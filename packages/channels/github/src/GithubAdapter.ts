@@ -7210,9 +7210,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? `${truncateCodePoints(display, MAX_AGGREGATE_COMMENT_CHARS)}… [comment truncated: ${total - MAX_AGGREGATE_COMMENT_CHARS} more characters]`
         : display;
     };
+    // The watch closes the SAME-account gap: GitHub sends the channel account no
+    // notification for its own comments, so the notification lanes never see
+    // them. Comments by any OTHER account do produce notifications and are
+    // delivered by the notification lanes under the thread's own reason and
+    // role templates. Watching them here too would pre-empt those lanes: the
+    // watch resolves the narrower `comment` class, and consuming the shared
+    // dedupe key after reaching only a subset of roles would starve the rest
+    // (e.g. fix:comment delivered, verify:mention lost). Leave other-account
+    // comments to the lanes.
+    const botLogin = this.botUsername?.toLowerCase();
+    const sameAccount = (login: string | undefined): boolean =>
+      botLogin !== undefined && login?.toLowerCase() === botLogin;
     for (const comment of conversation) {
       const commentKey = comment.node_id || String(comment.id);
       if (
+        !sameAccount(comment.user?.login) ||
         !comment.created_at ||
         comment.created_at <= baseline ||
         alreadyDispatched(commentKey)
@@ -7243,6 +7256,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     for (const comment of review) {
       const commentKey = comment.node_id || String(comment.id);
       if (
+        !sameAccount(comment.user?.login) ||
         !comment.created_at ||
         comment.created_at <= baseline ||
         alreadyDispatched(commentKey)
@@ -7291,11 +7305,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
 
-    // Cap the per-pass burst; the cursor resumes before the last processed
-    // comment when capped so the tail drains over subsequent passes.
-    const batch = candidates.slice(0, MAX_WATCH_COMMENTS_PER_PASS);
-    const capped = candidates.length > batch.length;
-
     // Look up each target's posted comments only now that there is something to
     // deliver, so a quiet pass costs no serve round-trips. A comment is withheld
     // only from the session that wrote it.
@@ -7309,33 +7318,48 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : new Set<string>();
       postedBySession.set(target.sessionId, ids);
     }
-
-    let allSettled = true;
-    for (const candidate of batch) {
+    const excludeFor = (
+      candidate: (typeof candidates)[number],
+    ): Set<string> => {
       const exclude = new Set<string>();
       for (const target of targets) {
         if (postedBySession.get(target.sessionId)?.has(candidate.attrKey)) {
           exclude.add(target.sessionId);
         }
       }
-      // Only consume a comment when delivering it to at least one target. The
-      // watch resolves the narrower `comment` class; a comment it cannot route
-      // (e.g. the operator only configured `fix:mention`) must stay available to
-      // the notification lanes, which resolve the thread's own reason. Skipping
-      // without dispatching records no shared dedupe key, so the mention is not
-      // lost. An all-excluded comment (every target posted it) is likewise left
-      // unconsumed rather than recorded.
-      if (!targets.some((target) => !exclude.has(target.sessionId))) {
-        continue;
-      }
+      return exclude;
+    };
+
+    // Exclude author-owned comments BEFORE the batch cap. They record no dedupe
+    // key, so if they occupied batch slots a run of same-second self-authored
+    // comments would re-fill every batch and the capped cursor would never reach
+    // the tail. Filtering them out keeps the cap and the cursor progressing over
+    // deliverable comments; the excluded ones are simply advanced past.
+    const deliverable = candidates.filter((candidate) =>
+      targets.some((target) => !excludeFor(candidate).has(target.sessionId)),
+    );
+    if (deliverable.length === 0) {
+      commitCursor(nowIso);
+      return;
+    }
+
+    // Cap the per-pass burst; the cursor resumes before the last processed
+    // comment when capped so the tail drains over subsequent passes.
+    const batch = deliverable.slice(0, MAX_WATCH_COMMENTS_PER_PASS);
+    const capped = deliverable.length > batch.length;
+
+    let allSettled = true;
+    for (const candidate of batch) {
       // Private-only: never answered in public. The stable comment id dedupes
-      // across polls and against the notification lanes.
+      // across polls. Only same-account comments reach this loop (see the
+      // candidate filter), and those generate no GitHub notification, so
+      // recording the shared key cannot pre-empt a notification lane.
       const settled = await this.dispatchEnvelope(
         candidate.envelope,
         number,
         { dispatchedComments: [candidate.key] },
         true,
-        exclude,
+        excludeFor(candidate),
       );
       if (!settled) allSettled = false;
     }

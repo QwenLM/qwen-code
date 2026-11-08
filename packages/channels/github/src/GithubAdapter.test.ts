@@ -22760,7 +22760,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           node_id: 'IC_555',
           body: 'please fix the overflow',
           created_at: '2026-07-02T10:00:00.000Z',
-          user: { login: 'someone' },
+          // Same account the channel authenticates as: the watch closes the
+          // same-account gap; other-account comments go to the notification lanes.
+          user: { login: 'test-bot' },
           ...overrides,
         };
       }
@@ -22779,8 +22781,30 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
         const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0]!;
         expect(sessionId).toBe('bound-session');
-        expect(prompt).toContain('New comment by @someone');
+        expect(prompt).toContain('New comment by @test-bot');
         expect(prompt).toContain('please fix the overflow');
+      });
+
+      it('leaves other-account comments to the notification lanes (no consumption)', async () => {
+        // A comment by a different account produces a GitHub notification and is
+        // delivered by the notification lanes under the thread's reason/roles.
+        // The watch must not consume it: recording the shared dedupe key after
+        // reaching only a subset of roles would starve the other roles.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'someone-else' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('IC_555');
       });
 
       it('withholds a comment the bound session itself posted', async () => {
@@ -22829,7 +22853,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             node_id: 'PRRC_777',
             body: 'guard this branch',
             created_at: '2026-07-02T10:00:00.000Z',
-            user: { login: 'reviewer' },
+            user: { login: 'test-bot' },
             path: 'src/a.ts',
             line: 12,
             side: 'RIGHT',
@@ -22839,9 +22863,48 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         await pollOnce();
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
         const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
-        expect(prompt).toContain('inline review comment by @reviewer');
+        expect(prompt).toContain('inline review comment by @test-bot');
         expect(prompt).toContain('src/a.ts');
         expect(prompt).toContain('guard this branch');
+      });
+
+      it('excluded self-authored comments do not block the batch tail', async () => {
+        // A run of same-second comments all posted by the bound session must not
+        // occupy the per-pass batch slots and stall the cursor: a later comment
+        // by another session still has to be delivered.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const own = new Set<string>();
+        const selfComments = Array.from({ length: 25 }, (_, i) => {
+          own.add(`ic:${900 + i}`);
+          return {
+            id: 900 + i,
+            node_id: `IC_${900 + i}`,
+            body: 'my own note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+          };
+        });
+        const tail = {
+          id: 999,
+          node_id: 'IC_999',
+          body: 'a finding from another session',
+          created_at: '2026-07-02T10:00:01.000Z',
+          user: { login: 'test-bot' },
+        };
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(own);
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          ...selfComments,
+          tail,
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'a finding from another session',
+        );
       });
 
       it('withholds an inline review comment the bound session posted', async () => {

@@ -48,6 +48,8 @@ const CREATION_COMMAND_PATTERNS: readonly RegExp[] = [
   // gh api / curl writing to a comments or reviews collection.
   /\bgh\s+api\b[\s\S]*?\b(?:issues|pulls)\/\d+\/(?:comments|reviews)\b[\s\S]*?(?:-X\s+POST|--method\s+POST|-f\s|--field\s|-F\s|--raw-field\s|--input\s)/,
   /\bcurl\b[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/(?:comments|reviews)\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)/,
+  // curl commonly puts the write flags before the URL.
+  /\bcurl\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/(?:comments|reviews)\b/,
 ];
 
 /**
@@ -58,7 +60,7 @@ const CREATION_COMMAND_PATTERNS: readonly RegExp[] = [
  * pattern matches and a session that only read comments is recorded as their
  * author, permanently withholding events it should receive.
  */
-const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|-X\s*)GET\b/i;
+const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|-X\s*)["']?GET\b/i;
 
 /**
  * Drop quoted spans so a creation subcommand or write flag inside a quoted
@@ -80,16 +82,19 @@ function stripQuotedSpans(command: string): string {
  * listing session.
  */
 function commandSegments(command: string): string[] {
-  return command.split(/&&|\|\||[;|]/);
+  // A newline is a command boundary too: `gh api …/comments` followed on the
+  // next line by `stat -f …` is a read plus an unrelated -f, not a creation.
+  return command.split(/&&|\|\||[;|\n\r]/);
 }
 
 function isCreationCommand(command: string): boolean {
-  const stripped = stripQuotedSpans(command);
-  for (const segment of commandSegments(stripped)) {
+  for (const segment of commandSegments(command)) {
     // An explicit GET is a read even with field flags (gh api sends them as
-    // query parameters on a GET).
+    // query parameters on a GET). Test the RAW segment so a quoted method value
+    // (`--method "GET"`) is still vetoed before quote-stripping would erase it.
     if (EXPLICIT_GET_PATTERN.test(segment)) continue;
-    if (CREATION_COMMAND_PATTERNS.some((pattern) => pattern.test(segment))) {
+    const stripped = stripQuotedSpans(segment);
+    if (CREATION_COMMAND_PATTERNS.some((pattern) => pattern.test(stripped))) {
       return true;
     }
   }
@@ -162,6 +167,18 @@ export function extractPostedCommentIds(entry: unknown): string[] {
           target === 'issue-comment'
             ? issueCommentKey(match[1]!)
             : reviewCommentKey(match[1]!),
+        );
+      }
+      // A recognised creation whose whole output is a bare number is the
+      // `gh api … --input payload.json --jq '.id'` publish shape: the id is the
+      // created comment. Narrower than the JSON-id harvest (single all-digit
+      // result only), so a listing's many ids are never grabbed this way.
+      const bare = result.trim();
+      if (/^\d+$/.test(bare)) {
+        ids.add(
+          target === 'issue-comment'
+            ? issueCommentKey(bare)
+            : reviewCommentKey(bare),
         );
       }
     }

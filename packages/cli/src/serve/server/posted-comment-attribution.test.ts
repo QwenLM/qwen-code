@@ -121,6 +121,42 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(post)).toContain(issueCommentKey('555'));
   });
 
+  it('vetoes a quoted GET method value', () => {
+    const entry = shellResult(
+      'gh api repos/o/r/issues/42/comments --method "GET" --paginate -F per_page=100',
+      '[{"id":111},{"id":222}]',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('treats a newline as a command boundary (listing then stat -f)', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments\nstat -f '%Sm' report.md",
+      '[{"id":111},{"id":222}]',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('attributes a creation whose output is a bare id (--jq .id)', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments -X POST --input payload.json --jq '.id'",
+      '6556188465',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([
+      issueCommentKey('6556188465'),
+    ]);
+  });
+
+  it('attributes a curl write whose flags precede the URL', () => {
+    const entry = shellResult(
+      'curl -X POST -d \'{"body":"hi"}\' https://api.github.com/repos/o/r/issues/9/comments',
+      '{"id":6600000002}',
+    );
+    expect(extractPostedCommentIds(entry)).toContain(
+      issueCommentKey('6600000002'),
+    );
+  });
+
   it('does not attribute a GET listing chained with an unrelated -f (stat -f)', () => {
     // The write flag must be in the same pipeline stage as the collection
     // path; a trailing `stat -f` in the chain is not a POST body field.

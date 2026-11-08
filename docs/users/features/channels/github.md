@@ -359,19 +359,28 @@ see Known Limitations.
 ### Bound PR Comment Watch
 
 With `deliverToBoundSessions` on, the channel also polls each bound PR for new
-**conversation comments and inline review comments** and delivers each one into
-every bound session that did **not** post it. This is default-on; set
-`prCommentWatch: false` to disable it. It is independent of `prWatchEvents`, so
-it works even when no state transition is subscribed.
+**conversation comments and inline review comments posted under the channel's
+own GitHub account** and delivers each one into every bound session that did
+**not** post it. This is default-on; set `prCommentWatch: false` to disable it.
+It is independent of `prWatchEvents`, so it works even when no state transition
+is subscribed.
 
-Unlike the notification-driven comment lanes, this watch does **not** filter the
-channel's own GitHub account. A comment posted under the same login by a
-different session, agent, or model — or by you by hand — still reaches the
-follower, which is what lets a `fix` session close the loop on findings posted
-by a separate verify/review session. Authorship is attributed per session from
-its transcript (the daemon's posted-comment lookup): a comment is withheld only
-from the session that actually wrote it, so a session's own reply does not
-re-trigger it. No marker or `@mention` is required.
+The watch closes the **same-account gap**: GitHub sends the channel account no
+notification for its own activity, so the notification-driven comment lanes
+never see a comment posted under that login by a different session, agent, or
+model — or by you by hand. The watch delivers those, which is what lets a `fix`
+session close the loop on findings posted by a separate verify/review session.
+Comments by **any other account** do produce notifications and are delivered by
+the notification lanes under the thread's own reason and role templates; the
+watch deliberately leaves them alone, because consuming them under its narrower
+`comment` class could reach only a subset of the configured roles and starve the
+rest. Authorship is attributed per session from its transcript (the daemon's
+posted-comment lookup): a comment is withheld only from the session that
+actually wrote it, so a session's own reply does not re-trigger it. No marker or
+`@mention` is required. In legacy mode (no `boundSessionActions`) there is a
+single most-recently-updated winner per PR, so a same-account comment the winner
+itself posted reaches no one; configure role-aware actions to fan out to every
+non-author session.
 
 Comments are fetched on a periodic re-check (about every 2 minutes), and the
 first observation baselines silently — comments that predate the watch are not
