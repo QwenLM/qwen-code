@@ -350,6 +350,8 @@ Checks endpoint never suppresses the other three detections: their data
 comes from `pulls.get`, and the last known CI aggregate stands until a fetch
 succeeds again.
 Transitions are persisted before delivery, so restarts do not re-fire them.
+A head move fires whoever pushed it, including the bound session itself —
+see Known Limitations.
 
 ### Role-Aware Action Templates
 
@@ -431,6 +433,7 @@ behavior and the generic prompt, byte for byte.
 - The bot does not read comments before the current polling window; `author` and `comment` notifications may aggregate up to 20 comments from that window.
 - Inline PR review comments and review summary bodies are not enumerated; only issue/PR comments are processed.
 - The selected credential must support the Notifications API. Fine-grained PATs do not support it; use local `gh` authentication or a classic PAT with `notifications` scope.
+- **A bound session receives its own pushes.** `head_change` compares head SHAs, and GitHub's PR object does not name the pusher, so the channel cannot tell a bound session's own push from someone else's: when the pushing session is the recipient, it receives the event as a queued turn, with `Author: GitHub` and both SHAs in the summary. The lever is the per-role subscription: with `boundSessionActions`, a role is skipped for the event only when none of `<role>:watch:head_change`, `<role>:default`, `watch:head_change` and `default` is configured — the example above wakes review and verify but not fix. Without `boundSessionActions` the single most recently active follower receives every subscribed transition, so either drop `head_change` from `prWatchEvents` or have the session compare the summary's target SHA with the head it just pushed. `/verify-pr` keeps a per-head record, so a repeat delivery of an already-verified head starts no round — but a head the session pushed itself is new to that record and does start one; `/autofix-pr` records the heads it pushed, so its own round treats them as its own work rather than someone else's push. Authorship never suppresses the other three transitions: a self-pushed head whose CI turns red still fires `ci_failure`.
 
 ## Starting the Channel
 
