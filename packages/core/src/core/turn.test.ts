@@ -1151,6 +1151,31 @@ describe('Turn', () => {
       expect(turn.pendingToolCalls[0].wasOutputTruncated).toBeUndefined();
     });
 
+    // #16417: alongside the flag, the turn records the budget numbers — the
+    // used tokens from the response's own usageMetadata and the limit from
+    // the send layer — so the scheduler's rejection can name them.
+    it('records the output budget alongside the truncation mark (#16417)', async () => {
+      await run(
+        [
+          callsChunk({
+            name: 'write_file',
+            args: { file_path: '/big.txt', content: 'x'.repeat(50_000) },
+          }),
+          cand([], {
+            finishReason: 'MAX_TOKENS',
+            usageMetadata: { candidatesTokenCount: 8192 },
+          }),
+        ],
+        [{ text: 'Test prompt' }],
+      );
+
+      const tc = turn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      // The mock LlmChat doesn't implement getLastRequestMaxOutputTokens,
+      // so the budget stays unset — the guard is the optional chaining.
+      expect(tc.outputBudgetAtTruncation).toBeUndefined();
+    });
+
     it('should handle multiple pending tool calls with MAX_TOKENS', async () => {
       await runCallsThenFinish(
         'MAX_TOKENS',

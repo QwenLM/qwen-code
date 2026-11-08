@@ -8701,6 +8701,33 @@ describe('CoreToolScheduler truncated output protection', () => {
     );
   });
 
+  it('names the output budget when the truncation carries one (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    await scheduleBatch(scheduler, {
+      ...toolRequest('1', TestApprovalTool.Name, { id: 'test-budget' }, 'p1'),
+      wasOutputTruncated: true,
+      outputBudgetAtTruncation: { usedTokens: 4096, limitTokens: 8192 },
+    });
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const message = expectTruncationRejection(
+      firstBatch(onAllToolCallsComplete)[0],
+    );
+    expect(message).toContain('used 4096 of the 8192-token output limit');
+  });
+
+  it('rejects without budget numbers when the truncation lacks them', async () => {
+    const message = expectTruncationRejection(
+      await completeTruncationCall(
+        approvalTool(),
+        { id: 'test-no-budget' },
+        'prompt-id-no-budget',
+        true,
+      ),
+    );
+    expect(message).not.toContain('output limit');
+  });
+
   // The token-limit diagnosis being withdrawn must not withdraw the data-loss
   // guard with it: incomplete arguments mean incomplete file content either
   // way (QwenLM/qwen-code#12970).

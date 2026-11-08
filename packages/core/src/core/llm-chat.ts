@@ -2399,6 +2399,19 @@ export class LlmChat {
     return this.historyReplacementRevision;
   }
 
+  /**
+   * The per-response output-token limit the send layer last used — clamp,
+   * escalation, or user override. `Turn` reads it when a `MAX_TOKENS` cut
+   * truncates a tool call so the scheduler's rejection can name the budget
+   * (#16417). One send stale is fine: the value is refreshed at every clamp
+   * and every escalation before the retry goes out.
+   */
+  private lastRequestMaxOutputTokens: number | undefined;
+
+  getLastRequestMaxOutputTokens(): number | undefined {
+    return this.lastRequestMaxOutputTokens;
+  }
+
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
@@ -4149,6 +4162,7 @@ export class LlmChat {
           contextWindowForClamp,
           promptTokensForClamp,
         );
+        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
         params = {
           ...params,
           config: {
@@ -5409,6 +5423,7 @@ export class LlmChat {
           let recoveryParams: SendMessageParameters = params;
 
           if (shouldEscalateMaxOutputTokens) {
+            self.lastRequestMaxOutputTokens = escalatedLimit;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
