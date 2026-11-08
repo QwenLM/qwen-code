@@ -511,15 +511,15 @@ describe('runNonInteractiveStreamJson', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(mockDispatcher.dispatch).toHaveBeenCalledOnce();
 
-      // The client abandons the request at 20 s; the error frame must land
+      // The client abandons the request at 20 s; the reply must land
       // strictly before that, not at the 55 s default.
       await vi.advanceTimersByTimeAsync(14_000);
-      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
-        'req-1',
-        'Initialization did not finish within 15s',
-      );
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledWith('req-1', {
+        ready: true,
+      });
+      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
 
       releaseInitialization();
       await run;
@@ -544,9 +544,10 @@ describe('runNonInteractiveStreamJson', () => {
       const run = runNonInteractiveStreamJson(config, '');
       await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS - 1);
-      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(mockDispatcher.sendError).toHaveBeenCalledOnce();
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledOnce();
+      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
 
       releaseInitialization();
       await run;
@@ -555,7 +556,7 @@ describe('runNonInteractiveStreamJson', () => {
     }
   });
 
-  it('replies to initialize with an error when config initialization outlasts the client budget', async () => {
+  it('answers initialize without waiting for config initialization that outlasts the client budget', async () => {
     vi.useFakeTimers();
     try {
       let releaseInitialization!: () => void;
@@ -579,13 +580,13 @@ describe('runNonInteractiveStreamJson', () => {
 
       await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
 
-      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
-      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
-        'req-1',
-        `Initialization did not finish within ${
-          SDK_INITIALIZE_REPLY_TIMEOUT_MS / 1000
-        }s`,
-      );
+      // An error frame would close the query in both shipped clients, so the
+      // give-up reply is a success: the session becomes usable once
+      // initialization settles.
+      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledWith('req-1', {
+        ready: true,
+      });
 
       // Abandoning the reply must not abandon the initialization: a slow init
       // still becomes ready, and prompts queued behind it are served normally.
@@ -617,7 +618,8 @@ describe('runNonInteractiveStreamJson', () => {
       );
       await run;
 
-      expect(mockDispatcher.sendError).toHaveBeenCalledOnce();
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledOnce();
+      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -649,10 +651,7 @@ describe('runNonInteractiveStreamJson', () => {
 
       const run = runNonInteractiveStreamJson(config, '');
       await vi.advanceTimersByTimeAsync(15_000);
-      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
-        'req-1',
-        'Initialization did not finish within 15s',
-      );
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledOnce();
 
       rejectInitialization(new Error('MCP discovery failed'));
       await vi.advanceTimersByTimeAsync(0);

@@ -471,13 +471,20 @@ class Session {
    *
    * Giving up the reply does not abandon the initialization: it keeps running
    * and settles readiness itself, so a session whose config legitimately needs
-   * longer still serves the prompts queued after it.
+   * longer still serves the prompts queued after it. For the same reason the
+   * give-up frame is a success, not an error: the shipped clients treat an
+   * error reply as fatal (`initialized.catch` errors the input stream in the
+   * TypeScript SDK, `_initialize` calls `_finish_with_error` in the Python
+   * SDK), which would kill a session that is about to become ready. The frame
+   * is informational, and `awaitConfigInitialized` still gates every prompt on
+   * the real initialization, so a client that reads prompts on any reply is
+   * no worse off than before the deferred reply existed.
    */
   private async awaitConfigInitializationWithReplyTimeout(
     requestId: string,
     options: ConfigInitializeOptions,
     replyTimeoutMs: number = SDK_INITIALIZE_REPLY_TIMEOUT_MS,
-  ): Promise<boolean> {
+  ): Promise<{ readonly deferred: boolean }> {
     const initPromise = this.ensureConfigInitialized(options).then(
       () => {
         this.completeInitialization();
@@ -506,7 +513,7 @@ class Session {
         if (!outcome.ok) {
           throw outcome.failure;
         }
-        return true;
+        return { deferred: false };
       }
     } finally {
       clearTimeout(timeoutId);
@@ -517,11 +524,7 @@ class Session {
       }
     }
 
-    const message = `Initialization did not finish within ${
-      replyTimeoutMs / 1000
-    }s`;
-    this.dispatcher?.sendError(requestId, message);
-    return false;
+    return { deferred: true };
   }
 
   /**
@@ -547,7 +550,7 @@ class Session {
       // follows the budget the client declared for the initialize request
       // itself, so a lowered (or raised) `timeout.controlRequest` is honored
       // instead of being overridden by the SDK's default.
-      const initialized = await this.awaitConfigInitializationWithReplyTimeout(
+      const deadline = await this.awaitConfigInitializationWithReplyTimeout(
         request.request_id,
         { sendSdkMcpMessage },
         sdkInitializeReplyTimeoutMs(
@@ -555,12 +558,15 @@ class Session {
             ?.controlRequest,
         ),
       );
-      if (!initialized) {
-        return;
-      }
-
-      if (initResponse) {
-        this.dispatcher?.sendSuccess(request.request_id, initResponse);
+      // A deferred initialization still answers the request with the success
+      // frame its controller produced. Sending it is what lets the client
+      // start sending prompts; the readiness gate above serves them only once
+      // initialization finishes.
+      this.dispatcher?.sendSuccess(request.request_id, initResponse ?? {});
+      if (deadline.deferred) {
+        debugLogger.debug(
+          `[Session] Deferred initialize reply sent before config initialization finished for request ${request.request_id}.`,
+        );
       }
     } catch (error) {
       // The deferred initialize reply would otherwise never arrive.
