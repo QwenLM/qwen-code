@@ -3022,6 +3022,7 @@ export function createServeApp(
     workspaceRegistry,
     gitState: workspaceGitState,
     sendBridgeError,
+    daemonEnv: daemonEnvAtBoot,
   });
   registerWorkspaceLocalOpenRoutes(app, {
     workspaceRegistry,

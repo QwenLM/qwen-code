@@ -60,13 +60,15 @@ The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains ten s
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
-labels; no central manager is needed. Display names use `ecs-qwen-<poolId>-<slot>`
-with two-digit slots, for example `ecs-qwen-hz4-ephemeral-01`. Replenishment
-reuses the display name after cleaning the previous runner, while the GitHub
-runner ID, container and internal UUID are new for each job. The UUID remains
-in state and diagnostic filenames. The `ecs-qwen-` prefix preserves CI worker
-caps and timeouts; recovery still accepts earlier UUID-based runner names,
-including old `qwen-` identities.
+labels; no central manager is needed. Display names use
+`ecs-qwen-<poolId>-<slot>-<suffix>` with two-digit slots and an
+eight-hex-character suffix, for example `ecs-qwen-hz4-ephemeral-01-1a2b3c4d`.
+Replenishment picks a fresh suffix for every registration, so a leftover
+registration still owning an earlier name can never reject a replacement with
+HTTP 422, while the GitHub runner ID, container and internal UUID are new for
+each job. The UUID remains in state and diagnostic filenames. The `ecs-qwen-`
+prefix preserves CI worker caps and timeouts; recovery still accepts the
+suffixed form, earlier UUID-based runner names, and old `qwen-` identities.
 
 systemd starts the manager at boot when enabled and restarts unexpected exits
 after ten seconds (`Restart=always`). An explicit service stop remains stopped.
@@ -113,6 +115,26 @@ If deleting a container fails, that slot stops; if GitHub registration cleanup
 fails, the failure is recorded and retried instead of endlessly requesting new
 identities. Host failures cannot clean up immediately, so recovery must reclaim
 before accepting new work.
+
+Retrying is only safe when each attempt can still reach the resource it must
+reclaim. Two self-perpetuating stalls were observed on hz4 on 2026-11-08 and are
+now closed. First, killing the `docker create` client on its command timeout
+does not stop the daemon, so a container could appear after cleanup had already
+deleted the slot state; cleanup then refused to touch an unidentifiable
+container, and the only code that could delete it sat behind that refusal. Such
+resources are now identified by their `qwen.instance` label, which must match
+this pool and slot and be unambiguous; anything else still blocks the slot.
+Second, a rejected JIT request deleted the local slot state while a leftover
+registration kept owning the display name, so every retry was rejected and the
+record needed to delete that registration was gone. A definitive rejection now
+reconciles the name instead of discarding the state, and a runner deletion
+GitHub rejects retains the state for the next attempt.
+
+Because these faults leave the process alive, systemd supervision cannot detect
+them. A slot that accumulates `stallAlertRetries` consecutive identical failures
+logs a `STALL ALERT` naming the slot, the count and the error, and the counter
+resets on any successful cycle or changed error. This is the operator signal for
+a slot that is consuming no jobs; alert on it rather than on service state.
 
 ## Minimal but necessary deployment boundary
 
