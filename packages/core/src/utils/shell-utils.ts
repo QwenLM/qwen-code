@@ -1682,11 +1682,11 @@ export function detectSelfKillCommand(command: string): boolean {
  * at the end at all.
  */
 export function stripTrailingBackgroundAmp(command: string): string {
-  const trimmed = command.trimEnd();
-  if (!trimmed.endsWith('&')) return command;
-  if (trimmed.endsWith('&&')) return command;
-  if (trimmed.endsWith('\\&')) return command;
-  return trimmed.slice(0, -1).trimEnd();
+  // Escaped-ness is a parity question, not a one-character one: `x\\&` ends
+  // with a literal backslash followed by a real operator, so only an ODD run of
+  // backslashes escapes it (#16540 review, R3-7).
+  if (!endsWithBackgroundAmp(command)) return command;
+  return command.trimEnd().slice(0, -1).trimEnd();
 }
 
 /** The command the monitor spawns for a wrapper whose payload cannot be
@@ -1726,20 +1726,31 @@ function stripPayloadBackgroundAmp(payloadToken: string): string {
   // that ends a NESTED quoted word (`"echo $X '&'"`) is script data — the
   // trimming below only fires when the last non-space character of the script
   // text is the bare operator (#16540 review, R1-1 second round / R4-1).
-  const trimmed = payloadToken.trimEnd();
-  // Anchored at the END of the token, not at its start: an unquoted prefix
-  // (`bash -c x"$Y &"`) still closes with a quoted span whose `&` is the
-  // background operator the tracked shell runs. Leaving it in made the shell
-  // fork the payload and exit before it, so the monitor saw rc 0 for a failing
-  // payload (#16540 review, R4-1).
-  const closing = /[ \t]*&[ \t]*(["'])$/.exec(trimmed);
-  if (closing === null) return stripTrailingBackgroundAmp(trimmed);
-  const ampIndex = closing.index + closing[0].indexOf('&');
-  const previous = ampIndex > 0 ? trimmed[ampIndex - 1] : '';
-  // The operator is the last character of the script text, not `&&`, and not
-  // escaped.
-  if (previous === '&' || previous === '\\') return trimmed;
-  return `${trimmed.slice(0, closing.index).trimEnd()}${closing[1]}`;
+  let out = payloadToken.trimEnd();
+  for (;;) {
+    // Anchored at the END of the token, not at its start: an unquoted prefix
+    // (`bash -c x"$Y &"`) still closes with a quoted span whose `&` is the
+    // background operator the tracked shell runs. Leaving it in made the shell
+    // fork the payload and exit before it, so the monitor saw rc 0 for a failing
+    // payload (#16540 review, R4-1).
+    const closing = /[ \t]*&[ \t]*(["'])$/.exec(out);
+    if (closing === null) return stripTrailingBackgroundAmp(out);
+    const ampIndex = closing.index + closing[0].indexOf('&');
+    // Not `&&`, and not escaped — where escaped-ness is the PARITY of the
+    // backslash run, so `x'\\&'` (a literal backslash, then a real operator)
+    // is stripped while `"echo $X \&"` is not (#16540 review, R3-7).
+    let backslashes = 0;
+    for (let at = ampIndex - 1; at >= 0 && out[at] === '\\'; at--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 1) return out;
+    if (ampIndex > 0 && out[ampIndex - 1] === '&') return out;
+    // Repeat: `$'exit 1 & &'` carries two operators, and trimming one leaves a
+    // runnable command that still backgrounds the payload (#16540 review, R3-7).
+    const next = `${out.slice(0, closing.index).trimEnd()}${closing[1]}`;
+    if (next === out) return out;
+    out = next;
+  }
 }
 
 export function hasNonFinalTopLevelBackgroundOperator(
@@ -2271,6 +2282,29 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         innerQuote === '' &&
         !/^["']/.test(commandToken.token) &&
         stripPayloadBackgroundAmp(commandToken.token) !== commandToken.token;
+      // Decide from the RESOLVED payload, not from the spelling: a payload whose
+      // quote-removed text ends in a real operator backgrounds whatever the
+      // token looks like (`"exit 1"' &'` is two quoted parts, so neither the
+      // prefix rule nor the ANSI-C rule caught it) (#16540 review, R3-7).
+      const payloadEndsInBackgroundOperator =
+        posixWrapper &&
+        payloadRemoval !== null &&
+        !payloadRemoval.hasExpansion &&
+        endsWithBackgroundAmp(payloadRemoval.text);
+      // Some spellings cannot be trimmed at all: an encoded operator
+      // (`$'exit 1 \x26'`) has no literal `&` in the token, and `"exit 1 &"&`
+      // resolves to a trailing `&&`. Refuse to certify those instead of
+      // reporting a strip that did not happen — the tracked shell would fork the
+      // payload and exit 0, and settleFromExit(0) would call it success
+      // (#16540 review, R3-7).
+      const trimmedPayloadRemoval = shellWordQuoteRemoval(
+        stripPayloadBackgroundAmp(commandToken.token),
+      );
+      const payloadAmpUnremovable =
+        posixWrapper &&
+        trimmedPayloadRemoval !== null &&
+        !trimmedPayloadRemoval.hasExpansion &&
+        resolvedTextBackgrounds(trimmedPayloadRemoval.text);
       // An ANSI-C payload is the decoded text for op extraction and the
       // self-kill gate, while the command still spawns as written
       // (#16540 review, R1-3).
@@ -2287,7 +2321,10 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
-        ...(payloadIsAnsiC || backgroundAmpBehindPrefix
+        ...(payloadAmpUnremovable ? { wrapperPayloadUnresolved: true } : {}),
+        ...(payloadIsAnsiC ||
+        backgroundAmpBehindPrefix ||
+        payloadEndsInBackgroundOperator
           ? {
               spawnOverride: buildMonitorSpawnOverride(
                 wrapperTokens,
@@ -2480,6 +2517,18 @@ function backgroundsAtLevel(command: string, dropComments: boolean): boolean {
  * of `&&`, and not escaped by an odd run of backslashes (`\&` is a literal
  * ampersand; `\\&` is a literal backslash, then a backgrounding `&`).
  */
+/**
+ * Whether the resolved script text ends in something that backgrounds the
+ * payload: a real (parity-checked) `&`, or a trailing `&&` — which is either a
+ * syntax error or two operators concatenated across a quote boundary
+ * (`"exit 1 &"&` resolves to `exit 1 &&`). Both make the tracked shell exit
+ * before the payload's own status is known (#16540 review, R3-7).
+ */
+function resolvedTextBackgrounds(text: string): boolean {
+  const trimmed = text.trimEnd();
+  return endsWithBackgroundAmp(trimmed) || trimmed.endsWith('&&');
+}
+
 function endsWithBackgroundAmp(command: string): boolean {
   const text = command.trimEnd();
   if (!text.endsWith('&') || text.endsWith('&&')) return false;

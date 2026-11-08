@@ -1177,6 +1177,37 @@ describe('normalizeMonitorCommand', () => {
     expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
   });
 
+  // R3-7 (#16540 review, round 3): escaped-ness is the PARITY of the backslash
+  // run, and one strip is not enough. Each of these made the tracked shell fork
+  // the payload and exit 0, so the monitor reported success for a payload whose
+  // failure it never observed (witnessed: `bash -c x'\\&'` and
+  // `bash -c $'exit 1 & &'` both background, rc 0, while `bash -c 'exit 1'` is
+  // rc 1).
+  it.each([
+    ["bash -c x'\\\\&'", "bash -c x'\\\\'"],
+    [`bash -c "exit 1"' &'`, `bash -c "exit 1"''`],
+    ["bash -c $'exit 1 & &'", "bash -c $'exit 1'"],
+    ['sleep 1 \\\\&', 'sleep 1 \\\\'],
+  ])(
+    'strips a background operator the spelling allows: %s',
+    (command, want) => {
+      expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
+    },
+  );
+
+  // Some spellings cannot be trimmed at all: an operator the shell only sees
+  // after decoding (`\x26`), or one glued outside the closing quote so the
+  // resolved text ends in `&&`. Refusing to certify beats reporting a strip that
+  // did not happen.
+  it.each(["bash -c $'exit 1 \\x26'", 'bash -c "exit 1 &"&'])(
+    'refuses a payload operator it cannot strip: %s',
+    (command) => {
+      expect(normalizeMonitorCommand(command).wrapperPayloadUnresolved).toBe(
+        true,
+      );
+    },
+  );
+
   // R4-1 (#16540 review): the payload's background `&` sits inside the closing
   // quote even when the payload word has an unquoted prefix. The old
   // start-anchored pattern missed it, so the tracked shell forked the payload
