@@ -265,6 +265,7 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-158)
 - [159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…](#af-159)
 - [160. (top level) · Env constant commentary — Moved out of the workflow verbatim to keep the file under GitHub's start-runs gate…](#af-160)
+- [161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…](#af-161)
 
 ---
 
@@ -4868,4 +4869,64 @@ plus a pointer.
   # It is matched against `author_association` at every census site; widening it
   # (NONE, FIRST_TIME_CONTRIBUTOR) hands untrusted text to an agent that runs
   # with a write PAT.
+```
+
+---
+
+<a id="af-161"></a>
+
+### 161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+New in this change, not moved from the YAML.
+
+The address agent receives check NAMES only ("Failed checks" and
+"Still-red checks" render name + conclusion) and holds no GitHub
+credentials, so "Linux unit tests (shard 3/8)" cannot tell it which
+step or assertion went red. For a locally reproducible lane that is
+survivable — the agent maps the name to the repository's own command
+and reruns it — but a shard name, a "Test" check that failed on a
+schema/lint step, or an environment-only lane each cost a full round
+of guessing. The CI Failure Patrol already distils job logs for its
+classifier (ci-flaky-rerun.mjs: redactLog + skillLog), so the
+asymmetry was a missing wire, not a missing capability.
+
+The collector (.github/scripts/autofix-check-evidence.mjs) prints the
+failed STEP NAMES plus a bounded log excerpt per failing job, reusing
+the patrol's skillLog so both automations redact secrets identically.
+Bounds: the first three distinct jobs in rollup order, 60 excerpt
+lines each, an 8 MiB execFileSync buffer past which the log is dropped
+rather than buffered. Selection mirrors the workflow's own gates —
+the same failure conclusions, the same "Qwen Autofix" self-lane
+exclusion with the review-address exception — and omits CANCELLED,
+which is not a failure to diagnose. External commit statuses carry no
+job URL and stay name-only.
+
+PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
+switches the working tree to the PR branch, so the collector AND the
+patrol module it imports execute from the trusted base — the same
+position resolve-sandbox-image.mjs already runs from. Nothing here
+needs a staged copy or a digest: no branch code has executed on this
+host at that point. Moving the call below the checkout would execute
+branch-supplied code with the PAT in env, which is exactly what
+af-041/af-158 exist to prevent.
+
+Degradation is always toward LESS evidence, never a failed round: the
+script is absent from the trusted base until this merges (the node
+call is `|| true`), an unreadable rollup or a failed API read yields
+an empty or partial section, and the feedback block cats the file
+only when it is non-empty. Collector stderr rides
+WORKDIR/check-evidence.log, which the whole-WORKDIR artifact upload
+already carries, so a systematic failure is diagnosable without
+polluting the round log.
+
+The excerpt is a SNAPSHOT taken before checkout, and its preamble
+names the head it describes; the two name-only sections remain the
+authoritative list for the evaluated head. Log text is untrusted
+output: skillLog redacts credentials, headings are stripped to the
+same character class the check-name lists use, and the existing
+feedback echo defangs both workflow-command syntaxes before anything
+reaches step stdout.
 ```
