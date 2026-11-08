@@ -4855,6 +4855,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const loadingPhrase = shouldShowBtwTip({
     tipHistory,
     elapsedTime,
+    streamingState,
   })
     ? t(
         'Tip: Use /btw to ask a quick side question without interrupting the current work',

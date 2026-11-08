@@ -147,6 +147,28 @@ describe('executeBtwGeneration', () => {
     });
   });
 
+  it('emits the no-response notice when a restarted retry settles empty', async () => {
+    runner.mockImplementation(async (params) => {
+      await params.onText('partial');
+      await params.onRetry({ restart: true });
+      return { text: null };
+    });
+    const emit = vi.fn().mockResolvedValue(undefined);
+
+    await executeBtwGeneration(
+      config,
+      'Why?',
+      new AbortController().signal,
+      emit,
+    );
+
+    expect(emit).toHaveBeenLastCalledWith({
+      type: 'delta',
+      seq: 1,
+      text: 'No response received.',
+    });
+  });
+
   it('emits the notice when the only streamed text is whitespace', async () => {
     runner.mockImplementation(async (params) => {
       await params.onText(' ');

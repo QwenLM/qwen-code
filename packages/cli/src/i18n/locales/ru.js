@@ -2041,6 +2041,8 @@ export default {
   'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
   'No conversation context available for /advisor':
     'Нет контекста разговора, доступного для /advisor',
+  'No conversation context available for /btw':
+    'Нет контекста разговора, доступного для /btw',
   'Focus too long (max {{max}} chars)':
     'Фокус слишком длинный (макс. {{max}} символов)',
   'Another operation is in progress, wait for it to complete before running /advisor':

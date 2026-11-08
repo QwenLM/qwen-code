@@ -2192,6 +2192,8 @@ export default {
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
     '沒有可供 /advisor 使用的對話上下文',
+  'No conversation context available for /btw':
+    '沒有可供 /btw 使用的對話上下文',
   'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一個操作正在進行中，請等待其完成後再執行 /advisor',

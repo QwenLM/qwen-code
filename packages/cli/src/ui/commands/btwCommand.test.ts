@@ -260,6 +260,15 @@ describe('btwCommand', () => {
       expect(recordBtwUse).not.toHaveBeenCalled();
     });
 
+    it('returns the no-response fallback when the model returns no text', async () => {
+      runner.mockResolvedValue({ text: null });
+      expect(await btwCommand.action!(mockContext, 'why?')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'No response received.',
+      });
+    });
+
     it('returns an error message on failure', async () => {
       runner.mockRejectedValue(new Error('boom'));
       expect(await btwCommand.action!(mockContext, 'why?')).toEqual({

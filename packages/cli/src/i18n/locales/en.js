@@ -2715,6 +2715,8 @@ export default {
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
     'No conversation context available for /advisor',
+  'No conversation context available for /btw':
+    'No conversation context available for /btw',
   'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Another operation is in progress, wait for it to complete before running /advisor',

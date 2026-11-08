@@ -4,12 +4,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
+import { Colors } from '../../colors.js';
 import { BtwMessage } from './BtwMessage.js';
+
+// Ink strips styling when stdout is not a TTY, so render each Text's color as
+// a prefix. That keeps the notice's severity choice observable in the frame.
+vi.mock('ink', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink')>();
+  const React = await import('react');
+  return {
+    ...actual,
+    Text: ({
+      color,
+      children,
+    }: {
+      color?: string;
+      children?: React.ReactNode;
+    }) =>
+      React.createElement(
+        actual.Text,
+        null,
+        color ? `[${color}]` : '',
+        children,
+      ),
+  };
+});
 
 const PAGE_DOWN = '\x1b[6~';
 
@@ -91,6 +115,7 @@ describe('BtwMessage', () => {
     expect(output).toContain('Enter');
     expect(output).toContain('Escape');
     expect(output).toContain('dismiss');
+    expect(output).not.toContain('c copy');
   });
 
   it('caps a long answer at maxAnswerRows and scrolls the rest into view', async () => {
@@ -174,7 +199,8 @@ describe('BtwMessage', () => {
           isPending: false,
           historyCount: 2,
           browsePosition: 1,
-          notice: 'Copied to clipboard',
+          browsing: true,
+          notice: { text: 'Copied to clipboard' },
         }}
       />,
     );
@@ -184,7 +210,60 @@ describe('BtwMessage', () => {
     expect(output).toContain('browse earlier answers');
     expect(output).toContain('c copy');
     expect(output).toContain('x clear history');
-    expect(output).toContain('Copied to clipboard');
+    expect(output).toContain(`[${Colors.AccentGreen}]Copied to clipboard`);
+  });
+
+  it('advertises copy and clear only while browsing earlier answers', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'q',
+          answer: 'a',
+          isPending: false,
+          historyCount: 2,
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('browse earlier answers');
+    expect(output).not.toContain('c copy');
+    expect(output).not.toContain('x clear history');
+  });
+
+  it('paints a failed copy notice as an error', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'q',
+          answer: 'a',
+          isPending: false,
+          notice: { text: 'Copy failed', isError: true },
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain(`[${Colors.AccentRed}]Copy failed`);
+    expect(output).not.toContain(`[${Colors.AccentGreen}]Copy failed`);
+  });
+
+  it('renders a settled error verbatim inside the scrollable path', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'q',
+          answer: '(API error: **429**)',
+          isPending: false,
+          isError: true,
+        }}
+        containerWidth={60}
+        maxAnswerRows={6}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain(`[${Colors.AccentRed}](API error: **429**)`);
   });
 
   it('renders an error answer without the copy hint', () => {

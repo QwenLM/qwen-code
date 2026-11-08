@@ -31,6 +31,8 @@ The behavior had several gaps:
    history of the session it targets.
 2. Send the full curated history and keep the parent tool declarations with
    function calling disabled, so the fork's prefix matches the main request.
+   Providers without a `NONE` function-calling mode (Anthropic) drop the tool
+   declarations instead, because keeping them would re-enable tool calls.
 3. Let side questions run concurrently. Only an explicit cancel (Esc, Ctrl+C,
    Ctrl+D) aborts the one on screen; showing another one does not.
 4. A bare `/btw` in the TUI reopens the newest running side question, else the
@@ -50,24 +52,27 @@ The behavior had several gaps:
 - OpenTUI key actions. OpenTUI renders the same item, so it gets streaming,
   history and reopen, but not browse/copy/clear keys.
 - Changing the Anthropic converter. It has no mapping for function calling
-  mode `NONE`; there the tool-call notice covers a model that still calls a
-  tool.
+  mode `NONE`, so the Anthropic fork drops the parent tool declarations
+  instead of keeping them with an implicit `tool_choice: auto`.
 
 ## Design
 
 ### Core
 
-- `utils/btw-session.ts` adds `BtwSession`, one per `Config` and session id
-  (`getBtwSession(config)`). A changed session id (`/clear`, `/new`, resume)
-  disposes the previous session, aborting its requests.
+- `packages/core/src/agents/btw-session.ts` adds `BtwSession`, one per
+  `Config` and session id (`getBtwSession(config)`). A changed session id
+  (`/clear`, `/new`, resume) disposes the previous session, aborting its
+  requests.
 - `ask(question, { signal, onText, onReset })` starts a request and returns
   `{ id, done }`. The session accumulates streamed text and retry state,
   settles each request once, and appends only `answered` outcomes to the
-  history. Other outcomes are `synthetic` (tool-call notice), `empty`,
-  `unavailable` (no conversation context), `failed` and `cancelled`.
-- `buildBtwCacheSafeParams(config, exchanges)` returns the full curated
-  history followed by the exchanges. `buildBtwPrompt` uses the longer system
-  reminder.
+  history. Other outcomes are `tool-call` (the model tried to call a tool),
+  `empty`, `unavailable` (no conversation context), `failed` and `cancelled`.
+- `buildBtwCacheSafeParams(config, exchanges, options)` returns the curated
+  history followed by the exchanges. By default it reads the last 40 history
+  entries (the `/advisor` shape); `{ fullHistory: true }` reads the whole
+  curated history, which `runBtwQuery` passes. `buildBtwPrompt` uses the
+  longer system reminder.
 - `runForkedAgent` (cache path) gains `fullHistory`, `disableFunctionCalls`
   (function calling mode `NONE` while keeping tools) and `onRetry`. A retry
   without `isContinuation` clears the accumulated text. The result reports
@@ -80,10 +85,12 @@ The behavior had several gaps:
   existing `setBtwItem`. `btwAbortControllerRef` now belongs to the view:
   aborting it (`cancelBtw`) cancels the shown request if it is still running.
   Showing another request, or dismissing with Space/Enter, detaches without
-  cancelling.
-- With an empty input buffer and the btw area visible: ←/→ browse earlier
-  answers, `c` copies the shown answer, `x` removes the earlier answers. The
-  footer lists only the actions that apply.
+  cancelling. Space/Enter never dismiss a view whose own request is still
+  running, even while an earlier settled answer is browsed.
+- With an empty input buffer and the btw area visible: ←/→ enter browse mode
+  and browse earlier answers; while in it, `c` copies the shown answer and
+  `x` removes the earlier answers; any other key leaves browse mode and is
+  typed normally. The footer lists only the actions that apply.
 - `TipHistory` stores `btwUseCount`. The command counts a use only when tips
   are enabled, so opting out never writes the file.
 
@@ -93,7 +100,8 @@ The behavior had several gaps:
   through `getBtwSession`.
 - Generation events gain `{ type: 'reset' }`. The bridge client forwards it;
   the serve btw stream clears its answer snapshot. Snapshot clients need no
-  change.
+  change. When a restarting retry leaves no visible text, the stream emits the
+  same outcome notice the TUI shows.
 
 ## Risks
 
@@ -103,15 +111,16 @@ The behavior had several gaps:
   the threaded answers.
 - Several clients attached to one daemon session share its side-question
   history.
-- `c` and `x` act only while the input buffer is empty, so typing a prompt
-  that starts with those letters right after an answer copies or clears
-  instead. The footer shows these keys.
+- An arrow key enters browse mode, where the next `c` or `x` is taken as a
+  shortcut instead of being typed. Any other key leaves the mode, and the
+  footer shows the shortcut keys only while browsing. An arrow with nothing
+  to browse does not enter the mode.
 
 ## Verification
 
 - Unit tests: `btw-session.test.ts`, `forkedAgent.cache.test.ts` (function
   calling mode, restart vs continuation retries, tool-call name, full
-  history), `btw-view.test.ts`, `btwCommand.test.ts`,
+  history), `btwUtils.test.ts`, `btw-view.test.ts`, `btwCommand.test.ts`,
   `btw-generation.test.ts`, `btw-stream.test.ts`, `BtwMessage.test.tsx`,
   `tipHistory.test.ts`, `btw-tip.test.ts`, `bridgeClient.test.ts`.
 - Manual: ask two side questions in a row and confirm the second can refer to

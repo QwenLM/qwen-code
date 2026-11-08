@@ -2418,6 +2418,8 @@ export default {
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
     '没有可供 /advisor 使用的对话上下文',
+  'No conversation context available for /btw':
+    '没有可供 /btw 使用的对话上下文',
   'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一个操作正在进行中，请等待其完成后再运行 /advisor',

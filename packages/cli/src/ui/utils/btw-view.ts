@@ -39,11 +39,11 @@ interface BtwView {
   ui: BtwViewUi;
   session: BtwSession;
   requestId: string;
-  /** Index into the browsable exchanges, or null for the request itself. */
-  browseIndex: number | null;
+  /** Id of the browsed exchange, or null for the request itself. */
+  browseId: string | null;
   /** True after ←/→ enables `c`/`x` until the next other key. */
   shortcuts: boolean;
-  notice?: string;
+  notice?: NonNullable<BtwProps['notice']>;
   noticeTimer?: ReturnType<typeof setTimeout>;
   retryTimer?: ReturnType<typeof setTimeout>;
   detach: () => void;
@@ -65,7 +65,7 @@ export function showBtwRequest(
     ui,
     session,
     requestId,
-    browseIndex: null,
+    browseId: null,
     shortcuts: false,
     detach: () => {
       unsubscribe();
@@ -98,11 +98,10 @@ export function handleBtwViewKey(key: Key): boolean {
   const view = activeView;
   if (!view) return false;
   if (key.ctrl || key.meta || key.paste) {
-    view.shortcuts = false;
+    exitBrowseMode(view);
     return false;
   }
   if (key.name === 'left' || key.name === 'right') {
-    view.shortcuts = true;
     return browseBtwHistory(key.name === 'left' ? 'older' : 'newer');
   }
   if (view.shortcuts) {
@@ -110,14 +109,15 @@ export function handleBtwViewKey(key: Key): boolean {
     if (key.sequence === 'x' && clearBtwHistory()) return true;
   }
   if (key.name === 'return' || key.sequence === ' ') {
-    if (project(view)?.isPending !== false) {
-      view.shortcuts = false;
+    const ownRequest = view.session.getRequest(view.requestId);
+    if (ownRequest?.outcome === null || project(view)?.isPending !== false) {
+      exitBrowseMode(view);
       return false;
     }
     dismissBtwView();
     return true;
   }
-  view.shortcuts = false;
+  exitBrowseMode(view);
   return false;
 }
 
@@ -134,15 +134,22 @@ export function dismissBtwView(): void {
 export function browseBtwHistory(direction: 'older' | 'newer'): boolean {
   const view = activeView;
   if (!view) return false;
-  const count = browsableExchanges(view).length;
+  const exchanges = browsableExchanges(view);
+  const count = exchanges.length;
   if (count === 0) return false;
+  const current = exchanges.findIndex(
+    (exchange) => exchange.id === view.browseId,
+  );
   if (direction === 'older') {
-    view.browseIndex =
-      view.browseIndex === null ? count - 1 : Math.max(0, view.browseIndex - 1);
-  } else if (view.browseIndex !== null) {
-    view.browseIndex =
-      view.browseIndex >= count - 1 ? null : view.browseIndex + 1;
+    view.browseId =
+      current === -1
+        ? exchanges[count - 1].id
+        : exchanges[Math.max(0, current - 1)].id;
+  } else if (view.browseId !== null) {
+    view.browseId =
+      current === -1 || current >= count - 1 ? null : exchanges[current + 1].id;
   }
+  view.shortcuts = true;
   render(view);
   return true;
 }
@@ -153,7 +160,7 @@ export function clearBtwHistory(): boolean {
   if (!view) return false;
   const ids = browsableExchanges(view).map((exchange) => exchange.id);
   if (ids.length === 0) return false;
-  view.browseIndex = null;
+  view.browseId = null;
   view.session.removeExchanges(ids);
   return true;
 }
@@ -167,13 +174,22 @@ export function copyBtwAnswer(
   const displayed = project(view);
   if (!displayed || displayed.isPending || displayed.isError) return false;
   void copy(displayed.answer).then(
-    () => setNotice(view, t('Copied to clipboard')),
-    () => setNotice(view, t('Copy failed')),
+    () => setNotice(view, { text: t('Copied to clipboard') }),
+    () => setNotice(view, { text: t('Copy failed'), isError: true }),
   );
   return true;
 }
 
-function setNotice(view: BtwView, notice: string): void {
+function exitBrowseMode(view: BtwView): void {
+  if (!view.shortcuts) return;
+  view.shortcuts = false;
+  render(view);
+}
+
+function setNotice(
+  view: BtwView,
+  notice: NonNullable<BtwProps['notice']>,
+): void {
   if (activeView !== view) return;
   clearTimeout(view.noticeTimer);
   view.notice = notice;
@@ -210,21 +226,25 @@ function project(view: BtwView): BtwProps | null {
   const exchanges = browsableExchanges(view);
   const common = {
     historyCount: exchanges.length,
+    ...(view.shortcuts ? { browsing: true } : {}),
     ...(view.notice ? { notice: view.notice } : {}),
   };
 
-  if (view.browseIndex !== null) {
-    const exchange = exchanges[view.browseIndex];
-    if (exchange) {
+  if (view.browseId !== null) {
+    const index = exchanges.findIndex(
+      (exchange) => exchange.id === view.browseId,
+    );
+    if (index !== -1) {
+      const exchange = exchanges[index];
       return {
         ...common,
         question: exchange.question,
         answer: exchange.response,
         isPending: false,
-        browsePosition: view.browseIndex + 1,
+        browsePosition: index + 1,
       };
     }
-    view.browseIndex = null;
+    view.browseId = null;
   }
 
   const request = view.session.getRequest(view.requestId);
@@ -245,7 +265,7 @@ function project(view: BtwView): BtwProps | null {
 
 function projectRequest(
   request: BtwRequest,
-  common: Pick<BtwProps, 'historyCount' | 'notice'>,
+  common: Pick<BtwProps, 'historyCount' | 'browsing' | 'notice'>,
 ): BtwProps | null {
   const base = { ...common, question: request.question };
   const outcome = request.outcome;

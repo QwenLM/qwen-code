@@ -221,14 +221,21 @@ describe('btw view', () => {
 
     expect(copyBtwAnswer(copy)).toBe(true);
     await vi.waitFor(() =>
-      expect(view.current()?.notice).toBe('Copied to clipboard'),
+      expect(view.current()?.notice).toEqual({
+        text: 'Copied to clipboard',
+      }),
     );
     expect(copy).toHaveBeenCalledWith('because');
     vi.advanceTimersByTime(2_000);
     expect(view.current()?.notice).toBeUndefined();
 
     copyBtwAnswer(vi.fn().mockRejectedValue(new Error('no clipboard')));
-    await vi.waitFor(() => expect(view.current()?.notice).toBe('Copy failed'));
+    await vi.waitFor(() =>
+      expect(view.current()?.notice).toEqual({
+        text: 'Copy failed',
+        isError: true,
+      }),
+    );
   });
 
   it('closes when the session drops the request', () => {
@@ -262,12 +269,117 @@ describe('btw view', () => {
     expect(
       handleBtwViewKey(key({ name: 'c', sequence: 'c', paste: true })),
     ).toBe(false);
+    expect(
+      handleBtwViewKey(key({ name: 'c', sequence: 'c', meta: true })),
+    ).toBe(false);
     expect(handleBtwViewKey(key({ name: 'x', sequence: 'x' }))).toBe(false);
     expect(handleBtwViewKey(key({ name: 'return', sequence: '\r' }))).toBe(
       true,
     );
     expect(view.items.at(-1)).toBeNull();
     expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(false);
+  });
+
+  it('does not arm the shortcuts when an arrow has nothing to browse', async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    const { id, done } = session.ask('why?');
+    showBtwRequest(view.ui, session, id);
+    pending[0].resolve({ text: 'because' });
+    await done;
+    vi.mocked(copyToClipboard).mockClear();
+
+    expect(handleBtwViewKey(key({ name: 'right' }))).toBe(false);
+    expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(false);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+    expect(handleBtwViewKey(key({ name: 'x', sequence: 'x' }))).toBe(false);
+    expect(view.current()).toMatchObject({ historyCount: 0 });
+  });
+
+  it('leaves browse mode for the next other key, including meta combos', async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    for (const question of ['one?', 'two?']) {
+      const request = session.ask(question);
+      pending.at(-1)!.resolve({ text: `answer ${question}` });
+      await request.done;
+    }
+    showBtwRequest(view.ui, session, session.getSnapshot().exchanges[1].id);
+    vi.mocked(copyToClipboard).mockClear();
+
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(view.current()?.browsing).toBe(true);
+    expect(
+      handleBtwViewKey(key({ name: 'c', sequence: 'c', meta: true })),
+    ).toBe(false);
+    expect(view.current()?.browsing).toBeUndefined();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(
+      handleBtwViewKey(key({ name: 'x', sequence: 'x', meta: true })),
+    ).toBe(false);
+    expect(session.getSnapshot().exchanges).toHaveLength(2);
+
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(handleBtwViewKey({ ...key({ name: 'left' }), meta: true })).toBe(
+      false,
+    );
+    expect(view.current()?.browsing).toBeUndefined();
+  });
+
+  it("dismisses only once the view's own request has settled", async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    const first = session.ask('first?');
+    pending[0].resolve({ text: 'first answer' });
+    await first.done;
+    const second = session.ask('second?');
+    showBtwRequest(view.ui, session, second.id);
+
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(view.current()).toMatchObject({
+      question: 'first?',
+      isPending: false,
+    });
+    expect(handleBtwViewKey(key({ name: 'return', sequence: '\r' }))).toBe(
+      false,
+    );
+    expect(view.items.at(-1)).not.toBeNull();
+
+    pending[1].resolve({ text: 'second answer' });
+    await second.done;
+    expect(handleBtwViewKey(key({ name: 'return', sequence: '\r' }))).toBe(
+      true,
+    );
+    expect(view.items.at(-1)).toBeNull();
+  });
+
+  it('keeps the browsed answer anchored when the history window trims', async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    for (let index = 0; index < 20; index += 1) {
+      const request = session.ask(`q${index}?`);
+      pending.at(-1)!.resolve({ text: `answer ${index}` });
+      await request.done;
+    }
+    const current = session.getSnapshot().exchanges.at(-1)!;
+    showBtwRequest(view.ui, session, current.id);
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(view.current()).toMatchObject({
+      question: 'q17?',
+      browsePosition: 18,
+    });
+
+    const next = session.ask('q20?');
+    pending.at(-1)!.resolve({ text: 'answer 20' });
+    await next.done;
+
+    expect(view.current()).toMatchObject({
+      question: 'q17?',
+      browsePosition: 17,
+    });
   });
 
   it('routes the arrow, c and x keys to browse, copy and clear', async () => {
@@ -320,6 +432,21 @@ describe('btw view', () => {
     vi.mocked(copyToClipboard).mockClear();
     expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(false);
     expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('shows the no-response fallback for an empty outcome', async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    const { id, done } = session.ask('why?');
+    showBtwRequest(view.ui, session, id);
+
+    pending[0].resolve({ text: null });
+    await done;
+
+    expect(view.current()).toMatchObject({
+      answer: 'No response received.',
+      isPending: false,
+    });
   });
 
   it('shows a localized notice when the model only tried to call a tool', async () => {

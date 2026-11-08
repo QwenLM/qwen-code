@@ -51,8 +51,8 @@ function streamingTail(text: string, rows: number): string {
 function footerHint(btw: BtwProps): string {
   const hints: string[] = [];
   if (btw.historyCount) hints.push(t('←/→ browse earlier answers'));
-  if (!btw.isError) hints.push(t('c copy'));
-  if (btw.historyCount) hints.push(t('x clear history'));
+  if (btw.browsing && !btw.isError) hints.push(t('c copy'));
+  if (btw.browsing && btw.historyCount) hints.push(t('x clear history'));
   hints.push(t('Press Space, Enter, or Escape to dismiss'));
   return hints.join(' · ');
 }
@@ -90,14 +90,19 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
     [answerItems, maxAnswerRows],
   );
   const renderAnswer = useCallback(
-    ({ item }: { item: BtwAnswerItem }) => (
-      <MarkdownDisplay
-        text={item.text}
-        isPending={false}
-        contentWidth={contentWidth}
-      />
-    ),
-    [contentWidth],
+    ({ item }: { item: BtwAnswerItem }) =>
+      btw.isError ? (
+        <Text color={Colors.AccentRed} wrap="wrap">
+          {item.text}
+        </Text>
+      ) : (
+        <MarkdownDisplay
+          text={item.text}
+          isPending={false}
+          contentWidth={contentWidth}
+        />
+      ),
+    [btw.isError, contentWidth],
   );
 
   return (
@@ -174,7 +179,13 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
           )}
           <Box marginTop={1} flexDirection="column">
             {btw.notice ? (
-              <Text color={Colors.AccentGreen}>{btw.notice}</Text>
+              <Text
+                color={
+                  btw.notice.isError ? Colors.AccentRed : Colors.AccentGreen
+                }
+              >
+                {btw.notice.text}
+              </Text>
             ) : null}
             <Text dimColor>{footerHint(btw)}</Text>
           </Box>

@@ -7,6 +7,7 @@
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
 import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
+import { t } from '../i18n/index.js';
 import type { GenerationEvent, GenerationResult } from './generation.js';
 
 export const BTW_STREAM_TIMEOUT_MS = 305_000;
@@ -38,12 +39,16 @@ export async function executeBtwGeneration(
   signal.throwIfAborted();
   if (result.kind === 'failed') throw result.cause;
   // `seq` never rewinds on reset, so decide on text the client can still see.
-  if (result.kind === 'tool-call' && emitted.trim() === '') {
-    await emit({
-      type: 'delta',
-      seq: seq++,
-      text: formatBtwToolCallNotice(result.toolName),
-    });
+  if (emitted.trim() === '') {
+    const notice =
+      result.kind === 'tool-call'
+        ? formatBtwToolCallNotice(result.toolName)
+        : result.kind === 'empty'
+          ? t('No response received.')
+          : null;
+    if (notice !== null) {
+      await emit({ type: 'delta', seq: seq++, text: notice });
+    }
   }
   return {
     model: result.usage?.model ?? model,

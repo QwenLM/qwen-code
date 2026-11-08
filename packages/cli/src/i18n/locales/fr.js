@@ -2056,6 +2056,8 @@ export default {
     "Échec de la revue de l'advisor : {{error}}",
   'No conversation context available for /advisor':
     'Aucun contexte de conversation disponible pour /advisor',
+  'No conversation context available for /btw':
+    'Aucun contexte de conversation disponible pour /btw',
   'Focus too long (max {{max}} chars)':
     'Focus trop long (max {{max}} caractères)',
   'Another operation is in progress, wait for it to complete before running /advisor':

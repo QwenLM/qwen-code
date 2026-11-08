@@ -1627,6 +1627,8 @@ export default {
     'アドバイザーレビューに失敗しました：{{error}}',
   'No conversation context available for /advisor':
     '/advisor に使用できる会話コンテキストがありません',
+  'No conversation context available for /btw':
+    '/btw に使用できる会話コンテキストがありません',
   'Focus too long (max {{max}} chars)':
     'フォーカスが長すぎます（最大 {{max}} 文字）',
   'Another operation is in progress, wait for it to complete before running /advisor':

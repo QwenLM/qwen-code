@@ -669,8 +669,10 @@ export interface BtwProps {
   historyCount?: number;
   /** 1-based position among the earlier answers while browsing them. */
   browsePosition?: number;
+  /** True while ←/→ browse mode is active, which enables `c` and `x`. */
+  browsing?: boolean;
   /** Short-lived status line, e.g. after copying the answer. */
-  notice?: string;
+  notice?: { text: string; isError?: boolean };
 }
 
 export type HistoryItemBtw = HistoryItemBase & {
