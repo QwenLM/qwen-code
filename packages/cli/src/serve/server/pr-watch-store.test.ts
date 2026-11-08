@@ -154,6 +154,32 @@ describe('pr-watch-store', () => {
     mkdirSync(filePath);
     const result = readPrWatchStateSync(dir, identity);
     expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect((result.error as NodeJS.ErrnoException).code).toBe('ENOTREG');
+    }
+  });
+
+  it('accepts arrays at exactly the durable caps', () => {
+    expect(
+      parsePrWatchState(
+        minimalState({
+          ciFired: Array.from(
+            { length: PR_WATCH_CI_FIRED_CAP },
+            (_, i) => `h${i}`,
+          ),
+          delivered: Array.from(
+            { length: PR_WATCH_DELIVERED_CAP },
+            (_, i) => `k${i}`,
+          ),
+          pending: Array.from({ length: PR_WATCH_PENDING_CAP }, (_, i) => ({
+            type: 'head_change' as const,
+            key: `p${i}`,
+            summary: 's',
+            detectedAt: new Date().toISOString(),
+          })),
+        }),
+      ),
+    ).not.toBeNull();
   });
 
   it('round-trips a state and refuses invalid writes without touching the old file', () => {
@@ -201,9 +227,18 @@ describe('pr-watch-store', () => {
     );
     writeFileSync(temp, 'partial');
     writeFileSync(path.join(dir, 'keep.json'), '{}');
+    const shortDigest = path.join(
+      dir,
+      '.abc.json.11111111-2222-3333-4444-555555555555.tmp',
+    );
+    writeFileSync(shortDigest, 'not a crash temp');
+    const nonHexUuid = path.join(dir, `.${path.basename(filePath)}.zzzz.tmp`);
+    writeFileSync(nonHexUuid, 'not a crash temp');
     expect(sweepPrWatchTempFilesSync(dir)).toBe(1);
     expect(existsSync(temp)).toBe(false);
     expect(existsSync(path.join(dir, 'keep.json'))).toBe(true);
+    expect(existsSync(shortDigest)).toBe(true);
+    expect(existsSync(nonHexUuid)).toBe(true);
   });
 
   it('claims, retains, releases, and reclaims ownership', () => {
@@ -369,11 +404,15 @@ describe('pr-watch-store', () => {
           startedAt: new Date().toISOString(),
         }),
       );
-      const result = claimPrWatchOwnershipSync(dir, vi.fn());
+      const log = vi.fn();
+      const result = claimPrWatchOwnershipSync(dir, log);
       expect(result.kind).toBe('blocked');
       if (result.kind === 'blocked') {
         expect(result.reason).toContain(`live pid ${pid}`);
       }
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining(`live pid ${pid}`),
+      );
     } finally {
       child.kill('SIGKILL');
     }
@@ -411,6 +450,14 @@ describe('pr-watch-store', () => {
         }),
       ),
     ).toBeNull();
+  });
+
+  it('release does not create a missing watch directory', () => {
+    const missing = path.join(dir, 'missing');
+    expect(
+      releasePrWatchOwnershipSync(missing, buildPrWatchOwnerRecord()),
+    ).toBe(false);
+    expect(existsSync(missing)).toBe(false);
   });
 
   it('release refuses to delete a successor owner record', () => {

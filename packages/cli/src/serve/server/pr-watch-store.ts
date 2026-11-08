@@ -666,23 +666,36 @@ function checkDirectoryOwnership(
  * Claim the watch directory's owner record, following the channel pidfile's
  * identity rules at a caller-chosen path. A provably dead local record is
  * swept; a record this machine cannot verify blocks the claim and is named on
- * every attempt. The caller runs this only when its effective event set is
- * non-empty and its refresh timer runs.
+ * every attempt. Every blocked outcome is logged through `log`, so a daemon
+ * that does not hold the record never silently skips PR watch. The caller runs
+ * this only when its effective event set is non-empty and its refresh timer
+ * runs.
  */
 export function claimPrWatchOwnershipSync(
   watchDir: string,
   log: (message: string) => void = defaultLog,
 ): PrWatchClaimResult {
+  const result = attemptPrWatchClaimSync(watchDir, log);
+  if (result.kind === 'blocked') {
+    log(`not claiming PR watch: ${result.reason}`);
+  }
+  return result;
+}
+
+function attemptPrWatchClaimSync(
+  watchDir: string,
+  log: (message: string) => void,
+): PrWatchClaimResult {
   try {
     mkdirSync(watchDir, { recursive: true, mode: 0o700 });
   } catch (error) {
-    const reason = `cannot create ${watchDir}: ${String(error)}`;
-    log(`not claiming PR watch: ${reason}`);
-    return { kind: 'blocked', reason };
+    return {
+      kind: 'blocked',
+      reason: `cannot create ${watchDir}: ${String(error)}`,
+    };
   }
   const ownership = checkDirectoryOwnership(watchDir);
   if (!ownership.ok) {
-    log(`not claiming PR watch: ${ownership.reason}`);
     return { kind: 'blocked', reason: ownership.reason };
   }
   if (process.platform !== 'win32') {
@@ -690,9 +703,10 @@ export function claimPrWatchOwnershipSync(
       const mode = lstatSync(watchDir).mode & 0o777;
       if ((mode & 0o077) !== 0) chmodSync(watchDir, 0o700);
     } catch (error) {
-      const reason = `cannot secure ${watchDir}: ${String(error)}`;
-      log(`not claiming PR watch: ${reason}`);
-      return { kind: 'blocked', reason };
+      return {
+        kind: 'blocked',
+        reason: `cannot secure ${watchDir}: ${String(error)}`,
+      };
     }
   }
   const ownerPath = prWatchOwnerPath(watchDir);
@@ -711,9 +725,10 @@ export function claimPrWatchOwnershipSync(
           existing = null;
         }
         if (existing && !isLocalIdentity(existing)) {
-          const reason = `${ownerPath} holds a record this machine cannot verify, written before a reboot or by another machine or PID namespace sharing this home. Confirm no PR watch owner is running, then delete that file to claim again.`;
-          log(reason);
-          return { kind: 'blocked', reason };
+          return {
+            kind: 'blocked',
+            reason: `${ownerPath} holds a record this machine cannot verify, written before a reboot or by another machine or PID namespace sharing this home. Confirm no PR watch owner is running, then delete that file to claim again.`,
+          };
         }
         if (existing && isSameProcess(existing.pid, existing.procStart)) {
           if (existing.pid === process.pid) {
@@ -782,6 +797,9 @@ export function releasePrWatchOwnershipSync(
   watchDir: string,
   expected: PrWatchOwnerRecord,
 ): boolean {
+  // A missing directory must stay missing: the pidfile lock helper would
+  // create it with the default mode instead of the required 0700.
+  if (!existsSync(watchDir)) return false;
   const ownerPath = prWatchOwnerPath(watchDir);
   try {
     return withChannelPidfileLock(ownerPath, () => {
