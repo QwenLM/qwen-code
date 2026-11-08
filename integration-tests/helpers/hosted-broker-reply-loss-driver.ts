@@ -408,6 +408,7 @@ try {
         );
         assert.deepEqual(entry.fields, {
           ...original.fields,
+          ...(entry.fields['drain'] === true ? { drain: true } : {}),
           requestId: entry.fields['requestId'],
         });
       }
