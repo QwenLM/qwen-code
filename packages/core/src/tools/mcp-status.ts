@@ -52,6 +52,37 @@ export function getMCPServerLastError(serverName: string): string | undefined {
 }
 
 /**
+ * Servers whose owner is tearing them down on purpose: operator Disconnect,
+ * Clear OAuth, `disableMcpServer`, pool eviction, session shutdown. A
+ * deliberate teardown and abort damage both write `CONNECTED -> DISCONNECTED`,
+ * so the transition alone cannot tell them apart; the owner records the
+ * intent here BEFORE it starts closing the transport, and abort recovery
+ * reads it back to stay out of the way. Cleared when the server next reaches
+ * `CONNECTED` (or leaves the registry) so the marker never outlives the
+ * teardown it describes.
+ */
+const deliberateTeardownServers: Set<string> = new Set();
+
+/**
+ * Record that `serverName` is being torn down on purpose. Call this before
+ * the transport actually closes: an abort repair that runs inside the status
+ * notification otherwise sees the transition as unrequested damage.
+ */
+export function markMCPServerTeardownIntent(serverName: string): void {
+  deliberateTeardownServers.add(serverName);
+}
+
+/** Whether `serverName` is currently being torn down on purpose. */
+export function isMCPServerTeardownIntent(serverName: string): boolean {
+  return deliberateTeardownServers.has(serverName);
+}
+
+/** Drop the teardown marker; used by owners once the server is live again. */
+export function clearMCPServerTeardownIntent(serverName: string): void {
+  deliberateTeardownServers.delete(serverName);
+}
+
+/**
  * Event listeners for MCP server status changes.
  * `status` is `undefined` when the server has been removed from the registry
  * (e.g. disabled via `/mcp`), so consumers can drop it from their snapshots
@@ -96,6 +127,9 @@ export function updateMCPServerStatus(
     // A live connection invalidates any previously recorded failure cause;
     // keeping it would let a stale error shadow a recovered server.
     serverLastErrors.delete(serverName);
+    // Same for a teardown marker: a server that answers again is not being
+    // torn down, so a repair listener must not skip its next real drop.
+    deliberateTeardownServers.delete(serverName);
   }
   // Snapshot the listener list so a listener that detaches itself (or
   // attaches a new one) during dispatch doesn't mutate the array we're
@@ -112,6 +146,7 @@ export function updateMCPServerStatus(
  */
 export function removeMCPServerStatus(serverName: string): void {
   serverLastErrors.delete(serverName);
+  deliberateTeardownServers.delete(serverName);
   if (!serverStatuses.has(serverName)) {
     return;
   }

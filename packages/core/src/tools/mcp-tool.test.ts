@@ -28,6 +28,7 @@ import {
   removeMCPServerStatus,
   updateMCPServerStatus,
 } from './mcp-client.js';
+import { markMCPServerTeardownIntent } from './mcp-status.js';
 import {
   INVOCATION_CONTEXT_META_KEY,
   runWithInvocationContext,
@@ -3030,9 +3031,11 @@ describe('DiscoveredMCPTool', () => {
       });
       const abortController = new AbortController();
       // Deliberate teardown writes the same CONNECTED -> DISCONNECTED
-      // transition, which is why the invocation must also check the client it
-      // called: a manager that stopped it has already flipped it.
-      const client: McpDirectClient & { getStatus: () => MCPServerStatus } = {
+      // transition, so the transition alone cannot tell it apart. The owner
+      // records the intent before it closes the transport; this client has no
+      // `getStatus` method, exactly like the raw SDK `Client` production
+      // passes to the tool.
+      const client: McpDirectClient = {
         callTool: vi.fn().mockImplementation(
           () =>
             new Promise((_resolve, reject) => {
@@ -3043,7 +3046,6 @@ describe('DiscoveredMCPTool', () => {
               );
             }),
         ),
-        getStatus: () => MCPServerStatus.CONNECTED,
       };
       updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
       const executePromise = exec(
@@ -3054,13 +3056,52 @@ describe('DiscoveredMCPTool', () => {
       abortController.abort();
       await expect(executePromise).rejects.toThrow('Tool call aborted');
 
-      // Operator Disconnect / disable / shutdown: the client leaves CONNECTED
-      // and the registry then reports DISCONNECTED.
-      (client as { getStatus: () => MCPServerStatus }).getStatus = () =>
-        MCPServerStatus.DISCONNECTED;
+      // Operator Disconnect / disable / shutdown: `McpClient.disconnect()`
+      // records the intent, then writes DISCONNECTED.
+      markMCPServerTeardownIntent(serverName);
       updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
       await Promise.resolve();
       expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('repairs again once the deliberate teardown marker is gone', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // A stale marker from an earlier teardown that has since been undone by
+      // a fresh CONNECTED must not suppress the repair for this abort.
+      markMCPServerTeardownIntent(serverName);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
       expect(client.callTool).toHaveBeenCalledTimes(1);
     });
 
