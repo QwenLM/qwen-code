@@ -255,9 +255,9 @@ describe('start_sandbox', () => {
   ])(
     'forwards a custom trust store without mounting the store file ($store, exists: $exists)',
     async ({ store, exists }) => {
+      const image = 'example.com/qwen-code:latest';
       vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
       vi.spyOn(os, 'platform').mockReturnValue('linux');
-      vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', store);
       vi.spyOn(fs, 'existsSync').mockImplementation(
         (filePath) => filePath !== store || exists,
       );
@@ -266,55 +266,66 @@ describe('start_sandbox', () => {
       );
       execSyncMock.mockReturnValue(Buffer.from(''));
 
-      const imageCheck = Object.assign(new EventEmitter(), {
-        stdout: new EventEmitter(),
-      });
-      const child = new EventEmitter();
-      spawnMock
-        .mockImplementationOnce(() => {
-          queueMicrotask(() => {
-            imageCheck.stdout.emit('data', Buffer.from('image-id'));
-            imageCheck.emit('close', 0);
-          });
-          return imageCheck;
-        })
-        .mockReturnValueOnce(child);
+      const launch = async () => {
+        spawnMock.mockReset();
+        const imageCheck = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+        });
+        const child = new EventEmitter();
+        spawnMock
+          .mockImplementationOnce(() => {
+            queueMicrotask(() => {
+              imageCheck.stdout.emit('data', Buffer.from('image-id'));
+              imageCheck.emit('close', 0);
+            });
+            return imageCheck;
+          })
+          .mockReturnValueOnce(child);
 
-      const result = start_sandbox(
-        { command: 'docker', image: 'example.com/qwen-code:latest' },
-        [],
-        undefined,
-        [process.execPath, '/path/to/cli.js'],
-      );
+        const result = start_sandbox(
+          { command: 'docker', image },
+          [],
+          undefined,
+          [process.execPath, '/path/to/cli.js'],
+        );
 
-      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
-      const args = spawnMock.mock.calls[1]?.[1] as string[];
-      const mountSpecs: string[] = [];
-      for (let index = 0; index < args.length; index++) {
-        if (args[index] === '--volume' || args[index] === '-v') {
-          mountSpecs.push(args[index + 1]);
-        } else if (args[index].startsWith('--volume=')) {
-          mountSpecs.push(args[index].slice('--volume='.length));
-        } else if (args[index] === '--mount') {
-          throw new Error(`unexpected --mount spec: ${args[index + 1]}`);
-        }
-      }
-      expect(mountSpecs.length).toBeGreaterThan(0);
-      expect(
-        mountSpecs.some((spec) => {
-          const { from, to } = parseSandboxMountSpec(spec, 'linux');
-          return from === store || to === store;
-        }),
-      ).toBe(false);
+        await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+        const args = spawnMock.mock.calls[1]?.[1] as string[];
+        child.emit('close', 0);
+        await expect(result).resolves.toBe(0);
+
+        // The container name is random per launch and also reaches --hostname
+        // and the SANDBOX env var.
+        const containerName = args[args.indexOf('--name') + 1];
+        return args.map((arg) => arg.split(containerName).join('<container>'));
+      };
+
+      vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', '');
+      const withoutOverride = await launch();
+      vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', store);
+      const args = await launch();
+
+      expect(withoutOverride).toContain('--volume');
       const envFlag = `QWEN_CODE_TRUSTED_FOLDERS_PATH=${store}`;
+      expect(
+        args.filter((arg) => arg.startsWith('QWEN_CODE_TRUSTED_FOLDERS_PATH=')),
+      ).toEqual([envFlag]);
       const envIndex = args.indexOf(envFlag);
       expect(args.slice(envIndex - 1, envIndex + 1)).toEqual([
         '--env',
         envFlag,
       ]);
-
-      child.emit('close', 0);
-      await expect(result).resolves.toBe(0);
+      // Past the image the pair is a container command argument, not an env.
+      expect(envIndex).toBeLessThan(args.indexOf(image));
+      // The override may add that one pair and nothing else. Mounting the
+      // store — as a file or as a directory above it, on either side of the
+      // spec, under any flag spelling — makes it a mount point, and the
+      // temp-sibling rename in atomicWriteFileSync then fails with EBUSY, so
+      // a trust answer given inside the sandbox is discarded.
+      expect([
+        ...args.slice(0, envIndex - 1),
+        ...args.slice(envIndex + 1),
+      ]).toEqual(withoutOverride);
     },
   );
 
