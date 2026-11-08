@@ -913,6 +913,63 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
   });
 });
 
+// R2-1/R2-2/R2-4/R2-5/R2-8 (#16540 review): a word that is nothing but decoded
+// ANSI-C content is data. Its operator characters are not operators, its tilde
+// does not expand, its astral characters stay whole, and both permission paths
+// read `\c\` the same way.
+describe('decoded ANSI-C words stay data', () => {
+  it('does not read a decoded operator as a redirect', () => {
+    // bash creates /tmp/t and cat opens a file literally named `>`, so the write
+    // is the real redirect and the read is the literal argument; before this the
+    // decoded `>` was the operator, /tmp/t came out as a READ and a phantom
+    // write to `>` was invented.
+    expect(
+      extractShellOperationsAcrossCommand("cat $'\\x3e' > /tmp/t", '/repo'),
+    ).toEqual([read('/repo/>'), write('/tmp/t')]);
+  });
+
+  it('does not expand a tilde that was quoted', () => {
+    expect(
+      extractShellOperationsAcrossCommand("cat > $'\\x7e/x'", '/repo'),
+    ).toEqual([write('/repo/~/x')]);
+  });
+
+  it('still expands an unquoted tilde', () => {
+    const target = ops('cat > ~/x')[0]?.filePath ?? '';
+    expect(target.startsWith('/')).toBe(true);
+    expect(target).not.toBe(`${CWD}/~/x`);
+  });
+
+  it('keeps a literal astral character whole', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\u{1F600}')", '/repo'),
+    ).toEqual([write('/repo/\u{1F600}')]);
+  });
+
+  it('reads the \\c\\ word the way decodeAnsiCWord does', () => {
+    // bash builds 61 1c 74 62 for `a\c\tb`; the tokenizer used to re-decode the
+    // operand backslash and report a tab instead of the literal `t`.
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cat $'a\\c\\tb' /etc/passwd",
+        '/repo',
+      ),
+    ).toEqual([read('/repo/a\u001ctb'), read('/etc/passwd')]);
+  });
+
+  it('reports the write inside a locale or continuation-split payload', () => {
+    expect(
+      extractShellOperationsAcrossCommand('sh -c $"cat > /etc/motd"', '/repo'),
+    ).toEqual([write('/etc/motd')]);
+    expect(
+      extractShellOperationsAcrossCommand(
+        "bash -c $\\\n'cat > /etc/motd'",
+        '/repo',
+      ),
+    ).toEqual([write('/etc/motd')]);
+  });
+});
+
 // R13-1 (#16075): a fully quoted -c payload that carries an expansion is still
 // unwrapped for op extraction, so a write inside it is reported (the monitor /
 // cron consumers keep the unresolved signal separately).

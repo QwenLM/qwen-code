@@ -694,11 +694,16 @@ describe('stripShellWrapper', () => {
 
   it('does not treat a locale word as an option terminator', async () => {
     // `$"…"` does not decode ANSI-C escapes: bash runs a program literally
-    // named `x2dx2d` (witnessed), so the locale word IS the payload and the
-    // following word is only $0.
-    expect(stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'')).toEqual(
-      '$"\\x2d\\x2d"',
-    );
+    // named `\x2d\x2d` (witnessed), so the locale word IS the payload and the
+    // following word is only $0. The projection hands back the resolved word
+    // rather than its spelling now, because a locale payload is still the
+    // script bash runs and `$"cat > /etc/motd"` has to expose its redirect
+    // (#16540 review, R2-1); quote removal leaves the backslashes alone, so
+    // this word is still the program name and never the `--` terminator.
+    const stripped = stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'');
+    expect(stripped).toEqual('\\x2d\\x2d');
+    expect(stripped).not.toEqual('--');
+    expect(stripped).not.toContain('ls -l');
   });
 
   it('fails closed on an expansion in the terminator position', async () => {
@@ -1085,6 +1090,41 @@ describe('normalizeMonitorCommand', () => {
     });
     // The static payload after `--` still unwraps (existing behaviour).
     expect(stripShellWrapper("sh -c -- 'ls -l'")).toBe('ls -l');
+  });
+
+  // R2-1 (#16540 review): the payload projection reads the resolved word rather
+  // than re-detecting ANSI-C from a `$'` substring, so a continuation-split
+  // introducer and a locale payload are both the script bash runs.
+  it('reads a payload whose introducer is split or locale-quoted', () => {
+    expect(stripShellWrapper("bash -c $\\\n'cat > /etc/motd'")).toBe(
+      'cat > /etc/motd',
+    );
+    expect(stripShellWrapper('sh -c $"cat > /etc/motd"')).toBe(
+      'cat > /etc/motd',
+    );
+  });
+
+  // R2-3 (#16540 review): inside `$'…'` a backslash escapes the next character,
+  // so `\'` does not close the payload word.
+  it('unwraps an ANSI-C payload that contains an escaped quote', () => {
+    expect(stripShellWrapper("bash -c $'cat > /tmp/x; echo \\'it\\''")).toBe(
+      "cat > /tmp/x; echo 'it'",
+    );
+    // A plain single-quoted word still closes at its first quote.
+    expect(stripShellWrapper("bash -c 'echo ok' 'sleep 5'")).toBe('echo ok');
+  });
+
+  // R2-2 (#16540 review): a literal non-BMP character is one code point, not two
+  // UTF-16 units encoded separately into U+FFFD.
+  it('decodes a literal astral character in an ANSI-C word', () => {
+    expect(decodeAnsiCWord('\u{1F600}')).toBe('\u{1F600}');
+    expect(decodeAnsiCWord('\\U0001F600')).toBe('\u{1F600}');
+  });
+
+  // R2-5 (#16540 review): `\c` consumes its operand, and a literal operand
+  // backslash makes the character after it plain text — bash builds 61 1c 74 62.
+  it('decodes a \\c\\ operand without re-reading it as an escape', () => {
+    expect(decodeAnsiCWord('a\\c\\tb')).toBe('a\u001ctb');
   });
 
   // R1-7 (#16540 review): `sh -c --` with no script leaves the shell running a

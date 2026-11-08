@@ -674,8 +674,13 @@ export function decodeAnsiCWord(body: string): string {
   for (let index = 0; index < body.length; index++) {
     const escape = decodeAnsiCEscape(body, index);
     if (!escape) {
-      // Unknown escape: bash keeps the backslash and the letter.
-      pushText(body[index]!);
+      // Unknown escape: bash keeps the backslash and the letter. A literal
+      // non-BMP character arrives as a surrogate pair, and encoding each UTF-16
+      // unit on its own turns both halves into U+FFFD, so the decoded word is
+      // not the word bash builds (#16540 review, R2-2).
+      const codePoint = body.codePointAt(index)!;
+      pushText(String.fromCodePoint(codePoint));
+      if (codePoint > 0xffff) index++;
       continue;
     }
     // A NUL ends the word bash builds: `$'--\0x'` is the word `--`, so the
@@ -1091,10 +1096,14 @@ export function stripShellWrapper(command: string): string {
       // the shell runs, not a quoted literal: handing back the `$'…'` spelling
       // made op extraction and the self-kill gate miss the payload
       // (#16540 review, R1-3).
+      // Read the resolved word, not the spelling: a substring test on `$'`
+      // missed both `$\<newline>'…'` and the locale form `$"…"`, so those
+      // payloads came back raw and op extraction saw nothing (#16540 review,
+      // R2-1).
       const innerCommand =
-        commandToken.token.includes("$'") &&
         payloadQuote !== null &&
-        !payloadQuote.hasExpansion
+        !payloadQuote.hasExpansion &&
+        payloadQuote.fullyQuoted
           ? payloadQuote.text
           : value;
       if (quote === '' && shellWrapperCommandConsumesRest(wrapperToken.token)) {
@@ -1844,6 +1853,17 @@ export interface NormalizedMonitorCommand {
   wrapperPayloadUnresolved?: boolean;
 }
 
+/**
+ * True when the quote at `quoteIndex` opens an ANSI-C word: `$'…'`, or
+ * `$\<newline>'…'`, where the continuation is removed before the quote is read
+ * (#16540 review, R1-11 spells the same shape for quote removal).
+ */
+function opensAnsiCQuote(token: string, quoteIndex: number): boolean {
+  let j = quoteIndex - 1;
+  while (j >= 1 && token[j] === '\n' && token[j - 1] === '\\') j -= 2;
+  return j >= 0 && token[j] === '$';
+}
+
 function takeLeadingToken(
   input: string,
 ): { token: string; rest: string } | null {
@@ -1853,6 +1873,11 @@ function takeLeadingToken(
   }
 
   let quote: '"' | "'" | '' = '';
+  // `$'…'` is not a plain single-quoted word: `\'` is an escaped quote rather
+  // than the close, so scanning for the first `'` cut the token in half and the
+  // payload never reached op extraction or the self-kill gate (#16540 review,
+  // R2-3). A plain `'…'` still closes at its first quote.
+  let ansiCQuote = false;
   let escaped = false;
   let inBackticks = false;
   let commandSubstitutionDepth = 0;
@@ -1865,6 +1890,18 @@ function takeLeadingToken(
     }
 
     if (quote === "'") {
+      if (ansiCQuote) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === "'") {
+          quote = '';
+          ansiCQuote = false;
+        }
+        idx++;
+        continue;
+      }
       if (char === "'") {
         quote = '';
       }
@@ -1910,6 +1947,7 @@ function takeLeadingToken(
 
     if (char === '"' || char === "'") {
       quote = char;
+      ansiCQuote = char === "'" && opensAnsiCQuote(trimmed, idx);
       idx++;
       continue;
     }
