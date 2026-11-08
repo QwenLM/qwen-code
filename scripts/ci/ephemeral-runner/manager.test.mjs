@@ -251,6 +251,86 @@ test('creates a new runner and container per job and keeps GitHub token out of D
   );
 });
 
+test('passes proxy configuration to container environment', async (t) => {
+  const f = await fixture(t);
+  f.config.proxy = {
+    http: 'http://172.27.32.1:7890',
+    https: 'http://172.27.32.1:7890',
+    noProxy: 'localhost,127.0.0.1,100.100.100.200',
+  };
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const creates = f.calls.filter(
+    (c) => c.program === 'docker' && c.args[0] === 'create',
+  );
+  assert.equal(creates.length, 1);
+  const args = creates[0].args;
+  // Proxy values are passed via the docker CLI env whitelist, not argv,
+  // so they do not appear in `ps` output.
+  const envPairs = [];
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (args[i] === '--env') envPairs.push(args[i + 1]);
+  }
+  assert.ok(envPairs.includes('HTTP_PROXY'));
+  assert.ok(envPairs.includes('HTTPS_PROXY'));
+  assert.ok(envPairs.includes('NO_PROXY'));
+  assert.ok(!args.some((a) => a.includes('HTTP_PROXY=')));
+  assert.equal(creates[0].options.env.HTTP_PROXY, 'http://172.27.32.1:7890');
+  assert.equal(creates[0].options.env.HTTPS_PROXY, 'http://172.27.32.1:7890');
+  assert.equal(
+    creates[0].options.env.NO_PROXY,
+    'localhost,127.0.0.1,100.100.100.200',
+  );
+});
+
+test('omits proxy env when proxy is not configured', async (t) => {
+  const f = await fixture(t);
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const creates = f.calls.filter(
+    (c) => c.program === 'docker' && c.args[0] === 'create',
+  );
+  assert.equal(creates.length, 1);
+  assert.ok(!creates[0].args.includes('HTTP_PROXY'));
+  assert.ok(!creates[0].options.env.HTTP_PROXY);
+  assert.ok(!creates[0].options.env.HTTPS_PROXY);
+  assert.ok(!creates[0].options.env.NO_PROXY);
+});
+
+test('rejects invalid proxy configuration', async (t) => {
+  const f = await fixture(t);
+  f.config.proxy = { http: 123 };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = 'not-an-object';
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy configuration/,
+  );
+  f.config.proxy = ['not-an-object'];
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy configuration/,
+  );
+  f.config.proxy = { http: '' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = { http: 'http://user:pass@proxy.example:7890' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = { https: 'http://user@proxy.example:7890' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.https/,
+  );
+});
+
 test('failed cleanup blocks replacement until recovery cleans the old container', async (t) => {
   const f = await fixture(t);
   const manager = createManager(f.config, { command: f.command });
