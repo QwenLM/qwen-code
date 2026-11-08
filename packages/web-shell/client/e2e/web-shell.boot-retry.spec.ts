@@ -11,8 +11,8 @@ import {
 // times out and the shard fails on a run no diff of it caused.
 //
 // Every mount assertion here allows for a second full boot of the graph: the
-// suite's 20 s visibility budget measures one, and a cold dev server under
-// load can spend it on the first before the reload even starts.
+// suite's 20 s visibility budget measures one, and a cold dev server measured
+// 26 s for the first here before the reload even started.
 const BOOT_VISIBLE_TIMEOUT_MS = 40_000;
 test('an aborted entry module reloads instead of stranding the boot @smoke', async ({
   page,
@@ -102,4 +102,48 @@ test('a completed boot keeps the reload budget for later navigations @smoke', as
   }
 
   expect(entryRequests).toBe(6);
+});
+
+// A document being left can still have module requests in flight; the
+// navigation cancels them and the failure is reported after the destination's
+// own document request, so a frame-only predicate charges it to the new boot
+// and reloads a healthy page.
+test('a module cancelled by navigation does not reload the destination @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  // Never settled: the import stays pending until navigation cancels it.
+  await page.route('**/pending-import.js', () => {});
+
+  await page.goto(
+    `/session/${scenario.sessionId}?theme=light&language=en&navigation=1`,
+  );
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible({ timeout: BOOT_VISIBLE_TIMEOUT_MS });
+  await page.evaluate(() => {
+    void import('/pending-import.js').catch(() => {});
+  });
+
+  const documents: string[] = [];
+  page.on('request', (request) => {
+    if (
+      request.frame() === page.mainFrame() &&
+      request.resourceType() === 'document'
+    ) {
+      documents.push(request.url());
+    }
+  });
+
+  await page.goto(
+    `/session/${scenario.sessionId}?theme=light&language=en&navigation=2`,
+  );
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible({ timeout: BOOT_VISIBLE_TIMEOUT_MS });
+
+  expect(documents).toHaveLength(1);
 });

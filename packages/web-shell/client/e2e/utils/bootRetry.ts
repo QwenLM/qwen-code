@@ -25,24 +25,31 @@ export async function installBootRetry(page: Page): Promise<void> {
   if (installedPages.has(page)) return;
   installedPages.add(page);
 
-  const onMainFrame = (request: Request): boolean =>
+  const mainFrame = (request: Request): boolean =>
     request.frame() === page.mainFrame();
-  let failedDuringBoot = false;
+  // The main frame survives navigation, so requests from the document being
+  // left keep arriving after the next boot started — a pending import is
+  // cancelled by the navigation and reports as a failed script then. Stamp
+  // each request with the boot it was issued in and ignore later boots' views
+  // of it.
+  let boot = 0;
+  let failedBoot = -1;
+  const bootOf = new WeakMap<Request, number>();
   let reloads = 0;
 
   page.on('request', (request) => {
-    // A new document starts a new boot; only failures after it count.
-    if (onMainFrame(request) && request.resourceType() === 'document') {
-      failedDuringBoot = false;
+    if (mainFrame(request) && request.resourceType() === 'document') {
+      boot += 1;
     }
+    bootOf.set(request, boot);
   });
   page.on('requestfailed', (request) => {
-    if (onMainFrame(request) && request.resourceType() === 'script') {
-      failedDuringBoot = true;
-    }
+    if (!mainFrame(request) || request.resourceType() !== 'script') return;
+    if (bootOf.get(request) !== boot) return;
+    failedBoot = boot;
   });
   page.on('load', () => {
-    if (!failedDuringBoot) {
+    if (failedBoot !== boot) {
       // An undisturbed boot hands the budget back to the next navigation.
       reloads = 0;
       return;
