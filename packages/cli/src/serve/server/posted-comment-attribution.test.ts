@@ -354,20 +354,37 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
-  it('attributes a creation inside an if-then pre-post guard', () => {
+  it('does not attribute a creation inside an if-then guard (execution unprovable)', () => {
+    // Static analysis cannot prove the creation branch ran, so stay fail-open.
     const entry = shellResult(
       'if [ "$STATE" = "OPEN" ]; then gh pr comment 42 --body c.md; else echo skip; fi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
-    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+    expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
-  it('attributes a creation inside a case arm pre-post guard', () => {
+  it('does not attribute a creation inside a case arm (execution unprovable)', () => {
     const entry = shellResult(
       'case "$S" in open*) gh pr comment 42 --body c.md;; *) echo skip;; esac',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
-    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not credit the condition read when the creation output is redirected', () => {
+    const entry = shellResult(
+      'if gh api repos/o/r/issues/comments/111 --jq .html_url; then gh pr comment 42 --body hi >/dev/null; fi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not attribute when no gh command executes (if-false else file read)', () => {
+    const entry = shellResult(
+      'if false; then gh pr comment 42 --body hi; else cat comment-url.txt; fi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
   it('does not attribute a conditional whose creation branch is chained with a comments read', () => {
