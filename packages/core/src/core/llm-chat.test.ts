@@ -13331,6 +13331,12 @@ describe('LlmChat', async () => {
       expect(requestAt(0).config?.maxOutputTokens).toBe(49_721);
       // Recovery: the prompt grew to ~121K → the 4,000 floor, not 49,721.
       expect(requestAt(1).config?.maxOutputTokens).toBe(4_000);
+      // #16417 P2: the per-response limit the Turn reads must track the
+      // recovery re-clamp, not the initial grant — otherwise a MAX_TOKENS
+      // cut in the recovery round would name a stale, oversized limit.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(1).config?.maxOutputTokens,
+      );
     });
 
     it('re-clamps recovery sends even when an intermediate response omits usage metadata', async () => {

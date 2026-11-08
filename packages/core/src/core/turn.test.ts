@@ -1154,25 +1154,108 @@ describe('Turn', () => {
     // #16417: alongside the flag, the turn records the budget numbers — the
     // used tokens from the response's own usageMetadata and the limit from
     // the send layer — so the scheduler's rejection can name them.
+    // usageMetadata must be at the response root (not inside candidates[0])
+    // because that is where turn.ts reads it.
     it('records the output budget alongside the truncation mark (#16417)', async () => {
-      await run(
-        [
-          callsChunk({
-            name: 'write_file',
-            args: { file_path: '/big.txt', content: 'x'.repeat(50_000) },
-          }),
-          cand([], {
-            finishReason: 'MAX_TOKENS',
-            usageMetadata: { candidatesTokenCount: 8192 },
-          }),
-        ],
-        [{ text: 'Test prompt' }],
+      // Wire a chat that returns a limit, so the budget actually lands.
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 8192,
+        } as unknown as LlmChat,
+        'prompt-budget',
       );
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/big.txt', content: 'x'.repeat(50_000) },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            usageMetadata: { totalTokenCount: 9216, promptTokenCount: 1024 },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      const tc = budgetTurn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      // total − prompt = 9216 − 1024 = 8192 (see R1: includes reasoning)
+      expect(tc.outputBudgetAtTruncation).toEqual({
+        usedTokens: 8192,
+        limitTokens: 8192,
+      });
+    });
+
+    it('falls back to candidatesTokenCount when total or prompt is missing (#16417 R1)', async () => {
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 4096,
+        } as unknown as LlmChat,
+        'prompt-budget-fallback',
+      );
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/x.txt', content: 'y' },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            usageMetadata: { candidatesTokenCount: 3500 },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      expect(budgetTurn.pendingToolCalls[0].outputBudgetAtTruncation).toEqual({
+        usedTokens: 3500,
+        limitTokens: 4096,
+      });
+    });
+
+    it('leaves the budget unset when the chat lacks the getter (#16417)', async () => {
+      await runCallsThenFinish('MAX_TOKENS', {
+        name: 'write_file',
+        args: { file_path: '/test.txt', content: 'hello' },
+      });
 
       const tc = turn.pendingToolCalls[0];
       expect(tc.wasOutputTruncated).toBe(true);
-      // The mock LlmChat doesn't implement getLastRequestMaxOutputTokens,
-      // so the budget stays unset — the guard is the optional chaining.
       expect(tc.outputBudgetAtTruncation).toBeUndefined();
     });
 

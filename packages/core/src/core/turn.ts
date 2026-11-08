@@ -947,7 +947,18 @@ export class Turn {
               // split write should be (#16417). The limit is whatever the
               // send layer actually used — clamp, escalation, or user
               // override.
-              const usedTokens = resp.usageMetadata?.candidatesTokenCount;
+              // Prefer total − prompt: Gemini-family providers report
+              // reasoning tokens separately in thoughtsTokenCount, and the
+              // output-limit consumption includes them. A bare
+              // candidatesTokenCount under-reports there and the model would
+              // size its retry too large. Fall back to candidatesTokenCount
+              // when total or prompt is missing (some providers omit them).
+              const usage = resp.usageMetadata;
+              const usedTokens =
+                usage?.totalTokenCount !== undefined &&
+                usage?.promptTokenCount !== undefined
+                  ? Math.max(0, usage.totalTokenCount - usage.promptTokenCount)
+                  : usage?.candidatesTokenCount;
               const limitTokens = this.chat.getLastRequestMaxOutputTokens?.();
               if (usedTokens !== undefined && limitTokens !== undefined) {
                 tc.outputBudgetAtTruncation = { usedTokens, limitTokens };

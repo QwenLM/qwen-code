@@ -5567,15 +5567,21 @@ export class LlmChat {
             // defensive fallback that never fires in practice.
             const recoveryCeiling =
               recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            const iterationClampedMaxOutputTokens = clampOutputTokensToWindow(
+              recoveryCeiling,
+              contextWindowForClamp,
+              recoveryPromptEstimate,
+            );
+            // Refresh the per-response limit the Turn reads (#16417): a
+            // recovery iteration can end at MAX_TOKENS, and the rejection
+            // must name the limit *this* iteration used, not the one from
+            // before the recovery loop started.
+            self.lastRequestMaxOutputTokens = iterationClampedMaxOutputTokens;
             const iterationParams: SendMessageParameters = {
               ...recoveryParams,
               config: {
                 ...recoveryParams.config,
-                maxOutputTokens: clampOutputTokensToWindow(
-                  recoveryCeiling,
-                  contextWindowForClamp,
-                  recoveryPromptEstimate,
-                ),
+                maxOutputTokens: iterationClampedMaxOutputTokens,
               },
             };
 
