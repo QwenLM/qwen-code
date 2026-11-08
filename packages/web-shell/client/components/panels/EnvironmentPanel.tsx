@@ -28,6 +28,7 @@ import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { isComposerTask } from '../../utils/composerTasks';
 import { BranchPickerPopover } from '../BranchPickerPopover';
+import { artifactDisplayName } from '../artifacts/artifactUtils';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { Skeleton } from '../ui/skeleton';
 import styles from './EnvironmentPanel.module.css';
@@ -119,9 +120,19 @@ function taskStatusKey(status: DaemonSessionTaskWithWorkflowStatus['status']) {
   return `tasks.${status}` as const;
 }
 
+/**
+ * Statuses this panel renders with a spinner. The header's activity dot keys
+ * off the same set, so the dot cannot promise a row the panel shows settled.
+ */
+export function isTaskInProgress(
+  status: DaemonSessionTaskWithWorkflowStatus['status'],
+): boolean {
+  return status === 'running' || status === 'pausing';
+}
+
 function taskStatusIcon(status: DaemonSessionTaskWithWorkflowStatus['status']) {
   if (status === 'completed') return <CircleCheckIcon />;
-  if (status === 'running' || status === 'pausing') {
+  if (isTaskInProgress(status)) {
     return <LoaderCircleIcon className={styles.statusRunning} />;
   }
   if (status === 'failed') return <CircleXIcon />;
@@ -497,28 +508,31 @@ export function EnvironmentPanel({
                 <FileListSkeleton label={t('common.loading')} />
               ) : artifacts?.length ? (
                 <ul className={styles.attachmentFiles}>
-                  {artifacts.map((artifact) => (
-                    <li key={artifact.id}>
-                      <button
-                        type="button"
-                        className={styles.attachmentFile}
-                        title={artifact.title}
-                        onClick={() => onOpenArtifact?.(artifact.id)}
-                      >
-                        <FileTypeIcon
-                          name={artifact.workspacePath ?? artifact.title}
-                          mimeType={artifact.mimeType}
-                          size={16}
-                          strokeWidth={1.7}
-                          className={styles.attachmentFileIcon}
-                          aria-hidden="true"
-                        />
-                        <span className={styles.attachmentFileName}>
-                          {artifact.title}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
+                  {artifacts.map((artifact) => {
+                    const displayName = artifactDisplayName(artifact);
+                    return (
+                      <li key={artifact.id}>
+                        <button
+                          type="button"
+                          className={styles.attachmentFile}
+                          title={displayName}
+                          onClick={() => onOpenArtifact?.(artifact.id)}
+                        >
+                          <FileTypeIcon
+                            name={artifact.workspacePath ?? artifact.title}
+                            mimeType={artifact.mimeType}
+                            size={16}
+                            strokeWidth={1.7}
+                            className={styles.attachmentFileIcon}
+                            aria-hidden="true"
+                          />
+                          <span className={styles.attachmentFileName}>
+                            {displayName}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               ) : (
                 <p className={styles.emptyDescription}>

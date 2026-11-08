@@ -23,6 +23,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -34,6 +35,7 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -93,6 +95,20 @@ export interface DaemonStandaloneConnectionState {
   errorCode?: string;
 }
 
+export interface DaemonWorkflowMode {
+  requested: boolean;
+  available: boolean;
+  effective: boolean;
+  reason?: string;
+}
+
+export type DaemonWorkflowModeStatus =
+  | 'unbound'
+  | 'unknown'
+  | 'syncing'
+  | 'ready'
+  | 'unsupported';
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   runtimeStopped?: boolean;
@@ -130,6 +146,9 @@ export interface DaemonConnectionState {
   models?: DaemonModelInfo[];
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
+  workflowMode?: DaemonWorkflowMode;
+  workflowModeStatus?: DaemonWorkflowModeStatus;
+  workflowModePending?: boolean;
   currentMode?: string;
   planExecutionMode?: string;
   displayName?: string;
@@ -139,6 +158,8 @@ export interface DaemonConnectionState {
   /** Authoritative Goal v2 state for the current session. */
   goalState?: GoalSnapshotV2;
   backgroundTurn?: DaemonBackgroundTurn;
+  /** Browser-owned send, including the gap before an authoritative user echo. */
+  localPrompt?: { sessionId: string; startedAt: number };
   /** Stops a lagging live-state snapshot from reviving the finished execution. */
   finishedBackgroundTurnId?: string;
   /** Local monotonic time; orders background events against live-state requests. */
@@ -159,6 +180,11 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+  /**
+   * True while the connection is parked on the daemon's terminal 409
+   * `session_archived` answer for the session it tried to load.
+   */
+  sessionArchived?: boolean;
 }
 
 export interface DaemonReasoningControls {
@@ -276,6 +302,12 @@ export interface DaemonPromptSettledEvent {
   sessionId: string;
   promptId: string;
   outcome: DaemonPromptSettlementOutcome;
+  /**
+   * The client that submitted the prompt, from the terminal frame's
+   * envelope. Lets a submitter recognise its own turn when the admission
+   * response never reached it.
+   */
+  originatorClientId?: string;
   /** Daemon terminal reason. Present for completed and cancelled turns. */
   stopReason?: string;
   error?: {
@@ -308,6 +340,7 @@ export type DaemonNoticeOperation =
   | 'send_shell_command'
   | 'switch_model'
   | 'set_reasoning_effort'
+  | 'set_workflow_mode'
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
@@ -401,7 +434,14 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   /** Original text declared at the user submission boundary, before host preparation. */
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  /**
+   * Existing transcript user block the admitted prompt binds to. Needed when
+   * `optimisticUserMessage: false` reuses the block a failed attempt already
+   * appended, so admission still has a block to bind.
+   */
+  bindBlockId?: string;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -413,17 +453,21 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Revalidates the caller before every HTTP attempt, including client recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
    * without waiting for the whole turn — e.g. the scheduled-tasks "run now",
    * which records the run at admission so a long/stalled turn or a closed tab
-   * can't lose the record.
+   * can't lose the record. Carries the daemon's id for the prompt, the key
+   * its terminal `turn_complete` / `turn_error` settles under.
    */
-  onAdmitted?: () => void;
+  onAdmitted?: (admission: { promptId: string }) => void;
 }
 
-export interface SubmitPromptOptions extends SendPromptOptions {
+export interface SubmitPromptOptions
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source' | 'bindBlockId'> {
   sessionId?: string;
   signal?: AbortSignal;
 }
@@ -506,7 +550,7 @@ export interface DaemonSessionActions {
     requestStartedAt?: number,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
-  continueSession(): Promise<void>;
+  continueSession(options?: { confirmCancellation?: string }): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its
@@ -519,6 +563,15 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  refreshModels(
+    beforeRefresh?: (target: {
+      workspaceCwd: string;
+      sessionId?: string;
+    }) => void | Promise<void>,
+    options?: { reloadProviders?: boolean },
+  ): Promise<void>;
+
+  setWorkflowMode(requested: boolean): Promise<void>;
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
@@ -596,7 +649,10 @@ export interface DaemonSessionActions {
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
   refreshCommands(): Promise<void>;
-  getContext(): Promise<DaemonSessionContextStatus>;
+  getContext(opts?: {
+    /** Rethrow transient failures without recording a notice. */
+    silent?: boolean;
+  }): Promise<DaemonSessionContextStatus>;
   getContextUsage(opts?: {
     detail?: boolean;
     /** Reconcile composer counters after compression, without changing billing usage. */
@@ -611,11 +667,25 @@ export interface DaemonSessionActions {
     prompt: string,
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<DaemonSessionGenerationEvent>;
-  getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
+  getRewindSnapshots(opts?: {
+    /** Rethrow failures raw instead of recording a notice; for best-effort
+     * callers that fall back on their own. */
+    silent?: boolean;
+  }): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   rewindSession(
     promptId: string,
-    opts?: { rewindFiles?: boolean },
+    opts?: {
+      rewindFiles?: boolean;
+      /** Rethrow failures raw instead of recording a notice; for best-effort
+       * callers that fall back on their own. */
+      silent?: boolean;
+    },
   ): Promise<DaemonRewindResult>;
+  btwSessionStream(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<{ type: 'answer' | 'done'; answer: string }>;
+  /** Legacy JSON action retained for existing daemon-react-sdk consumers. */
   btwSession(
     question: string,
     opts?: { signal?: AbortSignal },
@@ -652,6 +722,16 @@ export interface DaemonSessionActions {
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
   /**
+   * Ask the daemon to deliver the queued mid-turn messages now, cutting short
+   * a model response that a foreground turn is streaming, unless it has
+   * started a tool call.
+   * Pre-flight the daemon's `session_mid_turn_send_now` capability: older
+   * daemons lack the route.
+   */
+  sendMidTurnMessagesNow(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonSendMidTurnMessagesNowResult>;
+  /**
    * Best-effort reconciliation snapshot (queue + delivery-state rings) from the
    * daemon. Resolves `undefined` (never throws/raises a notice) when there
    * is no session or the query fails — callers preserve current state.
@@ -671,6 +751,7 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getTaskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus>;
   getWorkflowTasks(
     opts?: GetTasksActionOptions,
   ): Promise<DaemonSessionWorkflowTasksStatus>;

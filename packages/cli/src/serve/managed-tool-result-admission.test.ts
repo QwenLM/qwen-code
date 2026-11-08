@@ -18,6 +18,7 @@ import {
   ownedManagedRuntimeRouteGate,
 } from './managed-runtime-attestation-contract.js';
 import { MANAGED_CONTEXT_WORKER_ROUTES } from './managed-context-worker.js';
+import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
 
 // A worker that predates managed-tool-result/1 must refuse every Tool v3
 // route before a handler runs, so an old peer never executes a call that
@@ -32,7 +33,10 @@ interface Route {
 
 /** The route set that the worker's gate admits under each boot version. */
 const GATES = [
-  { boot: 'boot v1', routes: OWNED_MANAGED_RUNTIME_ROUTES },
+  {
+    boot: 'boot v1',
+    routes: [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
+  },
   { boot: 'boot v2', routes: MANAGED_CONTEXT_WORKER_ROUTES },
 ] as const;
 

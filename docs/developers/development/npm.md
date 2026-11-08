@@ -83,6 +83,14 @@ Every scheduled or manual release follows these steps:
 
 If any step in the release workflow fails, it will automatically create a new issue in the repository with the labels `bug` and a type-specific failure label (e.g., `nightly-failure`, `preview-failure`). The issue will contain a link to the failed workflow run for easy debugging.
 
+### When a release sits in the queue
+
+`Publish Release` runs on a GitHub-hosted runner and cannot move to the ECS pools: [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) supports cloud-hosted runners only, so a self-hosted publisher would fail to authenticate and would emit no provenance. The macOS and Windows legs of `audio-capture-prebuilds.yml` are hosted as well, because they build against native toolchains; only its Linux legs select `ecs-qwen-release-host`.
+
+Hosted concurrency is account-wide and shared with the PR review, autofix, and triage automation, so these hosted steps queue behind that traffic. A queued step is not a failed release: GitHub has not assigned it a runner, its log is still empty, and `timeout-minutes` only starts counting once it runs. On 2026-11-01 a publish waited 2h33m for a runner and then finished in 5m37s, while the nightlies around it were dispatched 3–4s after their build finished. Prefer the nightly, or dispatch outside the Asia/Shanghai working-day peak, when a manual release is timing-sensitive.
+
+See [Release runner slots](../../design/2026-10-28-release-queue-optimization.md) for the pool analysis and for which release jobs were already moved off hosted runners.
+
 ## Release Validation
 
 After pushing a new release smoke testing should be performed to ensure that the packages are working as expected. This can be done by installing the packages locally and running a set of tests to ensure that they are functioning correctly.

@@ -130,6 +130,13 @@ export async function loadConfig(
     throw new ConfigurationError('External context config is not valid JSON.');
   }
 
+  return resolveConfig(parsed, env);
+}
+
+export async function resolveConfig(
+  parsed: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ExternalContextConfig> {
   const result = configSchema.safeParse(parsed);
   if (!result.success) {
     throw new ConfigurationError('External context config is invalid.');

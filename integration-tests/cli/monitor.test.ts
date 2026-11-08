@@ -30,7 +30,16 @@ describe('monitor-tool', () => {
 
   it('should call monitor tool when asked to watch a command', async () => {
     rig = new TestRig();
-    await rig.setup('monitor-tool-call');
+    await rig.setup('monitor-tool-call', {
+      settings: {
+        // Cut real-model round trips from the critical path: tools.visible
+        // skips the tool_search discovery call, and the background extractor
+        // adds a post-turn request before exit; provider TTFT spikes
+        // (30-45s observed) otherwise push the run past the timeout (#13001).
+        tools: { visible: ['monitor'] },
+        memory: { enableManagedAutoMemory: false },
+      },
+    });
 
     const resultPromise = rig.run(
       'Use the monitor tool to watch this command: for i in 1 2 3; do echo "EVENT_$i"; sleep 0.3; done. ' +
@@ -39,9 +48,16 @@ describe('monitor-tool', () => {
 
     const [result, foundMonitor] = await Promise.all([
       resultPromise,
-      rig.waitForToolCall('monitor'),
+      rig.waitForToolCall('monitor', 180_000),
     ]);
     expect(foundMonitor).toBeTruthy();
+    const monitorCalls = rig
+      .readToolLogs()
+      .filter((log) => log.toolRequest.name === 'monitor');
+    expect(
+      monitorCalls.some((log) => log.toolRequest.success === true),
+      `monitor call did not succeed: ${JSON.stringify(monitorCalls)}`,
+    ).toBe(true);
     validateModelOutput(result, null, 'monitor tool call');
-  }, 60000);
+  });
 });

@@ -15,7 +15,7 @@ Qwen Code 已经具备 Hosted Harness Profile，以及访问其私有 HTTP/SSE �
 
 ## 2. 目标
 
-- 在 `packages/sdk-java/managed-agent-server` 增加可独立运行的 Spring Boot 应用。
+- 在 `packages/managed-agent-server` 增加可独立运行的 Spring Boot 应用。
 - Agent API 请求必须携带 `X-Qwen-Tenant-Id`，并将其作为数据库资源归属边界。
 - 不实现终端用户鉴权，也不解释公共 API 的 `Authorization`。
 - 在 MySQL 中持久化 Session、Turn、命令幂等、Harness generation fencing 和公共 Event 状态。
@@ -193,8 +193,7 @@ Runtime 冷启动中，公共 admission 为 114 ms，首个真实模型事件为
 Runtime ready 为 31,141 ms，Turn 在 39,237 ms 完成；同一轮还验证了精确的
 `write_file` 副作用、同 Session 幂等重放、跨 tenant 404、持久 Event sequence
 无重复且仅有一个 terminal Event。这些时延只是一次本地观测，不是 SLO。
-确定性模型 fixture 继续作为 CI 的时序证明；最近一次结果为首模型事件 300 ms，
-Runtime ready 15,565 ms。
+确定性 controlled-model 时序证明尚未实现，由 #12941 追踪。
 
 生产 ACS/Pod 调度、多节点 Broker 持久 Repository、进程丢失恢复、真实负载均衡
 和完整租户隔离矩阵仍是生产门禁，不能算作 Phase 1 已证明的能力。

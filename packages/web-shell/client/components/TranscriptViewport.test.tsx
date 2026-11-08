@@ -12,10 +12,21 @@ import type { MessageListHandle, MessageListProps } from './MessageList';
 import type { Message } from '../adapters/types';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 
+vi.mock('../hooks/useMessageDeletion', () => ({
+  useMessageDeletion: (...args: unknown[]) => {
+    observed.deletionArgs = args;
+    return observed.deletion;
+  },
+}));
+
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
   props: undefined as MessageListProps | undefined,
   transcript: { blocks: [] },
+  deletion: undefined as
+    | import('../hooks/useMessageDeletion').MessageDeletionControls
+    | undefined,
+  deletionArgs: [] as unknown[],
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
@@ -83,6 +94,7 @@ let container: HTMLDivElement | undefined;
 afterEach(() => {
   act(() => root?.unmount());
   root = undefined;
+  observed.deletion = undefined;
   container?.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -200,6 +212,34 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
 }
 
 describe('TranscriptViewport', () => {
+  it('hides deletion and marks it unavailable on a frozen history page', async () => {
+    observed.deletion = {
+      active: true,
+      busy: false,
+      disabled: false,
+      selected: new Set(['local']),
+      allowed: new Set(['local']),
+      groupByMessage: new Map(),
+      confirming: false,
+      canDelete: () => true,
+      start: vi.fn(),
+      toggle: vi.fn(),
+      cancel: vi.fn(),
+      setConfirming: vi.fn(),
+      submit: vi.fn(),
+    };
+    const { click } = await setup();
+    expect(
+      container!.querySelector('[data-web-shell-message-deletion]'),
+    ).not.toBeNull();
+    await click('history.openEarlier');
+    expect(observed.props!.deletion).toBeUndefined();
+    expect(
+      container!.querySelector('[data-web-shell-message-deletion]'),
+    ).toBeNull();
+    expect(observed.deletionArgs[2]).toBe(true);
+  });
+
   it('passes the historical record UUID from its own page to the tool calls handler', async () => {
     const { props, click } = await setup();
     const onOpen = vi.fn();

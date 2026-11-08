@@ -25,6 +25,7 @@ import {
   metadataBudgetBytes,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   pathHasSkippedDirectoryComponent,
+  sessionArtifactIdentityKey,
   stableSessionArtifactId,
   WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY,
   WORKSPACE_CONTENT_SHA256_METADATA_KEY,
@@ -83,6 +84,12 @@ const MAX_SNAPSHOT_BACKOFF_MULTIPLIER = 4;
 const MAX_TOMBSTONED_IDS = 500;
 const MAX_STICKY_EPHEMERAL_IDS = 500;
 const MAX_WORKSPACE_HASH_BYTES = 100 * 1024 * 1024;
+// Built-in file-write tools whose results auto-record workspace artifacts.
+const WORKSPACE_AUTO_RECORD_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'write_file',
+  'edit',
+  'notebook_edit',
+]);
 const SECRET_TOKEN_VALUE_PATTERN =
   /(?:^|\s)(?:bearer\s+\S{8,}|sk-[A-Za-z0-9_-]{12,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_/-]{12,}|[a-f0-9]{40,}|[A-Za-z0-9+/]{48,}={0,2})(?:$|\s)/i;
 const RESTORE_FAILED_WARNING_PREFIX = 'artifact snapshot restore failed';
@@ -117,6 +124,11 @@ export interface SessionArtifactInput extends ToolArtifactLike {
   toolName?: string;
   hookEventName?: string;
   clientId?: string;
+  /**
+   * Refresh an existing workspace artifact at `workspacePath`; never create
+   * one. Dropped when `workspacePath` is absent.
+   */
+  updateOnly?: boolean;
 }
 
 type RestoreSessionArtifactInput = Omit<SessionArtifactInput, 'retention'> & {
@@ -289,6 +301,7 @@ export class SessionArtifactStore {
   // Failed removals or partial restores can leave ownership without a live record.
   private readonly pendingSnapshotRemovals = new Set<string>();
   private lastRestoreWarnings: string[] = [];
+  private legacyOnlyRestore = false;
   private lastRestoreWarningDetails: SessionArtifactWarningDetail[] = [];
 
   constructor(options: SessionArtifactStoreOptions) {
@@ -366,6 +379,12 @@ export class SessionArtifactStore {
       const warningDetails: SessionArtifactWarningDetail[] = [];
       for (const input of inputs) {
         try {
+          if (await this.isUnmatchedWorkspaceUpdate(input)) {
+            writeStderrLine(
+              `[artifacts] session=${this.sessionId} action=dropped reason="unmatched workspace update" workspacePath=${JSON.stringify(input.workspacePath ?? '')}`,
+            );
+            continue;
+          }
           const expanded = await this.expandWorkspaceDirectoryInput(input);
           for (const item of expanded.inputs) {
             try {
@@ -425,16 +444,13 @@ export class SessionArtifactStore {
             this.findPublishedUpgradeTarget(artifact) ??
             this.findPublishedWorkspaceTarget(artifact);
           if (!existing) {
-            // Standalone publish of a local file:// page (non-snapshot):
-            // coerce to ephemeral so it never journals as a durable record
-            // that restore cannot relink. Upgrade merges keep the
-            // predecessor's retention — mergeRetention decides.
-            const coerced = this.coerceStandalonePublishedFile(artifact);
             const stored: StoredArtifact = {
-              ...coerced,
+              ...artifact,
+              metadata: stripDerivedFromTitleMarker(artifact.metadata),
               insertSeq: ++this.insertSeq,
             };
             this.artifacts.set(stored.id, stored);
+            this.clearTombstone(stored.id);
             changes.push({
               action: 'created',
               artifactId: stored.id,
@@ -444,9 +460,13 @@ export class SessionArtifactStore {
           }
 
           try {
-            this.denyCrossClientMutation('upsert', existing.id, existing, {
-              clientId: artifact.clientId,
-            });
+            // Agent file writes keep a client-owned artifact's content in
+            // sync; the merge never takes over its title, source, or owner.
+            if (!isWorkspaceAutoRecordInput(artifact)) {
+              this.denyCrossClientMutation('upsert', existing.id, existing, {
+                clientId: artifact.clientId,
+              });
+            }
           } catch (error) {
             if (validationStrict) {
               throw error;
@@ -459,7 +479,22 @@ export class SessionArtifactStore {
           }
           const updated = mergeArtifact(existing, artifact);
           if (updated.changed) {
-            if (updated.artifact.id !== existing.id) {
+            const supersededHosted =
+              updated.artifact.id === existing.id &&
+              wasDurablyJournaled(existing) &&
+              isNonSnapshotPublishedFileUrl(updated.artifact) &&
+              !shouldRecordEphemeralUnpin(existing, artifact);
+            if (supersededHosted) {
+              const removeChange: InternalSessionArtifactChange = {
+                action: 'removed',
+                artifactId: existing.id,
+                artifact: toRemovedPublicArtifact(existing),
+                reason: 'explicit',
+                durableTombstoneRequired: true,
+                removedClientId: existing.clientId,
+              };
+              changes.push(removeChange);
+            } else if (updated.artifact.id !== existing.id) {
               const removeChange: InternalSessionArtifactChange = {
                 action: 'removed',
                 artifactId: existing.id,
@@ -482,6 +517,7 @@ export class SessionArtifactStore {
               });
             }
             this.artifacts.set(updated.artifact.id, updated.artifact);
+            this.clearTombstone(updated.artifact.id);
             changes.push({
               action: 'updated',
               artifactId: updated.artifact.id,
@@ -609,14 +645,8 @@ export class SessionArtifactStore {
     });
   }
 
-  // Narrowed to the fields the helper reads: a future field read inside
-  // must fail typecheck here instead of silently seeing undefined at
-  // partial-literal call sites (R5-3).
   private findPublishedUpgradeTarget(
-    artifact: Pick<
-      NormalizedArtifact,
-      'storage' | 'trustedPublisher' | 'managedId' | 'url'
-    >,
+    artifact: NormalizedArtifact,
   ): StoredArtifact | undefined {
     if (
       artifact.storage !== 'published' ||
@@ -655,33 +685,43 @@ export class SessionArtifactStore {
     return undefined;
   }
 
-  // Restore-time trust rules treat a local file:// published page
-  // (non-snapshot) as untrusted, so journaling it `restorable` produces a
-  // dead record whose only effect is piled-up restore warnings. Coerce it
-  // to `ephemeral` up front and mark the choice explicit so later merges
-  // keep the pin. Runs only for records with no durable predecessor —
-  // upgrade merges keep the predecessor's retention instead (R4-1).
-  private coerceStandalonePublishedFile(
-    artifact: NormalizedArtifact,
-  ): NormalizedArtifact {
-    if (
-      artifact.retention !== 'ephemeral' &&
-      artifact.storage === 'published' &&
-      artifact.url !== undefined &&
-      isFileArtifactUrl(artifact.url) &&
-      getWebPreviewSnapshotId(artifact) === undefined
-    ) {
-      return {
-        ...artifact,
-        retention: 'ephemeral',
-        retentionExplicit: true,
-      };
+  /**
+   * An `updateOnly` input, or an auto-recorded file write whose artifact the
+   * user deleted, may only refresh an artifact that already exists. Resolved
+   * before the input is stat'd or hashed so unknown files cost nothing.
+   */
+  private async isUnmatchedWorkspaceUpdate(
+    input: SessionArtifactInput,
+  ): Promise<boolean> {
+    const updateOnly = input.updateOnly === true;
+    if (!updateOnly && !isWorkspaceAutoRecordInput(input)) {
+      return false;
     }
-    return artifact;
+    if (!input.workspacePath) {
+      return updateOnly;
+    }
+    const workspacePath = normalizeWorkspacePath(
+      input.workspacePath,
+      await this.getRealWorkspaceCwdForValidation(),
+    );
+    const id = stableSessionArtifactId(
+      this.sessionId,
+      buildIdentityKey({ workspacePath }),
+    );
+    if (!updateOnly && !this.tombstonedIds.has(id)) {
+      return false;
+    }
+    return (
+      !this.artifacts.has(id) &&
+      !this.findPublishedWorkspaceTarget({
+        storage: 'workspace',
+        workspacePath,
+      })
+    );
   }
 
   private findPublishedWorkspaceTarget(
-    artifact: NormalizedArtifact,
+    artifact: Pick<NormalizedArtifact, 'storage' | 'workspacePath'>,
   ): StoredArtifact | undefined {
     if (artifact.storage !== 'workspace' || !artifact.workspacePath) {
       return undefined;
@@ -701,9 +741,69 @@ export class SessionArtifactStore {
     return undefined;
   }
 
+  async readPersistedLibrary(
+    snapshot: RebuiltSessionArtifactSnapshot,
+  ): Promise<SessionArtifactsEnvelope> {
+    const artifacts: DaemonSessionArtifact[] = [];
+    const warnings = [...snapshot.warnings];
+    for (const artifact of snapshot.artifacts) {
+      if (this.dropLegacyLocalPublished(artifact)) continue;
+      if (artifact.retention === 'pinned') {
+        warnings.push(
+          `pinned artifact ${artifact.id} downgraded to restorable; runtime does not support pinned retention`,
+        );
+      }
+      try {
+        const normalized = await this.normalizeInput(
+          {
+            ...persistedArtifactToInput(artifact),
+            retention:
+              artifact.retention === 'pinned'
+                ? 'restorable'
+                : artifact.retention,
+          },
+          0,
+          artifact.storage === 'published' &&
+            !isNonSnapshotFileLocator(artifact),
+          {
+            metadataBudget: 'persisted',
+            workspaceAccess: 'metadata-only',
+            workspaceStatus: artifact.status,
+            hashWorkspaceContent: false,
+          },
+        );
+        if (normalized.id !== artifact.id)
+          throw new Error('Artifact identity mismatch');
+        artifacts.push(
+          toPublicArtifact({
+            ...normalized,
+            createdAt: artifact.createdAt,
+            updatedAt: artifact.updatedAt,
+            persistedAt: artifact.persistedAt,
+            restoreState: 'restored',
+            persistenceWarning:
+              normalized.status !== 'available'
+                ? 'metadata_only_restore'
+                : undefined,
+          }),
+        );
+      } catch {
+        warnings.push(`artifact ${artifact.id} is unavailable`);
+      }
+    }
+    return {
+      v: 1,
+      sessionId: this.sessionId,
+      artifacts,
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: this.maxArtifacts },
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
   async remove(
     artifactId: string,
-    options?: { clientId?: string },
+    options?: { clientId?: string; workspaceOwner?: boolean },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const existing = this.artifacts.get(artifactId);
@@ -713,12 +813,18 @@ export class SessionArtifactStore {
       // Client-created artifacts with an owner require the same client id.
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
-      this.denyCrossClientMutation('remove', artifactId, existing, options);
+      // Management routes act for the authenticated workspace owner; legacy
+      // client routes cannot grant this authority.
+      if (!options?.workspaceOwner)
+        this.denyCrossClientMutation('remove', artifactId, existing, options);
       const removedAt = new Date().toISOString();
+      const removedArtifact = isNonSnapshotPublishedFileUrl(existing)
+        ? undefined
+        : toRemovedPublicArtifact(existing, removedAt);
       const removeChange: InternalSessionArtifactChange = {
         action: 'removed',
         artifactId,
-        artifact: toRemovedPublicArtifact(existing, removedAt),
+        ...(removedArtifact ? { artifact: removedArtifact } : {}),
         reason: 'explicit',
         durableTombstoneRequired:
           existing.durableTombstoneRequired ||
@@ -781,8 +887,12 @@ export class SessionArtifactStore {
     snapshot: RebuiltSessionArtifactSnapshot | undefined,
     options: SessionArtifactRestoreOptions = {},
   ): Promise<string[]> {
-    if (!snapshot) return [];
+    if (!snapshot) {
+      this.legacyOnlyRestore = false;
+      return [];
+    }
     return this.enqueue(async () => {
+      this.legacyOnlyRestore = false;
       const warnings = [...(snapshot?.warnings ?? [])];
       const baselineWarnings = [...warnings];
       const previousState = this.cloneState();
@@ -792,6 +902,8 @@ export class SessionArtifactStore {
             .map(cloneStoredArtifact)
         : [];
       let restoredCount = 0;
+      let expectedExpiredDrops = 0;
+      const droppedLegacyIds: string[] = [];
       this.artifacts.clear();
       this.tombstonedIds.clear();
       this.tombstonedClientIds.clear();
@@ -820,33 +932,18 @@ export class SessionArtifactStore {
             artifact,
             warnings,
             options.workspaceAccess === 'metadata-only',
+            droppedLegacyIds,
           );
-          // Legacy `published + file://` marker artifacts fail the trust
-          // check in normalizeRestoredMarkerArtifact; the helper pushes a
-          // `skipped marker artifact` warning. Strip that specific warning
-          // so the cascade (completeness check, restore rollback, snapshot
-          // reclamation block) doesn't fire. The gate mirrors the main
-          // loop: source + storage/URL/snapshot shape, no toolName — the
-          // workspace→published upgrade keeps the workspace producer's
-          // name, which would otherwise leave mainstream markers loud.
-          if (
-            !markerArtifact &&
-            artifact.storage === 'published' &&
-            typeof artifact.url === 'string' &&
-            isFileArtifactUrl(artifact.url) &&
-            getWebPreviewSnapshotId(artifact) === undefined &&
-            (artifact.source === 'tool' || artifact.source === 'hook') &&
-            warnings.at(-1)?.startsWith('skipped marker artifact ') &&
-            warnings.at(-1)?.includes('url must use http or https')
-          ) {
-            warnings.pop();
-          }
           if (markerArtifact)
             this.markerArtifacts.set(artifact.id, markerArtifact);
         }
       }
-      let legacyPublishedFileCount = 0;
       for (const artifact of snapshot?.artifacts ?? []) {
+        if (this.dropLegacyLocalPublished(artifact)) {
+          expectedExpiredDrops++;
+          droppedLegacyIds.push(artifact.id);
+          continue;
+        }
         try {
           const input = persistedArtifactToInput(artifact);
           if (input.retention === 'pinned') {
@@ -859,8 +956,7 @@ export class SessionArtifactStore {
             input,
             ++this.receivedSeq,
             artifact.storage === 'published' &&
-              (!isFileArtifactUrl(artifact.url) ||
-                Boolean(getWebPreviewSnapshotId(artifact))),
+              !isNonSnapshotFileLocator(artifact),
             {
               metadataBudget: 'persisted',
               workspaceExpected: workspaceExpectedFromArtifact(artifact),
@@ -930,35 +1026,6 @@ export class SessionArtifactStore {
           this.artifacts.set(stored.id, stored);
           restoredCount++;
         } catch (error) {
-          // Drop legacy `published + file:// + restorable` records
-          // quietly: they were written before write-time coercion,
-          // restore-time trust rejects them, and pushing `skipped …`
-          // would (a) trip `isArtifactSnapshotCompletenessWarning`,
-          // (b) count toward the `restoredCount === 0` rollback, and
-          // (c) block snapshot reclamation. A `published + file://`
-          // record can only exist if a trusted-publisher ingest accepted
-          // it (`normalizeArtifactUrl(url, false)` throws for everyone
-          // else), so the source plus the storage/URL/snapshot shape is
-          // enough; toolName is deliberately NOT part of the gate —
-          // records this store produced itself via the workspace→
-          // published upgrade carry the workspace producer's name
-          // (e.g. `write_file`), and gating on the artifact-tool name
-          // would let exactly the mainstream legacy shape fall back to
-          // the loud path this PR exists to prevent. Non-tool sources
-          // (client, hook) still flow through the trust check and stay
-          // loud.
-          const isLegacyFileArtifact =
-            error instanceof Error &&
-            error.message === 'url must use http or https' &&
-            artifact.storage === 'published' &&
-            typeof artifact.url === 'string' &&
-            isFileArtifactUrl(artifact.url) &&
-            getWebPreviewSnapshotId(artifact) === undefined &&
-            (artifact.source === 'tool' || artifact.source === 'hook');
-          if (isLegacyFileArtifact) {
-            legacyPublishedFileCount++;
-            continue;
-          }
           warnings.push(
             `skipped artifact restore: ${
               error instanceof Error ? error.message : String(error)
@@ -967,42 +1034,17 @@ export class SessionArtifactStore {
         }
       }
       if (
-        snapshot.artifacts.length > legacyPublishedFileCount &&
+        snapshot.artifacts.length - expectedExpiredDrops > 0 &&
         restoredCount === 0
       ) {
-        // At least one snapshot record wasn't a legacy drop — a real
-        // restore failure. Roll back to preserve live state.
         this.restoreState(previousState);
         const rollbackWarnings = [
           ...baselineWarnings,
           `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
         ];
+        this.logLegacyLocalPublishedDrops(droppedLegacyIds, true);
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
-      }
-      if (
-        snapshot.artifacts.length > 0 &&
-        legacyPublishedFileCount > 0 &&
-        restoredCount === 0
-      ) {
-        // Every snapshot record was a legacy published file:// drop — no
-        // real restore was attempted. Preserve previous state and carry
-        // the RESTORE_FAILED prefix so `isArtifactRestoreFailureWarning`
-        // classifies this restore as failed: three control-plane callers
-        // (attach ingest, deferred replay, rewind snapshot) key off that
-        // predicate to decide whether to ingest/replay/record afterwards,
-        // and reporting an empty restore as success silently drops
-        // replay-frame-only artifacts and can overwrite a rewind
-        // target's journal. The text avoids a leading `skipped ` so the
-        // snapshot-completeness channel is not tripped as well — failure
-        // and completeness are independent classifications here.
-        this.restoreState(previousState);
-        const allLegacyWarnings = [
-          ...baselineWarnings,
-          `${RESTORE_FAILED_WARNING_PREFIX}; ${snapshot.artifacts.length} snapshot records were all legacy published file:// drops; live state preserved without a restore attempt`,
-        ];
-        this.setLastRestoreWarnings(allLegacyWarnings);
-        return allLegacyWarnings;
       }
       if (
         previousState.artifacts.size > 0 &&
@@ -1015,21 +1057,26 @@ export class SessionArtifactStore {
             ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
             : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
         ];
+        this.logLegacyLocalPublishedDrops(droppedLegacyIds, true);
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
       }
       for (const artifact of preservedLiveEphemeralArtifacts) {
-        if (
-          this.artifacts.has(artifact.id) ||
-          this.tombstonedIds.has(artifact.id)
-        ) {
-          continue;
+        if (this.artifacts.has(artifact.id)) continue;
+        if (this.tombstonedIds.has(artifact.id)) {
+          const markerUrl = this.markerArtifacts.get(artifact.id)?.url;
+          if (markerUrl === undefined || markerUrl === artifact.url) continue;
         }
         this.artifacts.set(artifact.id, {
           ...artifact,
           insertSeq: ++this.insertSeq,
         });
       }
+      this.legacyOnlyRestore = restoredCount === 0 && expectedExpiredDrops > 0;
+      this.logLegacyLocalPublishedDrops(
+        droppedLegacyIds.filter((id) => !this.artifacts.has(id)),
+        false,
+      );
       if (!warnings.some(isArtifactSnapshotCompletenessWarning)) {
         this.pendingSnapshotRemovals.clear();
       }
@@ -1097,11 +1144,54 @@ export class SessionArtifactStore {
     });
   }
 
+  consumeLegacyOnlyRestore(): boolean {
+    const value = this.legacyOnlyRestore;
+    this.legacyOnlyRestore = false;
+    return value;
+  }
+
+  private clearTombstone(id: string): void {
+    this.tombstonedIds.delete(id);
+    this.tombstonedClientIds.delete(id);
+  }
+
+  private clearResurrectionMarkers(id: string): void {
+    this.clearTombstone(id);
+    this.markerArtifacts.delete(id);
+  }
+
+  private dropLegacyLocalPublished(
+    artifact: PersistedSessionArtifact,
+  ): boolean {
+    return isExpectedExpiredLocalPublishedArtifact(this.sessionId, artifact);
+  }
+
+  private logLegacyLocalPublishedDrops(
+    artifactIds: readonly string[],
+    rolledBack: boolean,
+  ): void {
+    const action = rolledBack
+      ? 'legacy_local_published_drop_rolled_back'
+      : 'legacy_local_published_dropped';
+    for (const artifactId of artifactIds) {
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} ` +
+          `action=${action} ` +
+          `artifactId=${artifactId}`,
+      );
+    }
+  }
+
   private async normalizeRestoredMarkerArtifact(
     artifact: PersistedSessionArtifact,
     warnings: string[],
     metadataOnly = false,
+    droppedLegacyIds?: string[],
   ): Promise<PersistedSessionArtifact | undefined> {
+    if (this.dropLegacyLocalPublished(artifact)) {
+      droppedLegacyIds?.push(artifact.id);
+      return undefined;
+    }
     try {
       const input = persistedArtifactToInput(artifact);
       if (input.retention === 'pinned') {
@@ -1113,9 +1203,7 @@ export class SessionArtifactStore {
       const normalized = await this.normalizeInput(
         input,
         ++this.receivedSeq,
-        artifact.storage === 'published' &&
-          (!isFileArtifactUrl(artifact.url) ||
-            Boolean(getWebPreviewSnapshotId(artifact))),
+        artifact.storage === 'published' && !isNonSnapshotFileLocator(artifact),
         {
           metadataBudget: 'persisted',
           workspaceExpected: workspaceExpectedFromArtifact(artifact),
@@ -1355,7 +1443,11 @@ export class SessionArtifactStore {
     sequence: number,
   ): SessionArtifactSnapshotRecordPayload {
     const artifacts = Array.from(this.artifacts.values())
-      .filter((artifact) => artifact.retention !== 'ephemeral')
+      .filter(
+        (artifact) =>
+          artifact.retention !== 'ephemeral' &&
+          !isNonSnapshotPublishedFileUrl(artifact),
+      )
       .sort((a, b) => a.insertSeq - b.insertSeq)
       .map((artifact) => toPersistedArtifact(artifact, recordedAt));
     const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
@@ -1388,12 +1480,12 @@ export class SessionArtifactStore {
       if (seen.has(id)) continue;
       seen.add(id);
       const live = this.artifacts.get(id);
-      if (live) {
+      if (live && !isNonSnapshotPublishedFileUrl(live)) {
         artifacts.push(toPersistedArtifact(toPublicArtifact(live), recordedAt));
         continue;
       }
       const markerArtifact = this.markerArtifacts.get(id);
-      if (markerArtifact) {
+      if (markerArtifact && !isNonSnapshotPublishedFileUrl(markerArtifact)) {
         artifacts.push(markerArtifact);
       }
     }
@@ -1452,10 +1544,8 @@ export class SessionArtifactStore {
         continue;
       }
       if (change.artifact && change.artifact.retention !== 'ephemeral') {
-        this.tombstonedIds.delete(change.artifactId);
-        this.tombstonedClientIds.delete(change.artifactId);
+        this.clearResurrectionMarkers(change.artifactId);
         this.stickyEphemeralIds.delete(change.artifactId);
-        this.markerArtifacts.delete(change.artifactId);
       }
     }
   }
@@ -1500,9 +1590,7 @@ export class SessionArtifactStore {
           oldest,
         )} limit=${MAX_TOMBSTONED_IDS}`,
       );
-      this.tombstonedIds.delete(oldest);
-      this.tombstonedClientIds.delete(oldest);
-      this.markerArtifacts.delete(oldest);
+      this.clearResurrectionMarkers(oldest);
     }
   }
 
@@ -1793,15 +1881,10 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
 
-    const retention = normalizeRetention(input.retention, {
+    let retention = normalizeRetention(input.retention, {
       persistenceAvailable: this.persistence !== undefined,
     });
-    // Local file:// published pages (non-snapshot) are coerced to
-    // `ephemeral` by the upsert apply loop, not here: standalone-vs-upgrade
-    // is a property of the store state at apply time, so deciding it during
-    // normalization would make durability depend on batch boundaries
-    // (R5-3). The snapshot path stays restorable via
-    // `getWebPreviewSnapshotId`.
+    let retentionExplicit = input.retention !== undefined;
     const workspaceStatus = workspacePath
       ? options.workspaceAccess === 'metadata-only'
         ? {
@@ -1834,18 +1917,38 @@ export class SessionArtifactStore {
     );
     const now = new Date().toISOString();
     const identityKey = buildIdentityKey({
-      storage,
       workspacePath,
       managedId,
       url,
     });
     const id = stableSessionArtifactId(this.sessionId, identityKey);
+    const toolName = normalizeString(input.toolName, 'toolName', 200, false);
+    if (
+      isNonSnapshotPublishedFileUrl({
+        kind,
+        storage,
+        url,
+        managedId,
+        metadata,
+        source,
+        toolName,
+      })
+    ) {
+      const requestedRetention = retention;
+      retention = 'ephemeral';
+      retentionExplicit = false;
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} ` +
+          'action=local_published_coerced_ephemeral ' +
+          `artifactId=${id} requestedRetention=${requestedRetention}`,
+      );
+    }
 
     return {
       id,
       identityKey,
       receivedSeq,
-      retentionExplicit: input.retention !== undefined,
+      retentionExplicit,
       retentionSource: source,
       trustedPublisher,
       kind,
@@ -1881,7 +1984,7 @@ export class SessionArtifactStore {
       createdAt: now,
       updatedAt: now,
       toolCallId: normalizeString(input.toolCallId, 'toolCallId', 200, false),
-      toolName: normalizeString(input.toolName, 'toolName', 200, false),
+      toolName,
       hookEventName: normalizeString(
         input.hookEventName,
         'hookEventName',
@@ -2287,6 +2390,7 @@ function mergeBatchArtifact(
       lastStatAt: undefined,
     };
     delete merged.workspacePath;
+    coerceNonSnapshotPublishedFile(merged);
     return merged;
   }
   const refreshDisplay =
@@ -2294,27 +2398,32 @@ function mergeBatchArtifact(
     next.storage === 'workspace' &&
     shouldRefreshWorkspaceDisplay(next, existing);
   const metadata = mergeMetadata(existing, next);
-  return {
+  const merged: NormalizedArtifact = {
     ...existing,
     title: refreshDisplay ? next.title : existing.title,
     description: refreshDisplay
-      ? (next.description ?? existing.description)
+      ? descriptionOnWorkspaceRefresh(existing.description, next)
       : existing.description,
     toolName: refreshDisplay ? next.toolName : existing.toolName,
     source: refreshDisplay ? next.source : existing.source,
     hookEventName: refreshDisplay ? next.hookEventName : existing.hookEventName,
-    toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
+    toolCallId:
+      refreshDisplay || isLatestWorkspaceWrite(existing, next)
+        ? next.toolCallId
+        : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
-    metadata: refreshDisplay
-      ? stripExpandedFromDirectoryMarker(metadata)
-      : metadata,
+    metadata: stripDerivedFromTitleMarker(
+      refreshDisplay ? stripExpandedFromDirectoryMarker(metadata) : metadata,
+    ),
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
     retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
     retention: mergeRetention(existing, next),
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
+  coerceNonSnapshotPublishedFile(merged);
+  return merged;
 }
 
 function mergeArtifact(
@@ -2367,9 +2476,8 @@ function mergeArtifact(
     metadata:
       existing.storage === 'published' && !publishedUpdate
         ? existing.metadata
-        : mergeMetadata(existing, incoming),
+        : stripDerivedFromTitleMarker(mergeMetadata(existing, incoming)),
     retention: mergeRetention(existing, incoming),
-    retentionExplicit: existing.retentionExplicit || incoming.retentionExplicit,
     restoreState: 'live',
     persistenceWarning:
       incoming.retentionExplicit && incoming.retention !== 'ephemeral'
@@ -2407,13 +2515,23 @@ function mergeArtifact(
     // record_artifact (or the same producer) may refresh the display
     // name; write_file/hook auto-records must not clobber it.
     next.title = incoming.title;
-    next.description = incoming.description ?? existing.description;
+    next.description = descriptionOnWorkspaceRefresh(
+      existing.description,
+      incoming,
+    );
     next.toolCallId = incoming.toolCallId;
     next.toolName = incoming.toolName;
     next.source = incoming.source;
     next.hookEventName = incoming.hookEventName;
-    next.metadata = stripExpandedFromDirectoryMarker(next.metadata);
+    next.metadata = stripDerivedFromTitleMarker(
+      stripExpandedFromDirectoryMarker(next.metadata),
+    );
   }
+  if (isLatestWorkspaceWrite(existing, incoming)) {
+    next.toolCallId = incoming.toolCallId;
+  }
+
+  coerceMergedPublishedFile(next, wasDurablyJournaled(existing));
 
   const changed = !publicArtifactsEqual(
     toPublicArtifact(existing),
@@ -2445,6 +2563,26 @@ function stripExpandedFromDirectoryMarker(
     return metadata;
   }
   const { expandedFromDirectory: _dropped, ...rest } = metadata;
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
+function descriptionOnWorkspaceRefresh(
+  existingDescription: string | undefined,
+  incoming: Pick<NormalizedArtifact, 'description' | 'metadata'>,
+): string | undefined {
+  if (incoming.metadata?.['derivedFromTitle'] === true) {
+    return existingDescription ?? incoming.description;
+  }
+  return incoming.description ?? existingDescription;
+}
+
+function stripDerivedFromTitleMarker(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+): Record<string, string | number | boolean | null> | undefined {
+  if (metadata?.['derivedFromTitle'] !== true) {
+    return metadata;
+  }
+  const { derivedFromTitle: _dropped, ...rest } = metadata;
   return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
@@ -2560,10 +2698,12 @@ function mergeMetadata(
   existing: DaemonSessionArtifact,
   incoming: NormalizedArtifact,
 ): Record<string, string | number | boolean | null> | undefined {
+  // A file write from another producer only re-baselines the content.
+  const fingerprintsOnly = incoming.source !== existing.source;
   if (
     !incoming.metadata ||
     incoming.source === 'hook' ||
-    incoming.source !== existing.source
+    (fingerprintsOnly && !isWorkspaceAutoRecordInput(incoming))
   ) {
     return existing.metadata;
   }
@@ -2573,7 +2713,7 @@ function mergeMetadata(
     if (isAdoptableContentFingerprintKey(key) && merged[key] !== value) {
       merged[key] = value;
       changed = true;
-    } else if (!Object.hasOwn(merged, key)) {
+    } else if (!fingerprintsOnly && !Object.hasOwn(merged, key)) {
       merged[key] = value;
       changed = true;
     }
@@ -2610,11 +2750,41 @@ function countByRetentionSource(
   return counts;
 }
 
+function isWorkspaceAutoRecordInput(
+  artifact: Pick<SessionArtifactInput, 'source' | 'toolName'>,
+): boolean {
+  return (
+    (artifact.source ?? 'tool') === 'tool' &&
+    isWorkspaceAutoRecordToolName(artifact.toolName)
+  );
+}
+
+/**
+ * The latest file write owns the turn attribution even when it may not
+ * refresh the display fields of an artifact another producer created.
+ */
+function isLatestWorkspaceWrite(
+  existing: Pick<NormalizedArtifact, 'storage'>,
+  incoming: NormalizedArtifact,
+): boolean {
+  return (
+    existing.storage === 'workspace' &&
+    isWorkspaceAutoRecordInput(incoming) &&
+    Boolean(incoming.toolCallId)
+  );
+}
+
+function isWorkspaceAutoRecordToolName(toolName: string | undefined): boolean {
+  return (
+    toolName !== undefined && WORKSPACE_AUTO_RECORD_TOOL_NAMES.has(toolName)
+  );
+}
+
 function isVanishedAutoRecordedWorkspaceArtifact(
   artifact: StoredArtifact,
 ): boolean {
   return (
-    artifact.toolName === 'write_file' &&
+    isWorkspaceAutoRecordToolName(artifact.toolName) &&
     artifact.workspacePath !== undefined &&
     artifact.status === 'missing' &&
     artifact.missingFromStatError !== true &&
@@ -2644,7 +2814,7 @@ function needsWorkspaceStatusRefresh(
 
 function shouldRecheckWriteFilePresence(artifact: StoredArtifact): boolean {
   return (
-    artifact.toolName === 'write_file' &&
+    isWorkspaceAutoRecordToolName(artifact.toolName) &&
     (artifact.status === 'available' ||
       (artifact.status === 'missing' &&
         artifact.missingFromStatError !== true &&
@@ -2866,6 +3036,92 @@ function isFileArtifactUrl(raw: unknown): boolean {
   }
 }
 
+function isNonSnapshotFileLocator(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return isFileArtifactUrl(artifact.url) && !getWebPreviewSnapshotId(artifact);
+}
+
+function isNonSnapshotPublishedFileUrl(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return artifact.storage === 'published' && isNonSnapshotFileLocator(artifact);
+}
+
+function artifactIdMatchesIdentity(
+  sessionId: string,
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  const identityKey = sessionArtifactIdentityKey(artifact);
+  return (
+    identityKey !== undefined &&
+    artifact.id === stableSessionArtifactId(sessionId, identityKey)
+  );
+}
+
+function wasDurablyJournaled(artifact: {
+  durableTombstoneRequired?: boolean;
+  persistedAt?: string;
+}): boolean {
+  return (
+    artifact.durableTombstoneRequired === true ||
+    artifact.persistedAt !== undefined
+  );
+}
+
+function coerceNonSnapshotPublishedFile<
+  T extends {
+    retention: DaemonSessionArtifactRetention;
+    retentionExplicit?: boolean;
+    durableTombstoneRequired?: boolean;
+    persistedAt?: string;
+  },
+>(artifact: T): void {
+  if (!isNonSnapshotPublishedFileUrl(artifact)) return;
+  artifact.retention = 'ephemeral';
+  artifact.retentionExplicit = false;
+  artifact.durableTombstoneRequired = undefined;
+  artifact.persistedAt = undefined;
+}
+
+function coerceMergedPublishedFile<
+  T extends {
+    retention: DaemonSessionArtifactRetention;
+    retentionExplicit?: boolean;
+    durableTombstoneRequired?: boolean;
+    persistedAt?: string;
+  },
+>(artifact: T, wasDurable: boolean): void {
+  coerceNonSnapshotPublishedFile(artifact);
+  if (wasDurable && isNonSnapshotPublishedFileUrl(artifact)) {
+    artifact.durableTombstoneRequired = true;
+  }
+}
+
+function isWebPreviewSnapshotLocator(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return (
+    getWebPreviewSnapshotId({
+      ...artifact,
+      source: 'tool',
+      toolName: 'artifact',
+    }) !== undefined
+  );
+}
+
+function isExpectedExpiredLocalPublishedArtifact(
+  sessionId: string,
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return (
+    isNonSnapshotPublishedFileUrl(artifact) &&
+    !isWebPreviewSnapshotLocator(artifact) &&
+    artifact.kind === 'html' &&
+    artifactIdMatchesIdentity(sessionId, artifact)
+  );
+}
+
 function isArtifactSnapshotCompletenessWarning(warning: string): boolean {
   if (warning.startsWith('skipped stale event sequence ')) return false;
   return (
@@ -2886,6 +3142,7 @@ function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
     return true;
   }
   if (!change.artifact) return false;
+  if (isNonSnapshotPublishedFileUrl(change.artifact)) return false;
   return (
     change.artifact.retention !== 'ephemeral' ||
     change.artifact.persistenceWarning === 'persistence_unavailable'
@@ -3117,7 +3374,6 @@ function validateLocator(
 }
 
 function buildIdentityKey(input: {
-  storage: DaemonSessionArtifactStorage;
   workspacePath?: string;
   managedId?: string;
   url?: string;

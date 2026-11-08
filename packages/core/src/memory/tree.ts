@@ -5,6 +5,7 @@
  */
 
 import {
+  AUTO_MEMORY_SCOPES,
   AUTO_MEMORY_TREE_CATEGORIES,
   AUTO_MEMORY_UNCATEGORIZED,
   type AutoMemoryScope,
@@ -25,7 +26,7 @@ export const ROUTER_CHAR_BUDGET = 6_000;
 // within ROUTER_CHAR_BUDGET after the notice is appended.
 const ROUTER_TRUNCATION_RESERVE = 96;
 const CATEGORY_KEYWORD_LIMIT = 12;
-const SCOPE_ORDER: readonly AutoMemoryScope[] = ['project', 'user', 'team'];
+const SCOPE_ORDER: readonly AutoMemoryScope[] = AUTO_MEMORY_SCOPES;
 const CATEGORY_ORDER: readonly AutoMemoryTreeCategoryKey[] = [
   ...AUTO_MEMORY_TREE_CATEGORIES,
   AUTO_MEMORY_UNCATEGORIZED,

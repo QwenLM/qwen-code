@@ -96,9 +96,12 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
             if (typeof text === 'string' && text) {
               collector.texts.push(text);
             }
-            // After excluding notices and background output, `_meta` marks
-            // the foreground final chunk.
-            if ('_meta' in update) {
+            const lifecycle =
+              typeof meta === 'object' &&
+              meta !== null &&
+              Object.hasOwn(meta, 'executionLifecycle');
+            // Lifecycle frames describe one request, not the turn's final chunk.
+            if ('_meta' in update && !lifecycle) {
               collector.resolve();
             }
           }

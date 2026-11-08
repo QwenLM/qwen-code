@@ -15,6 +15,8 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 
 // Helper function to create a mock config
 function createMockConfig(
@@ -165,20 +167,19 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should return error when content generator config is not available', async () => {
+  it('opens the model picker without an initialized content generator', async () => {
     const mockConfig = createMockConfig(null);
     mockContext.services.config = mockConfig as Config;
 
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Content generator configuration not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
   });
 
-  it('should return error when auth type is not available', async () => {
+  it('opens the model picker after the active authentication was cleared', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: undefined,
@@ -188,9 +189,8 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Authentication type not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
   });
 
@@ -249,10 +249,56 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Authentication type not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
+  });
+
+  it.each([null, { model: '' }])(
+    'switches an explicitly qualified provider without active auth (%j)',
+    async (generationConfig) => {
+      const switchModel = vi.fn().mockResolvedValue(undefined);
+      mockContext.services.config = {
+        ...createMockConfig(generationConfig),
+        getAvailableModelsForAuthType: vi.fn(() => [
+          { id: 'qwen3.6-plus', authType: AuthType.USE_OPENAI },
+        ]),
+        switchModel,
+      } as unknown as Config;
+      mockContext.services.settings = createMockSettings() as LoadedSettings;
+
+      expect(
+        await modelCommand.action!(mockContext, 'qwen3.6-plus(openai)'),
+      ).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+      });
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3.6-plus',
+        undefined,
+      );
+    },
+  );
+
+  it('requires cached credentials for an explicit OAuth selection without active auth', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext.services.config = {
+      ...createMockConfig({ model: '' }),
+      getAvailableModelsForAuthType: vi.fn(() => [
+        { id: 'coder-model', authType: AuthType.QWEN_OAUTH },
+      ]),
+      switchModel,
+    } as unknown as Config;
+    mockContext.services.settings = createMockSettings() as LoadedSettings;
+    await modelCommand.action!(mockContext, 'coder-model(qwen-oauth)');
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'coder-model',
+      {
+        requireCachedCredentials: true,
+      },
+    );
   });
 
   it('should switch a dual-role model directly in interactive mode', async () => {
@@ -965,6 +1011,146 @@ describe('modelCommand', () => {
     });
   });
 
+  it.each([
+    ['--project', SettingScope.Workspace],
+    ['--global', SettingScope.User],
+  ] as const)(
+    'pins an ACP fast-model row at %s and updates the live runtime',
+    async (flag, scope) => {
+      const privateUrl = 'https://user:secret@second.example/v1?token=value';
+      const models = [
+        {
+          id: 'shared',
+          label: 'First',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://first.example/v1',
+          registryBaseUrl: 'https://first.example/v1',
+        },
+        {
+          id: 'shared',
+          label: 'Second',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: privateUrl,
+          registryBaseUrl: privateUrl,
+        },
+      ];
+      const route = buildAcpModelOptions(models)[1]!.modelId;
+      const args = `--fast ${route} ${flag}`;
+      const setValue = vi.fn();
+      const setFastModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: { raw: `/model ${args}`, name: 'model', args },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi
+              .fn()
+              .mockReturnValue({ authType: AuthType.USE_OPENAI }),
+            getAllConfiguredModels: vi.fn().mockReturnValue(models),
+            getAvailableModelsForAuthType: vi.fn().mockReturnValue(models),
+            setFastModel,
+          },
+          settings: { ...createMockSettings(setValue), isTrusted: true },
+        },
+      });
+      const result = await modelCommand.action!(mockContext, args);
+      const pinned = `openai:shared\0${privateUrl}`;
+      expect(setValue).toHaveBeenCalledWith(scope, 'fastModel', pinned);
+      expect(setFastModel).toHaveBeenCalledWith(pinned);
+      expect(result).toMatchObject({ messageType: 'info' });
+      expect(JSON.stringify(result)).not.toContain('secret');
+      expect(JSON.stringify(result)).not.toContain('token=value');
+    },
+  );
+
+  it('rejects a stale fast ACP route without persisting it', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: { name: 'model', args: '--fast qwen-route:v1:stale' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi
+            .fn()
+            .mockReturnValue({ authType: AuthType.USE_OPENAI }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([]),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast qwen-route:v1:stale',
+    );
+    expect(result).toMatchObject({ messageType: 'error' });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live endpoint pin when --fast re-enters the displayed selector (#12760)', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast openai:shared-fast',
+        name: 'model',
+        args: '--fast openai:shared-fast',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-max',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (token plan)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://exhausted-plan.example.com/v1',
+            },
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (free quota)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://free-quota.example.com/v1',
+            },
+          ]),
+          setFastModel,
+        },
+        settings: {
+          ...createMockSettings(setValue),
+          merged: { fastModel: pinned } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast openai:shared-fast',
+    );
+
+    // The bare re-entry must not overwrite the pin and rebind the first
+    // same-id entry.
+    expect(setValue).not.toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      'openai:shared-fast',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      pinned,
+    );
+    expect(setFastModel).toHaveBeenCalledWith(pinned);
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Fast Model: openai:shared-fast',
+    });
+  });
+
   it('should reject unavailable fast models across all auth types', async () => {
     const setValue = vi.fn();
     const setFastModel = vi.fn();
@@ -1510,6 +1696,62 @@ describe('modelCommand', () => {
       messageType: 'info',
       content:
         'Current vision model: qwen-vl-max (https://vision.example.com/v1)\nUse "/model --vision <model-id>" to set the vision bridge model.',
+    });
+  });
+
+  it('should redact userinfo from the vision model baseUrl in non-interactive readback', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--vision' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: {
+            visionModel:
+              'qwen-vl-max\0https://user:sk-secret@vision.example.com/v1',
+          } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--vision');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current vision model: qwen-vl-max (https://vision.example.com/v1)\nUse "/model --vision <model-id>" to set the vision bridge model.',
+    });
+  });
+
+  it('should redact userinfo from the image model baseUrl in non-interactive readback', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--image' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: {
+            imageModel:
+              'openai:dall-e\0https://user:sk-secret@image.example.com/v1',
+          } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--image');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current image model: openai:dall-e (https://image.example.com/v1)\nUse "/model --image <model-id>" to set the image generation model.',
     });
   });
 
@@ -2120,6 +2362,68 @@ describe('modelCommand', () => {
       });
     });
 
+    it('keeps the live endpoint pin when --compaction re-enters the displayed selector (#12760)', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      const pinned = 'openai:shared-compact\0https://free-quota.example.com/v1';
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction openai:shared-compact',
+          name: 'model',
+          args: '--compaction openai:shared-compact',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+              {
+                id: 'shared-compact',
+                label: 'shared-compact (token plan)',
+                authType: AuthType.USE_OPENAI,
+                baseUrl: 'https://exhausted-plan.example.com/v1',
+              },
+              {
+                id: 'shared-compact',
+                label: 'shared-compact (free quota)',
+                authType: AuthType.USE_OPENAI,
+                baseUrl: 'https://free-quota.example.com/v1',
+              },
+            ]),
+            setCompactionModel,
+          },
+          settings: {
+            ...createMockSettings(setValue),
+            merged: { compactionModel: pinned } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction openai:shared-compact',
+      );
+
+      expect(setValue).not.toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        'openai:shared-compact',
+      );
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        pinned,
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith(pinned);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Compaction Model: openai:shared-compact',
+      });
+    });
+
     it('should reject unavailable compaction models', async () => {
       const setCompactionModel = vi.fn();
       mockContext = createMockCommandContext({
@@ -2180,6 +2484,62 @@ describe('modelCommand', () => {
         messageType: 'info',
         content:
           'Current compaction model: compaction-model\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+      });
+    });
+
+    it('strips the endpoint disambiguator from a pinned compaction model (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: createMockConfig({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: {
+              compactionModel:
+                'openai:shared-compact\0https://free-quota.example.com/v1',
+            } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringMatching(
+          /^Current compaction model: openai:shared-compact\n/,
+        ),
+      });
+      expect((result as { content: string }).content).not.toContain('\0');
+    });
+
+    it('reports a non-string compactionModel setting as not set instead of throwing (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: createMockConfig({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: { compactionModel: 5 } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          'Current compaction model: not set (falls back to the main model)',
+        ),
       });
     });
 
@@ -2339,6 +2699,69 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('qwen-turbo'),
+      });
+    });
+
+    it('strips the endpoint disambiguator from a pinned fast model (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--fast' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-max',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getModel: vi.fn().mockReturnValue('qwen-max'),
+          },
+          settings: {
+            merged: {
+              // What the picker persists for a same-id endpoint pin.
+              fastModel:
+                'openai:shared-fast\0https://free-quota.example.com/v1',
+            } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--fast');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringMatching(
+          /^Current fast model: openai:shared-fast\n/,
+        ),
+      });
+      expect((result as { content: string }).content).not.toContain('\0');
+    });
+
+    it('reports a non-string fastModel setting as not set instead of throwing (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--fast' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-max',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getModel: vi.fn().mockReturnValue('qwen-max'),
+          },
+          settings: {
+            // A hand-edited settings.json shape the workspace-models routes
+            // already test for.
+            merged: { fastModel: { id: 'model' } } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--fast');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('Current fast model: not set'),
       });
     });
   });
@@ -2900,5 +3323,82 @@ describe('isPickerOnlyModelInvocation', () => {
     'qwen-max write a one-off prompt',
   ])('treats %j as not picker-only', (args) => {
     expect(isPickerOnlyModelInvocation(args)).toBe(false);
+  });
+});
+
+it('opens subscription model selection after startup failed before generator initialization', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockResolvedValue({ models: ['replacement'], cached: false }),
+        getModel: vi.fn().mockReturnValue('removed'),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  const result = await modelCommand.action!(context, '');
+  expect(result).toMatchObject({ type: 'dialog', dialog: 'model' });
+});
+
+it('opens the model picker after subscription expiry so other providers remain selectable', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockRejectedValue(new SubscriptionOAuthError('session_changed')),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  expect(await modelCommand.action!(context, '')).toMatchObject({
+    type: 'dialog',
+    dialog: 'model',
+  });
+});
+
+it('reports catalog permission failures when explicitly selecting a subscription model', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockRejectedValue(
+            new SubscriptionOAuthError(
+              'request_failed',
+              403,
+              'Your account cannot access this model catalog.',
+            ),
+          ),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  expect(
+    await modelCommand.action!(context, 'replacement(qwen-subscription)'),
+  ).toMatchObject({
+    type: 'message',
+    messageType: 'error',
+    content: 'Your account cannot access this model catalog.',
   });
 });

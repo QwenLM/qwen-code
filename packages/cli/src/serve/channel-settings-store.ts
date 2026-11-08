@@ -16,8 +16,10 @@ import {
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
 import {
+  effectiveSessionScope,
   multiSessionCompatibilityError,
   parseMessageRoutingConfig,
+  parseSessionRotationConfig,
 } from '../commands/channel/config-utils.js';
 import {
   loadSettings,
@@ -143,6 +145,16 @@ function assertSharedField(
   if (key === 'multiSession') {
     if (typeof value !== 'boolean') {
       throw invalidConfig(`Channel field "${key}" must be a boolean.`);
+    }
+    return true;
+  }
+  if (key === 'sessionRotation') {
+    try {
+      parseSessionRotationConfig('settings', value);
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
     }
     return true;
   }
@@ -342,8 +354,14 @@ function assertDescriptorValue(
     (field.kind === 'number' &&
       typeof value === 'number' &&
       Number.isFinite(value) &&
-      (field.exclusiveMinimum === undefined ||
-        value > field.exclusiveMinimum)) ||
+      (((field.exclusiveMinimum === undefined ||
+        value > field.exclusiveMinimum) &&
+        (field.maximum === undefined || value <= field.maximum)) ||
+        // A newly declared bound must not strand an unrelated edit: the editor
+        // re-sends the stored number verbatim, and the runtime already tolerates
+        // it (a non-positive poll interval falls back to the default). Only the
+        // range is forgiven — a wrong type is still rejected, unchanged or not.
+        isDeepStrictEqual(previous, value))) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
       field.options?.some((option) => option.value === value) === true) ||
@@ -654,15 +672,18 @@ export class WorkspaceChannelSettingsStore {
     );
     const multiSessionError = multiSessionCompatibilityError(name, {
       multiSession: nextConfig['multiSession'] === true,
-      sessionScope:
-        (nextConfig['sessionScope'] as
-          | 'user'
-          | 'thread'
-          | 'chat_thread'
-          | 'single'
-          | undefined) ??
-        plugin.defaultSessionScope ??
-        'user',
+      sessionRotation: parseSessionRotationConfig(
+        name,
+        nextConfig['sessionRotation'],
+      ),
+      // Same resolution the parser uses, so an existing multiSession channel
+      // with no stored scope is not re-scoped to the plugin default and
+      // rejected on every save.
+      sessionScope: effectiveSessionScope(
+        nextConfig,
+        nextConfig['multiSession'] === true,
+        plugin,
+      ),
       groupHistoryLimit: nextConfig['groupHistoryLimit'],
       groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
       webhooks: nextConfig['webhooks'],
@@ -722,6 +743,27 @@ export class WorkspaceChannelSettingsStore {
     const { current, storedChannels } = this.assertRevision(
       options.expectedRevision,
     );
+    const configured = Object.hasOwn(current.channels, name);
+    if (!configured) {
+      if (!current.startupNames.includes(name)) return current;
+      // The config is already gone from this scope; only a stale startup
+      // selection can remain. Write just that selection — replacing the
+      // whole `channels` subtree would erase entries the read view filters
+      // out (and this delete never touched), such as legacy scalar values.
+      saveSettings(
+        channelSettingsScope(this.workspaceCwd),
+        {
+          serve: {
+            channels: current.startupNames.filter(
+              (startupName) => startupName !== name,
+            ),
+          },
+        },
+        ['serve', 'channels'],
+        { throwOnWriteFailure: true },
+      );
+      return this.snapshot();
+    }
     const channels = { ...storedChannels };
     delete channels[name];
     const hasAllSentinel = current.startupNames.some(isAllStartupName);

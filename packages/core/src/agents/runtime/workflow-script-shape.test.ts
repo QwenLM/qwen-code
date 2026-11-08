@@ -282,3 +282,121 @@ describe('describeWorkflowDeterminismViolations', () => {
     expect(message).not.toContain('line 6');
   });
 });
+
+// #12651 R1-1: maskNonCode must end a `//` comment at any of the four
+// ECMAScript LineTerminators. A CR-only script (no `\n` anywhere) used to
+// be blanked end-to-end, silencing the pre-launch determinism gate (clock
+// calls invisible → run starts and burns tokens before the sandbox guard
+// rejects it) and emptying the agent-row inventory the approval dialog
+// renders.
+describe('scanWorkflowScriptShape — LineTerminator-terminated comments (#12651)', () => {
+  it('still reports a clock call after a CR-only leading comment', () => {
+    const shape = scanWorkflowScriptShape(
+      "// header\rexport const meta = { name: 'x', description: 'd' }\rreturn Date.now();",
+    );
+    expect(shape.determinismViolations.map((v) => v.call)).toContain(
+      'Date.now()',
+    );
+  });
+
+  it('still produces a row for an agent() call after a CR-only leading comment', () => {
+    const shape = scanWorkflowScriptShape(
+      "// header\rexport const meta = { name: 'x', description: 'd' }\rawait agent('do the thing');\rreturn 1;",
+    );
+    expect(shape.agentCalls).toBe(1);
+    expect(shape.rows.length).toBeGreaterThan(0);
+  });
+
+  it('is symmetric with LF on the same script', () => {
+    const cr = scanWorkflowScriptShape(
+      "// h\rexport const meta = { name: 'x', description: 'd' }\rawait agent('go');\rreturn 1;",
+    );
+    const lf = scanWorkflowScriptShape(
+      "// h\nexport const meta = { name: 'x', description: 'd' }\nawait agent('go');\nreturn 1;",
+    );
+    expect(cr.agentCalls).toBe(lf.agentCalls);
+    expect(cr.rows.length).toBe(lf.rows.length);
+    expect(cr.determinismViolations.length).toBe(
+      lf.determinismViolations.length,
+    );
+  });
+});
+
+// A nested workflow() resolves script bytes the parent's launch block
+// never pinned (a saved workflow from any tier); the hosted profile
+// refuses the script at admission on this signal (#13803 R1-1).
+describe('scanWorkflowScriptShape — nested workflow calls', () => {
+  it('reports each call on the injected global with its line', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "await workflow('audit')",
+        "await workflow({ scriptPath: '.qwen/workflows/x.js' })",
+        'const noun = workflow',
+      ),
+    );
+    expect(shape.nestedWorkflowCalls).toEqual([1, 2]);
+  });
+
+  it('ignores the name inside strings, templates and comments', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "// workflow('not a call')",
+        '/* workflow(x) */',
+        "const note = 'workflow(x)'",
+        'const t = `template workflow(y)`',
+        'return note + t',
+      ),
+    );
+    expect(shape.nestedWorkflowCalls).toEqual([]);
+  });
+
+  it('does not mistake members or longer names for the global', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        'host.workflow(x)',
+        'const myworkflow = () => 1',
+        'myworkflow(x)',
+        'const workflows = () => 1',
+        'workflows(x)',
+      ),
+    );
+    expect(shape.nestedWorkflowCalls).toEqual([]);
+  });
+});
+
+// The managed workflow child's agents carry no tools and use nothing on
+// the Harness host; the hosted admission refuses a literal host-bound
+// option early on this signal (#13858 R4-4), the runtime refuses the rest.
+describe('scanWorkflowScriptShape — host-bound agent options', () => {
+  it('reports each literal host-bound option key with its line', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "await agent('a', { tools: ['read_file'] })",
+        "await agent('b', {",
+        "  model: 'm',",
+        "  agentType: 'Explore',",
+        '})',
+        "await agent('c', { isolation: 'worktree', workingDir })",
+      ),
+    );
+    expect(shape.hostBoundAgentOptions).toEqual([
+      { option: 'tools', line: 1 },
+      { option: 'agentType', line: 4 },
+      { option: 'isolation', line: 6 },
+      { option: 'workingDir', line: 6 },
+    ]);
+  });
+
+  it('ignores nested keys, strings, comments and text-only options', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "await agent('a', { schema: { properties: { tools: { type: 'string' } } } })",
+        "await agent('b', { model: 'm', effort: 'high', label: 'tools' })",
+        "// agent('c', { tools: [] })",
+        "const note = \"agent('d', { agentType: 'x' })\"",
+        "const tools = ['x']; return agent('e', { label: tools[0] })",
+      ),
+    );
+    expect(shape.hostBoundAgentOptions).toEqual([]);
+  });
+});

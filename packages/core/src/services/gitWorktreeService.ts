@@ -20,7 +20,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
-import { runGit } from '../utils/git-branches.js';
+import { runGitCapture } from '../utils/git-branches.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
@@ -54,11 +54,15 @@ export class WorktreeSessionMarkerOwnerChangedError extends Error {
 }
 
 /**
- * Ignored top-level directories whose contents are regenerable build or
+ * Ignored directories whose contents are regenerable build or
  * dependency output. They are exempt from the ignored-content check in
  * {@link worktreeHasWork} so a checkout where an agent ran `npm install`
  * or a build stays cleanable; every other ignored entry (agent artifacts
- * like `.qwen/pr-drafts/`) still counts as work.
+ * like `.qwen/pr-drafts/`) still counts as work. An entry matches when
+ * its first path segment is in the set (root output, `node_modules/…`)
+ * or when it is an ignored directory whose last segment is in the set
+ * (a monorepo's `packages/app/node_modules/`); a nested ignored file
+ * outside those trees still counts as work.
  */
 export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
   'node_modules',
@@ -75,17 +79,28 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  *
  * Runs `git status --porcelain --untracked-files=normal
  * --ignored=matching`: tracked, untracked and ignored entries all count
- * as work, except ignored entries whose first path segment is disposable
- * build output ({@link DISPOSABLE_IGNORED_ROOTS}) and the session marker
- * ({@link WORKTREE_SESSION_FILE}) — git-excluded in production but
- * possibly untracked in hand-built fixtures. The argv tokens added for
- * this probe are literals placed after the `status` subcommand and are
- * never caller-derived (see `load-simple-git.ts`), and `runGit` scrubs
- * the environment (`gitEnv`) so an inherited `GIT_DIR` or
- * `status.showUntrackedFiles=no` cannot make a dirty checkout read clean.
+ * as work, except disposable build output ({@link DISPOSABLE_IGNORED_ROOTS}),
+ * symlinks (removing the checkout only unlinks them; the target lives
+ * elsewhere — this is what keeps `worktree.symlinkDirectories` checkouts
+ * reapable, nested values included, which git reports as a collapsed parent
+ * holding nothing but links), and the session marker
+ * ({@link WORKTREE_SESSION_FILE}) when git lists it as ignored (its exclude
+ * rule) or untracked (a fixture without one). A marker the repository tracks
+ * counts as work like any other tracked change: an edit to a tracked path is
+ * indistinguishable from user work, and since `writeWorktreeSessionMarker`
+ * overwrites a tracked marker unconditionally the daemon can be the author of
+ * that edit, so such a preserve is permanent rather than transient. The argv
+ * tokens added for this probe are literals placed after the `status`
+ * subcommand and are never caller-derived (see `load-simple-git.ts`), and
+ * `runGitCapture` scrubs the environment (`gitEnv`) so an inherited
+ * `GIT_DIR` or `status.showUntrackedFiles=no` cannot make a dirty checkout
+ * read clean.
  *
- * Fail-closed: any read error counts as work, preserving the checkout.
- * The `.git` access check exists because `runGit` does not pin the
+ * Fail-closed: any read error counts as work, preserving the checkout —
+ * including the one kind that arrives as a zero exit status: git reports
+ * a directory it cannot open as a stderr warning, leaving that content
+ * absent from stdout, so any stderr output preserves the checkout too.
+ * The `.git` access check exists because `runGitCapture` does not pin the
  * repository: without it, git's upward discovery from a path whose own
  * `.git` is gone (a sweep's `fs.rm` that threw partway, a restore that
  * dropped the link file) would answer about the *enclosing* repository —
@@ -95,7 +110,7 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
 export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
   try {
     await fs.access(path.join(worktreePath, '.git'));
-    const stdout = await runGit(worktreePath, [
+    const { stdout, stderr } = await runGitCapture(worktreePath, [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
       'status',
@@ -103,19 +118,116 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
       '--untracked-files=normal',
       '--ignored=matching',
     ]);
-    return stdout
-      .split('\n')
-      .filter((line) => line.trim().length > 0)
-      .some((line) => {
-        const entry = line.slice(3);
-        if (entry === WORKTREE_SESSION_FILE) return false;
-        if (line.startsWith('!!')) {
-          return !DISPOSABLE_IGNORED_ROOTS.has(entry.split('/')[0] ?? '');
-        }
-        return true;
-      });
-  } catch {
+    // `git status` reports a directory it cannot open as a stderr warning
+    // with exit 0, so that content is absent from stdout with no line to
+    // preserve it — the one read error that arrives without rejecting.
+    // Fail closed on it; the sweep's keeping line then carries the reason.
+    if (stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: status probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
+      );
+      return true;
+    }
+    for (const line of stdout.split('\n')) {
+      if (line.trim().length === 0) continue;
+      const entry = line.slice(3);
+      const status = line.slice(0, 2);
+      let waived: string | null = null;
+      if (
+        (status === '!!' || status === '??') &&
+        entry === WORKTREE_SESSION_FILE
+      ) {
+        waived = 'session-marker';
+      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
+        waived = 'disposable-output';
+      } else if (
+        (status === '!!' || status === '??') &&
+        (await isSymlinkEntry(worktreePath, entry))
+      ) {
+        waived = 'symlink';
+      }
+      if (waived === null) return true;
+      // A waiver authorizes `git worktree remove --force` plus a branch
+      // delete, and it destroys the very state that authorized it — so name
+      // the entry while it can still be read. Stays at `debug` for the
+      // reason the sweep's own breadcrumb records: `info` on every CLI start
+      // that has any dirty worktree is log noise.
+      debugLogger.debug(
+        `worktreeHasWork: waiving ${status} ${entry} (${waived}) at ${worktreePath}`,
+      );
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasWork: status probe at ${worktreePath} failed, treating as work: ${error}`,
+    );
     return true;
+  }
+}
+
+/**
+ * Disposable build output at the root (`node_modules/`) or as a workspace
+ * package's own ignored directory (`packages/app/node_modules/`). That nested
+ * rendering depends on how the ignore rule is spelled rather than holding for
+ * every monorepo: git collapses the entry to `!! <dir>/` only when a rule
+ * matches the *directory* itself (`node_modules/`, or a bare `node_modules`).
+ * A rule matching the directory's *contents* instead (a package-local
+ * `node_modules/**`) makes git list them individually
+ * (`!! packages/app/node_modules/x/`), whose last segment is not in the set,
+ * so such a tree still counts as work and the checkout is preserved.
+ */
+function isDisposableIgnoredEntry(entry: string): boolean {
+  const segments = entry.replace(/\/$/, '').split('/');
+  if (DISPOSABLE_IGNORED_ROOTS.has(segments[0] ?? '')) return true;
+  return (
+    entry.endsWith('/') &&
+    DISPOSABLE_IGNORED_ROOTS.has(segments[segments.length - 1] ?? '')
+  );
+}
+
+/**
+ * A symlink holds no data in this checkout: `worktree.symlinkDirectories`
+ * links e.g. `node_modules` from the main repo, and git lists such a link as
+ * an untracked file when the ignore rule is directory-only
+ * (`node_modules/`) or as an ignored one when the rule is bare (`.turbo`).
+ * Removing the worktree unlinks it and never touches the target.
+ *
+ * A *nested* configured value (`tools/cache`) is reported differently:
+ * `symlinkConfiguredDirectories` has to `fs.mkdir` the untracked parent
+ * because `git worktree add` does not create it, and nothing writes an
+ * exclude rule for linked paths, so git collapses the whole subtree to a
+ * single `?? tools/` entry that never names the link. Such a collapsed
+ * directory is exempt only when it holds at least one entry and every entry
+ * inside it is itself a symlink — an empty one is not a link, a real file or
+ * directory beside the links is work, and any read error fails closed exactly
+ * like the status probe does.
+ *
+ * Quoted (special-character) paths are not resolved and count as work.
+ */
+async function isSymlinkEntry(
+  worktreePath: string,
+  entry: string,
+): Promise<boolean> {
+  if (entry.startsWith('"')) return false;
+  const absolute = path.join(worktreePath, entry.replace(/\/$/, ''));
+  try {
+    const stats = await fs.lstat(absolute);
+    if (stats.isSymbolicLink()) return true;
+    if (!stats.isDirectory()) return false;
+    // Dirents from `readdir` do not follow links, so a real subdirectory —
+    // which may hold work one level down — fails this check. An *empty*
+    // directory would satisfy "every child is a link" vacuously, and git does
+    // list empty ignored directories (`!! build/`), so require at least one
+    // link: waiving such an entry as `symlink` would authorize a removal with
+    // a breadcrumb naming an exemption the checkout has nothing to do with.
+    let sawLink = false;
+    for (const child of await fs.readdir(absolute, { withFileTypes: true })) {
+      if (!child.isSymbolicLink()) return false;
+      sawLink = true;
+    }
+    return sawLink;
+  } catch {
+    return false;
   }
 }
 

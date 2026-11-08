@@ -432,7 +432,15 @@ class CodexSubagentExecutor implements SubagentExecutor {
       const task = String(context.get('task_prompt') ?? 'Get Started!');
       this.finalText = await runCodex(
         { ...this.params, eventEmitter: this.emitter },
-        [system, task].filter(Boolean).join('\n\n'),
+        // The rendered memory policy promises the legacy catalog at the
+        // request tail, which only LlmChat appends; deliver it here.
+        [
+          system,
+          task,
+          system ? this.params.runtimeContext.getAutoMemoryContext() : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
         this.sandbox,
         this.controller.signal,
       );

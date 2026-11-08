@@ -24,18 +24,18 @@ describe('deepseekProvider', () => {
     const plan = buildInstallPlan(deepseekProvider, {
       baseUrl: 'https://api.deepseek.com',
       apiKey: 'sk-deepseek',
-      modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro', 'DeepSeek-V4-Pro'],
+      modelIds: ['deepseek-flash', 'deepseek-v4-pro', 'DeepSeek-V4-Pro'],
     });
 
     const models = plan.modelProviders?.[0]?.models;
     expect(models?.map((model) => model.id)).toEqual([
-      'deepseek-v4-flash',
+      'deepseek-flash',
       'deepseek-v4-pro',
       'DeepSeek-V4-Pro',
     ]);
     expect(models?.[0]).toMatchObject({
-      id: 'deepseek-v4-flash',
-      name: '[DeepSeek] deepseek-v4-flash',
+      id: 'deepseek-flash',
+      name: '[DeepSeek] deepseek-flash',
     });
     expect(models?.[0]?.generationConfig).toEqual({
       contextWindowSize: 1000000,
@@ -48,6 +48,7 @@ describe('deepseekProvider', () => {
       contextWindowSize: 1000000,
     });
     expect(models?.[2]?.capabilities?.reasoning).toEqual({
+      profile: 'deepseek-openai',
       thinking: true,
       efforts: ['low', 'high', 'max'],
       defaultEffort: 'high',
@@ -59,7 +60,7 @@ describe('deepseekProvider', () => {
     const plan = buildInstallPlan(deepseekProvider, {
       baseUrl: 'https://api.deepseek.com',
       apiKey: 'sk-deepseek',
-      modelIds: ['deepseek-v4-flash', 'some-new-model'],
+      modelIds: ['deepseek-flash', 'some-new-model'],
     });
 
     const models = plan.modelProviders?.[0]?.models;

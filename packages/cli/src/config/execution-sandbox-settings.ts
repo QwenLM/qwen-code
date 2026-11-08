@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import path from 'node:path';
 import stripJsonComments from 'strip-json-comments';
+import { FatalConfigError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
@@ -14,12 +15,12 @@ import {
 } from './storage-paths-lite.js';
 
 export interface ExecutionSandboxSettings {
-  backend?: 'auto' | 'bwrap';
+  backend?: 'auto' | 'bwrap' | 'landlock';
   filesystem: 'read-only' | 'workspace-write';
   network: 'open' | 'closed';
 }
 
-export class InvalidExecutionSandboxConfigError extends Error {}
+export class InvalidExecutionSandboxConfigError extends FatalConfigError {}
 
 export function stripUtf8Bom(content: string): string {
   return content.startsWith('\uFEFF') ? content.slice(1) : content;
@@ -45,12 +46,13 @@ export function parseExecutionSandboxSettings(
     !['open', 'closed'].includes(String(value.network)) ||
     ('backend' in value &&
       value.backend !== 'auto' &&
-      value.backend !== 'bwrap') ||
+      value.backend !== 'bwrap' &&
+      value.backend !== 'landlock') ||
     typeof value.filesystem !== 'string' ||
     typeof value.network !== 'string'
   ) {
     throw new InvalidExecutionSandboxConfigError(
-      'tools.executionSandbox requires literal filesystem (read-only | workspace-write), network (open | closed), and optional backend (auto | bwrap). Unknown fields and environment interpolation are not supported.',
+      'tools.executionSandbox requires literal filesystem (read-only | workspace-write), network (open | closed), and optional backend (auto | bwrap | landlock). Unknown fields and environment interpolation are not supported.',
     );
   }
   return { ...(value as ExecutionSandboxSettings) };
@@ -64,6 +66,7 @@ type OperatorSettingsScope = SandboxSettingsInput & {
   /** Settings format version, used to date the legacy usage-statistics key. */
   $version?: unknown;
   privacy?: { usageStatisticsEnabled?: unknown };
+  model?: { catalogRefresh?: unknown };
   /** Pre-v2 location, migrated to `privacy.*` by a normal settings load. */
   usageStatisticsEnabled?: unknown;
 };
@@ -95,18 +98,33 @@ export function selectOperatorExecutionSandbox(
   return selected;
 }
 
+/** Operator scopes resolve like a normal load: system over user over defaults. */
+export function selectOperatorCatalogRefresh(
+  ...scopes: OperatorSettingsScope[]
+): boolean | undefined {
+  let selected: boolean | undefined;
+  for (const scope of scopes) {
+    if (typeof scope.model?.catalogRefresh === 'boolean') {
+      selected = scope.model.catalogRefresh;
+    }
+  }
+  return selected;
+}
+
 /** Bare mode still honors operator confinement without loading project/env data. */
 export function readOperatorSandboxSettings(): SandboxSettingsInput {
   return sandboxSettingsFromScopes(readOperatorSettingsScopes());
 }
 
 /**
- * The operator settings bare mode keeps: sandbox confinement, plus the
- * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on.
+ * The operator settings bare mode keeps: sandbox confinement, the
+ * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on,
+ * and the models.dev refresh choice.
  * Scopes resolve like a normal load (system over user over system defaults).
  */
 export function readBareModeOperatorSettings(): SandboxSettingsInput & {
   privacy?: { usageStatisticsEnabled: boolean };
+  model?: { catalogRefresh: boolean };
 } {
   const scopes = readOperatorSettingsScopes();
   const usageStatisticsEnabled = scopes.reduce<boolean | undefined>(
@@ -123,11 +141,13 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
     },
     undefined,
   );
+  const catalogRefresh = selectOperatorCatalogRefresh(...scopes);
   return {
     ...sandboxSettingsFromScopes(scopes),
     ...(usageStatisticsEnabled === undefined
       ? {}
       : { privacy: { usageStatisticsEnabled } }),
+    ...(catalogRefresh === undefined ? {} : { model: { catalogRefresh } }),
   };
 }
 
@@ -138,14 +158,13 @@ function readOperatorSettingsScopes(): OperatorSettingsScope[] {
     userSettingsPath,
     getSystemSettingsPath(),
   ].map((file) => {
-    if (!fs.existsSync(file)) return {};
     let source: string;
     try {
       source = fs.readFileSync(file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
       throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}`,
+        `Cannot read operator sandbox policy from ${file}: ${String(error)}. Restore read access to this settings file and restart; it has not been reset.`,
       );
     }
     try {
@@ -167,7 +186,7 @@ function readOperatorSettingsScopes(): OperatorSettingsScope[] {
         }
       }
       throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}`,
+        `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}. Repair the JSON object in ${file} and restart; the original file has not been reset.`,
       );
     }
   });

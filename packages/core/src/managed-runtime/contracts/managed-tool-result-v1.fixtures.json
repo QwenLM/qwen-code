@@ -34617,6 +34617,69 @@
       "valid": true
     },
     {
+      "id": "detached",
+      "result": {
+        "executionStatus": "success",
+        "responseParts": [
+          {
+            "text": "ab\ufffd\u20acxyz"
+          }
+        ],
+        "capture": {
+          "captureStatus": "detached",
+          "captureReason": null,
+          "manifest": null,
+          "previewTruncated": false,
+          "deliveryStatus": "pending"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "detached-with-a-reason",
+      "result": {
+        "executionStatus": "success",
+        "responseParts": [
+          {
+            "text": "ab\ufffd\u20acxyz"
+          }
+        ],
+        "capture": {
+          "captureStatus": "detached",
+          "captureReason": "producer_lost",
+          "manifest": null,
+          "previewTruncated": false,
+          "deliveryStatus": "pending"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "detached-with-a-manifest",
+      "result": {
+        "executionStatus": "success",
+        "responseParts": [
+          {
+            "text": "ab\ufffd\u20acxyz"
+          }
+        ],
+        "capture": {
+          "captureStatus": "detached",
+          "captureReason": null,
+          "manifest": {
+            "resourceId": "manifest-r2",
+            "kind": "managed-tool-result-manifest",
+            "schemaVersion": 1,
+            "byteLength": 1408,
+            "digest": "a46f4e9dfb96fbeebe1311777f4d3ccbcaa958297c530850d7701cfb4d52b0c2"
+          },
+          "previewTruncated": false,
+          "deliveryStatus": "pending"
+        }
+      },
+      "valid": false
+    },
+    {
       "id": "manifest-at-64-kib",
       "result": {
         "executionStatus": "success",

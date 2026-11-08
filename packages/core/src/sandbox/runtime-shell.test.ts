@@ -7,12 +7,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { executeRuntimeShell } from './runtime-shell.js';
-import { executeBwrap } from './bwrap-execution.js';
+import { executeSandbox } from './execute-sandbox.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { assertShellSandboxCwd } from './runtime-shell-policy.js';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
 
-vi.mock('./bwrap-execution.js', () => ({ executeBwrap: vi.fn() }));
+vi.mock('./execute-sandbox.js', () => ({ executeSandbox: vi.fn() }));
 vi.mock('./runtime-shell-policy.js', () => ({
   assertShellSandboxCwd: vi.fn(),
 }));
@@ -27,6 +27,8 @@ describe('runtime shell dispatch', () => {
     state: '/state',
     filesystem: 'workspace-write' as const,
     network: 'closed' as const,
+    effectiveBackend: 'bwrap' as const,
+    enforcement: 'full' as const,
   };
   const runtime = (enabled = true, sessionId = 'runtime-session') =>
     ({
@@ -67,7 +69,7 @@ describe('runtime shell dispatch', () => {
       {},
       options,
     );
-    expect(executeBwrap).not.toHaveBeenCalled();
+    expect(executeSandbox).not.toHaveBeenCalled();
   });
 
   it.each([false, true])(
@@ -92,7 +94,7 @@ describe('runtime shell dispatch', () => {
         policy,
         '/workspace/sub',
       );
-      const args = vi.mocked(executeBwrap).mock.calls[0];
+      const args = vi.mocked(executeSandbox).mock.calls[0];
       expect(args[0]).toBe(policy);
       expect(args[1]).toMatchObject({
         executable: '/bin/bash',
@@ -133,8 +135,8 @@ describe('runtime shell dispatch', () => {
         false,
       ),
     ).rejects.toThrow('outside');
-    expect(executeBwrap).not.toHaveBeenCalled();
-    vi.mocked(executeBwrap).mockRejectedValueOnce(new Error('setup failed'));
+    expect(executeSandbox).not.toHaveBeenCalled();
+    vi.mocked(executeSandbox).mockRejectedValueOnce(new Error('setup failed'));
     await expect(
       executeRuntimeShell(
         runtime(),

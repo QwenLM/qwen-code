@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, onTestFinished } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,7 +13,9 @@ import { preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
+  createDevelopmentMiddleware,
   MANAGED_AGENT_JAVA_ROUTE_PROXY,
+  MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
 } from '../vite.config';
@@ -28,39 +30,94 @@ function loadConfig(): UserConfig {
   });
 }
 
-it('serves preview documents with CSP scoped to the selected daemon', async ({
-  onTestFinished,
-}) => {
-  const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
-  onTestFinished(() => rm(dist, { recursive: true, force: true }));
-  await writeFile(
-    join(dist, 'index.html'),
-    '<!doctype html><title>Preview</title>',
-  );
-  const server = await preview({
-    ...loadConfig(),
-    configFile: false,
-    build: { outDir: dist },
-    preview: { host: '127.0.0.1', port: 0 },
-  });
-  onTestFinished(() => server.close());
-  const baseUrl = server.resolvedUrls!.local[0];
-  for (const [query, expected] of [
-    [
-      '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
-      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
-    ],
-    ['//', "connect-src 'self'"],
-    ['', "connect-src 'self'"],
-  ]) {
-    const response = await fetch(`${baseUrl}${query}`);
-    expect(response.status).toBe(200);
-    expect(await response.text()).toContain('<title>Preview</title>');
-    expect(
-      response.headers.get('Content-Security-Policy')?.split('; '),
-    ).toContain(expected);
+describe('Web Shell settings development route', () => {
+  function runMiddleware(method: string, url: string, accept?: string) {
+    const req = {
+      method,
+      url,
+      headers: accept ? { accept } : {},
+    } as unknown as IncomingMessage;
+    const res = { setHeader: vi.fn() } as unknown as ServerResponse;
+    const next = vi.fn();
+
+    createDevelopmentMiddleware()(req, res, next);
+    return { req, res, next };
   }
+
+  it.each(['/settings', '/settings?theme=dark', '/settings/'])(
+    'rewrites %s to the SPA document',
+    (url) => {
+      const { req, res, next } = runMiddleware('GET', url, 'text/html');
+
+      expect(req.url).toBe('/index.html');
+      expect(res.setHeader).toHaveBeenCalledWith(
+        'Content-Security-Policy',
+        expect.stringContaining("default-src 'self'"),
+      );
+      expect(next).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not claim the settings source module', () => {
+    const { req, next } = runMiddleware('GET', '/settings.ts', 'text/html');
+
+    expect(req.url).toBe('/settings.ts');
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['POST', '/settings', 'text/html'],
+    ['GET', '/settings', '*/*'],
+  ])('leaves non-document requests untouched', (method, url, accept) => {
+    const { req } = runMiddleware(method, url, accept);
+
+    expect(req.url).toBe(url);
+  });
 });
+
+it.each([
+  [undefined, false],
+  ['0', false],
+  [' FALSE ', false],
+  ['1', true],
+  [' TRUE ', true],
+  ['', true],
+] as const)(
+  'serves preview documents with CSP scoped to the selected daemon (desktop=%s)',
+  async (desktopRelay, enabled) => {
+    vi.stubEnv('QWEN_SERVE_CLIENT_MCP_OVER_WS', desktopRelay);
+    onTestFinished(() => vi.unstubAllEnvs());
+    const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
+    onTestFinished(() => rm(dist, { recursive: true, force: true }));
+    await writeFile(
+      join(dist, 'index.html'),
+      '<!doctype html><title>Preview</title>',
+    );
+    const server = await preview({
+      ...loadConfig(),
+      configFile: false,
+      build: { outDir: dist },
+      preview: { host: '127.0.0.1', port: 0 },
+    });
+    onTestFinished(() => server.close());
+    const baseUrl = server.resolvedUrls!.local[0];
+    for (const [query, expected] of [
+      [
+        '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      ],
+      ['//', "connect-src 'self'"],
+      ['', "connect-src 'self'"],
+    ]) {
+      const response = await fetch(`${baseUrl}${query}`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('<title>Preview</title>');
+      expect(
+        response.headers.get('Content-Security-Policy')?.split('; '),
+      ).toContain(expected + (enabled ? ' http://127.0.0.1:47821' : ''));
+    }
+  },
+);
 
 describe('Web Shell Voice development proxy', () => {
   it('proxies only qualified Voice stream upgrades', () => {
@@ -136,14 +193,20 @@ describe('Web Shell standalone session development proxy', () => {
 });
 
 describe('Web Shell Java Managed Agent development proxy', () => {
-  it('proxies only the public Java WebShell API prefix', () => {
+  it('proxies Java WebShell metadata and public artifact bytes', () => {
     const proxy = loadConfig().server?.proxy;
     const managed = proxy?.[MANAGED_AGENT_JAVA_ROUTE_PROXY];
 
     expect(managed).not.toBeTypeOf('string');
     expect(managed).toBeDefined();
-    expect((managed as ProxyOptions).target).toBe('http://127.0.0.1:8080');
+    // Compare against the same expression the config uses: the README's
+    // dual-path setup exports this variable for real development.
+    expect((managed as ProxyOptions).target).toBe(
+      process.env['QWEN_MANAGED_AGENT_JAVA_URL'] ?? 'http://127.0.0.1:8080',
+    );
     expect(MANAGED_AGENT_JAVA_ROUTE_PROXY).toBe('/api/agent/web-shell/v1');
+    expect(MANAGED_AGENT_PUBLIC_ROUTE_PROXY).toBe('/v1/agents');
+    expect(proxy?.[MANAGED_AGENT_PUBLIC_ROUTE_PROXY]).toBe(managed);
   });
 });
 
@@ -182,14 +245,21 @@ describe('Web Shell client source proxy bypass', () => {
 });
 
 describe('Web Shell daemon API proxy coverage', () => {
-  it.each(['/standalone', '/live'])('proxies %s API routes', (prefix) => {
+  // Without its own entry the SPA fallback answers these with index.html in
+  // dev and the page fails JSON parsing on open.
+  it.each([
+    { prefix: '/standalone', url: '/standalone/status' },
+    { prefix: '/live', url: '/live/status' },
+    // The only unqualified route in this namespace is the watches listing.
+    { prefix: '/autofix-pr', url: '/autofix-pr/watches' },
+  ])('proxies $prefix API routes', ({ prefix, url }) => {
     const proxy = loadConfig().server?.proxy?.[prefix];
     expect(proxy).not.toBeTypeOf('string');
     expect(proxy).toBeDefined();
     const options = proxy as ProxyOptions;
     const request = {
       method: 'GET',
-      url: `${prefix}/status`,
+      url,
       headers: { accept: '*/*' },
     } as unknown as IncomingMessage;
 
@@ -225,5 +295,23 @@ describe('Web Shell remote workspace development proxy', () => {
     expect(
       options?.bypass?.(request, {} as unknown as ServerResponse, options),
     ).toBeUndefined();
+  });
+});
+
+describe('Web Shell launcher-supplied open path', () => {
+  // scripts/managed-agent-dev.js hands the token-bearing open path through
+  // the environment instead of argv; server.open is where it lands.
+  it('opens the path QWEN_WEB_SHELL_OPEN_PATH carries', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', '/?managed=1&token=PROBETOKEN');
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBe('/?managed=1&token=PROBETOKEN');
+  });
+
+  it('stays closed when no launcher set the variable', () => {
+    vi.stubEnv('QWEN_WEB_SHELL_OPEN_PATH', undefined);
+    onTestFinished(() => vi.unstubAllEnvs());
+
+    expect(loadConfig().server?.open).toBeUndefined();
   });
 });

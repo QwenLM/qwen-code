@@ -7,13 +7,23 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   abortSpeculation,
+  acceptSpeculation,
   ensureToolResultPairing,
   startSpeculation,
+  type SpeculationState,
 } from './speculation.js';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
+import type { LlmClient } from '../core/client.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { getToolOutputProvenance } from '../tools/tool-output-size.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+} from '../test-utils/model-fixtures.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   getCacheSafeParams: vi.fn<
@@ -115,13 +125,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-permission-deferred',
-                        name: 'read_file',
-                        args: { path: '.env' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: '.env' },
+                      'call-permission-deferred',
+                    ),
                   ],
                 },
               },
@@ -176,13 +184,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-guard',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-guard',
+                    ),
                   ],
                 },
               },
@@ -247,13 +253,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-guard-allow',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-guard-allow',
+                    ),
                   ],
                 },
               },
@@ -321,13 +325,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-reject',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-reject',
+                    ),
                   ],
                 },
               },
@@ -405,13 +407,11 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-speculation-metadata',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
+                    fnCall(
+                      'read_file',
+                      { path: 'a.ts' },
+                      'call-speculation-metadata',
+                    ),
                   ],
                 },
               },
@@ -467,15 +467,7 @@ describe('startSpeculation', () => {
             candidates: [
               {
                 content: {
-                  parts: [
-                    {
-                      functionCall: {
-                        id: 'call_123',
-                        name: 'read_file',
-                        args: { path: 'a.ts' },
-                      },
-                    },
-                  ],
+                  parts: [fnCall('read_file', { path: 'a.ts' }, 'call_123')],
                 },
               },
             ],
@@ -559,6 +551,66 @@ describe('startSpeculation', () => {
       error: 'Command timed out.\npartial output',
     });
     expect(response?.response).not.toHaveProperty('output');
+
+    await abortSpeculation(state);
+  });
+
+  it('reports no raw size for the error body it replaces', async () => {
+    // A producer that declares a size and then fails: the converter drops the
+    // measured body and submits `error` instead, so the parts must not carry a
+    // raw size or a truncation verdict about that body (#13652 R4-1).
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }],
+      returnDisplay: 'image',
+      error: { message: 'image read failed', type: 'execution_failed' },
+      rawOutputSize: { chars: 0, estimatedTokens: 800 },
+    });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    fnCall('read_file', { path: 'a.ts' }, 'call_error_raw'),
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    const part = state.messages[2].parts?.[0];
+    expect(part?.functionResponse?.response).toMatchObject({
+      error: expect.stringContaining('image read failed'),
+    });
+    const provenance = getToolOutputProvenance(part!);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
 
     await abortSpeculation(state);
   });
@@ -657,13 +709,7 @@ describe('startSpeculation', () => {
               {
                 content: {
                   parts: [
-                    {
-                      functionCall: {
-                        id: 'call-image',
-                        name: 'read_file',
-                        args: { path: 'image.png' },
-                      },
-                    },
+                    fnCall('read_file', { path: 'image.png' }, 'call-image'),
                   ],
                 },
               },
@@ -804,24 +850,12 @@ describe('ensureToolResultPairing', () => {
   it('preserves paired functionCall + functionResponse', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'edit file' }] },
-      {
-        role: 'model',
-        parts: [
-          { text: 'editing...' },
-          { functionCall: { name: 'edit', args: { file: 'a.ts' } } },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'edit',
-              response: { output: 'done' },
-            },
-          },
-        ],
-      },
+      content(
+        'model',
+        { text: 'editing...' },
+        fnCall('edit', { file: 'a.ts' }),
+      ),
+      content('user', fnResponse('edit', { output: 'done' })),
       { role: 'model', parts: [{ text: 'file edited' }] },
     ];
     const result = ensureToolResultPairing(messages);
@@ -831,13 +865,7 @@ describe('ensureToolResultPairing', () => {
   it('strips unpaired functionCalls from last model message (keeps text)', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'do something' }] },
-      {
-        role: 'model',
-        parts: [
-          { text: 'I will edit the file' },
-          { functionCall: { name: 'edit', args: {} } },
-        ],
-      },
+      content('model', { text: 'I will edit the file' }, fnCall('edit', {})),
       // No functionResponse follows — boundary truncation
     ];
     const result = ensureToolResultPairing(messages);
@@ -848,13 +876,7 @@ describe('ensureToolResultPairing', () => {
   it('removes last model message entirely if only functionCalls', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'do something' }] },
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'edit', args: {} } },
-          { functionCall: { name: 'shell', args: {} } },
-        ],
-      },
+      content('model', fnCall('edit', {}), fnCall('shell', {})),
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toHaveLength(1);
@@ -865,17 +887,7 @@ describe('ensureToolResultPairing', () => {
     const messages: Content[] = [
       { role: 'user', parts: [{ text: 'hello' }] },
       { role: 'model', parts: [{ text: 'response' }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'tool',
-              response: { output: 'result' },
-            },
-          },
-        ],
-      },
+      content('user', fnResponse('tool', { output: 'result' })),
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toEqual(messages);
@@ -888,5 +900,39 @@ describe('ensureToolResultPairing', () => {
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toEqual(messages);
+  });
+});
+
+describe('acceptSpeculation', () => {
+  it('marks the replayed messages as already injected', async () => {
+    const messages: Content[] = [
+      content('model', fnCall('read_file', {}, 'call-1')),
+      content('user', fnResponse('read_file', { output: 'x' }, 'call-1')),
+      modelText('done'),
+    ];
+    const state = {
+      id: 'spec-1',
+      status: 'running',
+      suggestion: '',
+      overlayFs: null,
+      abortController: null,
+      messages,
+      startTime: Date.now(),
+      toolUseCount: 1,
+    } as SpeculationState;
+    const addHistory = vi.fn<(entry: Content) => Promise<void>>(async () => {});
+    const markToolResultsInjected =
+      vi.fn<(entries: readonly Content[]) => void>();
+
+    const result = await acceptSpeculation(state, {
+      addHistory,
+      markToolResultsInjected,
+    } as unknown as LlmClient);
+
+    expect(result.messages).toEqual(messages);
+    expect(addHistory.mock.calls.map(([entry]) => entry)).toEqual(messages);
+    // The forked chat already reported these results, so the main chat must
+    // not emit their injection events a second time.
+    expect(markToolResultsInjected).toHaveBeenCalledWith(result.messages);
   });
 });

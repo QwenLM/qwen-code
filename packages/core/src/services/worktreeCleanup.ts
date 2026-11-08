@@ -29,8 +29,10 @@ const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
  * worktree is indistinguishable from an ephemeral agent one (no marker
  * records which path created it). That is why the dirty check below must
  * treat ANY content — including untracked files — as a reason to keep the
- * worktree: name-shape matching alone cannot protect a user-named
- * `agent-<7hex>` worktree from being swept (issue #12735).
+ * worktree, minus the three exemptions {@link worktreeHasWork} enumerates
+ * (disposable build output, symlinks, the session marker): name-shape
+ * matching alone cannot protect a user-named `agent-<7hex>` worktree from
+ * being swept (issue #12735).
  *
  * Mirrors claude-code's `EPHEMERAL_WORKTREE_PATTERNS` in
  * `utils/worktree.ts`, restricted to the patterns qwen-code actually emits.
@@ -58,7 +60,8 @@ function isEphemeralSlug(slug: string): boolean {
  * - Skips entries with any uncommitted work — tracked, untracked, or
  *   git-ignored content — via the shared {@link worktreeHasWork}
  *   predicate the daemon reaper also uses (#12758); only disposable
- *   build output and the session marker stay exempt.
+ *   build output, symlinks (their targets live outside the checkout)
+ *   and the session marker stay exempt.
  * - Skips entries with commits not reachable from the upstream remote.
  * - Any error reading git status / log → skip the entry (don't delete).
  *

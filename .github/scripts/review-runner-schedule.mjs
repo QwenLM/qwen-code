@@ -6,6 +6,8 @@
  */
 
 // Switch all online hk1/hk2 runners between review and CI, twice a day.
+// `day` keeps a named handful on `ecs-review` so reviews start during the
+// daytime too, and returns the rest of the fleet to CI.
 // Offline runners are skipped; their labels stay unchanged.
 // Running jobs finish normally; labels only control which job starts next.
 
@@ -20,14 +22,38 @@ const MANAGED_LABELS = ['ecs-review', 'ecs-qwen'];
 // copies that can drift would reintroduce the silent no-op it prevents.
 const FLEET_NAME = /^ecs-qwen-hk[12]-\d+$/;
 
-export function planLabels(runners, mode) {
-  if (!['review', 'ci'].includes(mode)) {
-    throw new Error('mode must be review or ci');
+const MODES = ['review', 'day', 'ci'];
+
+// `dayKeep` is the runner-name list that stays on `ecs-review` in `day` mode.
+// Every other managed runner then serves CI, so the daytime review capacity is
+// exactly those runners and never the whole fleet.
+export function planLabels(runners, mode, dayKeep = []) {
+  if (!MODES.includes(mode)) {
+    throw new Error('mode must be review, day or ci');
   }
-  const target = mode === 'review' ? 'ecs-review' : 'ecs-qwen';
+  if (mode === 'day') {
+    if (!dayKeep.length) {
+      throw new Error('mode day needs at least one review-day runner name');
+    }
+    // Typo defence: a name that matches no registered hk1/hk2 runner would
+    // silently shrink the daytime pool every morning. Offline runners stay
+    // allowed — they keep their labels and rejoin when they come back.
+    const registered = new Set(
+      runners.filter((r) => FLEET_NAME.test(r.name)).map((r) => r.name),
+    );
+    const unknown = dayKeep.filter((name) => !registered.has(name));
+    if (unknown.length) {
+      throw new Error(
+        `review-day runner names match no registered hk1/hk2 runner: ${unknown.join(', ')}`,
+      );
+    }
+  }
+  const keep = new Set(mode === 'day' ? dayKeep : []);
   return runners
     .filter((r) => r.status === 'online' && FLEET_NAME.test(r.name))
     .flatMap((r) => {
+      const target =
+        mode === 'review' || keep.has(r.name) ? 'ecs-review' : 'ecs-qwen';
       const labels = r.labels.map((l) => l.name);
       const remove = labels.filter(
         (l) => MANAGED_LABELS.includes(l) && l !== target,
@@ -48,14 +74,21 @@ async function gh(args) {
 }
 
 async function main() {
-  const [repo, mode] = process.argv.slice(2);
+  const [repo, mode, ...rest] = process.argv.slice(2);
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) {
     throw new Error(
-      'usage: review-runner-schedule.mjs <owner/repo> <review|ci>',
+      'usage: review-runner-schedule.mjs <owner/repo> <review|day|ci> [review-day runner names]',
     );
   }
-  // Validate the mode before spending an authenticated call on it.
-  planLabels([], mode);
+  const dayKeep = rest.join(' ').split(/\s+/).filter(Boolean);
+  // Validate the mode (and the day list shape) before spending an
+  // authenticated call on it.
+  if (!MODES.includes(mode)) {
+    throw new Error('mode must be review, day or ci');
+  }
+  if (mode === 'day' && !dayKeep.length) {
+    throw new Error('mode day needs at least one review-day runner name');
+  }
   if (!process.env.RUNNER_ADMIN_TOKEN) {
     throw new Error(
       'RUNNER_ADMIN_TOKEN is empty (needs Administration: write)',
@@ -73,7 +106,7 @@ async function main() {
   if (!runners.some((r) => FLEET_NAME.test(r.name))) {
     throw new Error('no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found');
   }
-  const actions = planLabels(runners, mode);
+  const actions = planLabels(runners, mode, dayKeep);
   const results = await Promise.all(
     actions.map(async ({ id, name, add, remove }) => {
       try {
@@ -112,6 +145,7 @@ async function main() {
   );
   const summary = [
     `### hk1/hk2 runner pool: ${mode}`,
+    ...(mode === 'day' ? [`- keeping on review: ${dayKeep.join(', ')}`] : []),
     `- ${actions.length} runners to switch`,
     ...results.map((r) => r.message),
   ].join('\n');

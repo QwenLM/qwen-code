@@ -13,7 +13,8 @@ import * as path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { LocalToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/local-managed-tool-result-store.js';
 import { LocalShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
@@ -79,6 +80,7 @@ let lease: SessionWriterLease | undefined;
 let session: ManagedSession | undefined;
 let executor: ManagedToolExecutor | undefined;
 let root: string | undefined;
+beforeEach(resetManagedRuntimeDispatchGatesForTest);
 afterEach(async () => {
   await executor?.close();
   if (server)
@@ -103,6 +105,7 @@ afterEach(async () => {
 describe('Tool v3 local worker routes', () => {
   it('executes one Shell and binds status and ACK to the original receipt', async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-tool-v3-'));
+    const executionCallId = path.basename(root);
     const runtimeBaseDir = path.join(root, 'runtime');
     const transcriptPath = path.join(
       runtimeBaseDir,
@@ -156,7 +159,23 @@ describe('Tool v3 local worker routes', () => {
     await harness.ensureRunnable();
     const turnResult = await resources.publish(
       'managed-turn-result',
-      Buffer.from('{"state":"completed"}'),
+      Buffer.from(
+        JSON.stringify({
+          uuid: 'rec-turn-a',
+          parentUuid: null,
+          sessionId: sessionKey.sessionId,
+          timestamp: new Date(1).toISOString(),
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: {
+            promptId: 'prompt-a',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        }),
+      ),
     );
     await session.authority.commitTurnComplete(
       command('settleTurn', 'settle-a'),
@@ -207,7 +226,7 @@ describe('Tool v3 local worker routes', () => {
           epoch: session!.activation.epoch,
         },
         payload: {
-          executionCallId: identity.executionCallId,
+          executionCallId,
           batchId: 'batch-a',
           ordinal: 0,
           toolDefinitionRef: definitionRef,
@@ -220,7 +239,7 @@ describe('Tool v3 local worker routes', () => {
     await harness.commitAwaitRuntime({
       functionCallId: identity.callId,
       toolName: 'run_shell_command',
-      executionCallId: identity.executionCallId,
+      executionCallId,
       invocationBindingId: 'binding-a',
       capabilityVersion: 'cap-a',
       policyVersion: 'policy-a',
@@ -250,7 +269,12 @@ describe('Tool v3 local worker routes', () => {
     );
     registerManagedRuntimeToolRoutes(
       app,
-      { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
+      {
+        token: 'test-token',
+        leaseId: 'lease-a',
+        epoch: 1,
+        runtimeIncarnation: 'incarnation-a',
+      },
       executor,
     );
     server = createServer(app);
@@ -309,7 +333,7 @@ describe('Tool v3 local worker routes', () => {
             tenantId: sessionKey.tenantId,
             sessionId: sessionKey.sessionId,
             turnId: 'turn-a',
-            executionCallId: identity.executionCallId,
+            executionCallId,
             bindingGeneration: '1',
             capturePolicy: 'complete_required',
           },
@@ -324,7 +348,7 @@ describe('Tool v3 local worker routes', () => {
         tenantId: sessionKey.tenantId,
         sessionId: sessionKey.sessionId,
         turnId: 'turn-a',
-        executionCallId: identity.executionCallId,
+        executionCallId,
         bindingGeneration: '1',
         capturePolicy: 'complete_required',
       },
@@ -371,11 +395,18 @@ describe('Tool v3 local worker routes', () => {
       });
     }
     const receipt = {
-      executionCallId: identity.executionCallId,
+      executionCallId,
       manifest: settled.result.capture.manifest,
       deliveryStatus: 'committed',
       historyRevision: receiptEvent!.sequence,
     };
+    expect(
+      (
+        await post('acknowledge', {
+          receipt: { ...receipt, manifest: null, historyRevision: null },
+        })
+      ).status,
+    ).toBe(409);
     expect((await post('acknowledge', { receipt })).status).toBe(200);
     const changedAck = await post('acknowledge', {
       receipt: { ...receipt, historyRevision: receipt.historyRevision + 1 },
@@ -393,7 +424,7 @@ describe('Tool v3 local worker routes', () => {
             tenantId: sessionKey.tenantId,
             sessionId: sessionKey.sessionId,
             turnId: 'turn-a',
-            executionCallId: identity.executionCallId,
+            executionCallId,
             bindingGeneration: '1',
             capturePolicy: 'complete_required',
           },
@@ -763,4 +794,69 @@ describe('Tool v3 local worker routes', () => {
       }),
     ).rejects.toThrow(/before dispatch/);
   }, 120_000);
+
+  it('admits a native Monitor payload into the Monitor admission family', async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-tool-v3-monitor-'));
+    executor = new ManagedToolExecutor(
+      async () => createManagedToolSet(root!, 'runtime-session-a'),
+      {} as never,
+    );
+    const app = express();
+    registerManagedRuntimeToolV3Routes(
+      app,
+      { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
+      executor,
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server!.listen(0, '127.0.0.1', resolve),
+    );
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const post = (operation: string, body: Record<string, unknown>) =>
+      fetch(`${origin}/internal/managed-runtime/v3/${operation}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          protocolVersion: 3,
+          toolResult: 'managed-tool-result/1',
+          reference,
+          ...body,
+        }),
+      });
+    const capture = {
+      tenantId: sessionKey.tenantId,
+      sessionId: sessionKey.sessionId,
+      turnId: 'turn-a',
+      executionCallId: identity.executionCallId,
+      bindingGeneration: '1',
+      capturePolicy: 'complete_required',
+    };
+    const admitted = await post('execute', {
+      toolName: 'monitor',
+      input: { command: shellCommand },
+      capture,
+    });
+    expect(admitted.status).toBe(200);
+    // The payload ran as far as the monitor admission family; without a
+    // delegated cgroup root this exact Runtime accurately refuses the start
+    // rather than the payload.
+    expect(await admitted.json()).toMatchObject({
+      protocolVersion: 3,
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+        },
+      },
+    });
+    const refused = await post('execute', {
+      toolName: 'edit',
+      input: { command: shellCommand },
+      capture,
+    });
+    expect(refused.status).toBe(400);
+  });
 });
