@@ -120,6 +120,23 @@ it('completes the initiating browser flow with an in-memory nonce and returns on
   expect(popup.close).toHaveBeenCalled();
 });
 
+it('keeps the provider link through pending polls when the popup is blocked', async () => {
+  vi.useFakeTimers();
+  vi.mocked(window.open).mockReturnValue(null);
+  const client = api();
+  client.status.mockResolvedValue({ attemptId: 'attempt', state: 'pending' });
+  const callback = await render(client);
+  await act(async () => button('Authorize and use in this session').click());
+  const link = () => container.querySelector<HTMLAnchorElement>('a[href]');
+  expect(link()?.href).toBe('https://auth.example/authorize?state=opaque');
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(client.status).toHaveBeenCalledOnce();
+  expect(link()?.href).toBe('https://auth.example/authorize?state=opaque');
+  expect(client.complete).not.toHaveBeenCalled();
+  expect(callback).not.toHaveBeenCalled();
+  expect(sessionStorage.length).toBe(0);
+});
+
 it('discards a completed A response that becomes ready immediately before starting flow B', async () => {
   vi.useFakeTimers();
   const client = api();

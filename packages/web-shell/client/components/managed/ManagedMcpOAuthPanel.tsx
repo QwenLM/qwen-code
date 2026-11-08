@@ -108,7 +108,14 @@ export function ManagedMcpOAuthPanel({
         )
           throw new Error('Invalid authorization URL.');
       }
-      setAttempt(result);
+      setAttempt((previous) =>
+        result.state === 'pending' &&
+        previous?.attemptId === result.attemptId &&
+        previous.authorizationUrl &&
+        !result.authorizationUrl
+          ? { ...result, authorizationUrl: previous.authorizationUrl }
+          : result,
+      );
       if (result.state === 'completed' && !current.notified) {
         const binding = {
           serverId: current.server.serverId,

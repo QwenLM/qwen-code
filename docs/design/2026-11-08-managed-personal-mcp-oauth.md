@@ -33,6 +33,8 @@ Use deployment-pre-registered provider/client configuration, fixed redirect URI,
 5. Validate actor/attempt ownership, exchange the code once and return a non-secret credential reference.
 6. Explicitly bind that reference through normal Session configuration apply.
 
+Keep the validated provider link in memory across pending status polls for the same attempt so a blocked or closed popup retains an explicit recovery route. A different attempt or terminal state does not inherit that link.
+
 Keep callback pages and logs free of code/token values. Preserve no-store, no-referrer and restrictive CSP headers. Provider metadata, token endpoints and redirects obey deployment network policy; private destinations require explicit allowance. Preflight address checks are not connection-time DNS pinning, so DNS-rebinding/network enforcement still needs deployment evidence.
 
 ## Execution and token boundary
@@ -48,6 +50,20 @@ Revocation blocks subsequent issuance immediately and attempts provider grant re
 ## Capability and deployment gating
 
 Advertise `managed-mcp-oauth/1` only with the matching protocol and implementation. Configure default-off `qwen.managed-agent.mcp-oauth`, fixed callback, private Runtime token proxy and an explicit allowlist of qualified isolated tool profiles. Pool capabilities must be homogeneous.
+
+Configure the standalone `qwen.managed-agent.mcp-oauth` bean in deployment configuration:
+
+| Property                       | Type and default       | Meaning                                                                       |
+| ------------------------------ | ---------------------- | ----------------------------------------------------------------------------- |
+| `enabled`                      | boolean, `false`       | Allow new personal authorizations and token issuance only after qualification |
+| `callback-uri`                 | string, unset          | Fixed external URI ending in `/oauth/mcp/callback`                            |
+| `runtime-token-proxy-base-url` | string, unset          | Private Broker token-delivery origin, using HTTPS or allowed loopback HTTP    |
+| `isolated-tool-profiles`       | list of strings, empty | Explicit allowlist of independently qualified execution profiles              |
+| `providers`                    | YAML map, empty        | Pre-registered providers keyed by the public provider ID                      |
+
+A provider entry declares `issuer`, `resource-uri`, `resource-metadata-uri`, `authorization-metadata-uri`, `authorization-endpoint`, `token-endpoint`, `client-id` and `scopes`. The metadata must match the configured issuer/resource/endpoints and advertise S256. If it declares supported token-endpoint authentication methods, they must include the configured client authentication method. `revocation-endpoint` and `client-secret` are optional; a secret uses `client_secret_post`, while a public client uses `none`. `allow-private-network` and `allow-insecure-loopback` default to false and require an explicit deployment decision. Client secrets stay in deployment configuration and never enter a package or browser journal.
+
+The existing generated configuration reference processes only `ManagedAgentProperties`; these standalone-bean settings are documented here and in the server README. This split does not expand the Maven metadata processor's source selection or claim validation against newly compiled metadata.
 
 Enable only after proving that other actors' execution processes cannot read the Hosted process holding tokens, its service identity or its delivery channel. Directory isolation, owner fencing, cgroups or same-UID separation alone do not prove that property. Unsupported profiles fail closed; this PR does not build a new isolation platform.
 
