@@ -54,6 +54,13 @@ import { observeHeadlessToolResultProjection } from '../tool-result-boundary-dia
 export interface MessageState {
   messageId: string | null;
   blocks: ContentBlock[];
+  /**
+   * Number of content blocks already delivered for this message id. Block
+   * types cannot share one snapshot, so a type change closes the snapshot
+   * and starts a new one under the SAME id: the next block's stream index is
+   * this count, not 0, so consumers can key blocks by `(message.id, index)`.
+   */
+  emittedBlockCount: number;
   openBlocks: Set<number>;
   usage: Usage;
   messageStarted: boolean;
@@ -177,6 +184,7 @@ export abstract class BaseJsonOutputAdapter {
     return {
       messageId: null,
       blocks: [],
+      emittedBlockCount: 0,
       openBlocks: new Set<number>(),
       usage: this.createUsage(),
       messageStarted: false,
@@ -302,14 +310,18 @@ export abstract class BaseJsonOutputAdapter {
       return;
     }
 
-    const index = state.blocks.length - 1;
-    if (!state.openBlocks.has(index)) {
+    const blockIndex = state.blocks.length - 1;
+    if (!state.openBlocks.has(blockIndex)) {
       return;
     }
 
     if (lastBlock.type === 'text' || lastBlock.type === 'thinking') {
-      this.onBlockClosed(state, index, actualParentToolUseId);
-      this.closeBlock(state, index);
+      this.onBlockClosed(
+        state,
+        state.emittedBlockCount + blockIndex,
+        actualParentToolUseId,
+      );
+      this.closeBlock(state, blockIndex);
     }
   }
 
@@ -365,9 +377,18 @@ export abstract class BaseJsonOutputAdapter {
       return;
     }
 
-    // Finalize current message and start new one
+    // Close the current snapshot and continue the turn's stream under the
+    // same message id: one model response stays one message for consumers
+    // that pair a final `assistant` snapshot with the streamed blocks by
+    // `message.id` (#15875). Only the pending block type and the block counts
+    // reset, so the next block keeps a distinct stream index.
     this.finalizeAssistantMessageInternal(state, parentToolUseId);
-    this.startAssistantMessageInternal(state);
+    state.emittedBlockCount += state.blocks.length;
+    state.blocks = [];
+    state.openBlocks = new Set<number>();
+    state.usage = this.createUsage();
+    state.messageStarted = false;
+    state.finalized = false;
     state.currentBlockType = targetType;
   }
 
@@ -378,6 +399,7 @@ export abstract class BaseJsonOutputAdapter {
    */
   protected startAssistantMessageInternal(state: MessageState): void {
     state.messageId = randomUUID();
+    state.emittedBlockCount = 0;
     state.blocks = [];
     state.openBlocks = new Set<number>();
     state.usage = this.createUsage();
@@ -889,7 +911,7 @@ export abstract class BaseJsonOutputAdapter {
     const isNewBlock = !current || current.type !== 'text';
     if (isNewBlock) {
       current = { type: 'text', text: '' } satisfies TextBlock;
-      const index = state.blocks.length;
+      const index = state.emittedBlockCount + state.blocks.length;
       state.blocks.push(current);
       this.openBlock(state, index, current);
       this.onTextBlockCreated(state, index, current, parentToolUseId);
@@ -897,7 +919,7 @@ export abstract class BaseJsonOutputAdapter {
 
     // current is guaranteed to be defined here (either existing or newly created)
     current!.text += fragment;
-    const index = state.blocks.length - 1;
+    const index = state.emittedBlockCount + state.blocks.length - 1;
     this.onTextAppended(state, index, fragment, parentToolUseId);
   }
 
@@ -946,7 +968,7 @@ export abstract class BaseJsonOutputAdapter {
         thinking: '',
         signature: subject,
       } satisfies ThinkingBlock;
-      const index = state.blocks.length;
+      const index = state.emittedBlockCount + state.blocks.length;
       state.blocks.push(current);
       this.openBlock(state, index, current);
       this.onThinkingBlockCreated(state, index, current, actualParentToolUseId);
@@ -954,7 +976,7 @@ export abstract class BaseJsonOutputAdapter {
 
     // current is guaranteed to be defined here (either existing or newly created)
     current!.thinking = `${current!.thinking ?? ''}${fragment}`;
-    const index = state.blocks.length - 1;
+    const index = state.emittedBlockCount + state.blocks.length - 1;
     this.onThinkingAppended(state, index, fragment, actualParentToolUseId);
   }
 

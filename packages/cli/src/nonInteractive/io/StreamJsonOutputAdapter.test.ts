@@ -1332,6 +1332,73 @@ describe('StreamJsonOutputAdapter', () => {
       }
     });
 
+    it('keeps one message id across a thinking-to-text transition', () => {
+      adapter.processEvent({
+        type: LlmEventType.Thought,
+        value: { subject: 'Thinking', description: 'Thought' },
+      });
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Answer',
+      });
+
+      adapter.finalizeAssistantMessage();
+
+      const snapshots = stdoutWriteSpy.mock.calls
+        .map((call: unknown[]) => JSON.parse(call[0] as string))
+        .filter(
+          (payload: { type?: string; message?: { content?: unknown } }) =>
+            payload.type === 'assistant' &&
+            Array.isArray(payload.message?.content) &&
+            payload.message.content.length > 0,
+        );
+
+      // One model response stays one message for consumers that pair the
+      // streamed blocks with the final snapshots by `message.id` (#15875).
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[1].message.id).toBe(snapshots[0].message.id);
+    });
+
+    it('numbers a post-transition block after the blocks already streamed', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, true);
+      adapter.startAssistantMessage();
+      stdoutWriteSpy.mockClear();
+
+      adapter.processEvent({
+        type: LlmEventType.Thought,
+        value: { subject: 'Thinking', description: 'Thought' },
+      });
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Answer',
+      });
+
+      const payloads = stdoutWriteSpy.mock.calls.map((call: unknown[]) =>
+        JSON.parse(call[0] as string),
+      );
+      const blockStarts = payloads.filter(
+        (payload: { event?: { type?: string } }) =>
+          payload.event?.type === 'content_block_start',
+      );
+      const blockStops = payloads.filter(
+        (payload: { event?: { type?: string } }) =>
+          payload.event?.type === 'content_block_stop',
+      );
+
+      // A second snapshot reusing index 0 would make (message.id, index)
+      // ambiguous, so the text block continues the turn's block numbering.
+      expect(
+        blockStarts.map(
+          (payload: { event: { index: number } }) => payload.event.index,
+        ),
+      ).toEqual([0, 1]);
+      expect(
+        blockStops.map(
+          (payload: { event: { index: number } }) => payload.event.index,
+        ),
+      ).toEqual([0]);
+    });
+
     it('should merge consecutive text fragments', () => {
       adapter.processEvent({
         type: LlmEventType.Content,
