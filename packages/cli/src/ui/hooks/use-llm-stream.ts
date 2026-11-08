@@ -3937,7 +3937,10 @@ export const useLlmStream = (
         // On the shared loop the batch answers replays and records the
         // calls; a response made only of replays keeps the path below.
         if (sharedRound && executableOnSharedLoop.length > 0) {
-          if (pendingHistoryItemRef.current) {
+          if (
+            pendingHistoryItemRef.current &&
+            !shellOwnsPendingItem(pendingHistoryItemRef.current)
+          ) {
             commitItemInOrder(
               pendingHistoryItemRef.current,
               userMessageTimestamp,
@@ -4060,7 +4063,10 @@ export const useLlmStream = (
           // The scheduler may complete a fast tool before this stream's caller
           // regains control. Seal streamed assistant text first so the tool
           // group cannot enter static history ahead of it.
-          if (pendingHistoryItemRef.current) {
+          if (
+            pendingHistoryItemRef.current &&
+            !shellOwnsPendingItem(pendingHistoryItemRef.current)
+          ) {
             commitItemInOrder(
               pendingHistoryItemRef.current,
               userMessageTimestamp,
