@@ -21,6 +21,7 @@ import type {
 import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { StreamingToolCallParser } from '../openaiContentGenerator/streamingToolCallParser.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 import {
@@ -1922,6 +1923,94 @@ describe('LoggingContentGenerator', () => {
       inputTokens: 100,
       cachedInputTokens: 40,
     });
+  });
+
+  it('forwards a converter-reported cache creation count to endLLMRequestSpan', async () => {
+    // The value only survives because provenance is a WeakMap keyed on the
+    // usage object and the stream forwards that same reference. Reading
+    // provenance off the converter's own object (which the converter tests
+    // do) cannot see a copy, a spread or a JSON round-trip on the way.
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-cache-write',
+    );
+
+    expect(llmSpan().endMetadata).toMatchObject({
+      inputTokens: 373,
+      cacheCreationInputTokens: 256,
+    });
+  });
+
+  it('leaves cache creation unreported when the provider omits the field', async () => {
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-no-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'no-cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-no-cache-write',
+    );
+
+    // Absent must stay absent: session-tracing writes the attribute only when
+    // the value is defined, so a defaulted 0 would emit it on every turn.
+    expect(llmSpan().endMetadata!.cacheCreationInputTokens).toBeUndefined();
   });
 
   it('leaves ttftMs undefined when stream yields no user-visible chunks (Phase 4a)', async () => {
