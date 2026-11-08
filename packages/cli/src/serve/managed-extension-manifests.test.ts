@@ -17,6 +17,107 @@ import { stageManagedExtensionManifests } from './managed-extension-manifests.js
 import { ManagedExtensionProcessOwners } from './managed-extension-process.js';
 import { ManagedRuntimeLedger } from './managed-runtime-ledger.js';
 
+it('keeps unbound OAuth components dormant and binds only exact v2 personal selections', () => {
+  const workspace = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    workspaceGeneration: '1',
+  };
+  const mcp = new ManagedMcpRuntime(workspace, async () => undefined, {
+    version: 1,
+    servers: [],
+  });
+  const hooks = new ManagedHookRuntime(workspace, async () => undefined, {
+    version: 1,
+    catalogs: [],
+  });
+  const contributions: ManagedPackageContributions = {
+    skills: [],
+    commands: [],
+    agents: [],
+    context: [],
+    hooks: {},
+    settings: [],
+    mcpServers: {
+      fixture: {
+        httpUrl: 'https://mcp.example.test/mcp',
+        auth: {
+          type: 'oauth',
+          providerId: 'provider',
+          resourceUri: 'https://mcp.example.test/mcp',
+          scopes: ['read'],
+        },
+      },
+    },
+  };
+  const build = (
+    bound: boolean,
+    revision = 0,
+    available = true,
+    legacy = false,
+  ) =>
+    stageManagedExtensionManifests({
+      ...workspace,
+      runtimeSessionId: 'root',
+      mcp,
+      hooks,
+      oauthAvailable: available,
+      command: {
+        operationId: randomUUID(),
+        actorKey: 'a'.repeat(64),
+        expectedRevision: revision,
+        extensions: [],
+        ...(legacy
+          ? {}
+          : {
+              selectionVersion: 2 as const,
+              mcpAuthBindings: bound
+                ? [
+                    {
+                      serverId: 'one:fixture',
+                      credentialId: 'credential',
+                      credentialGeneration: 1,
+                    },
+                  ]
+                : [],
+            }),
+      },
+      packages: [
+        {
+          pin: {
+            extensionId: 'one',
+            packageRevision: 1,
+            packageDigest: 'b'.repeat(64),
+          },
+          assetRoot: '/private/package',
+          contributions,
+        },
+      ],
+      baseMcpServers: [],
+      baseHookCatalog: null,
+      hydrated: () => ({ contributions, environment: {} }),
+    });
+  expect(() => build(false, 0, true, true)).toThrow('version 2');
+  expect(build(false).mcpManifest.servers).toEqual([]);
+  expect(() => build(true, 0, false)).toThrow('unavailable');
+  const first = build(true);
+  expect(first.mcpManifest.version).toBe(2);
+  expect(first.mcpManifest.servers[0].oauth).toEqual({
+    resourceUri: 'https://mcp.example.test/mcp',
+    credentialId: 'credential',
+    credentialGeneration: 1,
+    configRevision: 1,
+    executionActorKey: 'a'.repeat(64),
+  });
+  mcp.installSessionDefinitions('root', first.mcpManifest);
+  const next = build(true, 1);
+  expect(next.mcpServers[0].definitionDigest).not.toBe(
+    first.mcpServers[0].definitionDigest,
+  );
+  expect(next.mcpServers[0].serverRevision).toBe(2);
+  expect(build(false, 2).mcpServers).toEqual([]);
+});
+
 it('keeps private settings out of public MCP and Hook digest inputs', () => {
   const workspace = {
     tenantId: 'tenant',

@@ -56,6 +56,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class RuntimeBrokerHttpServerTest {
     @Test
+    void personalMcpTokenPathsRejectOverlappingAndEmptyLeaseIdsWithoutRuntimeAccess() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var issued = new AtomicInteger();
+            fixture.service.configureMcpTokenIssuer((scope, harness, request) -> {
+                issued.incrementAndGet();
+                return "must-not-issue";
+            });
+            for (var entry : Map.of(
+                    "/runtime-leases/mcp/token", 404,
+                    "/runtime-leases//mcp/token", 400,
+                    "/runtime-leases/x/mcp/token", 401).entrySet()) {
+                var response = fixture.client.send(HttpRequest.newBuilder(fixture.uri(entry.getKey()))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+                assertEquals(entry.getValue().intValue(), response.statusCode(), response.body());
+                assertEquals("no-store", response.headers().firstValue("Cache-Control").orElse(null));
+            }
+            assertEquals(0, issued.get());
+            assertEquals(0, fixture.transport.acquisitions.get());
+            assertEquals(0, fixture.transport.executions.get());
+            assertNull(fixture.bindings.findActive(new RuntimeProvisionRequest(Fixture.defaultScope(), null, "static")));
+        }
+    }
+
+    @Test
     void capabilityReadsResolveAdmissionWithoutAllocatingOrAcquiringARuntime() throws Exception {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");

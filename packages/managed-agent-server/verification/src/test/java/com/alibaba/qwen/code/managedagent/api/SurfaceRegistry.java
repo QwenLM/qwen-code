@@ -31,6 +31,28 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
     WEBSHELL_SESSION_AGENT_TRACE(Method.POST, "/api/agent/web-shell/v1/session-agent-trace/query",
             Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
+    PUBLIC_MCP_OAUTH_CALLBACK(Method.GET, "/oauth/mcp/callback",
+            Surface.PUBLIC, RuleClass.OAUTH_CALLBACK, EnumSet.of(Capability.MCP_OAUTH_CALLBACK)),
+    PUBLIC_MCP_OAUTH_QUERY(Method.POST, "/v1/agents/sessions/{sessionId}/mcp-oauth/query",
+            Surface.PUBLIC, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_QUERY)),
+    PUBLIC_MCP_OAUTH_START(Method.POST, "/v1/agents/sessions/{sessionId}/mcp-oauth/start",
+            Surface.PUBLIC, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
+    PUBLIC_MCP_OAUTH_STATUS(Method.POST, "/v1/agents/sessions/{sessionId}/mcp-oauth/status",
+            Surface.PUBLIC, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
+    PUBLIC_MCP_OAUTH_COMPLETE(Method.POST, "/v1/agents/sessions/{sessionId}/mcp-oauth/complete",
+            Surface.PUBLIC, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
+    PUBLIC_MCP_OAUTH_REVOKE(Method.POST, "/v1/agents/sessions/{sessionId}/mcp-oauth/revoke",
+            Surface.PUBLIC, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
+    WEBSHELL_MCP_OAUTH_QUERY(Method.POST, "/api/agent/web-shell/v1/session-mcp-oauth/query",
+            Surface.WEBSHELL, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_QUERY)),
+    WEBSHELL_MCP_OAUTH_START(Method.POST, "/api/agent/web-shell/v1/session-mcp-oauth/start",
+            Surface.WEBSHELL, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
+    WEBSHELL_MCP_OAUTH_STATUS(Method.POST, "/api/agent/web-shell/v1/session-mcp-oauth/status",
+            Surface.WEBSHELL, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
+    WEBSHELL_MCP_OAUTH_COMPLETE(Method.POST, "/api/agent/web-shell/v1/session-mcp-oauth/complete",
+            Surface.WEBSHELL, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
+    WEBSHELL_MCP_OAUTH_REVOKE(Method.POST, "/api/agent/web-shell/v1/session-mcp-oauth/revoke",
+            Surface.WEBSHELL, RuleClass.SESSION_MCP_OAUTH_MANAGEMENT, EnumSet.of(Capability.MCP_OAUTH_MANAGE)),
     WEBSHELL_WORKTREE_OPTIONS(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/options",
             Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
     WEBSHELL_WORKTREE_QUERY(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/query",
@@ -732,6 +754,7 @@ public enum SurfaceRegistry {
      */
     public enum Capability {
         SESSION_RESOURCES, SESSION_AGENT_TRACE,
+        MCP_OAUTH_QUERY, MCP_OAUTH_MANAGE, MCP_OAUTH_CALLBACK,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
@@ -847,6 +870,10 @@ public enum SurfaceRegistry {
      * acceptance suite walks these classes to build its probe matrix.
      */
     public enum RuleClass {
+        /** Provider redirect, authorized by OAuth state; no tenant or actor headers. */
+        OAUTH_CALLBACK,
+        /** Readable Session plus the extension execution deployment allowlist; grants stay actor-owned. */
+        SESSION_MCP_OAUTH_MANAGEMENT,
         SESSION_WORKTREE,
         /** Trusted actor with a read grant on the persisted Workspace; operation reads also retain actor ownership. */
         SESSION_EXTENSION_READER,

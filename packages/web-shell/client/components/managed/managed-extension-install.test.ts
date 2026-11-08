@@ -153,6 +153,105 @@ describe('Managed installation receipts', () => {
   );
 
   it.each([
+    [new JavaManagedAgentHttpError(400, 'invalid_request', 'Invalid'), true],
+    [
+      new JavaManagedAgentHttpError(
+        400,
+        'invalid_mcp_oauth_request',
+        'Invalid',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'oauth_authorization_unavailable',
+        'Revoked',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        400,
+        'invalid_extension_command',
+        'Invalid',
+      ),
+      false,
+    ],
+    [new JavaManagedAgentHttpError(403, 'forbidden', 'Forbidden'), false],
+    [new JavaManagedAgentHttpError(404, 'session_not_found', 'Missing'), false],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'extension_config_revision_conflict',
+        'Conflict',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'extension_selection_upgrade_required',
+        'Upgrade',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'hosted_extension_configuration_conflict',
+        'Unknown',
+      ),
+      false,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'session_config_outcome_unknown',
+        'Unknown',
+      ),
+      false,
+    ],
+    [new JavaManagedAgentHttpError(503, 'unavailable', 'Unavailable'), false],
+    [new TypeError('Network response lost'), false],
+  ] as const)(
+    'releases the review barrier only for an exact pre-admission rejection (%s)',
+    async (failure, rejected) => {
+      const input = await command();
+      input.value.pin = pin;
+      input.value.stage = 'apply';
+      const client = api();
+      client.apply.mockRejectedValue(failure);
+      const progress = vi.fn();
+      await expect(
+        continueManagedExtensionInstall(
+          asManagement(client),
+          input.value,
+          undefined,
+          undefined,
+          { clientId: 'client' },
+          progress,
+        ),
+      ).rejects.toBe(failure);
+      const saved = progress.mock.lastCall![0];
+      expect(saved.applySubmitted).toBe(!rejected);
+      const review = reviewManagedExtensionInstall(
+        asManagement(client),
+        saved,
+        { clientId: 'client' },
+      );
+      if (rejected) {
+        expect((await review)!.applyKey).not.toBe(saved.applyKey);
+        expect(client.query).toHaveBeenCalledOnce();
+      } else {
+        await expect(review).rejects.toThrow('outcome');
+        expect(client.query).not.toHaveBeenCalled();
+      }
+      expect(client.apply).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
     { state: 'recovery_required', mode: 'apply' },
     { state: 'pending', mode: 'apply' },
     { state: 'failed', mode: 'recoverPrevious' },
@@ -333,6 +432,105 @@ describe('Managed installation receipts', () => {
     expect(client.saveSettings).not.toHaveBeenCalled();
     expect(client.apply).not.toHaveBeenCalled();
   });
+
+  it('preserves personal authorization bindings in version 2 updates', async () => {
+    const input = await command();
+    const bindings = [
+      {
+        serverId: `${other.extensionId}:tools`,
+        credentialId: 'credential',
+        credentialGeneration: 2,
+      },
+    ];
+    const value = createManagedExtensionInstall(
+      {
+        workspaceId: 'workspace',
+        sessionId: 'session',
+        metadata: input.value.metadata,
+        expectedSettingsRevision: 0,
+        settingsKeys: [],
+      },
+      { ...snapshot, selectionVersion: 2, mcpAuthBindings: bindings },
+    );
+    value.pin = pin;
+    value.stage = 'apply';
+    const client = api();
+    await continueManagedExtensionInstall(
+      asManagement(client),
+      value,
+      undefined,
+      undefined,
+      { clientId: 'client' },
+      vi.fn(),
+    );
+    expect(client.apply.mock.calls[0]?.[1]).toEqual({
+      selectionVersion: 2,
+      expectedConfigRevision: 7,
+      extensions: [other, pin],
+      mcpAuthBindings: bindings,
+    });
+  });
+
+  it.each([false, true])(
+    'reuses a replaced pin personal binding only after explicit validation (validated=%s)',
+    async (validated) => {
+      const input = await command();
+      const oldPin = {
+        ...pin,
+        packageRevision: 1,
+        packageDigest: 'b'.repeat(64),
+      };
+      const binding = {
+        serverId: `${pin.extensionId}:tools`,
+        credentialId: 'credential',
+        credentialGeneration: 2,
+      };
+      const value = createManagedExtensionInstall(
+        {
+          workspaceId: 'workspace',
+          sessionId: 'session',
+          metadata: input.value.metadata,
+          expectedSettingsRevision: 0,
+          settingsKeys: [],
+        },
+        {
+          ...snapshot,
+          extensions: [other, oldPin],
+          selectionVersion: 2,
+          mcpAuthBindings: [binding],
+        },
+      );
+      value.pin = pin;
+      value.stage = 'apply';
+      value.applySubmitted = false;
+      const client = api();
+      client.apply.mockImplementation(async (_session, selection) => ({
+        ...active,
+        ...selection,
+      }));
+      const journal: (typeof value)[] = [];
+      const authorize = vi.fn(async (command: typeof value) => command);
+      const result = await continueManagedExtensionInstall(
+        asManagement(client),
+        value,
+        undefined,
+        undefined,
+        { clientId: 'client' },
+        (entry) => journal.push(entry),
+        validated ? authorize : undefined,
+      );
+      expect(client.apply.mock.calls[0]?.[1]).toEqual({
+        selectionVersion: 2,
+        expectedConfigRevision: 7,
+        extensions: [other, pin],
+        mcpAuthBindings: validated ? [binding] : [],
+      });
+      if (validated) expect(authorize).toHaveBeenCalledOnce();
+      expect(isManagedExtensionInstallActive(journal.at(-1)!, result)).toBe(
+        true,
+      );
+    },
+  );
 
   it('accepts only scoped, public journal fields', async () => {
     const input = await command(['TOKEN']);

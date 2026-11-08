@@ -46,6 +46,47 @@ async function input(
 }
 
 describe('Managed package import', () => {
+  it('requires an explicit compiler v2 import for personal OAuth packages', async () => {
+    const source = await input(
+      JSON.stringify({
+        name: 'personal-tools',
+        serverName: 'tools',
+        recipe: {
+          httpUrl: 'https://mcp.example.test/mcp',
+          auth: {
+            type: 'oauth',
+            providerId: 'fixture',
+            resourceUri: 'https://mcp.example.test/mcp',
+            scopes: ['read'],
+          },
+        },
+      }),
+      'mcp',
+    );
+    await expect(
+      prepareManagedPackageImport(source.file, source.metadata, {
+        destination: path.join(temporary, 'legacy-client'),
+      }),
+    ).rejects.toThrow('compiler version');
+    const prepared = await prepareManagedPackageImport(
+      source.file,
+      {
+        ...source.metadata,
+        compilerVersion: 2,
+      },
+      { destination: path.join(temporary, 'v2-client') },
+    );
+    expect(prepared.manifest).toMatchObject({
+      schemaVersion: 2,
+      compilerVersion: 2,
+    });
+    expect(prepared.inspection.mcpServers[0]).toMatchObject({
+      name: 'tools',
+      recipe: { auth: { type: 'oauth', providerId: 'fixture' } },
+      redacted: false,
+    });
+  });
+
   it('rejects hidden additional Skills inside an independent Skill archive', async () => {
     const root = path.join(temporary, 'source');
     await fs.mkdir(path.join(root, 'assets/other'), { recursive: true });
@@ -291,6 +332,32 @@ describe('Managed package import', () => {
 });
 
 describe('Managed MCP recipe validation', () => {
+  it.each([
+    'https://mcp.example.com',
+    'HTTPS://MCP.EXAMPLE.COM',
+    'https://mcp.example.com:443',
+    'https://mcp.example.com/a/../mcp',
+  ])('compares normalized OAuth resource URLs for %s', (url) => {
+    for (const field of ['url', 'httpUrl']) {
+      const recipe = {
+        [field]: url,
+        auth: {
+          type: 'oauth',
+          providerId: 'fixture',
+          resourceUri: url,
+          scopes: ['read'],
+        },
+      };
+      expect(parseManagedMcpRecipe(recipe)).toEqual(recipe);
+      expect(() =>
+        parseManagedMcpRecipe({
+          ...recipe,
+          auth: { ...recipe.auth, resourceUri: 'https://other.example.com' },
+        }),
+      ).toThrow('Invalid Managed MCP recipe');
+    }
+  });
+
   it('accepts placeholders only before Runtime hydration', () => {
     expect(
       parseManagedMcpRecipe({ url: '${URL}' }, { allowPlaceholders: true }),
@@ -314,6 +381,24 @@ describe('Managed MCP recipe validation', () => {
       'Invalid Managed MCP recipe',
     );
   });
+});
+
+it('refuses static Authorization even when it is a declared placeholder on an OAuth recipe', () => {
+  expect(() =>
+    parseManagedMcpRecipe(
+      {
+        httpUrl: 'https://mcp.example/mcp',
+        headers: { Authorization: 'Bearer ${TOKEN}' },
+        auth: {
+          type: 'oauth',
+          providerId: 'fixture',
+          resourceUri: 'https://mcp.example/mcp',
+          scopes: ['read'],
+        },
+      },
+      { allowPlaceholders: true },
+    ),
+  ).toThrow();
 });
 
 it('redacts literal env/header values when inspecting an existing archive', async () => {

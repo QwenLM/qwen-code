@@ -9,8 +9,13 @@ import type {
   ManagedExtensionPackageOperation,
   ManagedExtensionPin,
   ManagedExtensionSnapshot,
+  ManagedMcpAuthBinding,
 } from './managed-extension-types';
-import { isManagedExtensionPins } from './managed-extension-types';
+import {
+  isManagedExtensionPins,
+  isManagedMcpAuthBindings,
+  managedExtensionSelection,
+} from './managed-extension-types';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { managedRequestId } from './managed-session-storage';
 
@@ -32,12 +37,23 @@ export interface ManagedExtensionInstallCommand {
   applyKey: string;
   stage: 'publish' | 'settings' | 'apply';
   pin?: ManagedExtensionPin;
+  selectionVersion?: 2;
+  mcpAuthBindings?: ManagedMcpAuthBinding[];
+  requiresOAuth?: boolean;
   applySubmitted?: boolean;
 }
 
 export class ManagedExtensionInstallInputRequired extends Error {
   constructor(readonly input: 'source' | 'settings') {
     super(`The original ${input} input is required.`);
+  }
+}
+
+export class ManagedExtensionInstallAuthorizationRequired extends Error {
+  constructor() {
+    super(
+      'Personal MCP authorization is required before applying this package.',
+    );
   }
 }
 
@@ -57,6 +73,7 @@ export function createManagedExtensionInstall(
     | 'expectedSettingsRevision'
     | 'settingsKeys'
     | 'keepSettingsRevision'
+    | 'requiresOAuth'
   >,
   snapshot: ManagedExtensionSnapshot,
 ): ManagedExtensionInstallCommand {
@@ -74,6 +91,12 @@ export function createManagedExtensionInstall(
     settingsKey: `${key}:settings`,
     applyKey: `${key}:apply`,
     stage: 'publish',
+    ...(snapshot.selectionVersion === 2
+      ? {
+          selectionVersion: 2,
+          mcpAuthBindings: structuredClone(snapshot.mcpAuthBindings ?? []),
+        }
+      : {}),
   };
 }
 
@@ -110,6 +133,9 @@ export function parseManagedExtensionInstall(
             'applyKey',
             'stage',
             'pin',
+            'selectionVersion',
+            'mcpAuthBindings',
+            'requiresOAuth',
             'applySubmitted',
           ].includes(key),
       ) ||
@@ -136,8 +162,19 @@ export function parseManagedExtensionInstall(
       (command.extensionId !== undefined &&
         !/^ext_[a-f0-9-]{36}$/.test(command.extensionId)) ||
       (command.pin !== undefined && !isManagedExtensionPins([command.pin])) ||
+      (command.requiresOAuth !== undefined &&
+        typeof command.requiresOAuth !== 'boolean') ||
       (command.applySubmitted !== undefined &&
         typeof command.applySubmitted !== 'boolean')
+    )
+      return;
+    if (
+      (command.selectionVersion !== undefined &&
+        command.selectionVersion !== 2) ||
+      (command.selectionVersion === 2 &&
+        !isManagedMcpAuthBindings(command.mcpAuthBindings)) ||
+      (command.selectionVersion === undefined &&
+        command.mcpAuthBindings !== undefined)
     )
       return;
     if (
@@ -155,7 +192,7 @@ export function parseManagedExtensionInstall(
           ].includes(key),
       ) ||
       !['skill', 'extension', 'mcp'].includes(metadata.sourceKind) ||
-      metadata.compilerVersion !== 1 ||
+      ![1, 2].includes(metadata.compilerVersion) ||
       !/^[a-f0-9]{64}$/.test(metadata.sourceDigest) ||
       !metadata.target ||
       typeof metadata.target !== 'object' ||
@@ -198,9 +235,14 @@ export function isManagedExtensionConfigurationPending(
 export function isManagedExtensionApplyRejected(cause: unknown) {
   return (
     cause instanceof JavaManagedAgentHttpError &&
-    ((cause.status === 400 && cause.code === 'invalid_request') ||
+    ((cause.status === 400 &&
+      ['invalid_request', 'invalid_mcp_oauth_request'].includes(cause.code)) ||
       (cause.status === 409 &&
-        cause.code === 'extension_config_revision_conflict'))
+        [
+          'extension_config_revision_conflict',
+          'extension_selection_upgrade_required',
+          'oauth_authorization_unavailable',
+        ].includes(cause.code)))
   );
 }
 
@@ -251,6 +293,23 @@ export async function reviewManagedExtensionInstall(
     extensions: current.extensions,
     applyKey: `${managedRequestId()}:apply`,
     applySubmitted: false,
+    ...(current.selectionVersion === 2 || command.selectionVersion === 2
+      ? {
+          selectionVersion: 2 as const,
+          mcpAuthBindings: [
+            ...(current.mcpAuthBindings ?? []).filter(
+              (binding) =>
+                !command.pin ||
+                !binding.serverId.startsWith(`${command.pin.extensionId}:`),
+            ),
+            ...(command.mcpAuthBindings ?? []).filter(
+              (binding) =>
+                command.pin &&
+                binding.serverId.startsWith(`${command.pin.extensionId}:`),
+            ),
+          ],
+        }
+      : {}),
   };
 }
 
@@ -294,7 +353,20 @@ export function isManagedExtensionInstallActive(
     )
   )
     return false;
-  return true;
+  return (
+    command.selectionVersion !== 2 ||
+    (snapshot.selectionVersion === 2 &&
+      (snapshot.mcpAuthBindings ?? []).length ===
+        (command.mcpAuthBindings ?? []).length &&
+      (command.mcpAuthBindings ?? []).every((binding) =>
+        snapshot.mcpAuthBindings?.some(
+          (entry) =>
+            entry.serverId === binding.serverId &&
+            entry.credentialId === binding.credentialId &&
+            entry.credentialGeneration === binding.credentialGeneration,
+        ),
+      ))
+  );
 }
 
 export async function continueManagedExtensionInstall(
@@ -304,6 +376,9 @@ export async function continueManagedExtensionInstall(
   settings: Record<string, string> | undefined,
   options: ManagedAgentRequestOptions,
   progress: (command: ManagedExtensionInstallCommand) => void,
+  authorize?: (
+    command: ManagedExtensionInstallCommand,
+  ) => Promise<ManagedExtensionInstallCommand>,
 ): Promise<ManagedExtensionSnapshot> {
   if (
     !management.importPackage ||
@@ -410,17 +485,32 @@ export async function continueManagedExtensionInstall(
       save({ applySubmitted: false });
     return result;
   }
+  if (authorize) {
+    command = await authorize(command);
+    options.signal?.throwIfAborted();
+    progress(command);
+  }
   const pins = command.extensions.filter(
     (pin) => pin.extensionId !== command.pin!.extensionId,
   );
   if (pins.length >= 32)
     throw new Error('The Session package limit has been reached.');
   const extensions = [...pins, command.pin!];
-  const selection = {
-    expectedConfigRevision: command.expectedConfigRevision,
+  const selection = managedExtensionSelection(
+    {
+      revision: command.expectedConfigRevision,
+      selectionVersion: command.selectionVersion,
+      mcpAuthBindings: command.mcpAuthBindings,
+      extensions: authorize ? extensions : command.extensions,
+    },
     extensions,
-  };
-  save({ applySubmitted: true });
+  );
+  save({
+    applySubmitted: true,
+    ...(selection.selectionVersion === 2
+      ? { mcpAuthBindings: selection.mcpAuthBindings }
+      : {}),
+  });
   try {
     const result = await management.apply(command.sessionId, selection, {
       ...options,

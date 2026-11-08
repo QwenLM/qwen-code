@@ -63,7 +63,7 @@ public final class ManagedExtensionProtocol {
                     "baseMcpServers", "baseHookCatalog"))
                     || !(operation.get("command") instanceof Map<?, ?> command)
                     || !command.keySet().containsAll(Set.of("operationId", "actorKey", "expectedRevision", "extensions"))
-                    || !Set.of("operationId", "actorKey", "expectedRevision", "extensions", "mcpChange").containsAll(command.keySet())
+                    || !Set.of("operationId", "actorKey", "expectedRevision", "extensions", "mcpChange", "selectionVersion", "mcpAuthBindings").containsAll(command.keySet())
                     || !operationId.equals(command.get("operationId"))
                     || !(command.get("actorKey") instanceof String actor) || !actor.matches("[a-f0-9]{64}")
                     || !counter(operation.get("expectedRevision"), 0)
@@ -75,6 +75,7 @@ public final class ManagedExtensionProtocol {
                     || operation.get("baseHookCatalog") != null && !(operation.get("baseHookCatalog") instanceof Map)) {
                 throw invalid();
             }
+            authBindings(command);
             Set<String> identities = new HashSet<>();
             for (Object item : pins) {
                 if (!(item instanceof Map<?, ?> pin)
@@ -211,6 +212,28 @@ public final class ManagedExtensionProtocol {
                 throw invalid();
             }
             if ("enabled".equals(pin.get("state")) && ++enabled > 16) {
+                throw invalid();
+            }
+        }
+    }
+
+    private static void authBindings(Map<?, ?> command) {
+        if (!command.containsKey("selectionVersion")) {
+            if (command.containsKey("mcpAuthBindings")) {
+                throw invalid();
+            }
+            return;
+        }
+        if (!counter(command.get("selectionVersion"), 2) || BrokerValues.exactLong(command.get("selectionVersion")) != 2
+                || !(command.get("mcpAuthBindings") instanceof List<?> bindings) || bindings.size() > 32) {
+            throw invalid();
+        }
+        Set<String> ids = new HashSet<>();
+        for (Object item : bindings) {
+            if (!(item instanceof Map<?, ?> binding) || !binding.keySet().equals(Set.of("serverId", "credentialId", "credentialGeneration"))
+                    || !identity(binding.get("serverId")) || !ids.add((String) binding.get("serverId"))
+                    || !(binding.get("credentialId") instanceof String credential) || !credential.matches("mcred_[0-9a-f-]{36}")
+                    || !counter(binding.get("credentialGeneration"), 1)) {
                 throw invalid();
             }
         }

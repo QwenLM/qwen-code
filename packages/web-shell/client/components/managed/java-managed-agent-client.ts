@@ -12,6 +12,12 @@ import type {
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
+  ManagedMcpOAuthAttempt,
+  ManagedMcpOAuthSnapshot,
+  ManagedMcpOAuthRevocation,
+  ManagedMcpOAuthStart,
+} from './managed-mcp-oauth-types';
+import type {
   ManagedWorkspaceFileQueryRequest,
   ManagedWorkspaceFileReadRequest,
   ManagedWorkspaceFileUploadRequest,
@@ -746,6 +752,71 @@ export class JavaManagedAgentClient {
     return this.post<ManagedMcpManagementSnapshot>(
       '/session-mcp/management/query',
       request,
+      signal,
+    );
+  }
+
+  queryMcpOAuth(
+    sessionId: string,
+    extensions: ManagedExtensionPin[] | undefined,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthSnapshot>(
+      '/session-mcp-oauth/query',
+      { sessionId, ...(extensions ? { extensions } : {}) },
+      signal,
+    );
+  }
+
+  startMcpOAuth(
+    sessionId: string,
+    input: {
+      serverId: string;
+      browserNonce: string;
+      pin?: ManagedExtensionPin;
+    },
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthStart>(
+      '/session-mcp-oauth/start',
+      { sessionId, ...input, idempotencyKey },
+      signal,
+    );
+  }
+
+  getMcpOAuthStatus(
+    sessionId: string,
+    attemptId: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthAttempt>(
+      '/session-mcp-oauth/status',
+      { sessionId, attemptId },
+      signal,
+    );
+  }
+
+  completeMcpOAuth(
+    sessionId: string,
+    input: { attemptId: string; browserNonce: string },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthAttempt>(
+      '/session-mcp-oauth/complete',
+      { sessionId, ...input },
+      signal,
+    );
+  }
+
+  revokeMcpOAuth(
+    sessionId: string,
+    input: { credentialId: string; expectedGeneration: number },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthRevocation>(
+      '/session-mcp-oauth/revoke',
+      { sessionId, ...input },
       signal,
     );
   }

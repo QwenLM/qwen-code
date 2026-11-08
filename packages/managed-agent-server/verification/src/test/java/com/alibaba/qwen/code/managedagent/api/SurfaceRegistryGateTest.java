@@ -62,6 +62,14 @@ class SurfaceRegistryGateTest {
         assertThat(mounted).hasSameSizeAs(SurfaceRegistry.values());
     }
 
+    @Test
+    void personalOAuthMetadataUsesTheManagementAdmissionBoundary() {
+        for (var entry : Set.of(SurfaceRegistry.PUBLIC_MCP_OAUTH_QUERY, SurfaceRegistry.WEBSHELL_MCP_OAUTH_QUERY)) {
+            assertThat(entry.ruleClass()).isEqualTo(SurfaceRegistry.RuleClass.SESSION_MCP_OAUTH_MANAGEMENT);
+            assertThat(entry.capabilities()).containsExactly(SurfaceRegistry.Capability.MCP_OAUTH_QUERY);
+        }
+    }
+
     // The acceptance walk keys the dual-purpose events route off its
     // first capability; that order is EnumSet's ordinal iteration, so the
     // declaration order of Capability is load-bearing here.

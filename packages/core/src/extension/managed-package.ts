@@ -55,8 +55,8 @@ export interface ManagedPackageTarget {
   arch: 'arm64' | 'x64' | 'any';
 }
 export interface ManagedPackageManifest {
-  schemaVersion: 1;
-  compilerVersion: 1;
+  schemaVersion: 1 | 2;
+  compilerVersion: 1 | 2;
   name: string;
   version: string;
   target: ManagedPackageTarget;
@@ -634,10 +634,15 @@ export async function compileManagedExtensionPackage(
   if (Object.keys(contributions.mcpServers).length) components.push('mcp');
   if (Object.keys(contributions.hooks).length) components.push('hooks');
   if (contributions.settings.length) components.push('settings');
+  const hasOAuth = Object.values(contributions.mcpServers).some(
+    (recipe) =>
+      parseManagedMcpRecipe(recipe, { allowPlaceholders: true }).auth !==
+      undefined,
+  );
   return {
     manifest: {
-      schemaVersion: 1,
-      compilerVersion: MANAGED_PACKAGE_COMPILER_VERSION,
+      schemaVersion: hasOAuth ? 2 : 1,
+      compilerVersion: hasOAuth ? 2 : MANAGED_PACKAGE_COMPILER_VERSION,
       name,
       version: text(config['version'] ?? '1.0.0', 'version', 128),
       target: packageTarget,

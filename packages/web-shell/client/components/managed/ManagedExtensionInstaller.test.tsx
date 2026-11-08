@@ -419,7 +419,7 @@ it('requires known credential headers to contain only the declared secret refere
   ).not.toThrow();
 });
 
-it('installs a reviewed Skill archive through the v1 preparation contract', async () => {
+it('installs a reviewed Skill archive without requiring personal authorization for the v2 preparation contract', async () => {
   const client = api();
   client.previewPackage.mockResolvedValue({
     ...inspection,
@@ -456,7 +456,7 @@ it('installs a reviewed Skill archive through the v1 preparation contract', asyn
   expect(client.importPackage).toHaveBeenCalledWith(
     'workspace',
     undefined,
-    expect.objectContaining({ sourceKind: 'skill', compilerVersion: 1 }),
+    expect.objectContaining({ sourceKind: 'skill', compilerVersion: 2 }),
     file,
     expect.any(Object),
   );
@@ -493,3 +493,25 @@ it.each(['X-Auth-Token', 'X-Custom-Credential'])(
     ).toThrow('settings placeholders');
   },
 );
+
+it('refuses a static Authorization placeholder alongside personal OAuth', () => {
+  expect(() =>
+    buildManagedMcpInput({
+      name: 'docs',
+      serverName: 'docs',
+      transport: 'streamable-http',
+      command: '',
+      args: '[]',
+      url: 'https://mcp.example/mcp',
+      environment: '{}',
+      headers: JSON.stringify({ Authorization: 'Bearer ${TOKEN}' }),
+      secretKeys: ['TOKEN'],
+      auth: {
+        type: 'oauth',
+        providerId: 'fixture',
+        resourceUri: 'https://mcp.example/mcp',
+        scopes: ['read'],
+      },
+    }),
+  ).toThrow('no static Authorization header');
+});
