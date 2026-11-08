@@ -740,6 +740,39 @@ describe('createRuntimeContentGeneratorView modalities source', () => {
     });
   });
 
+  it('omits via for a built-in model with no provider entry', async () => {
+    // A qwen-oauth session pinned to a built-in model has no `modelProviders`
+    // entry to declare the value on, so naming that route as `via` would aim
+    // the refusal at a key that does not exist. The primary path omits `via`
+    // for exactly this case.
+    const config = {
+      getContentGeneratorConfig: () => primary,
+      getContentGeneratorConfigSources: () => sessionSources,
+      getAuthType: () => 'qwen-oauth',
+      getModelProvidersConfig: () => ({}),
+      getModelsConfig: () => ({
+        getResolvedModel: () => ({
+          id: 'qwen3-coder-plus',
+          authType: 'qwen-oauth',
+          generationConfig: { modalities: { image: true } },
+          capabilities: {},
+        }),
+      }),
+    } as unknown as Config;
+
+    const view = await createRuntimeContentGeneratorView(
+      config,
+      config,
+      'qwen3-coder-plus',
+      { authType: 'qwen-oauth' },
+    );
+
+    expect(view.configSources?.['modalities']).toEqual({
+      kind: 'computed',
+      detail: "auto-detected from 'qwen3-coder-plus'",
+    });
+  });
+
   it('keeps the session’s sources for a view on the session’s own model', async () => {
     const view = await viewFor(
       configWithProviders([{ id: 'agent-model' }]),

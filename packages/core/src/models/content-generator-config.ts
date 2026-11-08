@@ -242,12 +242,17 @@ export function resolveAgentModalitiesSource(
   // A partially-built Config (tests, a view created before models are loaded)
   // can throw here; the fallback below is the correct answer for it anyway.
   const providers = safeCall(() => base.getModelProvidersConfig?.());
+  const declared =
+    resolvedModel && providers
+      ? findProviderEntry(
+          providers,
+          resolvedModel,
+          safeCall(() =>
+            base.getModelsConfig?.()?.getProviderProtocolConfig?.(),
+          ),
+        )
+      : undefined;
   if (resolvedModel && providers) {
-    const declared = findProviderEntry(
-      providers,
-      resolvedModel,
-      safeCall(() => base.getModelsConfig?.()?.getProviderProtocolConfig?.()),
-    );
     if (
       declared?.generationConfig?.modalities !== undefined &&
       // The registry canonicalises `modalities` away for a family whose
@@ -275,13 +280,16 @@ export function resolveAgentModalitiesSource(
   }
   // Everything else was either name-detected by the registry or left as the
   // field's default; neither was read from a setting that names this model.
-  // `via` still records the provider route the value was derived through, so a
+  // `via` records the provider route the value was derived through, so a
   // refusal does not offer `model.generationConfig.modalities` to an agent
-  // whose route came from `modelProviders` (QwenLM/qwen-code#16185).
+  // whose route came from `modelProviders` (QwenLM/qwen-code#16185). A
+  // built-in route has no provider entry to declare the value on, so naming
+  // that route as `via` would point a refusal at a key that does not exist —
+  // the primary path omits `via` in exactly that case.
   return {
     ...COMPUTED,
     detail: `auto-detected from '${model}'`,
-    ...(resolvedModel
+    ...(declared && resolvedModel
       ? {
           via: {
             kind: 'modelProviders' as const,
