@@ -12927,7 +12927,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           writeInboundTasks([
             makeInboundTaskRecord({
               state: 'failed',
-              // On the last attempt a public task would post its comment.
+              // The last-attempt row also reaches the exhaustion retire.
               attempts,
               deferCount: 239,
               backpressure: true,
@@ -12974,23 +12974,33 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           const stderr = vi
             .spyOn(process.stderr, 'write')
             .mockReturnValue(true);
+          let logged = '';
           try {
             await pollOnce();
           } finally {
+            // Read before the restore, which clears the recorded calls.
+            logged = stderr.mock.calls.map((call) => String(call[0])).join('');
             stderr.mockRestore();
           }
 
           expect(existsSync(boundDeadLetterPath())).toBe(true);
-          expect(remove).toHaveBeenCalled();
           // The task it left behind is still a bound one, so the failure stays
           // private. Before the last attempt the removal failure is recorded
-          // on it; on the last, retiring the exhausted task fails the same way.
+          // on it. On the last attempt only the bound delivery, not the
+          // attempt budget, keeps the public comment away: retiring the
+          // exhausted task fails the same way and the error escapes the
+          // recovery, leaving the record running (so recoverable) after both
+          // dead letters were written.
+          expect(remove).toHaveBeenCalledTimes(attempts === undefined ? 1 : 2);
+          expect(logged.includes('inbound task recovery failed')).toBe(
+            attempts !== undefined,
+          );
           expect(readInboundTasks()).toEqual([
             expect.objectContaining({
               delivery: { kind: 'bound-session', sessionId: 'bound-session' },
               ...(attempts === undefined
                 ? { state: 'failed', error: 'EIO: task store' }
-                : {}),
+                : { state: 'running', attempts: 2 }),
             }),
           ]);
           expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
