@@ -5291,6 +5291,11 @@ export class Session implements SessionContext {
       // the leader — while its mailbox row is already marked read. The
       // irreversible managed-shutdown path never runs this closure.
       this.peerNotificationsSealed = false;
+      // Un-sealing is not enough: the pre-close flush also stopped the
+      // leader-inbox poll, and nothing else restarts it, so the reports would
+      // still never arrive. Resuming is idempotent and a no-op once the team is
+      // gone.
+      this.config.getTeamManager()?.resumeLeaderInboxPolling?.();
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();

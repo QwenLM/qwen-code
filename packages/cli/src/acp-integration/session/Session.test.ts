@@ -1344,6 +1344,9 @@ describe('Session', () => {
           if (manager.holdQuiesce) await manager.holdQuiesce();
           manager.intakeCalls.push('quiesce:settled');
         },
+        resumeLeaderInboxPolling() {
+          manager.intakeCalls.push('resumeLeaderInboxPolling');
+        },
       };
       return manager;
     }
@@ -1765,6 +1768,12 @@ describe('Session', () => {
       vi.mocked(mockChatRecordingService.recordNotification).mockClear();
 
       releaseClose();
+      // Un-sealing alone leaves the session deaf: the pre-close flush also
+      // stopped the real leader-inbox poll and nothing else restarts it, so the
+      // rollback has to resume intake as well. Pinned end to end against a real
+      // TeamManager in
+      // packages/core/src/agents/team/TeamManager.leader-inbox.test.ts.
+      expect(manager.intakeCalls).toContain('resumeLeaderInboxPolling');
       manager.leaderCallback?.('after rollback', 'after rollback', [
         'security',
       ]);

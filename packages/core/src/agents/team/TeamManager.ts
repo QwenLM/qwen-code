@@ -1253,6 +1253,25 @@ export class TeamManager {
   }
 
   /**
+   * Resume leader-inbox intake after a caller quiesced it and then decided to
+   * keep going. A rolled-back session close is the live case: it clears its
+   * seal, but `ensureLeaderInboxPolling()` otherwise runs only when a teammate
+   * is spawned, so the session would stay deaf for the rest of its life to
+   * reports that are already marked read in the mailbox.
+   *
+   * Idempotent — `ensureLeaderInboxPolling()` returns while the interval lives,
+   * so a poll already in flight is never doubled. It stays a no-op when there
+   * is nothing left to listen for: no leader callback attached, or every
+   * teammate already terminal, where restarting would only re-publish
+   * ALL_TEAMMATES_TERMINATED for a team that is gone.
+   */
+  resumeLeaderInboxPolling(): void {
+    if (!this.leaderMessageCallback) return;
+    if (this.allTeammatesTerminated()) return;
+    this.ensureLeaderInboxPolling();
+  }
+
+  /**
    * Check for new leader inbox messages and deliver them.
    */
   private async pollLeaderInbox(): Promise<void> {
