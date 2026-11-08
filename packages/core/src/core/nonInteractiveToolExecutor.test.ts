@@ -22,6 +22,7 @@ import {
   getRuntimeContentGenerator,
 } from '../index.js';
 import type { Part } from '@google/genai';
+import { InputFormat } from '../output/types.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 
 describe('executeToolCall', () => {
@@ -75,6 +76,8 @@ describe('executeToolCall', () => {
         error: vi.fn(),
       }),
       isInteractive: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue(InputFormat.TEXT),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     abortController = new AbortController();

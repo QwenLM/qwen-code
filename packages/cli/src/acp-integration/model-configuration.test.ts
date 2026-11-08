@@ -20,6 +20,7 @@ import {
   resolveReasoningCapabilities,
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -208,6 +209,31 @@ describe('model configuration manifest', () => {
   it.each([
     ['deepseek-flash', 'https://api.deepseek.com/v1', ['low', 'high', 'max']],
     [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alibaba-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.aliyun-inc.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash',
+      'https://model-proxy.alicloudapi.com/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash-1017',
+      'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'DeepSeek-V4-Pro',
+      'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+      ['high', 'max'],
+    ],
+    [
       'deepseek-v4.1-flash-1017',
       'https://dashscope.aliyuncs.com/compatible-mode/v1',
       ['low', 'high', 'max'],
@@ -236,6 +262,7 @@ describe('model configuration manifest', () => {
       ).toMatchObject({
         currentValue: 'high',
         options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+        _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
       });
     },
   );
@@ -433,19 +460,19 @@ describe('model configuration manifest', () => {
     [
       'alibabaStandard',
       'qwen3.8-max',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-max-0902',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
       'alibabaStandard',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     ['alibabaStandard', 'deepseek-v4-pro', ['none', 'high', 'max'], 'high'],
@@ -456,12 +483,16 @@ describe('model configuration manifest', () => {
       'high',
     ],
     ['alibabaStandard', 'kimi-k3', ['low', 'high', 'max'], 'max'],
-    ['token-plan', 'qwen3.8-max', ['low', 'medium', 'xhigh'], 'xhigh'],
-    ['token-plan', 'qwen3.8-max-preview', ['low', 'medium', 'xhigh'], 'xhigh'],
+    [
+      'token-plan',
+      'qwen3.8-max',
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'xhigh',
+    ],
     [
       'token-plan',
       'qwen3.8-flash',
-      ['none', 'low', 'medium', 'xhigh'],
+      ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       'xhigh',
     ],
     [
@@ -696,18 +727,30 @@ describe('model configuration manifest', () => {
     expect(getConfiguredModelReasoning(config)).toBeUndefined();
   });
 
-  it('registers the exact stable qwen3.8-max reasoning controls', () => {
-    expect(getModelConfiguration('qwen3.8-max')).toEqual({
-      reasoning: {
-        thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
-        defaultEffort: 'xhigh',
-      },
-    });
-  });
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'registers the exact stable %s reasoning controls',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toEqual({
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+        },
+      });
+    },
+  );
 
-  it('builds the stable qwen3.8-max default reasoning option', () => {
-    expect(buildModelReasoningConfigOption('qwen3.8-max')).toMatchObject({
+  it.each([
+    'qwen-latest-series-invite-202610-m6',
+    'QWEN-LATEST-SERIES-INVITE-202610-m6',
+    'qwen4',
+    'qwen4-plus',
+    'Qwen4-Max-2026-10-01',
+  ])('registers the stable tiered controls for %s', (modelId) => {
+    expect(getModelConfiguration(modelId)).toEqual(
+      getModelConfiguration('qwen3.8-max'),
+    );
+    expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
       id: 'reasoning_effort',
       currentValue: 'xhigh',
       options: [
@@ -721,6 +764,114 @@ describe('model configuration manifest', () => {
       },
     });
   });
+
+  it.each(['qwen-latest-series-other', 'company-qwen4', 'qwen3.9-max'])(
+    'does not register tiered controls for %s',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toBeUndefined();
+    },
+  );
+
+  it.each(['qwen4-plus', 'qwen-latest-series-invite-202610-m6'])(
+    'projects tiered controls for %s on opaque duplicate-endpoint routes',
+    (model) => {
+      const baseUrl =
+        'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+      const generation = {
+        model,
+        authType: 'openai',
+        baseUrl,
+        reasoningSnapshot: [
+          { id: model, authType: 'openai', baseUrl, reasoning: undefined },
+          {
+            id: model,
+            authType: 'openai',
+            baseUrl:
+              'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+            reasoning: undefined,
+          },
+        ],
+        reasoningRouteBaseUrl: baseUrl,
+      } as unknown as ContentGeneratorConfig;
+      expect(
+        buildModelReasoningRoutePreview(
+          generation,
+          resolveReasoningForModel(undefined, generation),
+          undefined,
+          true,
+        )?.[0],
+      ).toMatchObject({
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+      });
+    },
+  );
+
+  it('keeps opaque routes without a known contract control-free', () => {
+    const generation = {
+      model: 'qwen3.7-plus',
+      authType: 'openai',
+      baseUrl: 'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    } as ContentGeneratorConfig;
+    expect(
+      buildModelReasoningRoutePreview(generation, undefined, undefined, true),
+    ).toBeUndefined();
+  });
+
+  it('does not re-tier the display for a declared new-alias route', () => {
+    const generation = {
+      model: 'deepseek-v4.1-flash-custom',
+      authType: 'openai',
+      baseUrl:
+        'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      reasoning: { effort: 'xhigh' },
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+            disableField: 'reasoning_effort',
+          },
+        },
+      }),
+    } as unknown as Config;
+    // The display reports the configured tier as the user set it. The
+    // declared-capability wire path separately drops an out-of-ladder tier
+    // (pinned by the sibling pipeline test); the built-in normalizer must
+    // not re-tier the display into a tier the user did not choose.
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: 'xhigh',
+    });
+  });
+
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'builds the stable %s default reasoning option',
+    (modelId) => {
+      expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+        },
+      });
+    },
+  );
 
   it('omits Thinking off when qwen3.8-max requires thinking', () => {
     expect(
@@ -770,6 +921,17 @@ describe('model configuration manifest', () => {
     ['qwen3.8-max', 'max', false, false],
     ['qwen3.8-max', 'none', false, true],
     ['qwen3.8-max', 'none', true, false],
+    ['qwen3.8-flash', 'low', false, true],
+    ['qwen3.8-flash', 'medium', false, true],
+    ['qwen3.8-flash', 'xhigh', false, true],
+    ['qwen3.8-flash', 'high', false, false],
+    ['qwen3.8-flash', 'max', false, false],
+    ['qwen3.8-flash', 'none', false, true],
+    ['qwen3.8-flash', 'none', true, false],
+    ['qwen-latest-series-invite-202610-m6', 'low', false, true],
+    ['qwen-latest-series-invite-202610-m6', 'max', false, false],
+    ['qwen4-plus', 'none', false, true],
+    ['qwen4-plus', 'none', true, false],
     ['qwen3.7-plus', 'default', false, true],
     ['qwen3.7-plus', 'none', false, true],
     ['qwen3.7-plus', 'low', false, false],
@@ -784,11 +946,27 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it('wraps the stable default option for workspace preview', () => {
-    expect(buildModelReasoningConfigPreview('qwen3.8-max')).toEqual([
-      buildModelReasoningConfigOption('qwen3.8-max'),
-    ]);
-  });
+  it.each([
+    'qwen3.8-max',
+    'qwen3.8-flash',
+    'qwen3.7-plus',
+    'future-served-model',
+  ])(
+    'shows the subscription default for %s in the workspace preview',
+    (modelId) => {
+      const generation = {
+        model: modelId,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      };
+      const reasoning = resolveReasoningForModel(undefined, generation);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, undefined, true),
+      ).toMatchObject([{ currentValue: 'medium' }]);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, 'xhigh', true),
+      ).toMatchObject([{ currentValue: 'xhigh' }]);
+    },
+  );
 
   it('preserves mandatory thinking in the workspace preview', () => {
     expect(
@@ -807,6 +985,10 @@ describe('model configuration manifest', () => {
     ['qwen3.8-max', 'none', false, { enabled: false }],
     ['qwen3.8-max', 'max', false, {}],
     ['qwen3.8-max', 'none', true, {}],
+    ['qwen3.8-flash', 'medium', false, { enabled: true, effort: 'medium' }],
+    ['qwen3.8-flash', 'none', false, { enabled: false }],
+    ['qwen3.8-flash', 'max', false, {}],
+    ['qwen3.8-flash', 'none', true, {}],
   ] as const)(
     'projects persisted %s selection %s with mandatory=%s',
     (modelId, selection, mandatory, expected) => {

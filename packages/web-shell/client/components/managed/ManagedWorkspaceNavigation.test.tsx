@@ -49,10 +49,8 @@ describe('Managed workspace navigation', () => {
     localStorage.clear();
     list.mockResolvedValue({ data: [workspace], supported: true });
     provider = {
-      kind: 'java',
       storageKey: 'provider:a',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       workspaceBinding: {
         agentId: 'agent',
         list,
@@ -65,6 +63,7 @@ describe('Managed workspace navigation', () => {
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -135,18 +134,18 @@ describe('Managed workspace navigation', () => {
     expect(provider.listSessions).not.toHaveBeenCalled();
     await act(async () =>
       group('b')
-        .querySelector<HTMLButtonElement>('button[title="New task"]')!
+        .querySelector<HTMLButtonElement>('button[title="New session"]')!
         .click(),
     );
     expect(selectWorkspace).toHaveBeenCalledWith('b');
     expect(
       group('unpaged').querySelector<HTMLButtonElement>(
-        'button[title="New task"]',
+        'button[title="New session"]',
       )!.disabled,
     ).toBe(true);
     await act(async () =>
-      [...group('unpaged').querySelectorAll('button')]
-        .find((item) => item.textContent === 'Task outside')!
+      group('unpaged')
+        .querySelector<HTMLElement>('[data-managed-session-id="outside"]')!
         .click(),
     );
     expect(selectSession).toHaveBeenCalledWith('outside', 'unpaged');
@@ -156,8 +155,8 @@ describe('Managed workspace navigation', () => {
     await render({ active: false });
     expect(container.querySelector('[aria-current]')).toBeNull();
     await act(async () =>
-      [...container.querySelectorAll('button')]
-        .find((item) => item.textContent === 'Task one')!
+      container
+        .querySelector<HTMLElement>('[data-managed-session-id="one"]')!
         .click(),
     );
     expect(selectSession).toHaveBeenCalledWith('one', 'a');
@@ -165,6 +164,83 @@ describe('Managed workspace navigation', () => {
     expect(container.querySelector('[aria-current="page"]')?.textContent).toBe(
       'Task one',
     );
+  });
+
+  it.each([
+    ['created', false],
+    ['admitted', true],
+    ['runtime_starting', true],
+    ['agent_running', true],
+    ['waiting_runtime', true],
+    ['tool_running', true],
+    ['cancelling', true],
+    ['completed', false],
+    ['failed', false],
+    ['cancelled', false],
+  ] as const)(
+    'uses daemon running indicators for %s',
+    async (phase, running) => {
+      await render({
+        sessions: [{ ...session('one', 'a'), phase }],
+        active: false,
+      });
+      const row = container.querySelector('[data-managed-session-id="one"]')!;
+      expect(
+        Boolean(row.querySelector('[data-web-shell-session-running]')),
+      ).toBe(running);
+      expect(
+        Boolean(row.querySelector('[role="status"][aria-label="Running"]')),
+      ).toBe(running);
+      expect(row.getAttribute('aria-current')).toBeNull();
+      await act(async () => (row as HTMLElement).click());
+      expect(selectSession).toHaveBeenCalledWith('one', 'a');
+    },
+  );
+
+  it('removes both running indicators when a task settles without changing selection', async () => {
+    await render({
+      sessions: [{ ...session('one', 'a'), phase: 'agent_running' }],
+    });
+    expect(
+      group('a').querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    await render({ sessions: [session('one', 'a')] });
+    expect(
+      group('a').querySelector('[data-web-shell-session-running]'),
+    ).toBeNull();
+    expect(
+      group('a').querySelector('[role="status"][aria-label="Running"]'),
+    ).toBeNull();
+    expect(container.querySelector('[aria-current="page"]')?.textContent).toBe(
+      'Task one',
+    );
+  });
+
+  it('keeps lifecycle actions independent from selecting a running session', async () => {
+    const archive = vi.fn();
+    await render({
+      sessions: [{ ...session('one', 'a'), phase: 'agent_running' }],
+      renderSessionActions: (item) => (
+        <button onClick={archive} aria-label={`Archive ${item.sessionId}`}>
+          Archive
+        </button>
+      ),
+    });
+    const row = container.querySelector<HTMLElement>(
+      '[data-managed-session-id="one"]',
+    )!;
+    const action = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Archive one"]',
+    )!;
+    expect(
+      row.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    expect(row.contains(action)).toBe(true);
+    await act(async () => action.click());
+    expect(archive).toHaveBeenCalledOnce();
+    expect(selectSession).not.toHaveBeenCalled();
+    await act(async () => row.click());
+    expect(selectSession).toHaveBeenCalledWith('one', 'a');
   });
 
   it('filters by common workspace or session search without reloading the catalog', async () => {
@@ -264,8 +340,9 @@ describe('Managed workspace navigation', () => {
     );
     expect(group('a').textContent).toContain('Task one');
     expect(
-      group('a').querySelector<HTMLButtonElement>('button[title="New task"]')!
-        .disabled,
+      group('a').querySelector<HTMLButtonElement>(
+        'button[title="New session"]',
+      )!.disabled,
     ).toBe(true);
     await render({ revision: 1 });
     expect(container.querySelector('[role="alert"]')).toBeNull();

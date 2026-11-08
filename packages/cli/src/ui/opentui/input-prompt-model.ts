@@ -24,8 +24,8 @@
  *  - the double-Esc clear state machine (arm → 500ms window → clear);
  *  - history edge decisions feeding the ported InputHistory.
  *
- * The OpenTUI component owns the edit buffer (opentui EditBufferRenderable)
- * and the keyboard; it delegates every decision here.
+ * The OpenTUI component owns the Ink text buffer and keyboard; it delegates
+ * completion and submission decisions here.
  */
 
 import { Fzf, type FzfResultItem } from 'fzf';
@@ -64,8 +64,9 @@ export { MAX_SUGGESTIONS_TO_SHOW };
 // line_start_weight + col where the rope weighs each newline as 1. The
 // helpers in this module work in code-point units (toCodePoints
 // coordinates, matching the ink ports they were derived from). These pure
-// converters bridge the two; the component calls them at the editor
-// boundary so every helper keeps its code-point contract.
+// legacy converters describe scalar-width coordinates. Editing now uses the
+// existing Ink buffer directly: grapheme/display positions are not invertible.
+// Native mouse/view projection lives in text-buffer-view.ts.
 
 const codePointWidth = (cp: string): number => getCachedStringWidth(cp);
 

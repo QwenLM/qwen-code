@@ -21,6 +21,8 @@ for (const width of [1280, 390]) {
       const request = route.request();
       const path = new URL(request.url()).pathname;
       const body = request.postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
@@ -74,7 +76,7 @@ for (const width of [1280, 390]) {
     await page
       .getByRole('menuitem', { name: 'Choose existing directory', exact: true })
       .click();
-    const dialog = page.getByRole('dialog', { name: 'Add Workspace' });
+    const dialog = page.getByRole('dialog', { name: 'Add workspace' });
     await expect(dialog).toBeVisible();
     await expect(page.locator('#managed-directory-root-label')).toHaveCount(0);
     await expect(

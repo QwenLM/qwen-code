@@ -29,6 +29,7 @@ import {
 } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
+import { createUntil } from './wait.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -41,20 +42,18 @@ const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 const keys = {
   left: '\x1b[D',
+  right: '\x1b[C',
+  up: '\x1b[A',
+  down: '\x1b[B',
   home: '\x1b[H',
+  end: '\x1b[F',
   undo: '\x1a',
   // modifyOtherKeys is decoded by both renderers without Kitty negotiation.
   redo: '\x1b[27;6;122~',
   editor: '\x18',
 };
 
-async function until(check: () => boolean | Promise<boolean>, label: string) {
-  const deadline = Date.now() + 12_000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(label);
-    await sleep(100);
-  }
-}
+const until = createUntil(12_000);
 
 function lastUser(server: FakeOpenAIServer): string {
   const messages = server.requests.at(-1)?.body['messages'];
@@ -84,9 +83,11 @@ type Context = {
   session: InteractiveSession;
   server: FakeOpenAIServer;
   editorLog: string;
+  workspace: string;
   ownedTemp: string;
   sentinel: string;
   release: () => void;
+  restart: () => Promise<InteractiveSession>;
   control: (value: Record<string, unknown>) => void;
   frame: (name: string) => Promise<string>;
   press: (sequence: string, settle?: boolean) => Promise<void>;
@@ -148,6 +149,9 @@ async function scenario(
   let server: FakeOpenAIServer | undefined;
   let failure: string | undefined;
   let submittedCount = 0;
+  const closedSessions: Array<
+    { exitCode: number; signal?: number } | undefined
+  > = [];
   const cleanupErrors: string[] = [];
   const frame = async (label: string) => {
     const value = await session!.viewport();
@@ -272,9 +276,19 @@ async function scenario(
       session,
       server,
       editorLog,
+      workspace,
       ownedTemp: realpathSync(temp),
       sentinel,
       release,
+      restart: async () => {
+        await frame('before-restart');
+        await session!.close();
+        writeFileSync(join(evidence, 'before-restart.ansi'), session!.output());
+        closedSessions.push(session!.exitResult());
+        session = await launch();
+        await ready();
+        return session;
+      },
       control: (value) => json(controlFile, value),
       frame,
       press,
@@ -301,6 +315,14 @@ async function scenario(
         () => {
           if (existsSync(editorLog))
             copyFileSync(editorLog, join(evidence, 'editor.jsonl'));
+        },
+      ],
+      [
+        'copy project settings',
+        () => {
+          const file = join(workspace, '.qwen', 'settings.json');
+          if (existsSync(file))
+            copyFileSync(file, join(evidence, 'project-settings.json'));
         },
       ],
       [
@@ -346,6 +368,7 @@ async function scenario(
       cols,
       terminalUnicodeVersion: '11',
       exitAfterCleanup: session?.exitResult(),
+      closedSessions,
     });
   }
   if (failure) throw new Error(failure);
@@ -436,6 +459,115 @@ for (const redo of [false, true]) {
   );
 }
 
+it('ordinary-history-restores-draft', () =>
+  scenario(
+    'ordinary-history-restores-draft',
+    async ({ type, press, submit }) => {
+      await type('HISTORY_ALPHA');
+      await submit('HISTORY_ALPHA');
+      await type('HISTORY_BETA');
+      await submit('HISTORY_BETA');
+      await type('DRAFT');
+      await press('\x01');
+      await press('\x10');
+      await submit('HISTORY_BETA');
+      await type('SUCCESSOR');
+      await press('\x01');
+      await press('\x10');
+      await press('\x05');
+      await press('\x0e');
+      await submit('SUCCESSOR');
+    },
+  ));
+
+it('search-tab-enter-and-escape', () =>
+  scenario(
+    'search-tab-enter-and-escape',
+    async ({ type, press, submit, server, frame }) => {
+      await type('SEARCH_ALPHA');
+      await submit('SEARCH_ALPHA');
+      await type('SEARCH_BETA');
+      await submit('SEARCH_BETA');
+      for (const sequence of ['\x10', '\x0e', '\x1b[1;2A', '\x1b[1;2B']) {
+        await press('\x12');
+        await until(
+          async () =>
+            (await frame('search-live-history'))
+              .split('(r:)')
+              .at(-1)!
+              .includes('SEARCH_BETA'),
+          'live prompt history must reach search',
+        );
+        await press(sequence);
+        await submit('SEARCH_BETA');
+      }
+      await type('ALPHA');
+      await press('\x12');
+      await sleep(300);
+      await frame('search-match');
+      await press('\t');
+      await type('_TAB_MARKER');
+      expect(server.requests).toHaveLength(6);
+      await submit('SEARCH_ALPHA_TAB_MARKER');
+      await type('BETA');
+      await press('\x12');
+      await sleep(300);
+      await press('\x1b[Z');
+      await type('_SHIFT_TAB');
+      expect(server.requests).toHaveLength(7);
+      await submit('SEARCH_BETA_SHIFT_TAB');
+      await type('SEARCH_ALPHA_TAB_MARKER');
+      await press('\x12');
+      await sleep(300);
+      await submit('SEARCH_ALPHA_TAB_MARKER', '\x1b\r');
+      await type('ORIGINAL');
+      await press(keys.left.repeat(4));
+      await press('\x12');
+      await type('no-match');
+      await press('\x1b');
+      await sleep(250);
+      await type('X');
+      await submit('ORIGXINAL');
+      const long = 'LONG_' + 'abcdef'.repeat(24) + '_TAIL_SENTINEL';
+      await type(long);
+      await submit(long);
+      for (const modifier of [5, 3]) {
+        await press('\x12');
+        const candidate = async (name: string) =>
+          (await frame(`search-${modifier}-${name}`)).split('(r:)').at(-1)!;
+        await until(
+          async () => (await candidate('ready')).includes('→'),
+          'long search candidate must expose expand arrow',
+        );
+        const label = (body: string) => {
+          const rows = body.split('\n').map((line) => line.trim());
+          const start = rows.findIndex((line) => line.startsWith('> LONG_'));
+          expect(start).toBeGreaterThanOrEqual(0);
+          return rows
+            .slice(start, start + 2)
+            .join('')
+            .replace(/^> /, '')
+            .replace(/ [←→]/, '');
+        };
+        let body = await candidate('collapsed');
+        expect(body).not.toContain('TAIL_SENTINEL');
+        expect(label(body)).toBe(long.slice(0, 150) + '...');
+        const requestCount = server.requests.length;
+        await press(`\x1b[1;${modifier}C`);
+        body = await candidate('expanded');
+        expect(body).toContain('←');
+        expect(label(body)).toBe(long);
+        await press(`\x1b[1;${modifier}D`);
+        body = await candidate('recollapsed');
+        expect(body).toContain('→');
+        expect(body).not.toContain('TAIL_SENTINEL');
+        expect(label(body)).toBe(long.slice(0, 150) + '...');
+        expect(server.requests).toHaveLength(requestCount);
+        await submit(long);
+      }
+    },
+  ));
+
 for (const behavior of ['changed', 'unchanged', 'nonzero', 'signal', 'delay']) {
   it(`external-editor-${behavior}`, () =>
     scenario(
@@ -489,6 +621,43 @@ for (const behavior of ['changed', 'unchanged', 'nonzero', 'signal', 'delay']) {
     ));
 }
 
+it('shell-history-domain-and-persistence', () =>
+  scenario(
+    'shell-history-domain-and-persistence',
+    async ({ type, press, server, workspace, restart, frame }) => {
+      const output = join(workspace, 'shell-history-owned.txt');
+      const first = `printf a >> '${output}'`;
+      const second = `printf b >> '${output}'`;
+      const contents = () =>
+        existsSync(output) ? readFileSync(output, 'utf8') : '';
+      await type('!');
+      await type(first);
+      await press('\r');
+      await until(() => contents() === 'a', 'first shell command executes');
+      await type(second);
+      await press('\r');
+      await until(() => contents() === 'ab', 'second shell command executes');
+      await press(keys.up);
+      await frame('shell-recalled');
+      await press('\r');
+      await until(
+        () => contents() === 'abb',
+        'Up recalls newest shell command',
+      );
+      await restart();
+      await type('!');
+      await press(keys.up);
+      await press(keys.up);
+      await frame('shell-persisted-oldest');
+      await press('\r');
+      await until(
+        () => contents() === 'abba',
+        'shell history survives restart and deduplicates',
+      );
+      expect(server.requests).toHaveLength(0);
+    },
+  ));
+
 it('ctrl-d-nonempty-does-not-exit', () =>
   scenario(
     'ctrl-d-nonempty-does-not-exit',
@@ -535,9 +704,7 @@ it('ctrl-c-clear-then-exit', () =>
         () => session.exitResult() !== undefined,
         'second Ctrl+C must exit',
       );
-      expect(session.exitResult()?.exitCode).toBe(
-        renderer === 'opentui' ? 130 : 0,
-      );
+      expect(session.exitResult()?.exitCode).toBe(0);
       expect(server.requests).toHaveLength(0);
     },
   ));
@@ -589,9 +756,7 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'second exit key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(server.requests).toHaveLength(1);
       },
       100,
@@ -637,12 +802,384 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'confirmation second key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(existsSync(sentinel)).toBe(false);
       },
       100,
       'confirmation',
     ));
 }
+
+async function enableVim(context: Context) {
+  await context.type('/vim');
+  await context.press('\r');
+  await context.session.waitFor('Entered Vim mode.', 12_000);
+  await context.session.waitForScreen(
+    (screen) => screen.includes('-- NORMAL --'),
+    '-- NORMAL --',
+    12_000,
+  );
+  await context.frame('vim-enabled');
+  expect(context.server.requests).toHaveLength(0);
+}
+
+for (const paced of [false, true]) {
+  const name = `vim-counted-delete-${paced ? 'paced' : 'single-write'}`;
+  it(name, () =>
+    scenario(name, async (context) => {
+      await enableVim(context);
+      await context.press('i');
+      await context.session.waitForScreen(
+        (screen) => screen.includes('-- INSERT --'),
+        '-- INSERT --',
+        12_000,
+      );
+      await context.type('one two three');
+      await context.press('\x1b');
+      await context.session.waitForScreen(
+        (screen) => screen.includes('-- NORMAL --'),
+        '-- NORMAL --',
+        12_000,
+      );
+      await context.press('0');
+      if (paced) for (const key of '2dw') await context.press(key);
+      else await context.press('2dw');
+      expect(await context.frame('after-counted-delete')).toMatch(/>\s*three/);
+      await context.submit('three');
+      expect(context.server.requests).toHaveLength(1);
+    }),
+  );
+}
+
+it('vim-pending-character-keeps-enter-and-draft', () =>
+  scenario('vim-pending-character-keeps-enter-and-draft', async (context) => {
+    await enableVim(context);
+    await context.press('i');
+    await context.type('pending draft');
+    await context.press('\x1b');
+    await context.session.waitForScreen(
+      (screen) => screen.includes('-- NORMAL --'),
+      '-- NORMAL --',
+      12_000,
+    );
+    for (const command of ['r', 'f', 'F', 't', 'T']) {
+      await context.press(command + '\r');
+      expect(await context.frame(`pending-${command}`)).toContain(
+        'pending draft',
+      );
+      expect(context.server.requests).toHaveLength(0);
+      await context.press('\x1b');
+    }
+    await context.submit('pending draft');
+    expect(context.server.requests).toHaveLength(1);
+  }));
+
+it('vim-insert-controls-and-disable', () =>
+  scenario('vim-insert-controls-and-disable', async (context) => {
+    await enableVim(context);
+    await context.press('i');
+    await context.type('甲🙂tail');
+    // Ink's Vim INSERT dispatcher consumes these without readline kill/editor actions.
+    await context.press('\x0b\x15\x18');
+    expect(await context.frame('insert-controls')).toContain('甲🙂tail');
+    expect(existsSync(context.editorLog)).toBe(false);
+    await context.submit('甲🙂tail');
+    await context.type('/vim');
+    await context.press('\r');
+    await context.session.waitFor('Exited Vim mode.', 12_000);
+    await context.type('ordinary again');
+    await context.submit('ordinary again');
+    expect(context.server.requests).toHaveLength(2);
+  }));
+
+it(
+  'permissions-edits-and-completes-without-model',
+  () =>
+    scenario(
+      'permissions-edits-and-completes-without-model',
+      async ({
+        session,
+        server,
+        workspace,
+        ownedTemp,
+        type,
+        press,
+        paste,
+        frame,
+      }) => {
+        const settingsFile = join(workspace, '.qwen', 'settings.json');
+        const settings = () =>
+          JSON.parse(readFileSync(settingsFile, 'utf8')) as {
+            permissions?: { allow?: string[] };
+            context?: { includeDirectories?: string[] };
+          };
+        const parent = join(ownedTemp, 'permission-parent');
+        mkdirSync(parent);
+        mkdirSync(join(parent, 'alpha'));
+        mkdirSync(join(parent, '.hidden'));
+        writeFileSync(join(parent, 'ordinary.txt'), 'fixture');
+        await until(
+          async () =>
+            (await frame('permissions-ready')).includes('Type your message'),
+          'composer ready',
+        );
+        await type('/permissions');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('permissions-list')).includes('Add a new rule'),
+          'permission list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('rule-input')).includes('Enter permission rule'),
+          'rule input',
+        );
+        await paste('Bash(lx)');
+        await press(keys.left);
+        await press('\x7f');
+        await type('s');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('scope')).includes('Where should this rule be saved?'),
+          'scope',
+        );
+        await press('\r');
+        await until(
+          () =>
+            existsSync(settingsFile) &&
+            settings().permissions?.allow?.includes('Bash(ls)') === true,
+          'exact persisted rule',
+        );
+        expect(settings().permissions?.allow).toEqual(['Bash(ls)']);
+        expect(settings().permissions?.allow).not.toContain('Bash(lx)');
+        expect(settings().permissions?.allow).not.toContain('Bash(lxs)');
+        for (let i = 0; i < 3; i++) await press('\t');
+        await until(
+          async () => (await frame('workspace-list')).includes('Add directory'),
+          'workspace list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('directory-input')).includes(
+              'Enter the path to the directory:',
+            ),
+          'directory input',
+        );
+        await paste(parent + '/');
+        await until(
+          async () => /alpha\/\s+directory/.test(await frame('candidate')),
+          'real visible alpha candidate',
+        );
+        const candidates = await frame('candidate-qualified');
+        expect(candidates).not.toMatch(/\.hidden\/\s+directory/);
+        expect(candidates).not.toMatch(/ordinary\.txt\/\s+directory/);
+        await press('\t');
+        await press('\r');
+        const selected = realpathSync(join(parent, 'alpha'));
+        await until(
+          () =>
+            settings().context?.includeDirectories?.includes(selected) === true,
+          'exact selected directory committed',
+        );
+        expect(settings().context?.includeDirectories).toEqual([selected]);
+        expect(settings().context?.includeDirectories).not.toContain(
+          realpathSync(parent),
+        );
+        // Both writes land in one settings file. Re-read the rule after the
+        // directory commit: a commit that rewrote the file from a stale
+        // snapshot, or wrote only `context`, would drop it while every
+        // context-only assertion below still passed.
+        expect(settings().permissions?.allow).toEqual(['Bash(ls)']);
+        const beforeCancel = readFileSync(settingsFile, 'utf8');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('cancel-input')).includes(
+              'Enter the path to the directory:',
+            ),
+          'new directory form',
+        );
+        await paste(join(parent, 'missing'));
+        await press('\x1b');
+        await until(
+          async () => (await frame('cancelled')).includes('Add directory'),
+          'cancelled directory form',
+        );
+        expect(readFileSync(settingsFile, 'utf8')).toBe(beforeCancel);
+        await press('\x1b');
+        await until(
+          async () => (await frame('composer')).includes('Type your message'),
+          'composer',
+        );
+        await type('/quit');
+        await press('\r');
+        await until(() => session.exitResult() !== undefined, 'natural quit');
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  90_000,
+);
+
+it(
+  'permissions-clear-undo-replace-without-model',
+  () =>
+    scenario(
+      'permissions-clear-undo-replace-without-model',
+      async ({ session, server, workspace, type, press, paste, frame }) => {
+        const settingsFile = join(workspace, '.qwen', 'settings.json');
+        const settings = () =>
+          JSON.parse(readFileSync(settingsFile, 'utf8')) as {
+            permissions?: { allow?: string[] };
+          };
+        const exitHint = 'Press Ctrl+C again to exit.';
+        // The value arm is column-exact at the scenario's pinned cols: 100.
+        // Ink spends two columns on its `> ` prefix, so its padding run is 79
+        // where OpenTUI's is 81 (caret cell included). A `[ \t]*` here would
+        // absorb a phantom column from an unguarded empty caret segment — the
+        // layout regression this case exists to catch. Only the whitespace
+        // outside the frame stays tolerant: ink trims the row tail, OpenTUI
+        // pads it to the terminal.
+        const originalRuleRow =
+          renderer === 'ink'
+            ? /^[ \t]*│[ \t]*│ > WebFetch {79}│[ \t]*│[ \t]*$/m
+            : /^[ \t]*│[ \t]*│ WebFetch {81}│[ \t]*│[ \t]*$/m;
+        await until(
+          async () =>
+            (await frame('clear-ready')).includes('Type your message'),
+          'composer ready',
+        );
+        await type('/permissions');
+        await press('\r');
+        await until(
+          async () => (await frame('clear-list')).includes('Add a new rule'),
+          'permission list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('clear-input')).includes('Enter permission rule…'),
+          'rule field',
+        );
+        await paste('WebFetch');
+        await until(
+          async () => originalRuleRow.test(await frame('clear-before')),
+          'exact original rule',
+        );
+        await press('\x03');
+        await until(async () => {
+          const screen = await frame('clear-empty');
+          return (
+            screen.includes('Enter permission rule…') &&
+            screen.includes(exitHint)
+          );
+        }, 'first C clears the field while global exit remains armed');
+        expect(session.exitResult()).toBeUndefined();
+        await press(keys.undo);
+        await until(
+          async () => originalRuleRow.test(await frame('clear-undo')),
+          'Undo restores the whole original rule',
+        );
+        // Observe the existing guard expiry before another deliberate clear.
+        // Otherwise its second C would correctly confirm process exit.
+        await until(
+          async () => !(await frame('clear-expired')).includes(exitHint),
+          'first C guard expires before the separate replacement edit',
+        );
+        await press('\x03');
+        await until(
+          async () =>
+            (await frame('replacement-empty')).includes(
+              'Enter permission rule…',
+            ),
+          'second independent clear',
+        );
+        expect(session.exitResult()).toBeUndefined();
+        await paste('Read');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('clear-scope')).includes(
+              'Where should this rule be saved?',
+            ),
+          'replacement rule scope',
+        );
+        await press('\r');
+        await until(
+          () =>
+            existsSync(settingsFile) &&
+            settings().permissions?.allow?.includes('Read') === true,
+          'replacement rule persisted',
+        );
+        expect(settings().permissions?.allow).toEqual(['Read']);
+        await press('\x1b');
+        await until(
+          async () =>
+            (await frame('clear-composer')).includes('Type your message'),
+          'composer after Permissions',
+        );
+        await type('/quit');
+        await press('\r');
+        await until(() => session.exitResult() !== undefined, 'natural quit');
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  90_000,
+);
+
+it(
+  'permissions-second-control-c-exits-without-model',
+  () =>
+    scenario(
+      'permissions-second-control-c-exits-without-model',
+      async ({ session, server, type, press, paste, frame }) => {
+        await until(
+          async () => (await frame('exit-ready')).includes('Type your message'),
+          'composer ready',
+        );
+        await type('/permissions');
+        await press('\r');
+        await until(
+          async () => (await frame('exit-list')).includes('Add a new rule'),
+          'permission list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('exit-input')).includes('Enter permission rule…'),
+          'rule field',
+        );
+        await paste('WebFetch');
+        await until(
+          async () => (await frame('exit-filled')).includes('WebFetch'),
+          'rule field holds the pasted value',
+        );
+        // The confirming half of the Ctrl+C contract: the field clear must not
+        // swallow the process-global key, so a second press inside the 1000 ms
+        // guard window still quits. The sibling clear/Undo case pins the first
+        // press's placeholder and exit hint; no frame is polled between these
+        // two presses because that round-trip can outlast the window.
+        const firstKeyAt = Date.now();
+        await press('\x03', false);
+        await sleep(300);
+        const secondKeyAt = Date.now();
+        expect(secondKeyAt - firstKeyAt).toBeLessThan(1000);
+        await press('\x03', false);
+        await until(
+          () => session.exitResult() !== undefined,
+          'second Ctrl+C reaches the global exit owner',
+        );
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  90_000,
+);

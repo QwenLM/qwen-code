@@ -40,7 +40,7 @@ Matched origins receive the standard CORS response headers on every request:
 ```
 Access-Control-Allow-Origin: <echoed origin>
 Vary: Origin
-Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID, X-Qwen-Event-Epoch
 Access-Control-Max-Age: 86400
 Access-Control-Expose-Headers: Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id
@@ -220,7 +220,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'session_monitor_tool_correlation', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'scheduled_task_gate', 'autofix_pr_watches', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_resources', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -234,7 +234,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
  'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
- 'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
+ 'session_recap', 'session_generation', 'session_btw', 'session_btw_stream', 'session_shell_command',
  'standalone_sessions_v1', 'standalone_session_options_v1',
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
@@ -250,7 +250,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_local_path_install',
  'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
- 'workspace_session_live_state',
+ 'workspace_session_live_state', 'workspace_session_live_state_batch',
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
@@ -317,9 +317,11 @@ When a workspace runtime has more than one execution engine, `runtimeLive` and `
 
 `workspace_session_live_state` advertises `GET /workspaces/:workspace/sessions/live-state`, a trusted-only, memory-only snapshot of the selected workspace runtime's live sessions plus an in-memory catalog version that tells clients when a full persisted-catalog reload is warranted. It is independent of `workspace_qualified_rest_core`: released daemons can advertise the broader workspace REST capability without implementing this route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd; per-workspace trust checks still apply on every request, and the route does not extend the permissive untrusted-secondary persisted-catalog read policy to live bridge state. The tag means the endpoint exists; it does not promise that every live item carries the optional `updatedAt` activity watermark, which is lifecycle-dependent.
 
+`workspace_session_live_state_batch` advertises `POST /sessions/live-state`. Clients pre-flight it once before batching polls and retain the single-workspace route for older daemons. The batch uses the same trusted, memory-only snapshot and catalog-version semantics as the single-workspace route.
+
 The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` advertises the daemon-wide live-state polling interval in milliseconds. It is resolved once from the startup environment variable `QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS`, independently of workspace environment overlays. Integer values from `1000` to `2147483647` are accepted; missing or invalid values use `5000`. Web Shell consumes this hint for all workspace live-state polling and also falls back to `5000` for an absent or invalid field from an older or incompatible daemon. This field does not change the route's snapshot semantics, immediate local/visibility refreshes, or full-catalog polling. SDK clients remain responsible for their own timers.
 
-`slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
+`slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The per-session ring is bounded by `--event-ring-size` (default **8000**, per #3803 §02) and `--event-ring-max-bytes` (default **8 MiB**, including the latest full command snapshot), except that the newest ring event survives an oversized event or snapshot. Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
 
 `typed_event_schema` advertises daemon event payloads that match the SDK's `KnownDaemonEvent` schema. Older daemons may still stream compatible frames, but SDK clients should pre-flight this tag before assuming typed event coverage.
 
@@ -331,7 +333,7 @@ The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` ad
 
 `session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_archive_idle_guard` advertises the additive `requireIdle` archive option: the owning runtime checks that active work is confirmed idle immediately before it begins the close, and leaves the active transcript in place otherwise. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
 
-`workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability documents a narrower policy: `workspace_persisted_transcript` (read-only), or the trust grant mutation, which is accepted for a registered untrusted workspace whether or not `workspace_trust_grant` is advertised — that tag reports only whether trust hot-reload is wired, so a recorded decision can reach the running runtime without a daemon restart; it never reports whether the route is served. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
+`workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; the qualified hooks status read (`GET /workspaces/:workspace/hooks`) is also served for registered untrusted workspaces because it reports the pending project-hooks trust decision, matching the qualified approve mutation; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability documents a narrower policy: `workspace_persisted_transcript` (read-only), or the trust grant mutation, which is accepted for a registered untrusted workspace whether or not `workspace_trust_grant` is advertised — that tag reports only whether trust hot-reload is wired, so a recorded decision can reach the running runtime without a daemon restart; it never reports whether the route is served. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
 `workspace_qualified_voice` advertises Voice routes selected by a trusted workspace runtime: `GET` and `POST /workspaces/:workspace/voice`, `POST /workspaces/:workspace/voice/transcribe`, and `WS /workspaces/:workspace/voice/stream`. It is advertised only when multi-workspace runtimes and the shared ACP/Voice WebSocket listener are both enabled. The selector follows the same id-or-encoded-absolute-cwd rules as other plural routes. For REST, an unknown selector returns `400 { code: "workspace_mismatch" }` and an untrusted selector returns `403 { code: "untrusted_workspace" }`; WebSocket upgrade rejection exposes the corresponding HTTP 400/403 status without a structured JSON envelope. Neither transport falls back to primary. Legacy `/workspace/voice`, `/workspace/voice/transcribe`, and `/voice/stream` remain primary-only. Clients use `workspace_qualified_voice` for all qualified Voice modalities and let the selected runtime report configuration-specific errors. The legacy `workspace_voice`, `workspace_voice_transcription`, and `voice_transcribe` tags describe only the primary-bound routes and must not hide a qualified secondary configuration.
 
@@ -594,6 +596,56 @@ operator diagnostic snapshot documented below.
 `daemon_update` advertises the process-global `GET /daemon/update`,
 `POST /daemon/update/prepare`, and `POST /daemon/update/restart` surface.
 
+`scheduled_task_gate` advertises the optional `gate` on `POST` and
+`PATCH /scheduled-tasks`, and `gate` and `gateStatus` on task views. A gate is
+a shell command the owning session runs at each fire, outside the model:
+exit 0 with output delivers the fire with that output attached, exit 0 with
+nothing on stdout skips it, and a non-zero exit is reported when the gate
+starts failing, not at every fire.
+`gateStatus.lastOutcome` is `quiet`, `delivered`, `failed` or `blocked`.
+
+- A gate needs a recurring task: `POST` with `recurring: false`, or a `PATCH`
+  that sets a gate on a one-shot or turns a gated task one-shot, answers 400
+  `gate_requires_recurring`; a task already in that state keeps its other
+  edits. A malformed gate (empty on `POST`, only a comment, over 2048
+  characters, a NUL character or an unpaired UTF-16 surrogate, a shell wrapper
+  such as `bash -c '…'`, or
+  any part backgrounded with `&`) answers 400 `invalid_gate`.
+  The `&` check is lexical and best-effort; where unsure it refuses (an `&` in
+  a comment, a heredoc body or `(( … ))`), and a gate that gets past it is
+  reported `failed` when it exits with nothing on stdout while a background
+  part still holds its stdout (outside the bwrap shell sandbox, whose PID
+  namespace ends that part with the command).
+  On `PATCH`, `gate: null` or `gate: ""` clears the gate and its `condition`.
+- A legacy task guarded by a `condition` refuses any `gate` key in a `PATCH`
+  with 409 `task_legacy_unsupported`, so a client sends `gate` only when it
+  changes it.
+- A gate written through these routes carries no confirmation from the
+  session. It runs unattended only where a `monitor` call of the same command
+  would run without asking: under a saved `Monitor(...)` or `Bash(...)` allow
+  rule, as a read-only command, or in an auto or yolo session. A deny rule
+  blocks it in every mode and plan mode blocks it; a blocked fire settles
+  `blocked`.
+- Clients must not send `gate` to a daemon without this tag: such a daemon
+  drops it on `POST` and answers a gate-only `PATCH` with 400 `empty_patch`.
+
+`autofix_pr_watches` advertises `GET /autofix-pr/watches` (the primary
+workspace) and `GET /workspaces/:workspace/autofix-pr/watches` (a registered,
+trusted one). Each answers the `/autofix-pr` watches of the workspace's clone
+as `qwen autofix-pr status` lists them, read from the watches' files under
+the clone's main worktree (`.qwen/tmp`), each opened without following a link
+and without blocking. No lock is taken, GitHub is not asked, and no git
+command runs but `git worktree list`, which finds the clone. The answer is
+`{ v: 1, available, root?, now?, watches, unreadable? }`: `available` is false,
+with no watches, when no git repository is found for the workspace (or git
+cannot run there), and `root` is the clone's main worktree, the same for two
+workspaces of one clone. A watch carries the fields of `status` (Section 6.10
+of the `/autofix-pr` design) but `thisSession`, `worktreePath`, `pushTarget`,
+`gitTrusted` and `worktreeWork`; its `session` is the session that owns it,
+which may be no session of this daemon. Stopping a watch is the skill's
+(`/autofix-pr stop <n>` in the session that owns it); these routes change
+nothing.
+
 **Conditional tags.** These feature tags are advertised only when their deployment toggle, runtime wiring, or availability condition is active. Tag presence means the documented behavior is available; absence means either an older daemon predating the tag or a current daemon where that condition is false. Currently:
 
 <!-- conditional-serve-features:start -->
@@ -620,8 +672,11 @@ operator diagnostic snapshot documented below.
 | `standalone_session_options_v1`          | the complete standalone-session runtime is installed (same condition as `standalone_sessions_v1`), so the read-only, sessionless `GET /standalone/session-options` route is registered on the internal Conversations runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `session_artifacts_persistence`          | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `session_artifact_library`               | Session artifact persistence is wired; supports trusted workspace-owner reads/removal of live, cold, and archived registrations via `/workspaces/:workspace/session/:id/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `workspace_artifact_library`             | Persisted workspace-wide artifact queries, batch session queries and explicit-pair removal via `/workspaces/:workspace/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `workspace_artifact_library_stream`      | Session metadata on all artifact-library reads and opt-in finite SSE for full and selected-session queries; requires artifact persistence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `session_sources`                        | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `session_generation`                     | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `session_btw_stream`                     | Every registered runtime bridge supports resumable BTW streaming. Clients must check this flag before calling `/session/:id/btw/stream`; otherwise use the existing JSON BTW interface.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `scheduled_task_session_reuse`           | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `workspace_generation`                   | workspace-scoped generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `rate_limit`                             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -638,11 +693,15 @@ operator diagnostic snapshot documented below.
 | `dynamic_workspace_registration`         | a workspace runtime factory is wired into the daemon, so an existing trusted directory can be registered as a secondary runtime at runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `persistent_workspace_registration`      | a workspace registration store is wired into the daemon. Production `runQwenServe` supplies the user-level store automatically; direct `createServeApp` embeds must inject one explicitly and own startup restoration of their workspace registry.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `scratch_workspace_registration`         | managed scratch workspace creation is available — a runtime factory, a validated managed scratch root, and runtime disposal are wired, and every managed runtime respects the scratch root boundary.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `git_workspace_clone`                    | the daemon host has a `git` binary; `POST /workspaces` with `{ kind: "git", url, target }` starts an asynchronous clone job whose routes report progress, cancellation, and the canonical cwd. Hosts without `git` omit the tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_runtime_removal`              | removable dynamic or persistence-restored secondary runtimes can be drained and removed through the management route.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `native_directory_picker`                | the daemon host can open a native OS directory picker (`osascript` on macOS, PowerShell on Windows, `zenity` on a Linux host with a display). Headless hosts omit the tag so clients hide the Browse affordance instead of surfacing a guaranteed picker failure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `workspace_directories`                  | the daemon persists workspace settings and every trusted local runtime can apply extra directories to its live sessions: `/workspaces/:workspace/directories` lists, adds, and removes the entries persisted at workspace scope (`context.includeDirectories`). SSH, managed, and standalone workspaces are rejected even when the tag is present, and experimental paired-engine daemons omit the tag and the route because a workspace-scoped mutation cannot reach the managed child.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `native_directory_picker`                | the daemon host can open a native OS directory picker (`osascript` on macOS, PowerShell on Windows, `zenity` on a Linux host with a display). Headless hosts omit the tag so clients withhold the daemon-native picker instead of surfacing a guaranteed failure. Web Shell hides Browse when no picker is available; an [embedding-host directory picker](../design/web-shell-host-directory-picker.md#public-api-and-precedence) can provide it without this tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `workspace_runtime_stop`                 | the daemon owns ACP process accounting, complete independent-activity and scheduled-task observations, and a runtime bridge supporting confirmed stop and receipt snapshots. Unsupported individual runtimes are disabled in the preview.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `workspace_runtime`                      | every active workspace bridge provides an authoritative runtime lifecycle snapshot; mixed or legacy injected bridges omit the tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `workspace_skills_config_runtime`        | every active workspace supports authoritative runtime lifecycle and the split config/runtime Skills routes used by Skills management and the new-session composer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `skill_archive_install`                  | authoritative workspace lifecycle, raw Skill archive installation, and owner-scoped attempt receipts are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `skill_zip_file_source`                  | authoritative workspace lifecycle, daemon-local ZIP copying, and owner-scoped attempt receipts are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `workspace_local_open`                   | the daemon host can open a workspace directory in the host's OS file manager (`open` on macOS, `explorer.exe` on Windows, `xdg-open` on a Linux host with a display). Headless hosts omit the tag so clients hide the Open-locally affordance instead of surfacing a guaranteed launch failure. The opened path is always the resolved registered workspace cwd, via `POST /workspaces/:workspace/open`; the route accepts an optional JSON body `{ "target": "terminal" }` (absent/other = folder) and answers `{ kind: 'workspace-local-open', opened: true, target }` with `target` set to `folder` or `terminal`.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `workspace_local_terminal`               | the daemon host can open a terminal window in a workspace directory (`open -a Terminal` on macOS, `wt.exe` with `cmd.exe` fallback on Windows, `gnome-terminal`/`konsole`/`xterm` on a Linux host with a display). Headless hosts omit the tag so clients hide the Open-in-terminal affordance instead of surfacing a guaranteed launch failure. Served by `POST /workspaces/:workspace/open` with body `{ "target": "terminal" }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `workspace_qualified_acp`                | ACP HTTP and multi-workspace runtimes are active, so the plural ACP endpoint can select a secondary runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -655,6 +714,7 @@ operator diagnostic snapshot documented below.
 | `realtime_voice`                         | the macOS WebShell daemon has Live Voice enabled and the native Host opted in with `QWEN_SERVE_LIVE_NATIVE_HOST=1` (off by default; see below). `/live/status` reports readiness, but the capability is withdrawn until the feature is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `realtime_voice_web`                     | Live Voice is enabled and the Web Shell page may itself be the audio endpoint over WS `/live/web`, on any platform, and the default endpoint (the native Host is macOS-only and opt-in). The route authenticates like `/voice/stream` (bearer subprotocol), requires a trusted primary workspace, and speaks the Live Host protocol with a reduced hello: microphone permission plus the audio input/output self-checks. A single Host lease remains: a native Host supersedes a browser (`4010`), a browser never displaces a native Host (`4009`), and a second tab takes over only with `?takeover=1`. `/live/status` reports `host.kind: "browser"`; screen capture needs a shared screen (below), and a shortcut change is stored for the next native Host rather than registered.                                                                                                                                                                                                                                                                        |
 | `web_terminal`                           | ACP HTTP is enabled, so the authenticated Web Terminal endpoint is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `user_skill_activation`                  | User settings persistence is available. `PUT /skills/activation` saves exact-name User preferences and queues asynchronous propagation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 <!-- conditional-serve-features:end -->
 
@@ -746,7 +806,9 @@ installation methods can report `available` with `canInstall: false` and manual
 instructions.
 
 Automatic updates require a real CLI lifecycle with POSIX `process.execve`, a
-standalone or managed global npm installation, and operator settings that permit
+standalone installation or a global npm/pnpm/yarn/bun installation running the
+published launcher (a root-owned npm prefix is included, because staging never
+writes to the global prefix), and operator settings that permit
 `general.enableAutoUpdate`. Embedded servers, Windows, unsupported Node runtimes,
 and development mode report `unavailable`. Only global/system settings apply;
 workspace settings cannot enable installation. The connection must use the
@@ -767,22 +829,64 @@ launcher; clients cannot supply a version or command.
 - `POST /daemon/update/restart` requires a prepared update, otherwise it returns
   `409 update_not_ready`. It responds with `202` and `state: "restarting"` before
   activating the update, gracefully closing the daemon, and replacing the process
-  with the updated launcher. Repeated clicks share one restart. The replacement
+  with the updated launcher. Repeated clicks share one restart. After responding,
+  the daemon re-resolves the current release once: if it is newer than the
+  prepared one and one-click covers it, the newer release is staged and the
+  prepared payload is discarded, so a long-lived daemon lands on the current
+  latest rather than on whatever was latest when it first prepared. The newer
+  payload is committed to before the superseded one is discarded, and that
+  discard is best-effort: a failed discard leaks disk but never orphans the
+  newer payload or falls back to one that may be half removed. `latestVersion`
+  then reports the newer target while `state` stays `restarting`. A failed
+  re-resolve or staging applies the prepared release instead; the click is never
+  stranded on the running version by a registry failure. The replacement
   preserves PID, working directory, CLI options, bound port, and effective daemon
   token, clears old version pins, and does not reopen a browser. The client polls
   GET until `currentVersion` changes, then reloads the document at the URL
-  captured when the update was requested. Standalone launcher validation runs before closing
+  captured when the update was requested. Because staging runs after the `202`
+  and can take minutes, the client measures its restart deadline from continuous
+  unreachability, not from the click: a daemon that keeps answering is still
+  working. A generous absolute cap (20 minutes) backstops a daemon
+  that stays reachable but never leaves `restarting`. It sits above the whole
+  staging chain, not above a single timeout constant: a standalone archive
+  download tries OSS and then GitHub sequentially with a five-minute budget
+  _each_, and the checksum and signature fetches add up to two more minutes, so
+  one restage can spend about twelve minutes downloading and verifying before
+  activation; the managed npm child is capped at ten. Every give-up path keeps a
+  retryable entry on screen, because a wedged daemon keeps reporting
+  `restarting`, which the control does not otherwise display. Once the restart is
+  acknowledged, `restarting` is sticky until the
+  process is replaced, so a reachable daemon that reports any other state with an
+  unchanged `currentVersion` means the replacement did not land on the new build;
+  the client stops waiting, publishes that settled state, and reports a failure
+  rather than waiting forever for a version change. That check applies only to a
+  poll _initiated_ after the acknowledgement: the status and restart requests are
+  independent, so a poll started earlier can deliver a pre-restart snapshot
+  afterwards, and reading that as a settled daemon would report a false failure
+  and suppress the reload a successful update still owes the user.
+  Standalone launcher validation runs before closing
   services; a failed check leaves the daemon running. Failures after shutdown
   begins or during process replacement are not guaranteed to recover.
 
 Web Shell automatically checks and prepares available supported updates in the
-background, and displays its version-adjacent update button only when ready.
-Preparation and readiness survive workspace runtime reloads. Ordinary daemon
-shutdown discards the prepared download. Activation failures keep the daemon
-running and report `error`; the next check after the one-minute error cache can
-prepare a new download for retry. Disabling automatic updates removes readiness
-and cleans the download before a restart can begin. Clicking the update button
-explicitly restarts the entire daemon and interrupts its active sessions.
+background, and displays its version-adjacent update button when a prepared
+update is ready or when an available update carries manual instructions. In the
+manual-instructions state the button opens a popover with the instructions from
+the check and never prepares or restarts. Preparation and readiness survive workspace runtime
+reloads. A prepared update pins its target: polling GET, including
+`?refresh=true`, keeps reporting the prepared `latestVersion` and never
+re-downloads, so a daemon that stays alive across several releases does not
+churn downloads in the background. Only the restart re-resolves the target.
+Ordinary daemon shutdown discards the prepared download. Activation
+failures keep the daemon running and report `error`; the next check after the
+one-minute error cache can prepare a new download for retry. Disabling automatic
+updates removes readiness and cleans the download before a restart can begin.
+Once a restart is in flight it is undisturbed: while the state is `restarting`
+the status, prepare and restart routes all return without consulting the
+operator setting, and shutdown cleanup is a no-op, so a restage that takes
+minutes cannot have its payload pulled out from under it.
+Clicking the button in the ready state explicitly restarts the entire daemon
+and interrupts its active sessions.
 
 ### `GET /daemon/status`
 
@@ -833,6 +937,7 @@ Response shape:
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
     "eventRingSize": 8000,
+    "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
     "writerIdleTimeoutMs": null,
@@ -889,6 +994,8 @@ Multi-workspace responses also include top-level `workspaces[]` rows with
 `{ id, cwd, displayName?, primary, trusted }`. The optional display name is
 omitted when unset and remains presentation-only; status consumers must keep
 using `id` or `cwd` to correlate runtimes.
+
+Full session status includes `eventRingCount`, `eventRingBytes`, optional `eventRingEarliestEventId`, `eventRingEvictedEvents`, `eventRingEvictedBytes`, and `availableCommandsSnapshotBytes`. Current ring bytes conservatively include the latest full command snapshot; eviction counters accumulate over the bus lifetime. These fields are additive and older daemons may omit them.
 
 `runtime.perf` is optional. When present, it reports daemon-process event loop
 lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
@@ -1175,8 +1282,75 @@ Read-only discovery uses:
 
 - `GET /workspace/channel-types`
 - `GET /workspace/channels`
+- `GET /workspace/channels/events`
 - `GET /workspaces/:workspace/channel-types`
 - `GET /workspaces/:workspace/channels`
+- `GET /workspaces/:workspace/channels/events`
+
+`GET .../channels/events` returns the resolved workspace's Channel event
+journal as `{ "events": [...], "truncated": boolean }` with
+`Cache-Control: no-store`, plus an optional `channelLinkMeta` member: a map
+from channel instance name to non-secret link metadata (`type` and `baseUrl`,
+each present only when configured as a string, and for GitHub channels a
+resolved `webOrigin` — the web UI origin clients should concatenate directly
+instead of re-deriving it from the API root). The metadata is resolved
+from the merged system + user + workspace settings the channel workers run
+with — the scope-local management listing does not contain channels
+configured in another scope — and filtered to channels whose resolved `cwd`
+belongs to the queried workspace, so one workspace never receives another
+workspace's channel metadata. It lets clients link journal rows (for
+example, a GitHub PR or issue reference) even for channels inherited from
+user or system settings. The member is omitted entirely when no channel
+resolves, and older daemons never send it; a settings read failure degrades
+to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
+message it accepted or skipped (with the machine reason: `reason_filter`,
+`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`,
+`no_role_matched`),
+a GitHub thread whose handling failed and that it will read again (`failed`
+with `github_api_error`: a GitHub error, or a local error while the channel
+cannot read or write its own state or one of the thread's tasks is unfinished),
+a publication
+outcome, an inbound task transition, or a poll result — and never carries
+message text. `outcome` is an open string: besides the task states it includes
+the publication outcomes `posted`, `suppressed`, `posting`, `failed` and
+`failed_ambiguous` (the write may have landed, so it is never retried publicly),
+the private-delivery terminals `delivered` and `retired` (with a reason such as
+`preflight_rejected`, `watch_no_candidate`, `bound_no_candidate` or
+`dead_letter`), and `degraded` for
+a dependency the poll survived. A `task` event about a PR-bound session carries
+that session's `sessionId`, including the rows written while the delivery is
+cleared and the retire that follows, which name the session the event lost.
+`detail` is optional on every event: a binding-scan `degraded` row carries
+`detail.streak` (a count of binding scans, which a gone-session retry can
+advance more than once per poll) and, on the `bindings_partial` rows only,
+`detail.sessions` — a session count, not a PR count: the session rows this scan
+listed plus the sessions retention keeps routing under a partial answer,
+bounded by the retention cap,
+while the watch-guard rows (`watch_reconcile_blocked`,
+`watch_pending_unreconciled`, `watch_reconcile_recovered`) carry `reason`; a
+blocking row also carries `error` when the watch state could not be read or
+reconciliation failed (the recovered row carries no error). A GitHub poll that filters more than 20 notifications journals
+the first 20 individually and one further `reason_filter` row whose
+`detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
+journal with repeats of the same batch. While the cursor is held, a comment the
+poll reads again is journaled as `duplicate` or `mention_required` once per
+window, and a failing thread as `github_api_error` on its first failing poll in
+the window and on every tenth failing poll (a rate limit or credential failure:
+its first and every tenth poll), and once when it is skipped. The once-per-window
+rows are tracked under up to 8,192 keys; a row whose key no longer fits is
+journaled on every poll. Query parameters: `limit` (1-500, default 100), `type`
+(comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
+(repeat the parameter once per instance name), and `since` (ISO 8601). The route needs no
+operator authority. Journal reads are asynchronous and bounded: the current journal plus one
+rotated file per Channel, 256 KiB per file, 4 MiB per request, 32 files per request, freshest
+first. Link metadata additionally reads a side-effect-free snapshot of the merged settings
+(a few small JSON files, resolved against the runtime's effective environment) synchronously;
+it is best-effort decoration, so any failure omits the member instead of failing the journal
+read. `truncated` is true when the
+record limit or any read bound clipped the result, including a journal taller than the
+per-file tail window. A workspace with no journal yet
+returns an empty list; a scope directory that cannot be read answers 5xx rather than an empty
+list.
 
 The catalog marks the types supported by this management API with
 `manageable: true`. Instance snapshots include a revision, redacted secret
@@ -1184,7 +1358,11 @@ presence metadata, startup state, and runtime state; literal secrets are never
 returned. Channel snapshots use `Cache-Control: no-store`.
 
 Field descriptors can expose nested object metadata through `properties`.
-Numeric descriptors can use `exclusiveMinimum` for open lower bounds. String
+Numeric descriptors can use `exclusiveMinimum` for an open lower bound and
+`maximum` for an inclusive upper bound. A stored number outside a newly declared
+bound is still accepted when the client re-sends it unchanged, so declaring a
+bound does not block unrelated edits to an existing channel; a value the client
+actually changed must satisfy both bounds. String
 and secret descriptors can use `multiline` to ask clients for a multi-line text
 area; the descriptor types allow it only on top-level fields. Clients that do
 not render an advertised field kind must preserve its existing config value
@@ -1409,6 +1587,8 @@ The Web Shell's product branding, for hosts that want to white-label the shell. 
 
 Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.
 
+When `git_workspace_clone` is advertised, the same route also accepts `{ "kind": "git", "url": "...", "target": "/absolute/new/path" }`. This form requires an absolute `target` that does not exist yet, starts an asynchronous clone, registers nothing, and returns `202 { "kind": "git-workspace-clone", "jobId": "..." }`. The `201` and `200` responses below describe the synchronous `cwd` and `scratch` forms; the git form registers nothing, and clone progress and cancellation use `GET`/`DELETE /workspace-git-clone-jobs/:jobId`.
+
 ```json
 {
   "cwd": "/canonical/path/to/secondary-workspace",
@@ -1512,10 +1692,23 @@ Returns `404 workspace_registration_not_found`, `500 workspace_registration_stor
 These routes report daemon-side runtime snapshots. They are additive v1 routes,
 do not mutate state, and do not change the serve protocol version. Workspace
 status routes intentionally do **not** start the ACP child process just because
-a client polls a GET route: if the daemon is idle, they return
-`initialized: false` with an empty snapshot. Session status routes require a
-live session and return `404 { code: "session_not_found", ... }` for unknown
-ids.
+a client polls a GET route. `GET /workspace/mcp` returns `initialized: false`
+with an empty snapshot when the daemon is idle and holds no retained MCP
+observation; if a live child answered earlier, the idle read replays that
+observation with `source: "cache"` and its original `initialized` value.
+`GET /workspace/skills` instead serves a retained daemon observation or
+daemon-local enumeration, and reports `initialized: false` **with an `errors`
+entry** (retryable unavailability, not an empty catalog) only when no retained
+observation exists and both sources are unavailable (or a cold read is
+throttled) — see [`GET /workspace/skills`](#get-workspaceskills).
+`GET /workspace/providers` is answered daemon-locally from workspace settings
+and environment, so it does not depend on a live ACP child, and
+`acpChannelLive` reports liveness. Its `initialized` is `true` on the success
+path and `false` with an `errors` entry when workspace settings or model
+configuration cannot be resolved; daemons constructed without a daemon-local
+provider builder fall back to the live ACP snapshot, and the daemon-local
+answer omits runtime-registered models. Session status routes require a live
+session and return `404 { code: "session_not_found", ... }` for unknown ids.
 
 Capability tags:
 
@@ -1649,6 +1842,14 @@ vars only; proxy URLs are stripped of credentials and reduced to
 `transport` is one of `stdio`, `sse`, `http`, `websocket`, `sdk`, or
 `unknown`. `errors` is omitted when discovery succeeds.
 
+`source` is `"live"` while the child that produced the observation is live.
+When the daemon is idle and a live child answered earlier, the response replays
+that observation with `source: "cache"` and the child's original values,
+including `initialized: true` and its server list. The cached observation is
+cleared only when a new MCP discovery begins; reaping the child does not
+discard it, so an idle `GET /workspace/mcp` can report a catalog that no live
+child currently serves.
+
 **MCP client guardrails (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175)).** Current daemons extend the payload with four additive fields and a capability-scoped budget cell:
 
 ```jsonc
@@ -1720,9 +1921,69 @@ Budget enforcement is capability-driven. With `mcp_workspace_pool`, sessions ins
 - `budgets[0].status === 'error'` ⇔ `refusedCount > 0` (one or more servers refused this discovery pass).
 - `budgets[0].status === 'ok'` ⇔ below the 75% threshold AND no refusals.
 
-Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost. SDK clients that subscribe to push events still benefit from the snapshot for state-after-extended-disconnect (the SSE replay ring depth is finite — `--event-ring-size`, default 8000 — so a client offline longer than the ring's coverage falls back to snapshot resync).
+Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost. SDK clients that subscribe to push events still benefit from the snapshot for state-after-extended-disconnect (the SSE replay ring is bounded by `--event-ring-size`, default 8000, and `--event-ring-max-bytes`, default 8 MiB — so a client offline longer than the ring's coverage falls back to snapshot resync).
 
 ### `GET /workspace/skills`
+
+The primary and workspace-qualified inventory routes return a retained snapshot
+immediately while revalidating in the background. Starts are throttled to once
+per second, measured from task start, and concurrent readers share a task.
+Warm background revalidation releases its slot after five seconds; timeout
+allows retry but does not cancel the observation or ACP work.
+Cold reads honor ACP's configured request timeout (ten seconds by default),
+then daemon-local enumeration if ACP is unavailable. They do not impose the
+background deadline on either source. A cold read that fails within one second
+of its start leaves the remainder of that window returning unavailable status
+immediately; slower failures leave no throttle window, so clients need their
+own retry backoff. A late successful background observation can publish while
+a retry is pending, but cannot replace an observation started later that has
+already published. Invalidated tasks cannot publish; a successful invalidated
+observation can still answer its original caller.
+Explicit invalidation drops known-invalid inventory and clears the throttle.
+A successful ACP preheat that completes before its timeout also invalidates
+retained inventory, including when the child was already live, so the
+subsequent read sees the child. A preheat that times out and then finds the
+channel live also reports `ready: true` — ready always equals `channelLive` —
+but keeps the retained inventory because startup may still be incomplete; the
+next read returns that retained data, and background revalidation replaces it
+once the one-second start throttle allows. Skill deletion bypasses the snapshot
+and throttle but requires a freshly enumerated catalog: it uses local fallback
+and never answers from a retained snapshot. Enablement identity reads bypass
+the snapshot and throttle, awaiting a new observation with local fallback and
+then the retained snapshot when both sources fail.
+
+Inventory responses carrying a retained daemon observation additionally include
+optional snapshot metadata. Direct config/runtime status reads, session resource
+inventories, and older daemons omit it. A superseded successful cold read returns
+a newer retained snapshot when available; otherwise it returns its own uncached
+observation without this metadata. Only initialized observations without errors
+can replace the retained snapshot:
+
+```json
+{
+  "snapshot": {
+    "observedAt": 1792486800000,
+    "ageMs": 1500,
+    "stale": true,
+    "refreshing": true
+  }
+}
+```
+
+`observedAt` is the Unix-millisecond start time of the successful observation;
+`ageMs` is recalculated per response, conservatively including collection time.
+`stale` means that observation is at least one second old. `refreshing` reports
+whether a revalidation occupies the shared slot; timed-out observations may
+still finish after the slot is released. Failed reads, slot timeouts, and replay
+after the runtime stops do not renew the timestamp; a later successful
+publication records its own observation start time. Clients may display this
+age, but it is not a filesystem revision or proof that every session is current.
+If no initialized snapshot exists and both sources are unavailable (or the cold
+read is throttled), the response has `initialized: false`, an `errors` entry,
+and no `snapshot` metadata. This is retryable unavailability, not an empty catalog;
+a valid empty catalog has `initialized: true`. Status reads do not invoke
+session-affecting Skill refresh commands. Closed or draining workspace runtimes
+reject reads; retained data survives child-channel reap, not runtime retirement.
 
 ```json
 {
@@ -1775,12 +2036,15 @@ localized presentation value and may be non-unique. New clients should display
 `extensionDisplayName ?? extensionName`; older daemons omit the display field.
 
 Repeated reads are served from the last committed workspace snapshot,
-periodically revalidated against the child's in-memory cache. A read never
-scans skill directories or reparses `SKILL.md` files. The child does verify
+periodically revalidated against the child's in-memory cache. Steady-state reads
+do not scan skill directories or reparse `SKILL.md` files; cold daemon-local
+fallback can enumerate from disk. The child does verify
 that its extension sources are unchanged — one `readdir` of the extensions
 directory plus a `stat` per entry, the enablement file, and the store's
 activation state — and refreshes only when they moved, so an extension
-installed or toggled outside the daemon is still picked up on the next read.
+installed or toggled outside the daemon is picked up by revalidation and appears
+on a subsequent read after that revalidation publishes. A warm read always
+returns the retained observation, even when it starts background work.
 Safe and bare mode skip the check, matching their exclusion of extensions.
 
 ### `GET /workspace/providers`
@@ -2871,9 +3135,9 @@ Request:
 }
 ```
 
-| Field | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cwd` | no       | Same canonicalization + `workspace_mismatch` rules as `POST /session`. Omit to inherit `/capabilities.workspaceCwd`. When `features` contains `multi_workspace_sessions`, callers may pass any trusted registered `workspaces[].cwd`; untrusted non-primary workspaces return `403 untrusted_workspace`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
+| Field | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwd` | no       | Same canonicalization as `POST /session`, with a stricter absence contract for restore: an explicit `cwd` with NO registry entry (removed, or never registered) returns `404 workspace_not_found` — a permanent absence callers may classify as gone — while a workspace whose entry exists in a reversible state (draining, transitioning, blocked) still returns `400 workspace_mismatch`. Omit to inherit `/capabilities.workspaceCwd`. When `features` contains `multi_workspace_sessions`, callers may pass any trusted registered `workspaces[].cwd`; untrusted non-primary workspaces return `403 untrusted_workspace`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
 
 Response:
 
@@ -2903,7 +3167,8 @@ The replay-window byte caps apply after the child has reconstructed the persiste
 **Errors:**
 
 - `404` — persisted session id doesn't exist (`SessionNotFoundError`).
-- `400` — `workspace_mismatch` (same shape as `POST /session`).
+- `404` — `workspace_not_found` when an explicit `cwd` has no registry entry at all (removed, or never registered): a PERMANENT absence, distinct from the reversible states below. Body: `{ error, code: "workspace_not_found", boundWorkspace, requestedWorkspace }` — no `workspaceCount`. A client that read the old "404 means the session is gone" contract should treat this code as a routing failure it can route around (e.g. re-register the workspace), not as evidence the session was deleted.
+- `400` — `workspace_mismatch` (same shape as `POST /session`), including the reversible lifecycle states: a workspace whose registry entry exists but is draining, transitioning, or blocked. Retry once the workspace settles; do not classify it as gone.
 - `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `504` — `session_restore_timeout`; retryable, with a `Retry-After` derived from the restore budget (clamped to 5-120s) because the same session id stays fenced until late cleanup settles.
@@ -3083,6 +3348,110 @@ The TypeScript daemon SDK exposes the plural route through `workspaceById(...)` 
 
 ### Workspace session artifact library
 
+`workspace_artifact_library` additionally advertises workspace-wide queries and
+batch operations:
+
+| Method | Route                                            | Input                                                                           |
+| ------ | ------------------------------------------------ | ------------------------------------------------------------------------------- |
+| GET    | `/workspaces/:workspace/artifact-library`        | All live, unloaded, and archived sessions in the workspace                      |
+| POST   | `/workspaces/:workspace/artifact-library/query`  | `{ "sessionIds": ["session-id"] }`                                              |
+| POST   | `/workspaces/:workspace/artifact-library/delete` | `{ "artifacts": [{ "sessionId": "session-id", "artifactId": "artifact-id" }] }` |
+
+Both POST bodies are strict objects containing 1–100 entries. Duplicate IDs or
+pairs are processed once. Query responses are
+`{ "v": 1, "sessions": [<session artifact envelope>], "errors": [<member error>] }`.
+Each member error contains `sessionId`, `status`, `code`, and `message`. Full
+discovery omits absent/foreign sessions; an explicit query reports them. Other
+member failures remain explicit while successful sessions are returned.
+
+With `workspace_artifact_library_stream`, every artifact-library session
+envelope (including the existing single-session GET) additionally contains:
+
+```json
+{
+  "session": {
+    "displayName": "Task title",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "archiveState": "archived",
+    "sourceType": "scheduled_task",
+    "sourceId": "task-id"
+  }
+}
+```
+
+`displayName` and `sourceId` are optional. `createdAt` is the original session
+creation time, including after resume; it is not an artifact timestamp.
+`archiveState` is `active` or `archived`. Source types are open strings and
+missing attribution becomes `default`. Sources such as `resource_inspection`
+are preserved so clients can explicitly exclude them. A source ID is paired
+with its original source type. Names follow the current live title or persisted
+custom title/first prompt. The generic `/session/:id/artifacts` response is
+unchanged.
+
+The full GET and selected-session POST also accept `Accept: text/event-stream`.
+Without that negotiation they return the JSON response above. Use fetch-based
+streaming for POST; check the capability and response content type on older
+daemons. The finite SSE sequence is:
+
+| Event           | Data                                                                             |
+| --------------- | -------------------------------------------------------------------------------- |
+| `start`         | `{ "v": 1, "total": <candidate sessions> }`                                      |
+| `session`       | One complete artifact-library envelope including `session`                       |
+| `session_error` | `{ "v": 1, "sessionId": "...", "status": 404, "code": "...", "message": "..." }` |
+| `complete`      | `{ "v": 1, "total": 10, "succeeded": 8, "failed": 1, "skipped": 1 }`             |
+| `error`         | Fatal `{ "v": 1, "status": 503, "code": "...", "message": "..." }`               |
+
+Results arrive in completion order with up to four concurrent session reads;
+a slow session does not block other workers. JSON retains selection order.
+Full-query absent/foreign sessions count as `skipped`; explicit-query failures
+emit `session_error`. `total` counts candidates, not artifacts. Only `complete`
+marks a finished scan. Fatal `error` or disconnection without `complete` means
+partial results; there is no replay cursor, automatic reconnect, or subscription.
+Heartbeat comments may occur while waiting. Initial failures use ordinary HTTP
+status codes; after SSE headers, fatal errors are stream events. A disconnected
+request stops dispatching new reads; already running shared cache loads may
+finish. Backpressure bounds pending result frames and does not hold archive
+barriers while waiting for the client.
+
+Batch removal returns `{ "v": 1, "results": [...] }`. Each result contains
+`sessionId` and `artifactId`, plus either the existing mutation envelope
+(`v`, `changes`, optional `warnings`/`warningDetails`) or
+`error: { status, code, message }`. Missing artifacts are idempotent empty
+changes. Clients must inspect every result and persistence warning; a 200 batch
+response does not mean every member succeeded. Removal is grouped by session,
+is not transactional across sessions, preserves actual files, and requires
+the same strict operator authority as single-artifact removal. Invalid input
+returns 400 `invalid_artifact_library_request`; workspace-level errors retain
+ordinary HTTP status codes.
+
+Live artifacts and titles come from the bridge; bounded persisted identity
+metadata preserves original creation time and source attribution. Unloaded
+metadata, including empty results, is
+cached per runtime with a 32 MiB serialized-size budget. Unchanged files are not
+replayed on repeated queries or after a TTL. Transcript and ownership metadata
+identities are checked on each read; changed entries are rebuilt. Candidate
+discovery is cached by directory identity and refreshed on the first query at
+least two seconds after a completed scan, including when directory timestamps
+do not change. This filename-only refresh preserves unchanged artifact caches.
+Concurrent cold reads share a load; each request processes up to four sessions
+at a time.
+Admitted unchanged entries are retained; new results exceeding the budget are
+returned uncached so repeated full scans do not evict the whole cache. Those
+uncached sessions, or a daemon restart, require reconstruction. This avoids
+repeated JSONL parsing for cached entries, but filesystem checks and response
+size still scale with the workspace. Cold file availability retains the existing
+metadata-only semantics.
+
+The existing single-session artifact-library GET shares this same cache with
+full and batch queries, adding only the `session` summary to its response and
+retaining existing error shapes. Warming one
+route benefits the others; single and batch removal invalidate the shared
+entry. Title-only transcript appends and archive moves also refresh metadata;
+live titles are read on each request without waiting for disk persistence. Live
+persisted metadata and cold envelopes share the same 32 MiB budget, and live/cold
+transitions rebuild the entry. A cached envelope's `generatedAt` is its projection
+creation time.
+
 `session_artifact_library` advertises these persisted-workspace-scoped endpoints:
 
 | Method | Route                                                             | Result                                                                                               |
@@ -3100,7 +3469,7 @@ Both routes return `409 artifact_library_unavailable` when artifact persistence 
 
 ### `GET /workspace/:id/sessions` and `GET /workspaces/:workspace/sessions`
 
-List sessions whose canonical workspace matches `:id` or `:workspace`. The path parameter first resolves as an exact workspace id and then as a URL-encoded absolute cwd. Primary workspaces include the existing persisted/live merge: the default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. Trusted non-primary workspaces include active persisted sessions from their own `chats/` store and merge matching live summaries without duplicates; if no active persisted sessions exist, the route preserves the previous live-only cursor behavior. Trusted non-primary workspaces also support `archiveState=archived`, the organized `view=organized` list, and `group` filters, reading from their own `chats/`, `chats/archive/`, and session-organization stores; a combined `view=organized&archiveState=archived` query returns only archived sessions without a live merge. Registered untrusted non-primary workspaces support the same list, filter, and pagination shapes but return persisted entries only: the daemon does not query the live bridge or populate pending interactions, turn errors, or client state from the runtime. Persisted defaults such as `clientCount: 0` and `hasActivePrompt: false` remain present for wire compatibility. Missing storage returns an empty list. The plural route still returns `403 { code: "untrusted_workspace" }` for an untrusted primary; legacy primary routes keep their existing compatibility behavior. `archiveState=all` is not supported in v1. Primary and persisted-backed lists keep the existing numeric `cursor` semantics; the no-persisted trusted non-primary live fallback keeps its existing opaque live cursor.
+List sessions whose canonical workspace matches `:id` or `:workspace`. The path parameter first resolves as an exact workspace id and then as a URL-encoded absolute cwd. Primary workspaces include the existing persisted/live merge: the default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. Trusted non-primary workspaces include active persisted sessions from their own `chats/` store and merge matching live summaries without duplicates; if no active persisted sessions exist, the route preserves the previous live-only cursor behavior. Trusted non-primary workspaces also support `archiveState=archived`, the organized `view=organized` list, and `group` filters, reading from their own `chats/`, `chats/archive/`, and session-organization stores; a combined `view=organized&archiveState=archived` query returns only archived sessions without a live merge. Registered untrusted non-primary workspaces support the same list, filter, and pagination shapes but return persisted entries only: the daemon does not query the live bridge or populate pending interactions, turn errors, or client state from the runtime. Persisted defaults such as `clientCount: 0` and `hasActivePrompt: false` remain present for wire compatibility. Missing storage returns an empty list. The plural route still returns `403 { code: "untrusted_workspace" }` for an untrusted primary; legacy primary routes keep their existing compatibility behavior. `archiveState=all` is not supported in v1. The legacy recent list of a primary or persisted-backed workspace — the default list and `archiveState=archived` — accepts a legacy numeric `cursor` (a bare mtime position) and answers with an opaque persisted cursor `"<mtime>|<name>"` on every page that has more results, whether or not the page ends inside a group of files sharing an mtime; a bare numeric mtime is accepted only as legacy input. Callers must round-trip the returned token verbatim rather than parse it. The `view=organized` list and the `parentSessionId` / `sourceType` filtered lists page with their own opaque activity cursors, described below, and reject a numeric `cursor` with `400 { code: "invalid_cursor" }`. The no-persisted trusted non-primary live fallback keeps its existing opaque live cursor.
 
 ```bash
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
@@ -3109,6 +3478,8 @@ curl http://127.0.0.1:4170/workspaces/<workspace-id>/sessions
 ```
 
 When `workspace_qualified_rest_core` is advertised, workspace-scoped session batch operations, group CRUD, and session organization mutation are available under `/workspaces/:workspace/sessions/{delete,archive,unarchive}`, `/workspaces/:workspace/session-groups`, and `/workspaces/:workspace/session/:id/organization`. For an untrusted secondary, group GET remains available; every group, session, and organization mutation remains trust-gated. Workspace-less batch and organization mutation routes remain primary-workspace-only for compatibility.
+
+The `liveOnly=1` list reads the workspace bridge instead of `chats/`, so closed persisted history cannot crowd live sessions out of the first page. It requires a trusted workspace and does not accept the persisted-only filters: combining it with `view`, `archiveState=archived`, `parentSessionId`, `sourceType`, or `sourceId` returns `400 { code: "invalid_session_live_only_filter" }`. Any value other than `1` returns `400 { code: "invalid_session_live_only" }`.
 
 Query parameters:
 
@@ -3119,6 +3490,7 @@ Query parameters:
 | `size`         | no       | Page size. Invalid values return `400 { code: "invalid_cursor" }` or the existing page-size validation.                                                                                         |
 | `view`         | no       | Omit for the legacy recent list. `organized` opts into server-side pinned/group ordering and adds optional organization fields. Any other value returns `400 { code: "invalid_session_view" }`. |
 | `group`        | no       | Only meaningful with `view=organized`. `all` (default), `pinned`, `ungrouped`, or a custom group id. Unknown group ids return `404 { code: "group_not_found" }`.                                |
+| `liveOnly`     | no       | `1` lists only sessions currently live in the workspace bridge, ignoring persisted history. Requires a trusted workspace and rejects the incompatibilities described above.                     |
 
 Response:
 
@@ -3135,7 +3507,7 @@ Response:
       "isArchived": false
     }
   ],
-  "nextCursor": 1772251200000
+  "nextCursor": "1772251200000|<uuid>.jsonl"
 }
 ```
 
@@ -3177,7 +3549,7 @@ Read independently paginated session catalogs for several registered workspaces 
 
 `workspaces` is an ordered array of 1–20 `{ workspace, cursor? }` entries, or `"all"` to select all public registered workspaces. Selectors resolve as exact ids before canonical absolute paths. `all` excludes internal Conversations and removed entries, includes temporarily unavailable entries, and fails if more than 20 entries would be selected; callers must then split explicit selections. An empty public registry returns an empty result. Explicit internal selectors return an entry error without booting the internal runtime.
 
-Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `view`, `group`, `parentSessionId`, `sourceType`, and `sourceId` with the existing list filters and combinations. `group` and `parentSessionId` are limited to 256 characters. `includeGroups` defaults to false. Each workspace has its own cursor. Batch default pages use activity ordering and opaque cursors, including for live-only sessions; these cursors are not interchangeable with legacy numeric list cursors. Continue with that entry's returned `cwd` and `nextCursor`, preserving the filters. There is no global sort or global pagination cursor.
+Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `view`, `group`, `parentSessionId`, `sourceType`, and `sourceId` with the existing list filters and combinations. `group` and `parentSessionId` are limited to 256 characters. `includeGroups` defaults to false. Each workspace has its own cursor. Batch default pages use activity ordering and opaque cursors, including for live-only sessions; these cursors are not interchangeable with the persisted list cursors described above. Continue with that entry's returned `cwd` and `nextCursor`, preserving the filters. There is no global sort or global pagination cursor.
 
 ```json
 {
@@ -3209,6 +3581,12 @@ The result preserves selection order and the original selector as `workspace`. S
 Unknown, internal, and removed workspaces produce `404 workspace_not_found`; unavailable or changed runtime generations produce `503 workspace_runtime_unavailable`; an untrusted primary produces `403 untrusted_workspace`. Untrusted secondaries keep the existing persisted-only catalog policy without live bridge reads, repair writes, or debug-session logging. Thrown cursor and group failures retain their existing codes; other thrown read failures become `500 session_catalog_failed`. Trusted active entries can merge existing live bridge state; archived entries remain storage-only.
 
 The daemon runs at most four workspace reads concurrently per batch, limits selectors to 4096 characters and cursors to 16384 characters, and caps each serialized successful entry at 512 KiB. An oversized entry returns `413 catalog_response_too_large`; reduce `size` or omit groups before retrying. This bounds a batch response to approximately 10 MiB plus envelope/error overhead. Client disconnect cancels pending reads and prevents additional workspace reads from starting. The existing daemon JSON body limit and persisted scan limits also apply. Catalog requests use the read rate-limit tier.
+
+### `POST /sessions/live-state`
+
+Read live-state snapshots for 1–20 explicitly selected registered workspaces in one request. The strict body is `{ "workspaces": ["workspace-id", "/absolute/workspace/path"] }`; selectors resolve as exact workspace ids before canonical absolute paths. The response is `{ "workspaces": [...] }` in request order. Each successful entry includes its original `workspace` selector, canonical `workspaceId` and `cwd`, plus the same `v: 1`, `catalogVersion`, and complete `sessions` snapshot as the single-workspace route below. The snapshots are independent; there is no cross-workspace atomicity or merged session feed. Both routes share catalog-version exposure and cache invalidation, so alternating between them preserves the single-workspace catalog reconciliation contract. A valid batch returns HTTP 200 and `Cache-Control: no-store` even if some entries fail.
+
+Each failed entry contains `workspace`, optional resolved `workspaceId` and `cwd`, and `error: { code, message, status }` without a successful empty `sessions` list. Unknown, internal, or removed selectors return `404 workspace_not_found`; unavailable or replaced runtime generations return `503 workspace_runtime_unavailable`; untrusted primary or secondary workspaces return `403 untrusted_workspace`; unexpected bridge failures return `500 session_live_state_failed`. A successful entry exceeding 512 KiB returns `413 live_state_response_too_large`. Invalid envelopes, extra keys, empty arrays, more than 20 selectors, and selectors longer than 4096 characters return HTTP 400 `invalid_session_live_state_batch_request` before any bridge reads. The route reads only each selected active runtime's in-memory bridge, never persisted catalogs or ACP children; member reads run sequentially, and the POST is charged to the daemon read rate-limit tier.
 
 ### `GET /workspaces/:workspace/sessions/live-state`
 
@@ -3395,7 +3773,7 @@ ACP-over-HTTP uses the same request and response bodies through vendor methods `
 
 ### Multi-workspace live-session routing
 
-When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, and `DELETE /session/:id/sources/:sourceId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
+When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/btw/stream`, `DELETE /session/:id/btw/stream/:requestId`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, and `DELETE /session/:id/sources/:sourceId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
 
 This rule is live-session-only and does not make every workspace-less session route multi-workspace-aware. Persisted or archived operations use their documented workspace-qualified routes. `POST /session/:id/branch`, `POST /session/:id/fork`, and `POST /session/:id/cd` intentionally remain primary-only and return `non_primary_session_route_not_supported` for non-primary owners.
 
@@ -3504,6 +3882,39 @@ send or publish a delivery result.
 
 Validation: `prompt` must be a non-empty array of objects. Other failures return `400` before reaching the bridge.
 
+`idempotencyKey` is an optional non-empty string of at most 200 characters
+(invalid values return `400 invalid_idempotency_key`). It identifies the
+caller's EVENT, not the HTTP request: the first admission remembers the key
+per session, and a repeat POST with the same key returns the original
+admission — `202 { promptId, lastEventId, eventEpoch, deduplicated: true }`
+with the FIRST prompt's `promptId` and a fresh cursor/epoch — without
+enqueueing a second turn. This lets a relay that marks acceptance durably
+after the `202` (or loses the response) retry safely. Dedupe is best-effort
+within a daemon's lifetime: the ring is in-memory and bounded (128 keys per
+session, 1024 sessions, FIFO eviction at both levels). Either cap can evict
+a key while its event's queue entry is still live — the per-session cap in
+the ordinary case of one long-lived session admitting more than 128 distinct
+events, the session cap when more than 1024 sessions hold keys — and a retry
+after such an eviction re-injects. The ring also dies with the in-memory
+prompt queue it protects, so a daemon restart loses both together and
+re-injection becomes the correct recovery. Keys are scoped per session; the
+field is admission metadata and is never forwarded to the agent.
+
+Channel relays ride three `_meta` keys that the route strips before
+forwarding: `qwen.channel.prompt` (channel-turn classification),
+`qwen.daemon.channelBoundRelay: true` (cross-workspace bound-delivery
+intent), and `qwen.daemon.channelPromptAuthorization` (the channel-worker
+authorization token; the reference worker sends it only when it holds a
+credential). `qwen.channel.prompt` requires a registered channel-worker
+authorization token — the per-workspace registration for the target
+workspace, or, for a CROSS-workspace bound delivery, any registered worker
+token plus the explicit `qwen.daemon.channelBoundRelay: true` marker and a
+primary/trusted target. A relay that sends only the two markers without the
+credential gets no channel classification: it is admitted as an ordinary
+interactive prompt (loop-detected rejection, live PR-binding backfill on the
+relayed text). A plain prompt carrying a foreign worker token likewise gets
+no channel classification and no caller-supplied display projection.
+
 Response:
 
 ```json
@@ -3512,7 +3923,17 @@ Response:
 
 The `202` response acknowledges admission, not Agent completion. Observe the
 session SSE stream after `lastEventId` and correlate `turn_complete` or
-`turn_error` by `promptId`.
+`turn_error` by `promptId`. Every reachable pre-enqueue admission check —
+including the reserved standalone working-directory guard — throws
+synchronously, so the route answers a non-202 error BEFORE any acceptance:
+the guard answers `409 working_directory_missing` (`retryable: true`,
+`Retry-After: 5`) while the session's managed conversation binding has not
+released yet, and a channel relay defers the event instead of consuming a
+phantom acceptance. Should a bridge still reject deferred before admission,
+the route drops the request's `idempotencyKey` so a subsequent retry is
+admitted fresh instead of deduping into a phantom admission — a
+defense-in-depth for that case, whose CURRENT delivery is already consumed
+by the caller.
 
 `turn_complete.data.stopReason` carries the ACP `StopReason` the agent
 returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or
@@ -3825,6 +4246,87 @@ content. A model failure after streaming starts produces an `error` event; it
 does not retry with another model. Prompts are limited to 32 KiB of UTF-8 text.
 Disconnecting the HTTP client cancels the generation request.
 
+### `POST /session/:id/btw/stream`
+
+Capability tag: `session_btw_stream`. Scope: live-session-owner.
+
+Ask a tool-free side question using the live session's conversation context,
+without appending to its transcript or interrupting its main task. The existing
+JSON `POST /session/:id/btw` API remains available with its original behavior.
+
+Request:
+
+```json
+{ "question": "Why?", "requestId": "unique-request-id", "resume": false }
+```
+
+`question` is a non-empty trimmed string, limited to 4096 characters before
+trimming. `requestId` contains 1–64 ASCII letters, digits, underscores or hyphens.
+`resume` is optional and defaults to `false`. `X-Qwen-Client-Id`, when supplied,
+must name a client registered with the live session. Every start and resume
+uses the resolved owner runtime and its trust and mutation gates.
+
+The response is `text/event-stream`, with `v: 1` on every event:
+
+| Event    | Payload                                                                     |
+| -------- | --------------------------------------------------------------------------- |
+| `answer` | `{ "type": "answer", "requestId": "...", "answer": "accumulated text" }`    |
+| `done`   | `{ "type": "done", "requestId": "...", "answer": "trimmed complete text" }` |
+| `error`  | `{ "type": "error", "requestId": "...", "code": "...", "message": "..." }`  |
+
+Each `answer` replaces the previous text; it is not a delta to append. Partial
+snapshots preserve whitespace; `done` trims leading and trailing whitespace,
+matching the existing JSON BTW result. The initial snapshot can be empty. `done` and `error` terminate the stream. Heartbeat
+comments are sent every 15 seconds. An answer is limited to 1 MiB of UTF-8 text;
+exceeding it produces `btw_failed`. The daemon ends generation after five minutes
+with `btw_timeout`; child and bridge cleanup deadlines allow another five and ten
+seconds respectively. Explicit cancellation produces `btw_cancelled`; other
+upstream failures produce `btw_failed`.
+
+HTTP disconnection only detaches the subscriber. Reconnect with the same
+`requestId`, question and client identity and `resume: true` to receive the latest
+snapshot without starting another model call. Repeat initial submissions with
+the same identity also reuse retained work. No event cursor or `Last-Event-ID`
+is required. A `resume: true` request whose retained entry is missing returns
+410 and never starts new work. Requests are scoped by
+bridge identity, session, client and request ID; they cannot resume across a
+daemon restart or replacement owner runtime.
+
+There are at most 32 retained requests per owner runtime. Terminal receipts and
+cancellation markers expire after 60 seconds and may be evicted earlier, oldest
+first, to admit a new request. Active requests are not evicted. Generation does
+not hold a session's shared archive admission lock while waiting for the model
+or subscriber; bridge activity still protects it against idle cleanup. Explicit
+session close and daemon shutdown retain their normal cancellation behavior.
+
+Errors before SSE starts:
+
+- `400 invalid_btw_request` — invalid question, request ID or resume flag.
+- `400 invalid_client_id` — malformed or unregistered client identity.
+- `403 untrusted_workspace` — the resolved non-primary owner is untrusted.
+- `404 session_not_found` — no live owner exists.
+- `409 btw_request_conflict` — the retained ID belongs to another question.
+- `410 btw_expired` — a resume has no retained request.
+- `429 btw_limit` — all 32 retained requests are active.
+- `501 btw_stream_not_supported` — the owner's bridge cannot stream BTW.
+
+### `DELETE /session/:id/btw/stream/:requestId`
+
+Capability tag: `session_btw_stream`. Scope: live-session-owner.
+
+Cancel the matching BTW request with the same session and client identity used
+to start it. Returns empty `204`; cancellation is idempotent for a retained
+request. The exact cached identity can cancel after its client detached, while
+unknown IDs require a still-registered client. Cancelling an unknown ID records
+a short-lived cancellation marker so a delayed initial POST cannot start work.
+
+The route uses the same owner resolution, trust and mutation gates as streaming
+POST. Invalid IDs return `400 invalid_btw_request`; invalid client identities
+return `400 invalid_client_id`. An unknown cancellation returns `429 btw_limit`
+when all 32 retained requests are active. A known active request can always be
+cancelled even when the runtime is at capacity. Cancellation does not cancel the
+main prompt or another session's BTW.
+
 ### Mutation: approval, tools, skills, init, MCP restart
 
 The daemon exposes five mutation control routes that let remote clients change runtime posture without touching the daemon host's CLI. Approval-mode control retains its non-strict compatibility gate. Tool toggle, skill toggle, workspace init, and MCP restart use the strict mutation gate: trusted-loopback primary, bearer-authenticated, and paired Local Control requests pass. A token-less primary request that reaches the gate without trusted-loopback authority receives `401 {code: 'token_required'}`; missing or invalid configured credentials and unpaired Local Control credentials are rejected earlier with plain `401 Unauthorized`. All five:
@@ -3928,9 +4430,21 @@ Capability tag: `workspace_skills_config_runtime`.
 
 Global installation and deletion use `POST /workspace/config/skills/install` and `DELETE /workspace/config/skills/:name?scope=global`. Workspace installation, deletion, and enablement use `POST /workspaces/:workspace/config/skills/install`, `DELETE /workspaces/:workspace/config/skills/:name?scope=workspace`, and `POST /workspaces/:workspace/config/skills/:name/enable`. Config writes commit durable state before scheduling runtime reconciliation. Their `activation` is `deferred` when no current runtime can be updated and `reconciling` when an update has been queued; a no-op toggle preserves the facade's activation instead of claiming that a runtime refresh occurred.
 
-Config deletion returns `503 skills_config_unavailable` instead of a definitive not-found response when the daemon-local Skill inventory cannot be enumerated.
+Config deletion returns `503 skills_config_unavailable` instead of a definitive not-found response when the daemon-local Skill inventory cannot be enumerated. Runtime deletion (`DELETE /workspace/skills/:name` and its workspace-qualified form) requires a freshly enumerated catalog: it returns the same `503 skills_config_unavailable` when neither the runtime catalog nor daemon-local enumeration yields an initialized catalog, even if a retained observation exists. `404 skill_not_found` means the catalog was enumerated and the name is not in it.
 
 The singular mutation owner rejects workspace scope with `400 workspace_scope_requires_qualified_workspace`; qualified mutations reject global scope with `400 global_scope_requires_singular_owner`. Qualified writes require a trusted workspace. A legacy injected bridge returns `501 workspace_runtime_not_supported` for qualified config writes that require runtime coordination. Unknown, removed, transitioning, and draining workspaces follow the standard qualified-workspace errors and never fall back to primary.
+
+#### Native Skill archive installation and receipts
+
+`skill_archive_install` and `skill_zip_file_source` advertise native ZIP inputs and the corresponding owner-scoped receipt queries. Both are confined to the modern config surface. Their `limits.maxSkillArchiveBytes`, `maxSkillArchiveExpandedBytes`, `maxSkillArchiveEntries`, and `maxSkillArchiveManifestBytes` apply only to these two sources: 50 MiB compressed, 200 MiB expanded, 4096 ZIP records, and 32 MiB for the effective root `SKILL.md`. Explicit directories and ignored metadata count as records before filtering; implicit parents do not. Ignored metadata is not inflated. Legacy base64, directory and GitHub limits, including the 10 MiB JSON parser, remain unchanged.
+
+- `POST /workspace/config/skills/install-archive?name=...&attemptId=...` installs globally; `/workspaces/:workspace/config/skills/install-archive` installs into the selected workspace. Send `application/octet-stream` without HTTP content encoding. The route fixes the scope.
+- The existing modern JSON install routes also accept `{ "name": "example", "scope": "global", "attemptId": "<UUID>", "source": { "type": "zip-file", "path": "/absolute/daemon/path.zip", "sha256": "<optional 64 hex digits>" } }`. Qualified routes require `scope: "workspace"`. The daemon copies the opened regular file into private storage and never removes or renames the caller's file. Keep the source stable while it is copied; metadata checks alone are not an atomic snapshot.
+- `GET /workspace/config/skills/install-attempts/:attemptId` and `GET /workspaces/:workspace/config/skills/install-attempts/:attemptId` query the original owner. Responses carry `running` (with phase), `committed`, `not_committed`, or `recovery_required`. Missing or inaccessible receipts mean the result cannot be confirmed. Queries neither start a runtime nor acquire the mutation coordinator.
+
+The client supplies a UUID before sending; the SDK can generate it. A duplicate ID under the same owner returns 409 without repeating the installation. Two operations may be active per daemon, including lock waits and cleanup; further admission returns 429 with `Retry-After`. There is one 120-second budget covering receipt intake through publication admission. Cancellation before publication stops the operation; after admission, commit or rollback finishes even if the HTTP connection disappears.
+
+Success retains the mutation result and activation, adding `attemptId` and `archiveSha256`. A post-commit activation failure is an `activationWarning`, not a failed commit. Receipts are process-local historical outcomes, retained for ten minutes after work settles, with a capacity of 256 and no early eviction. They do not prove that a later operation has not replaced the installed content. Restart, expiry or loss of owner access makes the result unknown. Clients must query after ambiguous failures and must not automatically retransmit.
 
 #### `POST /workspace/skills/refresh`
 
@@ -3962,7 +4476,7 @@ Counts describe the selected sessions and the shared/session configurations refr
 
 Capability tag: `workspace_skill_settings_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
+Update the workspace Skill settings for a name. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed; if both fresh sources fail, a retained observation is used before the legacy name heuristic. Names are not validated against the catalog. Disable does not read the catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
 
 This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. For an active Extension parent, effective Skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled` > workspace internal override > manifest `skillStates` > enabled. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
@@ -3985,7 +4499,7 @@ Response (200):
 }
 ```
 
-`activation` reflects child liveness and any required refresh independently from `changed`. It is `applied` when an ACP child is live and any required refresh succeeds, `deferred` when no child was live at the liveness check or a changed request loses its child/session during the required refresh, and `partial` when at least one other required refresh fails. A no-op can therefore be `applied` or `deferred` with `changed: false`; when `changed` is true and activation is `deferred`, the persisted declaration is used when a child starts. Busy sessions are included in a required refresh. The daemon reloads workspace settings for the ACP child and every active session, notifies SkillManager consumers, and pushes `available_commands_update`. A request already sent to the model is not rewritten; subsequent validation, command snapshots, and model contexts use the new state. If persistence fails, no refresh or event is emitted. If a session refresh fails, the committed setting is retained. When the child returns per-session results, the session counts are exact. If the refresh control itself fails before returning those results, `sessionsFailed: 1` is a conservative lower bound indicating that the refresh request failed.
+`activation` reflects child liveness and any required refresh independently from `changed`. It is `applied` when an ACP child is live and any required refresh succeeds, `deferred` when no child was live at the liveness check or a changed request loses its child/session during the required refresh, and `partial` when at least one other required refresh fails. A no-op can therefore be `applied` or `deferred` with `changed: false`; when `changed` is true and activation is `deferred`, the persisted declaration is used when a child starts. Busy sessions are included in a required refresh. The daemon reloads workspace settings for the ACP child and every active session, notifies SkillManager consumers, and pushes `available_commands_update` when the rebuilt catalog differs from the last successfully pushed snapshot. An unchanged command snapshot is suppressed; clients should use `settings_changed` to observe changed settings declarations independently of catalog delivery. A request already sent to the model is not rewritten; subsequent validation, command snapshots, and model contexts use the new state. If persistence fails, no refresh or event is emitted. If a session refresh fails, the committed setting is retained. When the child returns per-session results, the session counts are exact. If the refresh control itself fails before returning those results, `sessionsFailed: 1` is a conservative lower bound indicating that the refresh request failed.
 
 Errors:
 
@@ -3999,7 +4513,7 @@ The mutation reuses the workspace-scoped `settings_changed` event for each chang
 
 Capability tag: `workspace_skill_settings_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
-Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
+Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed; if both fresh sources fail, a retained observation is used before the legacy name heuristic. Names are not validated against the catalog. Disable does not read the catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
 
 Request:
 
@@ -4040,6 +4554,39 @@ Response (200):
 ```
 
 Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. `errors` remains in the response for wire compatibility and is empty for structurally valid names. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe child liveness and the single live-session refresh shared by all changed results. A batch in which no target changed can still answer `applied` when a child is live or `deferred` when none exists, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag. When at least one target changes, the daemon emits the same `settings_changed` mutation metadata as the single-Skill route; every `skills.disabled` / `skills.enabled` event from that request shares one `mutation.id`.
+
+#### `PUT /skills/activation`
+
+Capability: `user_skill_activation` (advertised when User settings persistence is available). This process-global mutation saves User Skill preferences without requiring a trusted workspace or scanning installed Skills. It uses the usual authenticated mutation gates; an optional `X-Qwen-Client-Id` must belong to a still-managed runtime, including one being drained.
+
+```json
+{
+  "skillNames": ["rust:pdf", "go:review"],
+  "state": "enabled"
+}
+```
+
+Supply 1–100 names (at most 256 characters each). Names are trimmed and deduplicated case-insensitively. `state` is `enabled` or `disabled`. Only `disabled` accepts `mode`: `hard` (default) or `default`. Names need not be installed yet. Invalid batches are rejected before any write.
+
+Qwen reads the latest User settings under its settings write lock, adds each explicit name to `skills.enabled`, `skills.disabled`, or `skills.defaultDisabled`, and removes that same name from the other two lists in one save. Other names, spellings, scopes, and settings are preserved. In particular, enabling `rust:pdf` does not remove a `pdf` restriction. Explicit bare names retain the existing matching rules. System restrictions still apply.
+
+```json
+{
+  "scope": "user",
+  "state": "enabled",
+  "results": [
+    { "skillName": "rust:pdf", "changed": true },
+    { "skillName": "go:review", "changed": true }
+  ],
+  "propagation": "queued"
+}
+```
+
+Disabled responses also include the normalized `mode`. `propagation` describes scheduling, not measured availability: `queued` means at least one live runtime queued a refresh; `deferred` means saved settings await runtime lifecycle work; `not_required` means this request changed nothing. A no-op neither writes nor emits events and does not certify completion of earlier refreshes. Read the existing workspace configuration and runtime Skill status endpoints for effective state.
+
+Successful changes invalidate configuration caches and broadcast ordinary `settings_changed` events with `scope: "user"`. Refreshes re-read User and Workspace settings atomically; failed configuration or session refreshes retain pending work for lifecycle recovery and bounded retries. Existing workspace-only refresh behavior is unchanged.
+
+Malformed input returns HTTP 400 (`invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`). A primary runtime generation closed before commit returns HTTP 503 with `Retry-After: 1`, as on settings routes. The SDK exposes `setUserSkillsActivation(skillNames, activation, { clientId? })` and sends one PUT without a preliminary configuration read.
 
 #### `POST /workspace/init`
 
@@ -4131,6 +4678,14 @@ Errors (non-2xx):
 - `500` — internal error (e.g. `ToolRegistry` not initialized).
 
 SSE events (workspace-scoped): `mcp_server_restarted` with `{serverName, durationMs, originatorClientId?}` on success; `mcp_server_restart_refused` with `{serverName, reason, originatorClientId?}` on soft skip.
+
+#### `POST /workspaces/:workspace/language`
+
+Sessionless workspace UI-language sync, registered when settings persistence is available. Ownership: selected-runtime. Resolves the workspace id or encoded absolute cwd, requires an active trusted runtime and validates client ownership against that runtime. Inactive generations return `503 workspace_runtime_unavailable`; unresolved selectors never fall back to the primary workspace.
+
+Request: `{ "language": "zh" }`. The language uses the same supported codes as `POST /language`. Persists only the selected workspace's `general.language`, then reads its effective merged setting and synchronizes already-live channels through `qwen/control/user/language` with `scope: "workspace"`. Cold channels are skipped without starting a process or creating a conversation. Output language and model settings remain unchanged; `syncOutputLanguage: true` is rejected.
+
+The response has the same shape as `POST /language`, with `outputLanguage: null`; `language` is the effective configured locale (including `auto`) and `refresh` counts the selected runtime only. A workspace `language_changed` event is emitted on success. The SDK exposes `client.workspaceByCwd(cwd).setUiLanguage(language)` over REST, independently of the session transport.
 
 #### `POST /language`
 
@@ -4235,7 +4790,8 @@ The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` f
 
 Reconnect semantics:
 
-- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`).
+- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`). Retention is also byte-capped by `--event-ring-max-bytes` (default **8 MiB**, positive safe integer up to **256 MiB**), including the latest full command snapshot. At least the newest ring event is retained even when one event or snapshot exceeds the cap.
+- Unchanged `available_commands_update` snapshots are not republished by the ACP child. Historical copies retain command metadata and skill names without full skill bodies; only the latest complete snapshot is restored at its original matching ID for ACP replay. Browser/SDK egress still omits skill bodies. These latest-state projections do not create ID gaps or replace the existing resync signals.
 - **Gap detection:** within the same epoch, if the first retained ring id is greater than `<n> + 1`, the daemon emits an id-less `state_resync_required` frame with `reason: 'ring_evicted'` before replaying the surviving suffix. The other reasons are `epoch_reset`, `seeded_replay_not_in_ring`, and `replay_budget_exceeded`; the budget signal follows the delivered replay prefix. See [resync reasons and ordering](./daemon/09-event-schema.md#resync-reasons-and-ordering) for their triggers, cursor fields, and recovery rules.
 - The SDK latches `awaitingResync`; clients should call `POST /session/:id/load` and rebuild from the current bounded replay snapshot window. That snapshot may itself start with `history_truncated` when older in-memory replay entries were dropped; this marker is informational and must not start another resync loop. Its optional pagination anchor is [frozen at replay-window eviction](./daemon/09-event-schema.md#history-truncation-anchor).
 - IDs are monotonic within a session's event-bus epoch, starting at 1. A rejected publish must not consume an id; see [event sequence invariants](./daemon/09-event-schema.md#state-and-forward-compatibility).
@@ -4382,8 +4938,8 @@ Response (`201` fresh start, `200` idempotent take-over):
   "providerId": "qwen-oauth",
   "status": "pending",
   "userCode": "USER-1",
-  "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device",
-  "verificationUriComplete": "https://chat.qwen.ai/api/v1/oauth2/device?user_code=USER-1",
+  "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device?entry=qwen_code&paywallScene=cli",
+  "verificationUriComplete": "https://chat.qwen.ai/api/v1/oauth2/device?user_code=USER-1&entry=qwen_code&paywallScene=cli",
   "expiresAt": 1700000600000,
   "intervalMs": 5000,
   "attached": false

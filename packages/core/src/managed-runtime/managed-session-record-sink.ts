@@ -13,7 +13,6 @@ import type {
 } from './managed-session-authority.js';
 import {
   createNextTurnReadyHarnessCheckpoint,
-  encodeHarnessCheckpointV1,
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
 } from './managed-harness-checkpoint.js';
@@ -35,6 +34,7 @@ import type { ManagedSessionResourceStore } from './managed-session-storage.js';
  * than falling back to a direct append.
  */
 const CARRIED_SYSTEM_SUBTYPES = new Set([
+  'memory_catalog_snapshot',
   'slash_command',
   'at_command',
   'ui_telemetry',
@@ -364,15 +364,13 @@ export class ManagedSessionRecordSink {
             turn,
             boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
             state: (identity, previous) =>
-              encodeHarnessCheckpointV1(
-                createNextTurnReadyHarnessCheckpoint({
-                  previous,
-                  ...identity,
-                  activationId: held.activationId,
-                  turnId,
-                  promptId: turnId,
-                }),
-              ),
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: held.activationId,
+                turnId,
+                promptId: turnId,
+              }),
           },
           actor,
         );

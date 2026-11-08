@@ -768,6 +768,9 @@ describe('ShellTool', () => {
       await runShell('gh pr create --help', 'usage: gh pr create\n');
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: URL absent from the command output',
+      );
     });
 
     it('attributes against the execution directory, not the target dir', async () => {
@@ -815,6 +818,11 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      // A merged PR arrives as `status: 'pr'`; the state is what names it.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'pr', state: 'merged' },
+      );
     });
 
     it('does not bind an open PR the branch already had before the run', async () => {
@@ -826,6 +834,10 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: PR already existed before the run',
+        { number: 42 },
+      );
     });
 
     it('does not bind when the pre-run snapshot errored', async () => {
@@ -839,6 +851,32 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: pre-run PR snapshot unavailable',
+      );
+    });
+
+    it('names the post-run resolution status instead of paraphrasing a cause', async () => {
+      // `none` (gh proved the branch has no PR) and `error` (gh could not
+      // answer at all) are different facts; the log must not report the first
+      // when the second happened.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'error' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'error' },
+      );
+
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'none' },
+      );
     });
 
     it('does not re-emit when the resolved PR is already bound', async () => {
@@ -859,6 +897,10 @@ describe('ShellTool', () => {
         [{ ...prRecord(42), source: 'create' }],
       );
       expect(sessionServiceMock().emitSessionPrBound).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: already bound',
+        { number: 42 },
+      );
     });
 
     it('binds when a promote is refused after the command settled', async () => {
@@ -917,6 +959,10 @@ describe('ShellTool', () => {
       );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: branch mismatch',
+        { created: 'other-branch', expected: 'main' },
+      );
     });
 
     it('does not bind when the pre-run branch could not be captured', async () => {
@@ -1531,6 +1577,48 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('sed edit made no changes');
       });
 
+      it('does not report a CRLF edit whose only effect is the carriage return', async () => {
+        // `.$` consumes the `\r` under dotAll, but the write path restores CRLF,
+        // so the bytes on disk would be identical to the original.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('still skips that CRLF edit when the file carries a BOM', async () => {
+        // The read returns the content without the BOM, so the prediction has
+        // to compare content strings or the BOM bytes make it unequal.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), bom: true, lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('writes a CRLF edit whose bytes do change', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/foo/bar/' file.txt");
+
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
+          expect.objectContaining({ content: 'bar\r\n' }),
+        );
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
       it.each([
         { code: 'ENOENT', type: ToolErrorType.FILE_NOT_FOUND },
         { code: 'EACCES', type: ToolErrorType.READ_CONTENT_FAILURE },
@@ -2105,6 +2193,33 @@ describe('ShellTool', () => {
 
       // Foreground commands should not be wrapped with pgrep
       expectSpawned('npm test');
+    });
+
+    it('marks a user-cancelled command as interrupted before completion', async () => {
+      const result = await runFg('npm test', {
+        output: 'start',
+        exitCode: null,
+        signal: 15,
+        aborted: true,
+      });
+
+      // The tool returns (rather than throws), so the scheduler needs this
+      // signal to avoid reporting a killed command as already completed.
+      expect(result.interruptedBeforeCompletion).toBe(true);
+      expect(String(result.llmContent)).toContain(
+        'Command was cancelled by user before it could complete.',
+      );
+      // What already ran is part of the interrupted account, not a detail the
+      // cancellation may drop.
+      expect(String(result.llmContent)).toContain(
+        'Below is the output before it was cancelled:\nstart',
+      );
+    });
+
+    it('does not mark a completed command as interrupted', async () => {
+      const result = await runFg('npm test', { output: 'done', exitCode: 0 });
+
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
     });
 
     it('preserves shell wrapper environment and flags during foreground execution', async () => {
@@ -4389,6 +4504,8 @@ describe('ShellTool', () => {
           ['timed out'],
         );
         expect(result.returnDisplay).toMatchObject({ outcome: 'completed' });
+        // Neither a timeout nor a refused promote is a returned interruption.
+        expect(result.interruptedBeforeCompletion).toBeUndefined();
       });
 
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
@@ -5281,6 +5398,8 @@ describe('ShellTool', () => {
         message: TIMED_OUT,
         type: ToolErrorType.EXECUTION_TIMEOUT,
       });
+      // A timeout is reported as a tool error, never as a returned interruption.
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
     });
 
     it('returns a structured timeout when the command produced no output', async () => {
