@@ -28091,6 +28091,154 @@ describe('App session callbacks', () => {
     expect(mockConnection.sessionId).toBe('session-2');
   });
 
+  it('gives a new draft its own session when another draft creation is in flight', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const createA = deferred<{ sessionId: string }>();
+    const detachedClientA = {
+      sessionId: 'session-a',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession
+      .mockImplementationOnce(
+        async (options?: { navigationOutcome?: { bound: boolean } }) => {
+          const result = await createA.promise;
+          if (options?.navigationOutcome) {
+            options.navigationOutcome.bound = false;
+          }
+          return { ...result, ...detachedClientA };
+        },
+      )
+      .mockImplementationOnce(async () => ({ sessionId: 'session-b' }));
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('prompt A');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    // The user opens an existing session, then starts a fresh draft and
+    // submits a different prompt while A's creation is still held.
+    act(() => {
+      mockConnection.sessionId = 'session-existing';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('prompt B');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      createA.resolve({ sessionId: 'session-a' });
+      await createA.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+    });
+    // A's prompt survives navigation into its own session; B's prompt goes
+    // to B's fresh session, never into A.
+    expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendDetachedPrompt.mock.calls[0][1]).toBe(
+      'prompt A',
+    );
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'prompt B',
+      expect.any(Object),
+    );
+  });
+
+  it('keeps a detached goal strip out of an unrelated new draft', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const createA = deferred<{ sessionId: string }>();
+    const detachedClientA = {
+      sessionId: 'session-a',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await createA.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClientA };
+      },
+    );
+    mockWorkspaceActions.controlGoal.mockResolvedValueOnce({
+      snapshot: activeGoalSnapshot('Objective A'),
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal Objective A';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-existing';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      createA.resolve({ sessionId: 'session-a' });
+      await createA.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith(
+        'session-a',
+        { action: 'create', objective: 'Objective A' },
+      );
+    });
+    await flush();
+    // The goal landed in A; the unrelated draft must not display its strip.
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).toBeNull();
+  });
+
   it('discards an armed /clear carry when a shrink-fold lands on a split pane', async () => {
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;

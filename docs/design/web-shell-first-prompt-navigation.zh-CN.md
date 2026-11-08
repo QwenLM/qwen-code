@@ -98,6 +98,15 @@ Web Shell 的新聊天是草稿态：首条 prompt 提交时才真正创建 daem
 `POST /session/:id/detach` 是唯一的释放方式。prompt 与 shell 在派发落定后
 detach；goal 与 mention 在分配时即 detach，因为它们的派发不经过客户端。
 
+两条导航不变式约束 detached 路径：
+
+- **分配复用按草稿作用域。** 在途创建只被同一 composer source generation
+  的提交复用；新草稿（New session 会 bump generation）创建自己的会话，
+  不继承在途分配，因此两个草稿的 prompt 不会落到同一会话。
+- **detached goal 状态不向本地发布。** detached goal 按 id 在自己的会话
+  创建；本地 goal strip 发布（把无会话连接当作即将成为的草稿）对
+  detached 分配被抑制，无关新草稿不会显示别的会话的 goal。
+
 ### `sendDetachedPrompt` action
 
 `actions.ts` 中新增的"仅准入"action，在 `types.ts` 中声明类型：

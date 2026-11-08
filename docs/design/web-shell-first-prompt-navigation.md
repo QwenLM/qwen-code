@@ -112,6 +112,19 @@ daemon-side registration, and `POST /session/:id/detach` is the only release.
 Prompt and shell detach after their dispatch settles; goal and mention
 detach at allocation because their dispatch never touches the client.
 
+Two navigation invariants bound the detached path:
+
+- **Allocation reuse is draft-scoped.** The in-flight creation is reused
+  only by submissions from the same composer source generation; a new
+  draft (New session bumps the generation) creates its own session instead
+  of inheriting the pending allocation, so two drafts' prompts never land
+  in one session.
+- **Detached goal state never publishes locally.** A detached goal is
+  created by id in its own session; the local goal-strip publication
+  (which treats a session-less connection as the becoming draft) is
+  suppressed for detached allocations, so an unrelated new draft never
+  displays another session's goal.
+
 ### `sendDetachedPrompt` action
 
 New admission-only action in `actions.ts`, typed in `types.ts`:
