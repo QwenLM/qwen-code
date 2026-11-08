@@ -247,6 +247,10 @@ it('navigates composite MCP edits to the Managed Extensions tab', async () => {
         truncated: false,
         settings: [],
       })),
+      importPackage: vi.fn(),
+      previewPackage: vi.fn(),
+      lookupPackageOperation: vi.fn(),
+      lookupApplyOperation: vi.fn(),
     },
   } as unknown as ManagedAgentProvider;
   await act(async () =>
