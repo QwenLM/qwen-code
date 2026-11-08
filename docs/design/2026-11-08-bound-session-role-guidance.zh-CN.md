@@ -94,7 +94,9 @@ export const DEFAULT_BOUND_ROLE_GUIDANCE: Readonly<
 | `resolveBoundTargets`（legacy 分支） | 评论车道事件                                                  | 同样的回读                                                 |
 | `resolveBoundDeliveryExcluding`      | gone 回退                                                     | 去掉 `this.boundRoleAware &&` 合取项；`best.role` 本就在手 |
 
-`boundSessionByPr` 只持有 `PrBindingSummary`，所以前两条从 `boundFollowersOf` 回读角色——正是角色化路径用来分组的那份列表。
+`boundSessionByPr` 只持有 `PrBindingSummary`，所以前两条从它们已经解析出的赢家回读角色。逐条目的匹配——URL 必须可解析、与自身记录的编号一致、并归一化为该 PR 的键——被抽取为 `boundPrEntryFor`，与 `boundFollowersOf` 共用，因此两条路径不会漂移。
+
+若通过整份跟随者列表回读角色，就会把「每会话每绑定一次 URL 解析」放进 `resolveBoundDelivery`——它原本只是一次 `Map` 查表，且每个事件会走到两三次。改用已解析出的赢家，就把解析限制在那一个会话自己的条目内。
 
 这些都不触及哪个会话胜出：分组、最近更新比较与单赢家形状均未改动。
 

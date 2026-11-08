@@ -21,6 +21,7 @@ import type {
   ChannelConfig,
   ChannelTaskLifecycleEvent,
   Envelope,
+  PrBindingEntry,
   PrBindingRole,
   PrBindingSummary,
 } from '@qwen-code/channel-base';
@@ -5303,7 +5304,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.prBindingKey(chatId, issueNumber),
     );
     if (!summary) return undefined;
-    const role = this.boundRoleOf(chatId, issueNumber, summary.sessionId);
+    const role = this.boundRoleOf(summary, chatId, issueNumber);
     return {
       kind: 'bound-session',
       sessionId: summary.sessionId,
@@ -5312,19 +5313,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
-   * The role of the entry that names THIS PR for a session, or undefined for
-   * an untyped binding. Legacy routing picks its winner from boundSessionByPr,
-   * which holds only the summary, so the role is read back from the same
-   * follower list the role-aware path groups by.
+   * The role of the entry that names THIS PR, or undefined for an untyped
+   * binding. Takes the winner legacy routing already resolved, so the URL
+   * parse stays within that one session's entries instead of repeating the
+   * whole follower scan on a path that used to be a single Map lookup.
    */
   private boundRoleOf(
+    summary: PrBindingSummary,
     chatId: string,
     issueNumber: number,
-    sessionId: string,
   ): PrBindingRole | undefined {
-    return this.boundFollowersOf(chatId, issueNumber).find(
-      (follower) => follower.summary.sessionId === sessionId,
-    )?.role;
+    return this.boundPrEntryFor(summary, this.prBindingKey(chatId, issueNumber))
+      ?.role;
+  }
+
+  /**
+   * The entry of `summary` that names the PR behind `key`, matched the same
+   * way for every candidate: the URL must parse, agree with its own number,
+   * and normalize to that key. Shared so the legacy role lookup and the
+   * role-aware follower scan cannot drift apart.
+   */
+  private boundPrEntryFor(
+    summary: PrBindingSummary,
+    key: string,
+  ): PrBindingEntry | undefined {
+    return summary.prs.find((pr) => {
+      const identity = this.parsePrBindingUrl(pr.url);
+      return (
+        !!identity &&
+        identity.number === pr.number &&
+        this.prBindingKey(identity.chatId, identity.number) === key
+      );
+    });
   }
 
   /**
@@ -5395,14 +5415,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }> = [];
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
-      const entry = summary.prs.find((pr) => {
-        const identity = this.parsePrBindingUrl(pr.url);
-        return (
-          !!identity &&
-          identity.number === pr.number &&
-          this.prBindingKey(identity.chatId, identity.number) === key
-        );
-      });
+      const entry = this.boundPrEntryFor(summary, key);
       if (!entry) continue;
       followers.push({ summary, ...(entry.role ? { role: entry.role } : {}) });
     }
@@ -5666,7 +5679,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.prBindingKey(chatId, issueNumber),
       );
       if (!summary) return { targets: [], followed: false };
-      const role = this.boundRoleOf(chatId, issueNumber, summary.sessionId);
+      const role = this.boundRoleOf(summary, chatId, issueNumber);
       return {
         targets: [{ sessionId: summary.sessionId, ...(role ? { role } : {}) }],
         followed: true,

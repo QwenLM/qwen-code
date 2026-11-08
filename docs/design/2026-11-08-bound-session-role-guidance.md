@@ -147,7 +147,15 @@ Three paths freeze a legacy target, and all three must carry the role:
 | `resolveBoundDeliveryExcluding`       | gone-fallback                                                                     | drop the `this.boundRoleAware &&` conjunct; `best.role` is already in hand |
 
 `boundSessionByPr` holds only a `PrBindingSummary`, so the first two read the
-role from `boundFollowersOf`, the same list the role-aware path groups by.
+role from the winner they already resolved. The per-entry match — the URL must
+parse, agree with its own recorded number, and normalize to the PR key — is
+extracted into `boundPrEntryFor` and shared with `boundFollowersOf`, so the two
+paths cannot drift.
+
+Reading the role through the whole follower list would have put a URL parse per
+binding per session into `resolveBoundDelivery`, which was a single `Map` lookup
+before and is reached two or three times per event. Taking the resolved winner
+keeps the parse inside that one session's own entries.
 
 None of this touches which session wins: the grouping, the recency comparison
 and the single-winner shape are untouched.
