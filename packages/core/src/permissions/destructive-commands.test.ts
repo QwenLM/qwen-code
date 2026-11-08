@@ -1274,3 +1274,37 @@ describe('isDestructiveCommand — non-destructive commands', () => {
     expectAllowed(commands, 'do stuff');
   });
 });
+
+// ── #16075 R15-3: IFS values are command data, not regex source ───────────
+// Real bash witnesses (git shim on PATH): each row below really runs
+// `git commit --amend`. At the reviewed head the backslash row threw an
+// uncaught SyntaxError out of the guard (/[\]+/ built from the IFS value)
+// and the `]` row silently evaluated amend-free. Splitting on the IFS
+// characters literally fixes both; the guard must also never crash on any
+// other command string (see the crash-boundary test).
+describe('isDestructiveCommand — IFS word-splitting regression (#16075 R15-3)', () => {
+  beforeEach(() => {
+    clearSessionCommits();
+  });
+
+  it.each([
+    // Witness 1: crashed the whole permission evaluation with SyntaxError.
+    "IFS='\\'; X='git\\commit\\--amend'; $X",
+    // Witness 2: silently false — the `]` closed the regex character class.
+    "IFS=']'; X='git]commit]--amend'; $X",
+    // `^` negated the character class, splitting every character away.
+    "IFS='^'; X='git^commit^--amend'; $X",
+    // Several regex-active characters at once.
+    "IFS='\\\\]^'; X='git\\\\commit]--amend'; $X",
+  ])('blocks the amend bash really runs: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  it.each([
+    "IFS=:; X='ls:-la'; $X",
+    "IFS='\\'; X='ls\\-la'; $X",
+    "IFS=']'; X='echo]hi'; $X",
+  ])('keeps a non-amend IFS split amend-free: %s', (command) => {
+    expect(isDestructiveCommand(command, 'list files')).toBeNull();
+  });
+});

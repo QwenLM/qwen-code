@@ -330,6 +330,27 @@ export function isDestructiveCommand(
   userPrompt: string,
   cwd: string = process.cwd(),
 ): DestructiveCommandResult | null {
+  try {
+    return isDestructiveCommandUnchecked(command, userPrompt, cwd);
+  } catch {
+    // A permission guard must never crash on command data: R15-3 witnessed
+    // an IFS value spliced into a regex throwing SyntaxError out of the
+    // evaluation. Whatever the cause, fail to manual approval — never to a
+    // silent allow (#16075 maintainer stopgap).
+    return {
+      blocked: false,
+      ask: true,
+      reason:
+        'The destructive-command guard could not evaluate this command safely. Routed to manual approval (issue #13570).',
+    };
+  }
+}
+
+function isDestructiveCommandUnchecked(
+  command: string,
+  userPrompt: string,
+  cwd: string,
+): DestructiveCommandResult | null {
   const expanded = command + ' ' + stripShellQuotes(command);
 
   for (const pattern of DESTRUCTIVE_GIT_PATTERNS) {

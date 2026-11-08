@@ -1255,3 +1255,22 @@ describe('classifyGitAmend channels (issue #13570 maintainer stopgap)', () => {
     expect(commandContainsGitAmend(command)).toBe(false);
   });
 });
+
+// ── #16075 R15-3: literal IFS splitting in the recognizer ─────────────────
+describe('commandContainsGitAmend IFS splitting is literal (#16075 R15-3)', () => {
+  it.each([
+    "IFS='\\'; X='git\\commit\\--amend'; $X",
+    "IFS=']'; X='git]commit]--amend'; $X",
+    "IFS='^'; X='git^commit^--amend'; $X",
+    "IFS='\\\\]^'; X='git\\\\commit]--amend'; $X",
+  ])('recognises the amend bash really runs: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each(["IFS=:; X='ls:-la'; $X", "IFS='\\'; X='ls\\-la'; $X"])(
+    'a split into a non-git program stays amend-free: %s',
+    (command) => {
+      expect(commandContainsGitAmend(command)).toBe(false);
+    },
+  );
+});

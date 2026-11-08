@@ -4150,10 +4150,22 @@ function commandContainsGitAmendAtDepth(
         if (typeof ifsValue !== 'string' || typeof expanded !== 'string') {
           return true;
         }
-        const separators = ifsValue.length > 0 ? ifsValue : ' \t\n';
-        const words = expanded
-          .split(new RegExp(`[${separators}]+`))
-          .filter(Boolean);
+        // Split on the IFS characters literally. Building a regex character
+        // class from command data threw on `IFS='\'` (/[\]+/ is unterminated)
+        // and silently mis-split `IFS=']'` and `IFS='^'` (#16075 review,
+        // R15-3): bash treats every IFS character as a literal separator.
+        const separators = new Set(ifsValue.length > 0 ? ifsValue : ' \t\n');
+        const words: string[] = [];
+        let word = '';
+        for (const ch of expanded) {
+          if (separators.has(ch)) {
+            if (word.length > 0) words.push(word);
+            word = '';
+          } else {
+            word += ch;
+          }
+        }
+        if (word.length > 0) words.push(word);
         const split = [...words, ...programTokens.slice(1)];
         if (isGitAmendInvocationAt(split, 0)) return true;
       }
