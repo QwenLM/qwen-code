@@ -8,7 +8,7 @@
 // scarce pool (2026-10-31 decision, same accepted risk class as lint).
 // The association routing for DOWNSTREAM lanes lives in the `pick_runner`
 // shell step, which publishes `ubuntu_runner` (association-gated) and
-// `lint_runner` (every pull request reaches the fleet). The matrix below
+// `lint_runner` (untrusted forks use the disposable ARM64 pool). The matrix below
 // pins the gate's unconditional routing AND that ubuntu_runner keeps the
 // association gate for the test/integration lanes.
 //
@@ -161,7 +161,15 @@ function runPickRunnerOutputs({
     outputs.split('\n').includes(`lint_runner=${lintRunner}`),
     `lint_runner not published: ${outputs}`,
   );
-  return { ubuntuRunner, lintRunner };
+  const prTest = outputs
+    .split('\n')
+    .find((line) => line.startsWith('pr_test_runner='));
+  assert.ok(prTest, 'pr_test_runner not published');
+  return {
+    ubuntuRunner,
+    lintRunner,
+    prTestRunner: prTest.slice('pr_test_runner='.length),
+  };
 }
 
 function runPickRunner(inputs) {
@@ -302,11 +310,34 @@ describe('ci.yml lint_runner routing', () => {
   const ARM = '["self-hosted", "linux", "arm64"]';
   const lintRunner = (inputs) => runPickRunnerOutputs(inputs).lintRunner;
 
-  it('routes every pull request to the fleet, untrusted forks included', () => {
-    // The maintainer decision this pins: Lint & Static executes PR code on
-    // the shared pool for ALL authors. If this matrix ever flips back to
-    // hosted for the negative associations without a deliberate decision,
-    // the lane silently regrows its hosted quota spend.
+  // The disposable-pool config and the CI selectors are one contract: a label
+  // rename on either side leaves every fork PR queued forever with no failed
+  // check to point at. Pin them together (#16551 review).
+  it('publishes exactly the labels the disposable-pool config registers', () => {
+    const config = JSON.parse(
+      readFileSync(
+        join(
+          workflowsDir,
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    const fork = runPickRunnerOutputs({
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+    });
+    assert.deepEqual(JSON.parse(fork.prTestRunner), config.labels);
+    assert.deepEqual(JSON.parse(fork.lintRunner), config.labels);
+  });
+
+  it('routes untrusted fork lint to the disposable pool without variables', () => {
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
         assert.equal(
@@ -316,8 +347,10 @@ describe('ci.yml lint_runner routing', () => {
             assoc,
             eventName: 'pull_request',
           }),
-          ECS,
-          `lint sameRepo=${sameRepo} assoc='${assoc}' must route to ECS`,
+          sameRepo || TRUSTED.includes(assoc)
+            ? ECS
+            : '["self-hosted", "ecs-qwen-ephemeral"]',
+          `lint sameRepo=${sameRepo} assoc='${assoc}'`,
         );
       }
     }
@@ -354,7 +387,7 @@ describe('ci.yml lint_runner routing', () => {
       lintRunner({
         ecsDisabled: false,
         sameRepo: false,
-        assoc: 'NONE',
+        assoc: 'MEMBER',
         eventName: 'pull_request',
         fleet: 'arm64',
       }),
@@ -438,6 +471,111 @@ describe('ci.yml lint_runner routing', () => {
         fleet,
       });
       assert.equal(out.lintRunner, out.ubuntuRunner, `fleet='${fleet}'`);
+    }
+  });
+});
+
+describe('ci.yml disposable runner routing', () => {
+  it('selects the formal ARM64 pool when repository variables are empty', () => {
+    const selected = runPickRunnerOutputs({
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+    });
+    const arm = '["self-hosted", "ecs-qwen-ephemeral"]';
+    assert.equal(selected.prTestRunner, arm);
+    assert.equal(selected.lintRunner, arm);
+    assert.equal(selected.ubuntuRunner, HOSTED);
+    const genericArm = JSON.parse(
+      runPickRunnerOutputs({
+        eventName: 'workflow_dispatch',
+        dispatch: 'self-hosted-arm64',
+      }).ubuntuRunner,
+    );
+    assert.equal(
+      genericArm.every((label) => JSON.parse(arm).includes(label)),
+      false,
+      'generic ARM64 jobs must not match the disposable pool',
+    );
+    assert.equal(pickRunner.env.EPHEMERAL_ENABLED, undefined);
+    assert.equal(pickRunner.env.EPHEMERAL_ARCH, undefined);
+    assert.equal(
+      existsSync(join(workflowsDir, 'ephemeral-runner-smoke.yml')),
+      false,
+    );
+    assert.equal(
+      existsSync(join(workflowsDir, 'ci-runner-routing.yml')),
+      false,
+    );
+    const example = JSON.parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    assert.deepEqual(
+      example.labels,
+      JSON.parse(arm),
+      'the example runner registration must match the fork routing selector',
+    );
+  });
+  it('routes only untrusted fork jobs to the disposable pool', () => {
+    const ephemeral = '["self-hosted", "ecs-qwen-ephemeral"]';
+    for (const eventName of [
+      'pull_request',
+      'push',
+      'merge_group',
+      'workflow_dispatch',
+    ]) {
+      for (const sameRepo of [true, false]) {
+        for (const assoc of ASSOCIATIONS) {
+          for (const ecsDisabled of [true, false]) {
+            for (const fleet of ['', 'hosted', 'arm64']) {
+              const inputs = { eventName, sameRepo, assoc, ecsDisabled, fleet };
+              const baseline = runPickRunnerOutputs(inputs);
+              const selected =
+                eventName === 'pull_request' &&
+                !sameRepo &&
+                !TRUSTED.includes(assoc) &&
+                !ecsDisabled &&
+                fleet !== 'hosted';
+              assert.equal(
+                baseline.prTestRunner,
+                selected ? ephemeral : baseline.ubuntuRunner,
+                JSON.stringify(inputs),
+              );
+              assert.equal(
+                baseline.lintRunner,
+                selected ? ephemeral : baseline.ubuntuRunner,
+                JSON.stringify(inputs),
+              );
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('routes only the intended jobs through the new output', () => {
+    assert.equal(
+      ciDoc.jobs.classify_pr.outputs.pr_test_runner,
+      '${{ steps.pick_runner.outputs.pr_test_runner }}',
+    );
+    for (const name of ['test_build', 'test'])
+      assert.match(ciDoc.jobs[name]['runs-on'], /pr_test_runner/);
+    for (const name of ['lint_and_static', 'integration_no_ak'])
+      assert.match(ciDoc.jobs[name]['runs-on'], /lint_runner/);
+    for (const [name, job] of Object.entries(ciDoc.jobs)) {
+      if (!['classify_pr', 'test_build', 'test'].includes(name))
+        assert.doesNotMatch(String(job['runs-on']), /pr_test_runner/, name);
     }
   });
 });
@@ -1314,11 +1452,14 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.match(remove.if, /always\(\)/);
     const run = (name) => build.steps.find((s) => s.name === name).run;
-    assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
+    const buildJava = run('Build Java components');
+    assert.match(buildJava, /-Dmaven\.repo\.local=/);
+    assert.match(buildJava, /find "\$\{repo\}" -depth -type d/);
     assert.match(
-      run('Build Java components'),
-      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/"qwen-managed-agent-\*/,
+      buildJava,
+      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*'/,
     );
+    assert.match(buildJava, /-exec rm -rf \{\} \+/);
     assert.match(
       run('Assemble reference distribution'),
       /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
@@ -1619,4 +1760,44 @@ describe('credential-free release fanout routing (#15465)', () => {
       }
     });
   }
+});
+
+// The patrol holds CI_BOT_PAT and runs a sandboxed agent, so its routing is
+// evaluated here rather than left to substring pins: `== 'true'` contains
+// every term a `includes("!= 'true'")` style assertion looks for, and an
+// inverted kill switch would send every round to the pool it just disabled.
+describe('CI failure patrol routing (#16462)', () => {
+  const doc = parse(
+    readFileSync(join(workflowsDir, 'qwen-ci-flaky-rerun.yml'), 'utf8'),
+  );
+  const events = Object.keys(doc.on);
+  it('reaches the pool only for this repository with the switch off', () => {
+    assert.deepEqual(events.sort(), ['schedule', 'workflow_dispatch']);
+    for (const jobName of ['classify', 'act']) {
+      const expression = doc.jobs[jobName]['runs-on'];
+      for (const eventName of events) {
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: false }),
+          JSON.parse(ECS),
+          `${jobName} on ${eventName} with the fleet enabled`,
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: true }),
+          JSON.parse(HOSTED),
+          `${jobName} on ${eventName} with the fleet disabled`,
+        );
+        assert.deepEqual(
+          evalRunsOn(
+            expression.replace(
+              "github.repository == 'QwenLM/qwen-code'",
+              'false',
+            ),
+            { eventName, ecsDisabled: false },
+          ),
+          JSON.parse(HOSTED),
+          `${jobName} on ${eventName} in a fork`,
+        );
+      }
+    }
+  });
 });

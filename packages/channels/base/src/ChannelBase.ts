@@ -3920,6 +3920,9 @@ export abstract class ChannelBase {
   }
 
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
+    // A tagged (automated) sender's text is prose, so it never takes a
+    // command/bang bypass: it binds a named turn like any other message.
+    if (envelope.senderTag) return false;
     const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
     const bangText = envelope.text.trimStart();
@@ -6877,9 +6880,13 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    const parsed = this.parseCommand(envelope.text);
+    // Automated senders (see Envelope.senderTag) get prose treatment: their
+    // command-shaped text reaches the model instead of this channel's local
+    // commands and memory intents.
+    const automated = envelope.senderTag !== undefined;
+    const parsed = automated ? null : this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
-      parsed?.command === 'btw'
+      automated || parsed?.command === 'btw'
         ? null
         : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
@@ -6887,6 +6894,7 @@ export abstract class ChannelBase {
       this.deletePendingChannelMemoryMutation(envelope);
     }
     if (
+      !automated &&
       !memoryIntent &&
       parsed?.command !== 'btw' &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
@@ -6971,7 +6979,9 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = envelope.text.trimStart();
+    // An automated sender's text is never a shell command (Envelope.senderTag),
+    // so it skips both the refusal and the execution arms below.
+    const bangText = automated ? '' : envelope.text.trimStart();
     if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`
@@ -7140,8 +7150,17 @@ export abstract class ChannelBase {
       }
 
       const recognizedSlashCommand =
+        !automated &&
         this.isSlashCommand(envelope.text) &&
         this.isRecognizedCommand(envelope.text, sessionId);
+      // Adapter-tagged automated sender (Envelope.senderTag): rendered here,
+      // after prompt sanitization, because a line-leading `[tag]` inside `text`
+      // would be peeled by unwrapStartOfLineTags. Self-prefixing adapters
+      // (`alreadyPrefixed`) render the tag themselves.
+      const senderTagBar =
+        !envelope.alreadyPrefixed && envelope.senderTag?.trim()
+          ? `[${sanitizeSenderName(envelope.senderTag)}] `
+          : '';
       // Prepend referenced (quoted) message text for reply context
       let promptText = envelope.text;
 
@@ -7174,7 +7193,7 @@ export abstract class ChannelBase {
         const who = sanitizeSenderName(
           envelope.senderName || envelope.senderId || 'unknown',
         );
-        promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+        promptText = `${senderTagBar}[${who}] ${sanitizePromptText(promptText)}`;
         // Render the non-bot mention marker AFTER sanitization (like the
         // [Replying to:] wrapper below). Inside `text` it would pass through
         // sanitizePromptText, which strips brackets only on content <=64 chars
@@ -7193,6 +7212,10 @@ export abstract class ChannelBase {
             promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
           }
         }
+      } else if (senderTagBar) {
+        // No sender attribution to attach the tag to (per-user 1:1 DM), so the
+        // tag opens the prompt on its own.
+        promptText = `${senderTagBar}${promptText}`;
       }
 
       if (envelope.referencedText) {
@@ -7619,6 +7642,7 @@ export abstract class ChannelBase {
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
+        let answerDelivered = false;
         try {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
@@ -7661,6 +7685,7 @@ export abstract class ChannelBase {
               sessionId,
               segment,
             );
+            answerDelivered = true;
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
             }
@@ -7668,12 +7693,27 @@ export abstract class ChannelBase {
           if (!promptState.cancelled && turnNotice) {
             // Keep notices out of stream buffers and let the answer consume
             // adapter-specific reply metadata (such as DingTalk mentions) first.
-            await this.sendResponseMessage(
-              envelope.chatId,
-              turnNotice,
-              sessionId,
-              sourceLabel,
-            );
+            try {
+              await this.sendResponseMessage(
+                envelope.chatId,
+                turnNotice,
+                sessionId,
+                sourceLabel,
+              );
+            } catch (err) {
+              // The prompt result is `turnNotice || body`, so on an empty body
+              // the notice is the turn's only delivery: rethrow instead of
+              // reporting a completed turn the user never received.
+              if (!answerDelivered) throw err;
+              // The answer is already delivered, so the turn's outcome is fixed
+              // (see the deliveryStarted invariant below): log the failed
+              // notice instead of letting it rewrite completed into failed.
+              // The notice was sliced out of the answer above, so this line is
+              // the only remaining record of what the user never received.
+              process.stderr.write(
+                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)} (dropped notice: ${sanitizeLogText(turnNotice, 200)})\n`,
+              );
+            }
           }
           // Once delivery started the turn's outcome is fixed — don't let a
           // cancel settling during the send rewrite completed into cancelled.
