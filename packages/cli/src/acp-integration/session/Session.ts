@@ -5285,6 +5285,12 @@ export class Session implements SessionContext {
       if (this.disposed) return;
       this.closing = false;
       this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
+      // The close was reversible and just got rolled back, so the session is
+      // live again: un-seal peer intake or every later teammate report takes
+      // the cold-copy branch above, never enters the queue and never reaches
+      // the leader — while its mailbox row is already marked read. The
+      // irreversible managed-shutdown path never runs this closure.
+      this.peerNotificationsSealed = false;
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -5419,10 +5425,17 @@ export class Session implements SessionContext {
 
   /**
    * Pre-close hook for {@link #landUndrainedPeerNotifications}. The
-   * stored-session close sequence calls this before the recorder is finalized,
-   * which is the last point where the write is both accepted and then flushed.
+   * stored-session close sequence awaits this before the recorder is
+   * finalized, which is the last point where the write is both accepted and
+   * then flushed.
+   *
+   * Intake stops before the seal: the leader-inbox poll marks a mailbox row
+   * read as it consumes it, and `notificationQueue` is the report's only
+   * carrier after that, so a report consumed past the seal would be read on
+   * disk, landed into a writer that no longer accepts records, and lost.
    */
-  flushPendingPeerNotifications(): void {
+  async flushPendingPeerNotifications(): Promise<void> {
+    await this.config.getTeamManager()?.quiesceLeaderInbox?.();
     this.peerNotificationsSealed = true;
     this.#landUndrainedPeerNotifications();
   }
@@ -13903,7 +13916,10 @@ export class Session implements SessionContext {
     // The pre-close flush already ran, so this queue will never be drained
     // again. Land the copy while the recorder still accepts writes rather than
     // parking it in a queue whose contents become unpersistable moments later.
-    if (this.peerNotificationsSealed) {
+    // Peer reports only: a shell/monitor/agent/workflow completion still owes
+    // the client its display frame and `recordBackgroundTaskCompleted`, and
+    // the cold-copy branch below records neither.
+    if (this.peerNotificationsSealed && item.kind === 'peer') {
       this.#landUndrainedPeerNotifications([item]);
       return;
     }

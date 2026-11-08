@@ -536,6 +536,29 @@ describe('attachTeamSink', () => {
     expect(reportRosterChange).toHaveBeenCalledTimes(2);
   });
 
+  it('passes a teardown exit through so the leader wakes once, not per teammate', () => {
+    // `Session.#enqueueTeamRosterChange` coalesces a teardown burst into one
+    // automatic leader turn, but only while the flag survives the sink:
+    // dropping it turns one team deletion into up to ten leader wake-ups.
+    const detach = attachTeamSink(deps);
+
+    manager.emitter.emit(TeamEventType.TEAMMATE_EXITED, {
+      agentId: 'a1',
+      name: 'correctness',
+      status: 'cancelled',
+      timestamp: 1,
+      teardown: true,
+    });
+
+    expect(reportRosterChange).toHaveBeenCalledWith({
+      type: 'exited',
+      name: 'correctness',
+      status: 'cancelled',
+      teardown: true,
+    });
+    detach();
+  });
+
   it('retires the exiting teammate\u2019s approvals on the host', () => {
     // A teammate approval is session-scoped, so nothing about the leader's
     // turn ends it: without this the host keeps advertising a prompt whose

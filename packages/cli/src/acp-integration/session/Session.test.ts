@@ -1329,6 +1329,21 @@ describe('Session', () => {
         listenerCount(type: string) {
           return listeners.get(type)?.size ?? 0;
         },
+        /** Records intake calls so a test can pin the flush ordering. */
+        intakeCalls: [] as string[],
+        /** Lets a test hold `quiesceLeaderInbox` on a poll already in flight. */
+        holdQuiesce: null as null | (() => Promise<void>),
+        stopLeaderInboxPolling() {
+          manager.intakeCalls.push('stopLeaderInboxPolling');
+        },
+        async drainLeaderInbox() {
+          manager.intakeCalls.push('drainLeaderInbox');
+        },
+        async quiesceLeaderInbox() {
+          manager.intakeCalls.push('quiesce:start');
+          if (manager.holdQuiesce) await manager.holdQuiesce();
+          manager.intakeCalls.push('quiesce:settled');
+        },
       };
       return manager;
     }
@@ -1622,7 +1637,7 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordNotification,
         ).toHaveBeenCalledTimes(reportCount - 10);
-        session.flushPendingPeerNotifications();
+        await session.flushPendingPeerNotifications();
         session.dispose();
         const landed = vi.mocked(mockChatRecordingService.recordNotification)
           .mock.calls;
@@ -1656,7 +1671,7 @@ describe('Session', () => {
       session.beginClose();
       vi.mocked(mockChatRecordingService.recordNotification).mockClear();
 
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       const landedBefore = vi.mocked(
         mockChatRecordingService.recordNotification,
       ).mock.calls.length;
@@ -1665,6 +1680,139 @@ describe('Session', () => {
       expect(
         vi.mocked(mockChatRecordingService.recordNotification).mock.calls,
       ).toHaveLength(landedBefore + 1);
+      session.dispose();
+    });
+
+    it('quiesces the leader inbox before sealing so an in-flight report survives', async () => {
+      // The 500 ms poll marks a mailbox row read as it consumes it, so a
+      // report delivered after the seal is read on disk, landed into a writer
+      // that has stopped accepting records, and lost. The flush therefore has
+      // to stop intake and wait out the poll already in flight before it seals.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      vi.mocked(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).mockClear();
+
+      let releaseInFlightPoll: () => void = () => {};
+      manager.holdQuiesce = () =>
+        new Promise<void>((resolve) => {
+          releaseInFlightPoll = resolve;
+        });
+      const flushing = session.flushPendingPeerNotifications();
+      await vi.waitFor(() =>
+        expect(manager.intakeCalls).toContain('quiesce:start'),
+      );
+      // The poll that was already running consumes its row and delivers now:
+      // after the flush started, before it is allowed to seal.
+      manager.leaderCallback?.('in-flight report', 'in-flight report', [
+        'security',
+      ]);
+      releaseInFlightPoll();
+      await flushing;
+
+      expect(manager.intakeCalls).toEqual(['quiesce:start', 'quiesce:settled']);
+      // Delivered before the seal, so it took the live path — queued and
+      // accounted as a completion — instead of the cold-copy branch.
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ displayText: 'in-flight report' }),
+      );
+      // The same flush then landed it, so a reload still finds the report.
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            text: expect.stringContaining('in-flight report'),
+          }),
+        ],
+        'in-flight report',
+        expect.objectContaining({ kind: 'peer', status: 'message' }),
+      );
+      session.dispose();
+    });
+
+    it('un-seals peer intake when a reversible close is rolled back', async () => {
+      // `beginClose`'s release restores `closing` and re-drains, so the session
+      // is live again. A latch left set diverts every later report to a cold
+      // record: never queued, never delivered, while its mailbox row is
+      // already marked read.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const releaseClose = session.beginClose();
+      await session.flushPendingPeerNotifications();
+      vi.mocked(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).mockClear();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+
+      releaseClose();
+      manager.leaderCallback?.('after rollback', 'after rollback', [
+        'security',
+      ]);
+
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ displayText: 'after rollback' }),
+      );
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+      session.dispose();
+    });
+
+    it('still records a shell completion that arrives while peer intake is sealed', async () => {
+      // The seal is about peer reports. A shell/monitor/agent/workflow
+      // completion that lands in the sealed window still owes the client its
+      // display frame and the recorder its completion record; the cold-copy
+      // branch writes neither, because it skips every non-peer item.
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      await session.flushPendingPeerNotifications();
+      vi.mocked(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).mockClear();
+
+      await session.enqueueBackgroundNotification({
+        displayText: 'npm test finished',
+        modelText: '<task-notification />',
+        taskId: 'shell-sealed-window',
+        status: 'completed',
+        kind: 'shell',
+      });
+
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          displayText: 'npm test finished',
+          backgroundTask: expect.objectContaining({
+            taskId: 'shell-sealed-window',
+            kind: 'shell',
+          }),
+        }),
+      );
       session.dispose();
     });
 
@@ -1715,7 +1863,7 @@ describe('Session', () => {
       session.dispose();
     });
 
-    it('lands a rejected peer report when every queued notification is protected', () => {
+    it('lands a rejected peer report when every queued notification is protected', async () => {
       const manager = makeFakeTeamManager();
       session.dispose();
       vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
@@ -1767,7 +1915,7 @@ describe('Session', () => {
         expect.objectContaining({ kind: 'peer', status: 'message' }),
       );
       expect(internals.droppedNotifications.take()?.status).toBe('recorded');
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       session.dispose();
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
         1,
@@ -1808,7 +1956,7 @@ describe('Session', () => {
 
       // The stored-session close path runs this before `recorder.finalize()`,
       // the last point where the write is both accepted and then flushed.
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
           {
@@ -1841,7 +1989,7 @@ describe('Session', () => {
 
       // Landing marks the report durable, so neither a second flush nor the
       // `dispose()` fallback writes the same report twice.
-      session.flushPendingPeerNotifications();
+      await session.flushPendingPeerNotifications();
       session.dispose();
       expect(
         vi.mocked(mockChatRecordingService.recordNotification),

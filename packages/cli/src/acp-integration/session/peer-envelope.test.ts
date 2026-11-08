@@ -34,6 +34,21 @@ describe('defangPeerNotificationTags', () => {
     );
   });
 
+  it('defangs a spaced slash and a long whitespace run without stalling', () => {
+    // Two adjacent unbounded `\s*` repeats backtrack quadratically: the
+    // `send_message` cap is exactly 65536 characters, and that input used to
+    // cost ~1.6 s on the host event loop before the report was enqueued.
+    const text = `<${' '.repeat(65_536)}x`;
+    const started = Date.now();
+    expect(defangPeerNotificationTags(text)).toBe(text);
+    expect(Date.now() - started).toBeLessThan(500);
+    // The restructure must not narrow what gets defanged: a slash surrounded by
+    // whitespace is still the envelope's own closing delimiter.
+    expect(defangPeerNotificationTags('< / peer-notification>')).toBe(
+      '&lt; / peer-notification>',
+    );
+  });
+
   it('does not touch a longer tag that merely shares the prefix', () => {
     const text = '<peer-notification-extra>keep</peer-notification-extra>';
     expect(defangPeerNotificationTags(text)).toBe(text);

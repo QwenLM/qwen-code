@@ -41,7 +41,7 @@ interface AgentIdentity {
 
 未排空的 peer 报告保持待处理工作。可逆关闭、队列溢出及关机 flush 保存未投递报告，重复 flush 不重复录制。冷录制和暖通知 envelope 保留 peer 语义、XML 转义、rewind 与恢复行为。删除 Team 会发送剩余成员退出事件。
 
-## 决策与约束
+## 决策与约束（Team 协调）
 
 Team sink 依赖共享身份形状，不依赖 subagent 运行时。本层注册 approval、joined 和 exited 三个监听器；同一个 manager 重复通知不能重复注册。报告和成员通知可以唤醒 leader 并会被持久化；逐工具进展尚未进入本层。
 

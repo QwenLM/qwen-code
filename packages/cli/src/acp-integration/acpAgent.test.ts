@@ -29833,6 +29833,46 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     await agentPromise;
   });
 
+  it('awaits the peer flush before the recorder is finalized', async () => {
+    // The flush stops the leader-inbox poll and drains it, which is async: a
+    // writer finalized while that is still settling would drop whatever the
+    // drain delivers, which is the loss the flush exists to prevent.
+    const recording = makeRecordingService();
+    const order: string[] = [];
+    let releaseFlush: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    liveFlushPendingPeerNotifications.mockImplementation(async () => {
+      order.push('flush:start');
+      await held;
+      order.push('flush:settled');
+    });
+    recording.finalize.mockImplementation(() => {
+      order.push('finalize');
+    });
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(recording),
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const closing = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+      sessionId: liveSessionId,
+    });
+    await vi.waitFor(() => expect(order).toContain('flush:start'));
+    expect(order).toEqual(['flush:start']);
+    expect(recording.finalize).not.toHaveBeenCalled();
+
+    releaseFlush();
+    await expect(closing).resolves.toEqual({
+      sessionId: liveSessionId,
+      closed: true,
+    });
+    expect(order).toEqual(['flush:start', 'flush:settled', 'finalize']);
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not abort an active generation when the close gate is unavailable', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
@@ -32883,6 +32923,46 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     ).toBeLessThan(
       vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('awaits the peer flush before managed shutdown closes the writers', async () => {
+    // `writerShutdown` is `Promise.allSettled(peerFlushes)` and then the writer
+    // loop, so an unawaited flush would let the writers close while the
+    // leader-inbox drain is still in flight.
+    const innerConfig = makeRestoreInnerConfig();
+    let releaseFlush: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      flushPendingPeerNotifications: vi.fn(() => held),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    const shutdown = agent.beginManagedShutdown().writerShutdown;
+    await vi.waitFor(() =>
+      expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce(),
+    );
+    expect(innerConfig.closeSessionWriter).not.toHaveBeenCalled();
+
+    releaseFlush();
+    await shutdown;
+    expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
+      handoff: true,
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

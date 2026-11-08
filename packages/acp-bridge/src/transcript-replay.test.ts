@@ -229,6 +229,39 @@ describe('createTranscriptReplayMachine', () => {
     expect(projected[0]._meta?.['backgroundTurn']).toBeUndefined();
   });
 
+  it('lifts teammate attribution onto a reloaded task completion frame', () => {
+    // The live frame carries `_meta.agent`; a reload rebuilds the frame from the
+    // persisted record, so without the hoist a reloaded peer report renders
+    // unattributed — the symptom the attribution work exists to remove.
+    const backgroundTask = {
+      taskId: 'teammate-message-1',
+      kind: 'peer',
+      status: 'message',
+      agent: { agentName: 'security', depth: 1, kind: 'teammate' },
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('completed-2', 'system', {
+        subtype: 'background_task_completed',
+        systemPayload: {
+          displayText: 'security reported',
+          backgroundTask,
+        },
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'security reported' },
+      _meta: {
+        source: 'background_task_completed',
+        backgroundTask,
+      },
+    });
+    expect(projected[0]._meta?.['agent']).toEqual(backgroundTask.agent);
+  });
+
   it('stamps stable segment identity across replayed text parts', () => {
     const projected = updates(
       createTranscriptReplayMachine(),

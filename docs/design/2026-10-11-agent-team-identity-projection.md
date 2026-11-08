@@ -41,7 +41,7 @@ Teammate approval requests reach the host directly, independently of the leader 
 
 Peer reports keep work pending while undrained. Reversible close, queue overflow and shutdown flushing preserve undelivered reports, and repeated flushing does not record duplicates. Cold recording and warm notification envelopes retain peer semantics, XML escaping, rewind and recovery behavior. Team deletion emits remaining member exits.
 
-## Decisions and constraints
+## Decisions and constraints (team coordination)
 
 The Team sink depends on the shared identity shape, not the subagent runtime. This layer registers approval, joined and exited listeners; re-notifying the same manager must not duplicate them. Reports and roster notices may wake the leader and are persisted; per-tool progress is excluded from this layer.
 

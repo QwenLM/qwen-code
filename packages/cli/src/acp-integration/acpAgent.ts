@@ -4276,13 +4276,15 @@ class QwenAgent implements Agent {
               }`,
             );
           })
-          .then(() => {
+          .then(async () => {
             try {
               // Queued teammate reports are already marked read in the on-disk
               // mailbox, so land them here: the writer-close loop below runs
               // before `dispose()`, and `appendRecord` is a silent no-op once
-              // it has closed.
-              session.flushPendingPeerNotifications?.();
+              // it has closed. Awaited, because the flush now stops the
+              // leader-inbox poll and drains it first — sealing before that
+              // intake settles is what lost the report.
+              await session.flushPendingPeerNotifications?.();
             } catch (error) {
               debugLogger.debug(
                 `Session ${session.getId()} peer notification flush during managed shutdown failed: ${
@@ -5175,7 +5177,7 @@ class QwenAgent implements Agent {
           // Session multi-agent records deferred behind the turn that just
           // settled land now, while the recorder still accepts writes.
           await session.flushDeferredExternalRecords?.();
-          session.flushPendingPeerNotifications?.();
+          await session.flushPendingPeerNotifications?.();
           recorder?.finalize();
           let flushError: unknown;
           try {
