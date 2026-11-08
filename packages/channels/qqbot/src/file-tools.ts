@@ -411,12 +411,17 @@ function descriptorPath(fd: number): string | undefined {
 }
 
 /**
- * Characters that must not survive into a display name: bidi controls reorder
- * what the reader sees, C0/C1 controls and the line/paragraph separators are
- * unprintable, and a lone surrogate cannot be encoded. Enumerated ranges miss
- * code points (U+061C was one), so this names the properties instead.
+ * Characters that must not survive into a display name: format characters
+ * (`Cf`, which includes the bidi controls and the zero-width/soft-hyphen/tag
+ * set) make two byte-distinct names render identically or not at all, C0/C1
+ * controls and the line/paragraph separators are unprintable, a lone surrogate
+ * cannot be encoded, and the listed blank-rendering code points are invisible
+ * while belonging to other categories. Enumerated ranges miss code points
+ * (U+061C was one), so this names the properties instead. `Default_Ignorable`
+ * is deliberately not used: it includes VS16, which changes emoji rendering.
  */
-const UNSAFE_FILE_NAME_CHAR = /[\p{Bidi_Control}\p{Cc}\p{Zl}\p{Zp}\p{Cs}]/u;
+const UNSAFE_FILE_NAME_CHAR =
+  /[\p{Cf}\p{Cc}\p{Zl}\p{Zp}\p{Cs}\u115F\u1160\u3164\uFFA0\u2800]/u;
 
 /** The platform file name is model-supplied, so drop separators and controls. */
 function safeFileName(name: string): string {

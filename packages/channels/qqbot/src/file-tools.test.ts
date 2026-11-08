@@ -396,6 +396,34 @@ describe('buildFileTools', () => {
     expect(textOf(result)).toBe('File sent (file).');
   });
 
+  it('strips invisible format characters from a display name', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({
+      path,
+      file_name: 'invoice\u200B\u200C\u200D\u2060\u00ADgnp.exe',
+    });
+
+    expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+  });
+
+  it('treats a name of invisible or blank-rendering characters as empty', async () => {
+    const path = join(workspace, 'invoice\u202Egnp.exe');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+    const blankCodePoints = [0x200b, 0x2800, 0x115f, 0x3164, 0xffa0];
+
+    for (const code of blankCodePoints) {
+      await call({ path, file_name: String.fromCodePoint(code) });
+    }
+
+    expect(sent.map((entry) => entry.fileName)).toEqual(
+      blankCodePoints.map(() => 'invoicegnp.exe'),
+    );
+  });
+
   it('sanitizes the on-disk basename when no display name is given', async () => {
     // The default path reaches the platform card and the tool result verbatim,
     // so an on-disk name carrying a bidi override spoofs the card exactly as an
