@@ -494,6 +494,11 @@ test('accepts immutable local image IDs and rejects mutable tags and invalid con
     () => createManager({ ...f.config, cpus: Infinity }),
     /Invalid manager configuration/,
   );
+  assert.doesNotThrow(() => createManager({ ...f.config, slots: 30 }));
+  assert.throws(
+    () => createManager({ ...f.config, slots: 65 }),
+    /Invalid manager configuration/,
+  );
 });
 
 test('does not expose malformed GitHub responses in errors', async (t) => {
