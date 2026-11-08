@@ -39,16 +39,35 @@ Session ID 隔离。短期 token 刷新应保持 provider 身份稳定。品牌�
 `renderManagedAgentWebShell(container, props)` 创建 React root，返回
 `{ update(nextProps), unmount() }`。更新替换完整 props 对象。宿主拥有容器并在销毁时
 调用 `unmount()`。不引入 daemon provider、服务或替代对话页面。容器位于 ShadowRoot 时复用
-已有 Web Shell 样式 adoption，unmount 时释放注入样式。
+已有 Web Shell 样式 adoption，unmount 时释放注入样式；释放是幂等的，重复销毁不会
+摘掉兄弟挂载仍在使用的样式表。
+
+导航插槽可以位于 shell 容器之外。编译后的 CSS 只匹配 shell 与 portal 作用域，因此
+入口把每个 portal 出去的列表包进 `data-web-shell-portal-root` 容器，并把 shell 的
+自定义属性、主题 class 与语言同步上去。`onArchivedSessionsStatusChange` 经 ref 转发，
+宿主内联回调不会反复触发状态 effect。
+
+空态规则改用内容容器上的 auto margin 居中，而不是 `justify-content: center`，
+会话头部因此留在顶部，且内容高于容器时顶部仍可滚动到达。该标记只在转录为空、空闲、
+无失败态时设置，加载中和首次发送不会先居中再跳回。返回未决请求的归属会话走统一的
+打开路径，并带上归属工作区 id。
 
 ## 构建与约束
 
-在 `packages/web-shell` 运行
-`npx vite build --config vite.lib.config.ts --mode managed-host`。产物为
-`dist/managed-host/index.js` 及相对 chunks。独立模式 bundle React、React DOM 与运行时
+在 `packages/web-shell` 运行 `npm run build:managed-host`（它包装
+`vite build --config vite.lib.config.ts --mode managed-host`）。产物为
+`dist-managed-host/index.js` 及相对 chunks。独立模式 bundle React、React DOM 与运行时
 依赖，复用已有 CSS 隔离和注入插件。宿主需按 JavaScript MIME 类型提供完整产物目录，
 无需 import map 或单独 CSS import。普通 default 与 transcript 构建保持既有入口和 external
 规则。
+该模式**刻意不接入**包的 `build`：它不 externalize 任何依赖，挂在该脚本上会让每次本地
+构建和每次全新克隆的 `prepare` 都完整打一遍 React、xterm、mermaid、echarts、shiki 与
+codemirror，而仓库内没有任何消费方读取该产物。防腐坏改由独立的工作流
+`Web Shell Managed Host Build` 承担：在入口、构建配置或锁文件变化的 PR 与合并后 push
+上运行该模式，断言入口产物非空且含挂载符号与 scoped CSS，并检查产物仍未进入发布的
+`exports`/`files`。产物目录也在 `dist/` 之外，应用构建的 `emptyOutDir` 不会删掉宿主正在
+使用的产物。另有一个工作流 meta 测试同时固定这两半，因此「关卡缺失」和「构建税回归」
+都不会无声通过。
 
 整页宿主入口（`--mode app-host`）已从本 PR 移除：它没有构建接线、没有测试覆盖、
 硬编码了特定宿主的侧栏/footer 配置。等有明确消费者后，可以在后续 PR 中补上
@@ -61,3 +80,7 @@ React 集成测试覆盖已有 ID 的加载和发送、不访问列表/创建/da
 host-only 请求断言失败；恢复无 ID 创建会触发无 ID 输入框断言失败。包内 typecheck 与
 普通、managed-host 构建验证集成。真实浏览器验收由宿主 agent 执行；此处不进行浏览器或
 云端操作。
+
+后续修复另外固定了：注入 provider 时可省略 `baseUrl`、宿主重渲染时归档状态回调保持
+稳定、宿主插槽具备作用域容器与主题变量、目录丢失归属会话后跳转仍保留归属工作区，
+以及重复释放样式后兄弟挂载仍有样式。

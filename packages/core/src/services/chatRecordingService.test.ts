@@ -397,6 +397,73 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('persisted last user prompt notifications', () => {
+    it('publishes the recorded timestamp only after a successful human write', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      const held = holdNext(vi.mocked(jsonl.writeLine));
+      user('question');
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalled());
+      expect(notify).not.toHaveBeenCalled();
+      held.resolve!();
+      await svc.flush();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        writes().find((record) => record.type === 'user')!.timestamp,
+        'test-session-id',
+      );
+    });
+
+    it('does not advance metadata when a human write fails', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      user('not persisted');
+      await expect(svc.flush()).rejects.toThrow('disk full');
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('ignores assistant and cron activity but includes human mid-turn input', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      reply('assistant output');
+      svc.recordCronPrompt([{ text: 'automatic prompt' }]);
+      await svc.flush();
+      expect(notify).not.toHaveBeenCalled();
+      svc.recordMidTurnUserMessage([{ text: 'follow up' }], 'follow up');
+      await svc.flush();
+      const midTurn = writes().find(
+        (record) => record.subtype === 'mid_turn_user_message',
+      )!;
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        midTurn.timestamp,
+        'test-session-id',
+      );
+    });
+
+    it('requests cold recovery after a persisted rewind', async () => {
+      user('first');
+      reply('first answer');
+      user('second');
+      await svc.flush();
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      await svc.flush();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        undefined,
+        'test-session-id',
+      );
+    });
+
+    it('keeps a successful write successful when an observer throws', async () => {
+      svc.setLastUserPromptRecordedCallback(() => {
+        throw new Error('observer');
+      });
+      user('persisted');
+      await expect(svc.flush()).resolves.toBeUndefined();
+    });
+  });
+
   describe('background execution recording ownership', () => {
     const turn: BackgroundNotificationTurn = {
       turnId: 'automatic-turn',

@@ -11,6 +11,14 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+
+// macOS ships rm at /bin/rm, so a hardcoded /usr/bin/rm exits 127 on the macOS
+// scripts lane (which collects these files — the vitest exclude is win32-only).
+// Resolve external tools the way the workflows themselves do.
+const resolvedBin = (name) =>
+  execFileSync('bash', ['-c', `command -v ${name}`], {
+    encoding: 'utf8',
+  }).trim();
 import { expect, it } from 'vitest';
 
 // The qwen-triage entries are DERIVED, not hand-typed: every pool-routed job
@@ -66,6 +74,7 @@ const jobs = [
     'qwen-autofix',
     name,
   ]),
+  ...['classify', 'act'].map((name) => ['qwen-ci-flaky-rerun', name]),
 ];
 
 it.each(jobs)(
@@ -91,12 +100,34 @@ it.each(jobs)(
       const preserved = join(external, 'keep');
       mkdirSync(cached);
       writeFileSync(preserved, 'keep external repository');
+      // A real runner always provides these. Steps that neutralise the global
+      // and system Git config write an empty file under RUNNER_TEMP and export
+      // the scopes through GITHUB_ENV, so the fixture has to offer both or it
+      // would exercise those steps against paths that do not exist.
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
+      const githubEnv = join(root, 'gh-env');
+      writeFileSync(githubEnv, '');
       const git = (...args) =>
         execFileSync('git', args, { cwd: workspace, stdio: 'pipe' });
       const recover = () =>
         execFileSync('bash', ['-e', '-c', steps[index].run], {
           cwd: workspace,
-          env: { ...process.env, GITHUB_WORKSPACE: workspace },
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: workspace,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_ENV: githubEnv,
+            // Steps that use the guard's verified base need those binaries and
+            // an output file; a real runner always supplies GITHUB_OUTPUT.
+            GITHUB_OUTPUT: join(root, 'gh-output'),
+            RM_BIN: resolvedBin('rm'),
+            // The patrol's rebuild also validates every component of the
+            // system_path it hands checkout. Derive it from the same binary so
+            // the two checks stand or fall together on any host.
+            SYSTEM_PATH: resolvedBin('rm').replace(/\/[^/]+$/, ''),
+            MKTEMP_BIN: resolvedBin('mktemp'),
+          },
         });
 
       git('init', '--quiet');
