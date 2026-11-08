@@ -343,6 +343,9 @@ export function prepareSettingWrite(
           modelProvidersConfig: loaded.merged.modelProviders,
           providerProtocolConfig: loaded.merged.providerProtocol,
           ...readModelPolicyOptions(loaded),
+          // The registry's allowlist judge needs the env baseUrl layer,
+          // exactly as a session's Config hands it over (issue #12805).
+          env: process.env,
         }),
       };
     };
@@ -369,14 +372,31 @@ export function prepareSettingWrite(
     // and refuse a selector whose model the registry dropped with no
     // registered route left — the same predicate the next CLI start uses to
     // refuse it. Endpoint-less values for registered (or exempt built-in)
-    // models still persist.
+    // models still persist. The policy is read first and the registry is
+    // built only when one is in force: with no allowlist the write never
+    // needed the registry, and building one validates the whole
+    // modelProviders config, so an unrelated invalid entry would turn a
+    // valid write into an opaque server error (issue #12805).
     if (
       (key === 'advisorModel' || key === 'imageModel') &&
       typeof value === 'string' &&
       value.trim() !== ''
     ) {
-      const { policy, models } = loadPolicyModels();
+      const loaded = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      });
+      const policy = loaded.merged.model?.allowedBaseUrls;
       if (policy !== undefined) {
+        const models = new ModelsConfig({
+          modelProvidersConfig: loaded.merged.modelProviders,
+          providerProtocolConfig: loaded.merged.providerProtocol,
+          ...readModelPolicyOptions(loaded),
+          // The registry's allowlist judge needs the env baseUrl layer,
+          // exactly as a session's Config hands it over (issue #12805).
+          env: process.env,
+        });
         const endpointIndex = value.indexOf('\0');
         const suffix = endpointIndex < 0 ? '' : value.slice(endpointIndex + 1);
         if (suffix && !isBaseUrlAllowed(suffix, policy)) {
@@ -384,7 +404,9 @@ export function prepareSettingWrite(
             `${key} endpoint is not in the managed allowlist 'model.allowedBaseUrls'; choose a model on an allowed endpoint or ask the operator to add it to the allowlist.`,
           );
         }
-        const dropped = findUnregisteredAllowlistDrop(models, value);
+        const dropped = findUnregisteredAllowlistDrop(models, value, {
+          fastModel: loaded.merged.fastModel,
+        });
         if (dropped) {
           throw new SettingWritePolicyError(
             `${key} model '${dropped.id}' was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'; choose a model on an allowed endpoint or ask the operator to allow its endpoint.`,

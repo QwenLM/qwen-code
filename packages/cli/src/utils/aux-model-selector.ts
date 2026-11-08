@@ -42,6 +42,7 @@ import {
   type AllowlistDroppedModel,
 } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import type { AvailableModel } from '@qwen-code/qwen-code-core/models/types.js';
+import { parseModelIdSelector } from '@qwen-code/qwen-code-core/utils/modelId.js';
 
 /** Settings keys that persist an `authType:id\0baseUrl` aux-model selector. */
 export const AUX_MODEL_SELECTOR_SETTING_KEYS: ReadonlySet<string> = new Set([
@@ -208,18 +209,48 @@ export function findUnregisteredAllowlistDrop(
     getAllowlistDroppedModels(): AllowlistDroppedModel[];
   },
   rawSelector: string,
+  /**
+   * The alias context the consumers resolve with (issue #12805): every
+   * caller routes the selector through `resolveModelId` before dialing,
+   * which expands `fast` to the configured fast model. The predicate
+   * expands it the same way, or the alias slips past the gate while the
+   * runtime reaches the dropped route.
+   */
+  context: { fastModel?: string } = {},
 ): AllowlistDroppedModel | undefined {
-  const dropped = models.getAllowlistDroppedModels();
+  // Optional-call: dialog hosts pass partial config objects (test stubs,
+  // pre-init states) the same way they pass the other getters.
+  const dropped = models.getAllowlistDroppedModels?.() ?? [];
   if (dropped.length === 0) return undefined;
-  const endpointIndex = rawSelector.indexOf('\0');
-  const modelId = (
-    endpointIndex < 0 ? rawSelector : rawSelector.slice(0, endpointIndex)
-  ).trim();
-  if (modelId === '') return undefined;
+  let selectorText = rawSelector;
+  if (selectorText.trim() === 'fast' && context.fastModel) {
+    const fast = context.fastModel.trim();
+    if (fast && fast !== 'fast') selectorText = context.fastModel;
+  }
+  const endpointIndex = selectorText.indexOf('\0');
+  const selectorPart =
+    endpointIndex < 0 ? selectorText : selectorText.slice(0, endpointIndex);
   const endpoint =
-    endpointIndex < 0 ? undefined : rawSelector.slice(endpointIndex + 1);
+    endpointIndex < 0 ? undefined : selectorText.slice(endpointIndex + 1);
+  // Parse the selector the way the consumers parse it (resolveModelId):
+  // trim around the colon and resolve a known auth-type prefix, so
+  // `openai : id` names the same route the registry judged. A selector the
+  // parser refuses (e.g. `openai:`) cannot resolve at runtime either — the
+  // consumer's own error covers it, so the predicate reports no drop.
+  let parsed: ReturnType<typeof parseModelIdSelector>;
+  try {
+    parsed = parseModelIdSelector(selectorPart);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || parsed.kind !== 'model') return undefined;
+  const modelId = parsed.modelId;
+  const explicitAuthType = parsed.authType;
+  if (modelId === '') return undefined;
   const idMatches = (id: string, authType: string) =>
-    modelId === id || modelId === `${authType}:${id}`;
+    explicitAuthType === undefined
+      ? modelId === id
+      : modelId === id && authType === explicitAuthType;
   const registered = models
     .getAllConfiguredModels()
     .some(

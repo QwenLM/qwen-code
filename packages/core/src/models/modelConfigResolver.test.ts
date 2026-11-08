@@ -828,6 +828,30 @@ describe('modelConfigResolver', () => {
       );
     });
 
+    it('judges a responses-wire model without baseUrl against the dialed default (R7-1)', () => {
+      // The wire dials <origin>/v1/responses, not the config base-URL
+      // placeholder: a list naming the OpenAI endpoint must admit the
+      // responses model, and the refusal must name the dialed URL
+      // (issue #12805).
+      const result = resolve({
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        env: { OPENAI_API_KEY: 'key', OPENAI_MODEL: 'resp-model' },
+        allowedBaseUrls: ['https://api.openai.com/v1'],
+      });
+      expect(result.config.model).toBe('resp-model');
+
+      expectFatal(
+        () =>
+          resolve({
+            authType: AuthType.USE_OPENAI_RESPONSES,
+            env: { OPENAI_API_KEY: 'key', OPENAI_MODEL: 'resp-model' },
+            allowedBaseUrls: [CORP],
+          }),
+        'model.allowedBaseUrls',
+        'https://api.openai.com/v1/responses',
+      );
+    });
+
     it('resolves normally when the endpoint is on the allowlist', () => {
       const result = resolve({
         env: { MY_CUSTOM_KEY: 'provider-key' },

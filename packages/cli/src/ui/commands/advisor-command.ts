@@ -177,7 +177,11 @@ async function setAdvisorModel(
     // availability escape hatch re-admits a dropped model that is the
     // current runtime model, but enabling and persisting it would make every
     // later launch refuse to start. The escape hatch stays display-only.
-    const dropped = findUnregisteredAllowlistDrop(config, model);
+    // The fastModel context keeps the `fast` alias resolved the same way
+    // the runtime resolves it.
+    const dropped = findUnregisteredAllowlistDrop(config, model, {
+      fastModel: config.getFastModel?.(),
+    });
     if (dropped || !availability.available) {
       return {
         type: 'message',

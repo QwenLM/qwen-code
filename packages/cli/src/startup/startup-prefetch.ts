@@ -303,6 +303,10 @@ export function startPostRenderPrefetches(
           resolveEndpoint(process.env, {
             settings: settings.merged,
             warn: (message) => debugLogger.debug(message),
+            // Recovery: the tasks being collected were submitted (and
+            // billed) under an earlier policy; a now-off-list endpoint
+            // must not strand their results.
+            enforceAllowlist: false,
           }),
         log: (message) => debugLogger.debug(message),
       });

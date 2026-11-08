@@ -603,6 +603,111 @@ describe('buildAgentContentGeneratorConfig', () => {
   });
 });
 
+describe('buildAgentContentGeneratorConfig managed allowlist gate (R6-3)', () => {
+  // A per-agent generator dials outside the session's resolution gate; the
+  // derived endpoint must be judged exactly as a fresh resolution would be
+  // (issue #12805).
+  const parentConfig: ContentGeneratorConfig = {
+    model: 'parent-model',
+    authType: 'openai' as ContentGeneratorConfig['authType'],
+    apiKey: 'parent-key',
+    baseUrl: 'https://corp.example/v1',
+  };
+
+  const policyConfig = (
+    parent: ContentGeneratorConfig,
+    policy: {
+      allowedBaseUrls?: readonly string[];
+      builtinsDisabled?: boolean;
+      workspaceOnly?: boolean;
+    },
+  ) =>
+    ({
+      ...createMockConfig(parent),
+      getAllowedModelBaseUrls: vi.fn(() => policy.allowedBaseUrls),
+      getQwenOAuthBuiltinsDisabled: vi.fn(
+        () => policy.builtinsDisabled === true,
+      ),
+      getAllowedBaseUrlsWorkspaceOnly: vi.fn(
+        () => policy.workspaceOnly === true,
+      ),
+    }) as unknown as Config;
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('refuses a derived generator whose explicit endpoint is off the allowlist', () => {
+    const config = policyConfig(parentConfig, {
+      allowedBaseUrls: ['https://corp.example'],
+    });
+    expect(() =>
+      buildAgentContentGeneratorConfig(config, 'side-model', {
+        authType: 'anthropic',
+        baseUrl: 'https://off-list.example/v1',
+      }),
+    ).toThrow(/not in the managed allowlist 'model\.allowedBaseUrls'/);
+  });
+
+  it('admits a derived generator when the env baseUrl layer is on the allowlist', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://corp.example/v1');
+    const config = policyConfig(parentConfig, {
+      allowedBaseUrls: ['https://corp.example'],
+    });
+    const result = buildAgentContentGeneratorConfig(config, 'claude-sonnet', {
+      authType: 'anthropic',
+    });
+    expect(result.baseUrl).toBe('https://corp.example/v1');
+  });
+
+  it('refuses a derived generator on an off-list protocol default', () => {
+    // No baseUrl anywhere (parent or env): the dialed protocol default is
+    // what gets judged.
+    const config = policyConfig(
+      { ...parentConfig, baseUrl: undefined },
+      { allowedBaseUrls: ['https://corp.example'] },
+    );
+    expect(() =>
+      buildAgentContentGeneratorConfig(config, 'gpt-4o', {
+        authType: 'openai',
+      }),
+    ).toThrow(/not in the managed allowlist 'model\.allowedBaseUrls'/);
+  });
+
+  it('refuses a Qwen OAuth agent under an operator-scope allowlist', () => {
+    const config = policyConfig(parentConfig, {
+      allowedBaseUrls: ['https://corp.example'],
+    });
+    expect(() =>
+      buildAgentContentGeneratorConfig(config, 'coder-model', {
+        authType: 'qwen-oauth',
+      }),
+    ).toThrow(/discovered dynamically at login/);
+  });
+
+  it('refuses a Qwen OAuth agent when the builtins are operator-disabled', () => {
+    const config = policyConfig(parentConfig, {
+      allowedBaseUrls: ['https://corp.example'],
+      builtinsDisabled: true,
+    });
+    expect(() =>
+      buildAgentContentGeneratorConfig(config, 'coder-model', {
+        authType: 'qwen-oauth',
+      }),
+    ).toThrow(/disabled by operator settings/);
+  });
+
+  it('keeps a Qwen OAuth agent for a workspace-only allowlist', () => {
+    const config = policyConfig(parentConfig, {
+      allowedBaseUrls: ['https://corp.example'],
+      workspaceOnly: true,
+    });
+    expect(() =>
+      buildAgentContentGeneratorConfig(config, 'coder-model', {
+        authType: 'qwen-oauth',
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe('createRuntimeContentGeneratorView', () => {
   const parentConfig: ContentGeneratorConfig = {
     model: 'parent-model',

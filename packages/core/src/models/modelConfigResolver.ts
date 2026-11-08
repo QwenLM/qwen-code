@@ -21,7 +21,7 @@
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { FatalConfigError } from '../utils/errors.js';
-import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
+import { getDialedProtocolDefaultBaseUrl } from '../providers/provider-config.js';
 import { isBaseUrlAllowed, scrubBaseUrlForMessage } from './modelRegistry.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import {
@@ -411,7 +411,9 @@ export function resolveModelConfig(
         );
       }
     } else if (authType) {
-      const protocolDefault = getDefaultBaseUrlForProtocol(authType);
+      // Judge the endpoint the wire dials, not the config placeholder: the
+      // Responses wire rewrites its base URL to <origin>/v1/responses.
+      const protocolDefault = getDialedProtocolDefaultBaseUrl(authType);
       if (protocolDefault) {
         if (!isBaseUrlAllowed(protocolDefault, input.allowedBaseUrls)) {
           throw new FatalConfigError(

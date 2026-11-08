@@ -558,6 +558,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/workspace-settings.ts',
+    {
+      reason:
+        'The managed allowlist setting-write gate judges the env baseUrl layer ' +
+        'the same way a session Config does, so a write refused here is ' +
+        'refused identically at the next startup (issue #12805).',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/server/fs-factory.ts',
     {
       reason:

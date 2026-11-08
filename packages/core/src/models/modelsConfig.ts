@@ -86,6 +86,13 @@ export interface ModelsConfigOptions {
    * the allowlist filter. See {@link ModelRegistry}.
    */
   allowedBaseUrlsWorkspaceOnly?: boolean;
+  /**
+   * Boot-frozen environment snapshot the registry's allowlist judge uses for
+   * the AUTH_ENV_MAPPINGS baseUrl layer of baseUrl-less models (same layer
+   * order as the resolution gate). Passed in by the host; core never reads
+   * process.env here. See {@link ModelRegistry}.
+   */
+  env?: Record<string, string | undefined>;
   /** Generation config from CLI/settings */
   generationConfig?: Partial<ContentGeneratorConfig>;
   /** Source tracking for generation config */
@@ -196,6 +203,7 @@ export class ModelsConfig {
       options.allowedModelBaseUrls,
       options.qwenOAuthBuiltinsDisabled,
       options.allowedBaseUrlsWorkspaceOnly,
+      options.env,
     );
     // Boot-frozen managed endpoint allowlist, reused by the preserve/capture
     // paths below (the registry applies it at registration).

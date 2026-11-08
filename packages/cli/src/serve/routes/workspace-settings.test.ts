@@ -292,6 +292,32 @@ describe('aux-model endpoint allowlist gate (advisorModel/imageModel)', () => {
       'openai:ext\0https://external-llm.example/v1',
     );
   });
+
+  it('does not build the registry when no policy is set, even with an invalid provider entry (R5-2)', () => {
+    // With no allowlist in force the write path never needed the registry:
+    // building one here validates the whole modelProviders config, so an
+    // unrelated invalid entry would turn a valid write into an opaque
+    // server error the client cannot act on (issue #12805).
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: {
+        modelProviders: {
+          openai: [{ id: 'bad', wireApi: 'no-such-wire' }],
+        },
+      },
+    } as never);
+
+    const prepared = prepareSettingWrite(
+      '/workspace',
+      SettingScope.User,
+      'advisorModel',
+      'openai:ext\0https://external-llm.example/v1',
+      undefined,
+      true,
+    );
+    expect(prepared.persistedValue).toBe(
+      'openai:ext\0https://external-llm.example/v1',
+    );
+  });
 });
 
 describe('aux-model allowlist refusal over HTTP (R5-20)', () => {

@@ -79,6 +79,42 @@ describe('findUnregisteredAllowlistDrop (issue #12805)', () => {
       ),
     ).toMatchObject({ id: 'gpt-4o' });
   });
+
+  it('resolves the fast alias and trims around the colon like the consumers do (R3-12)', () => {
+    // Every consumer resolves the selector through resolveModelId before
+    // dialing: it trims whitespace around the colon and expands `fast` to
+    // the configured fast model. The predicate must use the same identity,
+    // or both forms slip past the gate while the runtime reaches the
+    // dropped route (issue #12805).
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'openai : gpt-4o'),
+    ).toMatchObject({ id: 'gpt-4o' });
+    expect(findUnregisteredAllowlistDrop(models([]), 'fast')).toBeUndefined();
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'fast', {
+        fastModel: 'openai:gpt-4o',
+      }),
+    ).toMatchObject({ id: 'gpt-4o' });
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'fast', {
+        fastModel: `openai:gpt-4o\0${OFF}`,
+      }),
+    ).toMatchObject({ id: 'gpt-4o' });
+    // A fast model whose selected route is registered is not a drop.
+    expect(
+      findUnregisteredAllowlistDrop(
+        models([{ id: 'gpt-4o', registryBaseUrl: ON }]),
+        'fast',
+        { fastModel: `openai:gpt-4o\0${ON}` },
+      ),
+    ).toBeUndefined();
+    // The alias expands to the fast model's endpoint when it carries one.
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'fast', {
+        fastModel: `openai:gpt-4o\0https://other.example/v1`,
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe('AUX_MODEL_SELECTOR_SETTING_KEYS', () => {

@@ -81,6 +81,11 @@ export function resolveEndpoint(
     settings?: ReturnType<typeof loadSettings>['merged'];
     /** Where resolver warnings go; stderr would draw over a TUI. */
     warn?: (message: string) => void;
+    /** Skip the managed-allowlist gate (defaults to enforced, fail-closed).
+     * Recovery commands (collect, cancel, the auto-collector) opt out so a
+     * policy that stops allowing the endpoint after submit cannot strand
+     * an already-paid task (issue #12805). */
+    enforceAllowlist?: boolean;
   } = {},
 ): BatchEndpoint {
   let settings = options.settings ?? loadSettings().merged;
@@ -174,6 +179,7 @@ export function resolveEndpoint(
   // the wire uses; the gate runs here, on the dialed endpoint, instead.
   const dialedBaseUrl = (baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
   if (
+    options.enforceAllowlist !== false &&
     allowedBaseUrls !== undefined &&
     !isBaseUrlAllowed(dialedBaseUrl, allowedBaseUrls)
   ) {
@@ -208,6 +214,7 @@ export interface BatchCliOptions {
 export async function prepareEndpoint(
   env: Record<string, string | undefined> = process.env,
   cliOptions: BatchCliOptions = {},
+  endpointOptions: { enforceAllowlist?: boolean } = {},
 ): Promise<BatchEndpoint> {
   // Same route loadCliConfig uses: --insecure surfaces as QWEN_TLS_INSECURE,
   // and either one disables verification for the global fetch used here.
@@ -226,7 +233,7 @@ export async function prepareEndpoint(
     cliOptions.proxy,
     loadSettings().merged.proxy as string | undefined,
   );
-  return resolveEndpoint(env);
+  return resolveEndpoint(env, endpointOptions);
 }
 
 /** Read the CLI-level options every subcommand handler forwards. */
@@ -266,7 +273,7 @@ const workflowDeps = (ep: BatchEndpoint): WorkflowDeps => ({
   lockWaitMs: LOCK_WAIT_MS,
 });
 
-const runWorkflowCommand: CommandModule = {
+export const runWorkflowCommand: CommandModule = {
   command: 'run <plan>',
   describe:
     'Run an agent-prepared batch plan: assemble requests, submit, record the task',
@@ -307,7 +314,7 @@ const runWorkflowCommand: CommandModule = {
     }),
 };
 
-const collectWorkflowCommand: CommandModule = {
+export const collectWorkflowCommand: CommandModule = {
   command: 'collect <task-id>',
   describe:
     'Collect a workflow task: reconcile, download, validate, and deliver results',
@@ -337,8 +344,14 @@ const collectWorkflowCommand: CommandModule = {
       ),
   handler: (argv) =>
     run(async () => {
+      // Recovery: the task was submitted (and billed) under an earlier
+      // policy; a now-off-list endpoint must not strand its results.
       await collectTask(
-        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        workflowDeps(
+          await prepareEndpoint(process.env, cliOptionsOf(argv), {
+            enforceAllowlist: false,
+          }),
+        ),
         argv['task-id'] as string,
         {
           wait: argv['wait'] as boolean,
@@ -426,7 +439,7 @@ const checkWorkflowCommand: CommandModule = {
     }),
 };
 
-const cancelWorkflowCommand: CommandModule = {
+export const cancelWorkflowCommand: CommandModule = {
   command: 'cancel <task-id>',
   describe:
     "Cancel a workflow task's active batch (already-completed requests are still billed)",
@@ -438,8 +451,14 @@ const cancelWorkflowCommand: CommandModule = {
     }),
   handler: (argv) =>
     run(async () => {
+      // Recovery, like collect: reaching the running batch is what stops
+      // the rest of it from being billed.
       await cancelTask(
-        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        workflowDeps(
+          await prepareEndpoint(process.env, cliOptionsOf(argv), {
+            enforceAllowlist: false,
+          }),
+        ),
         argv['task-id'] as string,
       );
     }),

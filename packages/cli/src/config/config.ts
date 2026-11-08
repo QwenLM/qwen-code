@@ -66,6 +66,7 @@ import {
   validateModelProvidersConfig,
   isBaseUrlAllowed,
   assertAllowedBaseUrlsSetting,
+  assertQwenOAuthBuiltinsDisabledSetting,
   DYNAMIC_QWEN_OAUTH_BASE_URL,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -161,7 +162,6 @@ import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
-import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 
 export { parseApprovalModeValue };
 
@@ -1358,8 +1358,12 @@ export function buildAdvisorAllowlistHint(
   // Drop records name routes, and the selector may be authType-qualified
   // (`openai:ext-model` — the form the picker persists and /advisor
   // writes) and endpoint-qualified; the shared predicate matches both and
-  // ignores an id whose selected route is registered (issue #12805).
-  const dropped = findUnregisteredAllowlistDrop(config, rawModel);
+  // ignores an id whose selected route is registered (issue #12805). The
+  // fastModel context keeps the `fast` alias resolved the same way the
+  // consumers resolve it.
+  const dropped = findUnregisteredAllowlistDrop(config, rawModel, {
+    fastModel: config.getFastModel?.(),
+  });
   if (dropped) {
     // Built-in Qwen OAuth models are dropped with the non-URL sentinel:
     // their endpoint is discovered dynamically at login, so "allow its
@@ -1412,8 +1416,11 @@ function validateCliAdvisorModel(
   // re-admit it (a dropped default model is still the "current" model at
   // boot): the operator's lockdown is policy, not a registry gap
   // (issue #12805). The remedy list is the advisor-eligible one, minus the
-  // dropped id the escape hatch re-added.
-  const dropped = findUnregisteredAllowlistDrop(config, modelName);
+  // dropped id the escape hatch re-added. The fastModel context keeps the
+  // `fast` alias resolved the same way the runtime resolves it.
+  const dropped = findUnregisteredAllowlistDrop(config, modelName, {
+    fastModel: startupContext.fastModel,
+  });
   if (dropped) {
     throw new FatalConfigError(
       formatUnavailableAdvisorModelMessage(
@@ -2412,10 +2419,13 @@ export async function loadCliConfig(
   // Operator-scope Qwen OAuth builtins disable (issue #12805): honored only
   // from System, User, or SystemDefaults settings — a workspace-scope value
   // is stripped from the merge (WORKSPACE_RESTRICTED_SETTINGS), so the
-  // merged view cannot carry it. Strict `=== true` treats any non-boolean
-  // value as unset, like the schema default.
-  const qwenOAuthBuiltinsDisabled =
-    settings.model?.qwenOAuthBuiltinsDisabled === true;
+  // merged view cannot carry it. Like the allowlist above it, a mistyped
+  // value is a startup error, not a silent no-op: a templating system that
+  // renders the boolean as "true" must not leave personal Qwen login enabled
+  // in a deployment that meant to remove it.
+  const qwenOAuthBuiltinsDisabled = assertQwenOAuthBuiltinsDisabledSetting(
+    settings.model?.qwenOAuthBuiltinsDisabled,
+  );
 
   // Unified resolution of generation config with source attribution. Note the
   // up-front provider validation above is what classifies invalid configuration;
@@ -2446,6 +2456,13 @@ export async function loadCliConfig(
               },
               selectedAuthType: modelConfiguration.authType,
               env: {},
+              // The managed policy applies to the hosted entrance too (issue
+              // #12805): the host envelope names the endpoint the session
+              // dials, so the resolver must judge it like every other
+              // resolution path.
+              allowedBaseUrls: allowedModelBaseUrls,
+              qwenOAuthBuiltinsDisabled,
+              allowedBaseUrlsWorkspaceOnly,
             }).generationConfig,
             ...modelConfiguration,
           },
@@ -3065,6 +3082,10 @@ export async function loadCliConfig(
     allowedModelBaseUrls,
     qwenOAuthBuiltinsDisabled,
     allowedBaseUrlsWorkspaceOnly,
+    // The registry's allowlist judge needs the env baseUrl layer (e.g.
+    // ANTHROPIC_BASE_URL for a baseUrl-less model); core must not read
+    // process.env itself, so the CLI hands the snapshot over.
+    env: process.env,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,

@@ -27,6 +27,7 @@ import {
   readOperatorSandboxSettings,
   selectOperatorCatalogRefresh,
   selectOperatorExecutionSandbox,
+  selectOperatorModelControls,
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
@@ -839,6 +840,29 @@ function mergeSettings(
         ? model
         : {}),
       catalogRefresh: operatorCatalogRefresh,
+    } as Settings['model'];
+  }
+  // Same class of restore for the managed model policy (issue #12805): a
+  // trusted project that replaces the whole `model` section with null, an
+  // array, or a scalar has no key for the workspace strips to delete, so
+  // without this the operator's allowlist and builtins disable would be
+  // silently discarded — a workspace would be able to widen exactly what the
+  // policy forbids.
+  const operatorModelControls = selectOperatorModelControls(
+    systemDefaults,
+    user,
+    system,
+  );
+  if (
+    operatorModelControls.allowedBaseUrls !== undefined ||
+    operatorModelControls.qwenOAuthBuiltinsDisabled !== undefined
+  ) {
+    const model = merged.model;
+    merged.model = {
+      ...(model && typeof model === 'object' && !Array.isArray(model)
+        ? model
+        : {}),
+      ...operatorModelControls,
     } as Settings['model'];
   }
   return merged;

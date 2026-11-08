@@ -1307,6 +1307,62 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
   });
 
+  it('judges a baseUrl-less model against the env baseUrl before the protocol default (R6-1)', () => {
+    // The env layer sits between the explicit baseUrl and the protocol
+    // default, exactly as the resolution gate layers them: ANTHROPIC_BASE_URL
+    // pointing at the allowlisted gateway admits the model that the table
+    // default would have dropped.
+    const allowed = new ModelRegistry(
+      { anthropic: [{ id: 'claude' }] },
+      undefined,
+      [CORP],
+      undefined,
+      undefined,
+      { ANTHROPIC_BASE_URL: `${CORP}/v1` },
+    );
+    expect(idsOf(allowed, AuthType.USE_ANTHROPIC)).toEqual(['claude']);
+
+    const offList = new ModelRegistry(
+      { anthropic: [{ id: 'claude' }] },
+      undefined,
+      [CORP],
+      undefined,
+      undefined,
+      { ANTHROPIC_BASE_URL: 'https://external-llm.example/v1' },
+    );
+    expect(offList.getModelsForAuthType(AuthType.USE_ANTHROPIC)).toEqual([]);
+
+    // No env value: back to the (off-list) protocol default.
+    const noEnv = new ModelRegistry(
+      { anthropic: [{ id: 'claude' }] },
+      undefined,
+      [CORP],
+    );
+    expect(noEnv.getModelsForAuthType(AuthType.USE_ANTHROPIC)).toEqual([]);
+  });
+
+  it('judges responses-wire models against the dialed <origin>/v1/responses default (R7-1)', () => {
+    // The protocol table holds the bare origin for the responses wire, but
+    // the pipeline dials <origin>/v1/responses — the judge must use the
+    // dialed endpoint or a list naming exactly it drops every
+    // baseUrl-less responses model (issue #12805).
+    const dialed = new ModelRegistry(
+      { openai: [{ id: 'resp', wireApi: 'responses' }] },
+      undefined,
+      ['https://api.openai.com/v1/responses'],
+    );
+    expect(idsOf(dialed, AuthType.USE_OPENAI_RESPONSES)).toEqual(['resp']);
+
+    const neither = new ModelRegistry(
+      { openai: [{ id: 'resp', wireApi: 'responses' }] },
+      undefined,
+      [CORP],
+    );
+    expect(neither.getModelsForAuthType(AuthType.USE_OPENAI_RESPONSES)).toEqual(
+      [],
+    );
+  });
+
   it('keeps the qwen-oauth built-ins for an explicit empty list (retired pin)', () => {
     // `[]` under qwen-oauth is an empty provider list, not a switch: only
     // the operator-scoped model.qwenOAuthBuiltinsDisabled disables the
@@ -1751,6 +1807,10 @@ describe('scrubBaseUrlForMessage (R2-18)', () => {
     ['sk-abc123:tok@gw.corp.example/v1', '***@gw.corp.example/v1'],
     ['https://user:sk@', 'https://***@'],
     ['ftp://user:pass@host/v1', 'ftp://***@host/v1'],
+    // Folded authority: a path separator BEFORE the @ must not confine the
+    // mask to the authority (R2-18: http//user:pass@host survived verbatim).
+    ['http//user:pass@gw.corp.example/v1', '***@gw.corp.example/v1'],
+    ['///user:pass@corp.example/v1', '//***@corp.example/v1'],
   ])('masks the userinfo of a non-http(s) shape %j', (input, expected) => {
     expect(scrubBaseUrlForMessage(input)).toBe(expected);
   });

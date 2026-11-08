@@ -43,6 +43,7 @@ export {
   isBaseUrlAllowed,
   validateAllowedBaseUrls,
   assertAllowedBaseUrlsSetting,
+  assertQwenOAuthBuiltinsDisabledSetting,
   scrubBaseUrlForMessage,
   type AllowlistDroppedModel,
   DYNAMIC_QWEN_OAUTH_BASE_URL,

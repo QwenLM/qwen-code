@@ -2568,6 +2568,56 @@ describe('loadCliConfig', () => {
       );
     });
 
+    it('fails closed at startup for a non-boolean model.qwenOAuthBuiltinsDisabled', async () => {
+      // A templating system renders a boolean as the string "true": like the
+      // non-array allowlist nine lines above, a mistyped operator lockdown
+      // must be a startup error, not a silent no-op (issue #12805).
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const err = await loadCliConfig(
+        { model: { qwenOAuthBuiltinsDisabled: 'true' } },
+        argv,
+      ).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(FatalConfigError);
+      expect((err as Error).message).toMatch(
+        /model\.qwenOAuthBuiltinsDisabled must be a boolean/,
+      );
+    });
+
+    it('judges a host-supplied modelConfiguration.baseUrl against the managed allowlist (R8-1)', async () => {
+      // The hosted entrance: hostPolicy.modelConfiguration names the endpoint
+      // the session will dial, and the operator list must judge it — the arm
+      // must hand the policy to the resolver like its sibling does
+      // (issue #12805).
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      const err = await loadCliConfig(
+        { model: { allowedBaseUrls: ['https://corp.example'] } },
+        argv,
+        process.cwd(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        {
+          modelConfiguration: {
+            authType: AuthType.USE_OPENAI,
+            model: 'hosted-model',
+            apiKey: 'hosted-key',
+            baseUrl: 'https://external.example/v1',
+          },
+        },
+      ).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(FatalConfigError);
+      expect((err as Error).message).toMatch(/model\.allowedBaseUrls/);
+    });
+
     it('threads model.allowedBaseUrls into the Config getters (loadCliConfig hand-off)', async () => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();

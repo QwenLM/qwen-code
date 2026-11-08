@@ -50,6 +50,7 @@ import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
+import { findUnregisteredAllowlistDrop } from '../../utils/aux-model-selector.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -948,6 +949,16 @@ export function ModelDialog({
         const advisorModel = selectedEntry.isRuntime
           ? advisorSelector
           : `${advisorSelector}\0${selectedEntry.model.registryBaseUrl ?? ''}`;
+        // Managed allowlist: a model the registry dropped (no registered
+        // route left) is not selectable, even when the availability check
+        // alone would let it through (issue #12805, R5-3).
+        const dropped = findUnregisteredAllowlistDrop(config, advisorModel, {
+          fastModel: config.getFastModel?.(),
+        });
+        if (dropped) {
+          setErrorMessage(t('Selected Advisor model is unavailable.'));
+          return;
+        }
         if (!checkAdvisorModelAvailability(config, advisorModel).available) {
           setErrorMessage(t('Selected Advisor model is unavailable.'));
           return;

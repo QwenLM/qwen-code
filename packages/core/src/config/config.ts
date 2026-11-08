@@ -1707,6 +1707,13 @@ export interface ConfigParameters {
    * is an operator decision (issue #12805).
    */
   allowedBaseUrlsWorkspaceOnly?: boolean;
+  /**
+   * Environment snapshot the model registry judges against for the
+   * AUTH_ENV_MAPPINGS baseUrl layer of baseUrl-less models (issue #12805).
+   * Passed in by the host (the CLI passes process.env); core never reads
+   * process.env for policy decisions.
+   */
+  env?: Record<string, string | undefined>;
   /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -3026,6 +3033,7 @@ export class Config {
   private readonly allowedModelBaseUrls?: readonly string[];
   private readonly qwenOAuthBuiltinsDisabled?: boolean;
   private readonly allowedBaseUrlsWorkspaceOnly?: boolean;
+  private readonly env?: Record<string, string | undefined>;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -3810,6 +3818,7 @@ export class Config {
     this.allowedModelBaseUrls = params.allowedModelBaseUrls;
     this.qwenOAuthBuiltinsDisabled = params.qwenOAuthBuiltinsDisabled;
     this.allowedBaseUrlsWorkspaceOnly = params.allowedBaseUrlsWorkspaceOnly;
+    this.env = params.env;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -3960,6 +3969,7 @@ export class Config {
       allowedModelBaseUrls: this.allowedModelBaseUrls,
       qwenOAuthBuiltinsDisabled: this.qwenOAuthBuiltinsDisabled,
       allowedBaseUrlsWorkspaceOnly: this.allowedBaseUrlsWorkspaceOnly,
+      env: this.env,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
@@ -7986,6 +7996,25 @@ export class Config {
    */
   getAllowedModelBaseUrls(): readonly string[] | undefined {
     return this.allowedModelBaseUrls;
+  }
+
+  /**
+   * Whether the operator disabled the built-in Qwen OAuth personal-login
+   * models (model.qwenOAuthBuiltinsDisabled). The derived-generator gate
+   * (buildInheritedAgentContentGeneratorConfig) re-applies the resolver's
+   * qwen-oauth policy with this flag (issue #12805).
+   */
+  getQwenOAuthBuiltinsDisabled(): boolean {
+    return this.qwenOAuthBuiltinsDisabled === true;
+  }
+
+  /**
+   * Whether the managed allowlist in effect came from workspace scope only:
+   * the derived-generator gate then exempts the qwen-oauth dynamic endpoint
+   * the same way the resolution gate does (issue #12805).
+   */
+  getAllowedBaseUrlsWorkspaceOnly(): boolean {
+    return this.allowedBaseUrlsWorkspaceOnly === true;
   }
 
   /**

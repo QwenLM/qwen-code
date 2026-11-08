@@ -8,7 +8,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
-import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
+import { getDialedProtocolDefaultBaseUrl } from '../providers/provider-config.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import {
   readCachedSubscriptionModels,
@@ -22,7 +22,11 @@ import {
   type AvailableModel,
 } from './types.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { DYNAMIC_QWEN_OAUTH_BASE_URL, QWEN_OAUTH_MODELS } from './constants.js';
+import {
+  AUTH_ENV_MAPPINGS,
+  DYNAMIC_QWEN_OAUTH_BASE_URL,
+  QWEN_OAUTH_MODELS,
+} from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { FatalConfigError } from '../utils/errors.js';
 
@@ -204,6 +208,26 @@ export function assertAllowedBaseUrlsSetting(
 }
 
 /**
+ * Startup shape check for the `model.qwenOAuthBuiltinsDisabled` setting
+ * value, the sibling of {@link assertAllowedBaseUrlsSetting}: the two halves
+ * of the same managed policy must cost the same to mistype. A templating
+ * system renders a boolean as the string `"true"`, and a silent no-op there
+ * leaves personal Qwen login enabled in a deployment that meant to remove it
+ * (issue #12805). `undefined` and `false` keep meaning "built-ins enabled"
+ * (the schema default); any other non-boolean value is a startup error.
+ */
+export function assertQwenOAuthBuiltinsDisabledSetting(
+  value: unknown,
+): boolean {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new FatalConfigError(
+      `model.qwenOAuthBuiltinsDisabled must be a boolean; got ${typeof value}. Remove or correct the value to start.`,
+    );
+  }
+  return value === true;
+}
+
+/**
  * Validate a managed endpoint allowlist (`model.allowedBaseUrls`).
  * `undefined` means no policy and is kept as-is. A non-array value is a
  * runtime data error (a hand-edited settings file): warn and fail closed
@@ -266,10 +290,12 @@ export function validateAllowedBaseUrls(
  * returned verbatim only when it parses as an http(s) URL with no userinfo,
  * and a credential-bearing http(s) URL is shown with its userinfo stripped.
  * Every other shape (scheme-less, protocol-relative, opaque-scheme, or
- * unparseable) has its authority masked up to the last `@` before the path,
- * so a value that cannot be positively identified as credential-free never
- * echoes one. A value with no `@` in its authority (including the Qwen OAuth
- * sentinel) carries no userinfo and is returned as is.
+ * unparseable) has its head masked up to the last `@` of the whole value —
+ * confining the mask to the authority alone would let a folded authority
+ * (`http//user:pass@host`, where a path separator precedes the `@`) leak its
+ * userinfo verbatim — so a value that cannot be positively identified as
+ * credential-free never echoes one. A value with no `@` (including the Qwen
+ * OAuth sentinel) carries no userinfo and is returned as is.
  */
 export function scrubBaseUrlForMessage(url: string): string {
   try {
@@ -286,11 +312,8 @@ export function scrubBaseUrlForMessage(url: string): string {
     // Not a URL: fall through to the shape-independent mask below.
   }
   const lead = /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)?\/\//.exec(url)?.[0] ?? '';
-  const rest = url.slice(lead.length);
-  const authorityEnd = rest.search(/[/?#]/);
-  const authority = authorityEnd < 0 ? rest : rest.slice(0, authorityEnd);
-  const at = authority.lastIndexOf('@');
-  return at < 0 ? url : `${lead}***@${rest.slice(at + 1)}`;
+  const at = url.lastIndexOf('@');
+  return at < 0 ? url : `${lead}***@${url.slice(at + 1)}`;
 }
 
 /**
@@ -441,9 +464,15 @@ export class ModelRegistry {
   private builtinsAllowlistExempt = false;
 
   /**
-   * The protocol default endpoint for an authType — the SAME table the
-   * resolution gate judges against (getDefaultBaseUrlForProtocol), so the
-   * registration filter and the resolver agree on the endpoint a
+   * Boot-frozen environment snapshot (see the constructor's env parameter):
+   * the AUTH_ENV_MAPPINGS baseUrl layer of the allowlist judge.
+   */
+  private env: Record<string, string | undefined>;
+
+  /**
+   * The protocol default endpoint for an authType — the SAME dialed default
+   * the resolution gate judges against (getDialedProtocolDefaultBaseUrl), so
+   * the registration filter and the resolver agree on the endpoint a
    * baseUrl-less model dials (issue #12805: a model whose true endpoint the
    * operator listed must not be dropped by one enforcement point and
    * admitted by the other). Qwen OAuth has no static default — its endpoint
@@ -454,19 +483,43 @@ export class ModelRegistry {
     if (authType === AuthType.QWEN_OAUTH) {
       return DYNAMIC_QWEN_OAUTH_BASE_URL;
     }
-    return getDefaultBaseUrlForProtocol(authType);
+    return getDialedProtocolDefaultBaseUrl(authType);
+  }
+
+  /**
+   * The baseUrl the authType's env vars point at (first truthy entry of
+   * AUTH_ENV_MAPPINGS), or '' when none is set or the authType has no env
+   * mapping at all (custom protocols, and test worlds that mock the AuthType
+   * enum with a partial set). The registry is built with a boot-frozen env
+   * snapshot (no process.env reads here), so this layer only ever sees what
+   * the host handed over at construction.
+   */
+  private resolveEnvBaseUrl(authType: AuthType): string {
+    const mapping =
+      AUTH_ENV_MAPPINGS[authType as keyof typeof AUTH_ENV_MAPPINGS];
+    if (!mapping) return '';
+    for (const key of mapping.baseUrl) {
+      const value = this.env[key];
+      if (value) return value;
+    }
+    return '';
   }
 
   /**
    * The endpoint a model of this authType dials, as the allowlist judges it:
-   * its explicit baseUrl or the protocol default (the same value the
-   * resolution gate judges, so the two enforcement points agree).
+   * its explicit baseUrl, then the env baseUrl, then the protocol default —
+   * the same layering the resolution gate applies, so the two enforcement
+   * points agree.
    */
   private resolveRegistryBaseUrl(
     config: ModelConfig,
     authType: AuthType,
   ): string {
-    return config.baseUrl || this.getDefaultBaseUrl(authType);
+    return (
+      config.baseUrl ||
+      this.resolveEnvBaseUrl(authType) ||
+      this.getDefaultBaseUrl(authType)
+    );
   }
 
   /**
@@ -516,6 +569,13 @@ export class ModelRegistry {
      * decision (issue #12805).
      */
     allowedBaseUrlsWorkspaceOnly?: boolean,
+    /**
+     * Boot-frozen environment snapshot the allowlist judges against for
+     * baseUrl-less models (the AUTH_ENV_MAPPINGS baseUrl layer, same
+     * order as the resolution gate). The registry never reads
+     * process.env itself (env-guard); the host passes the snapshot in.
+     */
+    env?: Record<string, string | undefined>,
   ) {
     validateModelProvidersConfig(modelProvidersConfig, providerProtocolConfig);
     this.modelsByAuthType = new Map();
@@ -526,6 +586,7 @@ export class ModelRegistry {
     this.builtinsAllowlistExempt =
       !this.qwenOAuthBuiltinsDisabledFlag &&
       allowedBaseUrlsWorkspaceOnly === true;
+    this.env = env ?? {};
 
     // Register the hard-coded qwen-oauth models unless the operator disabled
     // them via model.qwenOAuthBuiltinsDisabled. When the allowlist comes from
@@ -901,6 +962,7 @@ export class ModelRegistry {
       this.allowedModelBaseUrls,
       this.qwenOAuthBuiltinsDisabledFlag,
       this.builtinsAllowlistExempt,
+      this.env,
     );
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;

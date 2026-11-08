@@ -111,6 +111,9 @@ function buildWorkspaceProvidersStatus(
       // Managed model policy (issue #12805): the allowlist with its
       // workspace-only exemption and the operator builtins disable.
       ...readModelPolicyOptions(loaded),
+      // The same env snapshot the auth resolution above used, so the
+      // registry's allowlist judge sees the baseUrl layer a session sees.
+      env,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });

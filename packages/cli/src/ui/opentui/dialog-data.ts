@@ -29,6 +29,7 @@ import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
+import { findUnregisteredAllowlistDrop } from '../../utils/aux-model-selector.js';
 import process from 'node:process';
 import { EventEmitter } from 'node:events';
 import {
@@ -435,6 +436,16 @@ export async function applyModelSelection(
       return { ok: false, error: t('Selected Advisor model is unavailable.') };
     hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model?.envKey);
     const selector = off ? undefined : advisorSelector(selectedEntry!.model!);
+    // Managed allowlist: a model the registry dropped (no registered route
+    // left) is not selectable, even when the availability check alone would
+    // let it through (issue #12805, R5-3).
+    if (
+      selector &&
+      findUnregisteredAllowlistDrop(config, selector, {
+        fastModel: config.getFastModel?.(),
+      })
+    )
+      return { ok: false, error: t('Selected Advisor model is unavailable.') };
     if (selector && !checkAdvisorModelAvailability(config, selector).available)
       return { ok: false, error: t('Selected Advisor model is unavailable.') };
     try {

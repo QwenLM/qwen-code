@@ -2160,4 +2160,51 @@ describe('Advisor model selection', () => {
     ]);
     expect(switchModel).not.toHaveBeenCalled();
   });
+
+  it('refuses a runtime model the managed allowlist dropped (R5-3)', async () => {
+    // The registry dropped the endpoint, but a runtime snapshot of the same
+    // id is listed: selecting it must be refused, not dialed (issue #12805).
+    const setAdvisorModel = vi.fn().mockResolvedValue(true);
+    const config = stubConfig({
+      getAllConfiguredModels: () => [
+        {
+          id: 'dropped-model',
+          label: 'Dropped Model',
+          authType: AuthType.USE_OPENAI,
+          isRuntimeModel: true,
+          runtimeSnapshotId: '$runtime|openai|dropped-model',
+        },
+      ],
+      getAllowlistDroppedModels: () => [
+        {
+          id: 'dropped-model',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://off-list.example/v1',
+        },
+      ],
+      setAdvisorModel,
+    });
+    const { settings, written } = createFakeSettings();
+    const entries = buildModelEntries(config, 'advisor');
+    // The row IS listed — the refusal must come from the allowlist gate,
+    // not from a missing-row guard.
+    expect(entries.map((entry) => entry.key)).toEqual([
+      '$advisor-off',
+      '$runtime|openai|dropped-model',
+    ]);
+    expect(
+      await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'advisor',
+        selectionKey: '$runtime|openai|dropped-model',
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: 'Selected Advisor model is unavailable.',
+    });
+    expect(setAdvisorModel).not.toHaveBeenCalled();
+    expect(written).toEqual([]);
+  });
 });

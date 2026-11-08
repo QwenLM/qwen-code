@@ -17,9 +17,12 @@ import {
   listBatchJobs,
 } from './batch-client.js';
 import {
+  cancelWorkflowCommand,
+  collectWorkflowCommand,
   listWorkflowCommand,
   prepareEndpoint,
   resolveEndpoint,
+  runWorkflowCommand,
 } from './batch.js';
 
 const mockLoadSettings = vi.hoisted(() => vi.fn());
@@ -28,6 +31,9 @@ const mockResolveProxy = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockIgnoreBrokenPipe = vi.hoisted(() => vi.fn());
 const mockCollectProviderModels = vi.hoisted(() => vi.fn());
+const mockRunPlan = vi.hoisted(() => vi.fn());
+const mockCollectTask = vi.hoisted(() => vi.fn());
+const mockCancelTask = vi.hoisted(() => vi.fn());
 
 vi.mock('../config/settings.js', () => ({ loadSettings: mockLoadSettings }));
 vi.mock('../utils/modelConfigUtils.js', () => ({
@@ -35,6 +41,15 @@ vi.mock('../utils/modelConfigUtils.js', () => ({
   resolveCliGenerationConfig: mockResolve,
   collectProviderModelsForProtocol: mockCollectProviderModels,
 }));
+vi.mock('./batch-workflow.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./batch-workflow.js')>();
+  return {
+    ...actual,
+    runPlan: mockRunPlan,
+    collectTask: mockCollectTask,
+    cancelTask: mockCancelTask,
+  };
+});
 vi.mock('./channel/proxy.js', () => ({ resolveProxy: mockResolveProxy }));
 vi.mock('../utils/stdioHelpers.js', () => ({
   ignoreBrokenPipe: mockIgnoreBrokenPipe,
@@ -233,6 +248,91 @@ describe('prepareEndpoint', () => {
     expect(mockResolveProxy).toHaveBeenCalledWith(
       'http://jump-host:1080',
       'http://proxy.internal:8080',
+    );
+  });
+
+  it('stays fail-closed for callers that do not opt the gate off (R7-2)', async () => {
+    // settings allow only corp-llm, the resolved endpoint is off-list.
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      },
+    });
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: 'https://off-list.example/v1',
+      model: 'm',
+      authType: AuthType.USE_OPENAI,
+    });
+    await expect(prepareEndpoint({})).rejects.toThrow(
+      /Batch endpoint 'https:\/\/off-list\.example\/v1' is not in the managed allowlist/,
+    );
+  });
+});
+
+describe('recovery subcommands reach the task behind an off-list policy (R7-2)', () => {
+  // collect/cancel retrieve an already-paid task: a policy change after
+  // submit must not strand the result, while submit commands (run, retry)
+  // keep the fail-closed gate (issue #12805).
+  const handlerOf = (command: typeof runWorkflowCommand) =>
+    command.handler as (argv: Record<string, unknown>) => Promise<void>;
+
+  beforeEach(() => {
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      },
+    });
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: 'https://off-list.example/v1',
+      model: 'm',
+      authType: AuthType.USE_OPENAI,
+    });
+    mockRunPlan.mockReset().mockResolvedValue(undefined);
+    mockCollectTask.mockReset().mockResolvedValue(undefined);
+    mockCancelTask.mockReset().mockResolvedValue(undefined);
+    mockWriteStderrLine.mockClear();
+  });
+
+  it('collects the task and issues the API call despite the off-list endpoint', async () => {
+    // wait: false mirrors the yargs default the handler forwards.
+    await handlerOf(collectWorkflowCommand)({ 'task-id': 't-1', wait: false });
+    expect(mockCollectTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ep: expect.objectContaining({
+          baseUrl: 'https://off-list.example/v1',
+        }),
+      }),
+      't-1',
+      expect.objectContaining({ wait: false }),
+    );
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('managed allowlist'),
+    );
+  });
+
+  it('cancels the active batch the same way', async () => {
+    await handlerOf(cancelWorkflowCommand)({ 'task-id': 't-1' });
+    expect(mockCancelTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ep: expect.objectContaining({
+          baseUrl: 'https://off-list.example/v1',
+        }),
+      }),
+      't-1',
+    );
+  });
+
+  it('still refuses a new submission while the endpoint is off-list', async () => {
+    await handlerOf(runWorkflowCommand)({ plan: 'plan.json' });
+    expect(mockRunPlan).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Batch endpoint 'https://off-list.example/v1' is not in the managed allowlist",
+      ),
     );
   });
 });

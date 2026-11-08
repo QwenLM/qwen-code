@@ -123,6 +123,41 @@ export function selectOperatorCatalogRefresh(
   return selected;
 }
 
+/**
+ * The managed model controls (issue #12805) an operator scope keeps in force
+ * even when a trusted project replaces the whole `model` section with a
+ * non-object (null/`[]`/scalar). Each key resolves like a normal load: system
+ * over user over system defaults. Values are restored RAW so the config
+ * layer's shape validation (`assertAllowedBaseUrlsSetting`,
+ * `assertQwenOAuthBuiltinsDisabledSetting`) still runs on them — a mistyped
+ * operator value must stay a startup error, not be silently dropped here. A
+ * key absent from every operator scope is left absent so the merge (and the
+ * schema defaults) decide, exactly as when the workspace did not replace the
+ * section.
+ */
+export function selectOperatorModelControls(
+  ...scopes: OperatorSettingsScope[]
+): {
+  allowedBaseUrls?: unknown;
+  qwenOAuthBuiltinsDisabled?: unknown;
+} {
+  const selected: {
+    allowedBaseUrls?: unknown;
+    qwenOAuthBuiltinsDisabled?: unknown;
+  } = {};
+  for (const scope of scopes) {
+    const model = scope.model;
+    if (!model) continue;
+    if (model.allowedBaseUrls !== undefined) {
+      selected.allowedBaseUrls = model.allowedBaseUrls;
+    }
+    if (model.qwenOAuthBuiltinsDisabled !== undefined) {
+      selected.qwenOAuthBuiltinsDisabled = model.qwenOAuthBuiltinsDisabled;
+    }
+  }
+  return selected;
+}
+
 /** Bare mode still honors operator confinement without loading project/env data. */
 export function readOperatorSandboxSettings(): SandboxSettingsInput {
   return sandboxSettingsFromScopes(readOperatorSettingsScopes());

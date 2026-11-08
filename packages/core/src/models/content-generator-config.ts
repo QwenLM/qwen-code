@@ -18,8 +18,8 @@ import {
   resolveReasoningCapabilities,
 } from '../core/reasoning-overrides.js';
 import {
+  AuthType,
   createContentGenerator,
-  type AuthType,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
@@ -27,6 +27,8 @@ import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
+import { getDialedProtocolDefaultBaseUrl } from '../providers/provider-config.js';
+import { isBaseUrlAllowed, scrubBaseUrlForMessage } from './modelRegistry.js';
 import type { ResolvedModelConfig } from './types.js';
 import {
   clampReasoningEffort,
@@ -262,39 +264,92 @@ function buildInheritedAgentContentGeneratorConfig(
       parentConfig,
       authOverrides,
     );
-    return nextConfig;
-  }
+  } else {
+    if (modelId && modelId !== parentConfig.model) {
+      nextConfig.thinkingMandatory = undefined;
+    }
 
-  if (modelId && modelId !== parentConfig.model) {
-    nextConfig.thinkingMandatory = undefined;
-  }
-
-  nextConfig.apiKey = resolveCredentialField(
-    authOverrides.apiKey,
-    sameProvider ? parentConfig.apiKey : undefined,
-    authOverrides.authType,
-    'apiKey',
-  );
-  if (
-    !sameProvider ||
-    nextConfig.model !== parentConfig.model ||
-    (authOverrides.baseUrl !== undefined &&
-      authOverrides.baseUrl !== parentConfig.baseUrl)
-  )
-    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
-  nextConfig.baseUrl =
-    authOverrides.baseUrl ??
-    resolveCredentialField(
-      undefined,
-      sameProvider ? parentConfig.baseUrl : undefined,
+    nextConfig.apiKey = resolveCredentialField(
+      authOverrides.apiKey,
+      sameProvider ? parentConfig.apiKey : undefined,
       authOverrides.authType,
-      'baseUrl',
+      'apiKey',
     );
-  nextConfig.apiKeyEnvKey = sameProvider
-    ? parentConfig.apiKeyEnvKey
-    : undefined;
+    if (
+      !sameProvider ||
+      nextConfig.model !== parentConfig.model ||
+      (authOverrides.baseUrl !== undefined &&
+        authOverrides.baseUrl !== parentConfig.baseUrl)
+    )
+      nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
+    nextConfig.baseUrl =
+      authOverrides.baseUrl ??
+      resolveCredentialField(
+        undefined,
+        sameProvider ? parentConfig.baseUrl : undefined,
+        authOverrides.authType,
+        'baseUrl',
+      );
+    nextConfig.apiKeyEnvKey = sameProvider
+      ? parentConfig.apiKeyEnvKey
+      : undefined;
+  }
 
+  // Managed endpoint allowlist (issue #12805): a per-agent generator dials
+  // on its own, outside the session's resolution gate, so the derived
+  // endpoint must be judged exactly the way a fresh resolution would be.
+  assertDerivedGeneratorEndpointAllowed(base, nextConfig);
   return nextConfig;
+}
+
+/**
+ * The managed-endpoint allowlist for derived per-agent generators
+ * (issue #12805, review R6-3). Mirrors the resolution gate's rules:
+ * qwen-oauth is judged against the operator builtins pin and the
+ * workspace-only exemption (its endpoint is discovered at login and no
+ * allowlist entry can name it), and every other auth type is judged on the
+ * endpoint that will actually be dialed — the config baseUrl, then the
+ * auth type's env baseUrl, then the wire's protocol default — the same
+ * layering the resolution gate applies.
+ */
+function assertDerivedGeneratorEndpointAllowed(
+  base: Config,
+  config: ContentGeneratorConfig,
+): void {
+  // Optional-calls: this module's test harness (and a few headless hosts)
+  // pass partial config objects; a missing policy means no policy.
+  const allowedBaseUrls = base.getAllowedModelBaseUrls?.();
+  if (allowedBaseUrls === undefined) return;
+  if (config.authType === AuthType.QWEN_OAUTH) {
+    if (base.getQwenOAuthBuiltinsDisabled?.() ?? false) {
+      throw new Error(
+        `Qwen OAuth (personal Qwen login) is disabled by operator settings: ` +
+          `model.qwenOAuthBuiltinsDisabled is set in system, user, or systemDefaults settings. ` +
+          `Remove that setting from the operator scope or choose another authentication type.`,
+      );
+    }
+    if (!(base.getAllowedBaseUrlsWorkspaceOnly?.() ?? false)) {
+      throw new Error(
+        `The Qwen OAuth (personal Qwen login) endpoint is discovered dynamically at login and cannot be listed in the managed allowlist 'model.allowedBaseUrls', which this deployment sets in operator scope. ` +
+          `Personal Qwen login and an operator-scope allowlist are mutually exclusive: removing model.allowedBaseUrls is the only way to re-enable it, or choose another authentication type.`,
+      );
+    }
+    // Workspace-only list: the dynamic endpoint is exempt, like at
+    // resolution time.
+    return;
+  }
+  const endpoint =
+    config.baseUrl ||
+    (config.authType
+      ? resolveCredentialField(undefined, undefined, config.authType, 'baseUrl')
+      : undefined) ||
+    getDialedProtocolDefaultBaseUrl(config.authType);
+  if (!isBaseUrlAllowed(endpoint, allowedBaseUrls)) {
+    throw new Error(
+      `Model endpoint '${scrubBaseUrlForMessage(endpoint)}' (auth type '${config.authType}') is not in the managed allowlist 'model.allowedBaseUrls'; the derived generator was not started. ` +
+        `Ask the operator to add it to the allowlist in system or user settings, or choose a model on an allowed endpoint.`,
+    );
+  }
 }
 
 /**

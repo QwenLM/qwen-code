@@ -4528,6 +4528,37 @@ describe('Settings Loading and Merging', () => {
         ),
       ).toBe(true);
     });
+
+    // R8-2: a trusted workspace that replaces the whole `model` section with
+    // a non-object must not reset the operator's managed policy — the
+    // workspace strips have no key to delete in a non-object section, so the
+    // merge restores the operator values (issue #12805).
+    it.each([null, [], 42])(
+      'restores the operator model controls when the workspace model section is %j',
+      (workspaceModel) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({ $version: 4, model: workspaceModel });
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                model: {
+                  allowedBaseUrls: ['https://corp-llm.example/v1'],
+                  qwenOAuthBuiltinsDisabled: true,
+                },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.model?.allowedBaseUrls).toEqual([
+          'https://corp-llm.example/v1',
+        ]);
+        expect(settings.merged.model?.qwenOAuthBuiltinsDisabled).toBe(true);
+      },
+    );
   });
 
   describe('goals.modelProposed scope handling', () => {

@@ -79,7 +79,9 @@ export function buildModelIdContext(config: Config): ModelIdResolutionContext {
   };
 }
 
-function parseModelIdSelector(model: string | undefined): ModelIdSelector {
+export function parseModelIdSelector(
+  model: string | undefined,
+): ModelIdSelector {
   const raw = model?.trim();
   // Persisted selectors may carry a `\0<baseUrl>` endpoint disambiguator
   // (written by the model picker for same-id endpoints, #12760). It is
