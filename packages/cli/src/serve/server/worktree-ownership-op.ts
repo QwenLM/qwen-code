@@ -16,6 +16,22 @@
  * facades for the same workspace still serialize with each other. The map
  * only grows while an operation is in flight (the release callback
  * deletes the entry).
+ *
+ * Every caller must derive the key by the same rule: `fs.realpathSync` (the
+ * JS implementation, not `.native`) of the sidecar's recorded worktree path.
+ * Keys agree only while the checkout resolves to the same path, which is why
+ * the restore re-checks under the lock before it attests a checkout, the
+ * reset before it transfers one, and the cleanup before it removes one; a
+ * caller using another rule could disagree even then and stop excluding the
+ * others. The daemon-side containment checks compare these paths with
+ * `fs.realpathSync` of the worktree roots and must keep the same rule. The
+ * restore derives the key in `ownershipLockKeyForWorktree`
+ * (`routes/session.ts`) and later compares it with the `realTarget` its
+ * validation resolves; the orphan cleanup uses `canonicalPath`
+ * (`worktree-orphan-cleanup.ts`); both fall back to the raw path when it does
+ * not resolve. The reset route locks the `realTarget` from
+ * `resolveWorktreeOwnershipTarget` (`routes/session.ts`), which refuses an
+ * unresolvable checkout, so it only ever locks a resolved path.
  */
 const worktreeOwnershipOpTails = new Map<string, Promise<void>>();
 

@@ -7,11 +7,15 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.ApplicationContextFactory;
 import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.env.OriginTrackedMapPropertySource;
+import org.springframework.boot.origin.OriginTrackedValue;
+import org.springframework.boot.origin.TextResourceOrigin;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.MutablePropertySources;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
+import org.springframework.core.io.FileSystemResource;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -1371,6 +1375,28 @@ class ServerEnvironmentTest {
             assertTrue(last.detail().startsWith("cannot tell which other files the server reads: "),
                     rows.toString());
         }
+    }
+
+    @Test
+    void saysWhyItCannotTellTheFilesWhereSpringReadsTheRootAsAFile() {
+        // Under file:/[.properties] Spring reads / as a properties file, its
+        // listing as keys, so an entry of / called spring.config.import is an
+        // import key in a file with no directory. A test cannot write to /,
+        // so the source Spring would add is in place before it prepares.
+        String name = "Config resource 'file [/]' via location 'file:/[.properties]'";
+        ConfigurableEnvironment environment = environment(Map.of());
+        environment.getPropertySources().addLast(new OriginTrackedMapPropertySource(name,
+                Map.of("spring.config.import", OriginTrackedValue.of("",
+                        new TextResourceOrigin(new FileSystemResource("/"), null)))));
+        ManagedAgentPreflight.Prepared prepared = prepare(environment, new ArrayList<>(),
+                "--spring.config.location=optional:file:" + directory + "/");
+        assertNull(prepared.failure());
+        String why = "Spring reads the directory / as a file (" + name + ")";
+        assertEquals(why, prepared.unlisted());
+        List<ManagedAgentPreflight.Check> rows = rows(prepared);
+        ManagedAgentPreflight.Check last = rows.get(rows.size() - 1);
+        assertEquals(ManagedAgentPreflight.Status.WARN, last.status(), rows.toString());
+        assertEquals("cannot tell which other files the server reads: " + why, last.detail());
     }
 
     @Test
