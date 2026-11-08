@@ -462,7 +462,8 @@ final class ManagedActivityDiagnosticProjection {
                     + " AND record_key = ?", sequence, resource, scope, key);
         }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scope, key);
-        store.referenceProjectionResource(scope, key, sequence, tenant, workspace, session, resource);
+        ManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, sequence, tenant, workspace,
+                session, resource);
         for (String previous : old) {
             discardUnreferenced(scope, previous);
         }

@@ -90,6 +90,30 @@ class ManagedMcpSettingsStoreTest {
     }
 
     @Test
+    void legacySettingsRevisionsReplaceTheirProjectionRowInsteadOfAccumulating() throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        byte[] session = id.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        ObjectNode first = settings(1, "enabled", null);
+        var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND session_id=?",
+                Integer.class, session)).isEqualTo(1);
+        ObjectNode second = settings(2, "disabled", first);
+        var disable = journal.requestOrdinary(second.path("operationId").asText(), "config_install", second,
+                event -> {}, records -> records, 0);
+        journal.commit(disable);
+        journal.committed(disable);
+        // R2-5: the legacy path needs no closure, so it replaces the superseded
+        // projection row — two revisions still leave exactly one row rather than
+        // accumulating one per revision for the Session's whole life.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD' AND session_id=?",
+                Integer.class, session)).isEqualTo(1);
+    }
+
+    @Test
     void recipesAndBrokenPredecessorsCannotCommitAnOverride() throws Exception {
         String id = UUID.randomUUID().toString();
         var journal = publicJournal(id);

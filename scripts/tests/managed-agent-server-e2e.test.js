@@ -5,16 +5,18 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import path, { join } from 'node:path';
 import { inspect, isDeepStrictEqual } from 'node:util';
 import {
   createSourceFile,
@@ -72,6 +74,119 @@ describe('managed-agent-server e2e runner', () => {
         `E2E table ${table} is absent from canonical V1`,
       ).toBe(true);
     }
+  });
+
+  // Column identifiers named by the runner's single-table ma_public_event
+  // queries. Interpolated SQL fragments are expanded so a typo inside
+  // ${sessionFilter} stays visible, and quoted literals are stripped so a value
+  // like LIKE 'agent.%' cannot pose as a column (R5-1, both directions).
+  const maPublicEventColumns = (source) => {
+    const fragments = new Map();
+    for (const m of source.matchAll(/const (\w+) = `([^`]*)`/g)) {
+      fragments.set(m[1], m[2]);
+    }
+    const expand = (sql, depth) =>
+      depth > 4
+        ? sql
+        : sql.replace(/\$\{([^}]*)\}/g, (_whole, expr) => {
+            const name = expr.trim();
+            return fragments.has(name)
+              ? expand(fragments.get(name), depth + 1)
+              : ' ? ';
+          });
+    const keywords = new Set([
+      'select',
+      'from',
+      'where',
+      'and',
+      'or',
+      'not',
+      'order',
+      'group',
+      'by',
+      'count',
+      'sum',
+      'distinct',
+      'hex',
+      'sha2',
+      'limit',
+      'desc',
+      'asc',
+      'true',
+      'false',
+      'null',
+      'as',
+      'on',
+      'in',
+      'is',
+      'like',
+      'case',
+      'when',
+      'then',
+      'else',
+      'end',
+      'qwen_managed_agent',
+      'ma_public_event',
+    ]);
+    const named = new Set();
+    for (const match of source.matchAll(/`([^`]*ma_public_event[^`]*)`/g)) {
+      let sql = match[1];
+      const tables = [...sql.matchAll(/qwen_managed_agent\.(\w+)/g)].map(
+        (m) => m[1],
+      );
+      // Multi-table dumps name other tables' columns too; only reconcile the
+      // single-table ma_public_event queries.
+      if (tables.some((table) => table !== 'ma_public_event')) continue;
+      sql = expand(sql, 0);
+      sql = sql.replace(/'[^']*'/g, " '' ");
+      for (const token of sql.matchAll(/[a-z][a-z_]+/g)) {
+        if (!keywords.has(token[0])) named.add(token[0]);
+      }
+    }
+    return named;
+  };
+
+  it('names only real ma_public_event columns in its single-table SQL (R4-1)', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const baseline = read(
+      'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+    );
+    const tableBody =
+      baseline
+        .split('CREATE TABLE ma_public_event (')[1]
+        ?.split(') ENGINE=')[0] ?? '';
+    const columns = new Set(
+      [...tableBody.matchAll(/^\s+([a-z_]+)\s/gm)].map((match) => match[1]),
+    );
+    expect(columns.has('is_terminal')).toBe(true);
+    const named = maPublicEventColumns(source);
+    expect(named.size).toBeGreaterThan(0);
+    for (const column of named) {
+      expect(
+        columns.has(column),
+        `ma_public_event column ${column} is absent from canonical V1`,
+      ).toBe(true);
+    }
+  });
+
+  it('the ma_public_event column guard ignores literal values and sees interpolated typos (R5-1)', () => {
+    // (a) A quoted value must not be mistaken for a column: LIKE 'agent.%'
+    // contributes no `agent` token, so valid SQL does not red the guard.
+    const literal = maPublicEventColumns(
+      'const q = `SELECT event_type FROM qwen_managed_agent.ma_public_event ' +
+        "WHERE event_type LIKE 'agent.%'`;",
+    );
+    expect(literal.has('event_type')).toBe(true);
+    expect(literal.has('agent')).toBe(false);
+    // (b) A column misspelled inside an interpolated fragment must surface
+    // rather than being blanked away with the interpolation.
+    const typo = maPublicEventColumns(
+      'const sessionFilter = `sessoin_id=${sqlString(session.id)}`;\n' +
+        'const q = `SELECT sequence_id FROM qwen_managed_agent.ma_public_event ' +
+        'WHERE ${sessionFilter}`;',
+    );
+    expect(typo.has('sequence_id')).toBe(true);
+    expect(typo.has('sessoin_id')).toBe(true);
   });
 
   const extracted = (names) => {
@@ -344,6 +459,581 @@ describe('managed-agent-server e2e runner', () => {
     expect(rejects(['4'], checkpoint, 'other-approval')).toBe(true);
   });
 
+  it('builds the rewritten-command package with a rewriting, fsyncing command Hook', async () => {
+    const temporary = mkdtempSync(join(tmpdir(), 'a3-package-contract-'));
+    try {
+      const prepared = {
+        archivePath: join(temporary, 'package.tar.gz'),
+        packageDigest: 'a'.repeat(64),
+        manifest: { name: 'a3-recovery' },
+      };
+      const { prepareCommandRewriteExtensionPackage } = load(
+        [
+          'prepareCommandRewriteExtensionPackage',
+          'commandRewriteOriginalFirst',
+          'commandRewriteOriginalSecond',
+          'commandRewriteRewrittenFirst',
+          'commandRewriteRewrittenSecond',
+        ],
+        'prepareCommandRewriteExtensionPackage',
+        'path',
+        'mkdirSync',
+        'writeFileSync',
+        'prepareManagedExtensionPackage',
+      )(path, mkdirSync, writeFileSync, async (source, options) => {
+        expect(source).toEqual({
+          type: 'local',
+          source: join(temporary, 'source'),
+        });
+        expect(options).toEqual({
+          target: { platform: 'linux', arch: 'any' },
+          destination: join(temporary, 'destination'),
+        });
+        const manifest = JSON.parse(
+          readFileSync(
+            join(temporary, 'source', 'qwen-extension.json'),
+            'utf8',
+          ),
+        );
+        expect(manifest.name).toBe('a3-recovery');
+        expect(Object.keys(manifest.hooks).sort()).toEqual([
+          'PostToolUse',
+          'PreToolUse',
+        ]);
+        for (const event of Object.values(manifest.hooks)) {
+          expect(event[0].matcher).toBe('run_shell_command');
+          expect(event[0].hooks[0].type).toBe('command');
+          expect(event[0].hooks[0].command).toContain(
+            '"${extensionPath}/hook.cjs"',
+          );
+          expect(event[0].hooks[0].command).toContain(
+            JSON.stringify(join(temporary, 'hooks.jsonl')),
+          );
+        }
+        const command = readFileSync(
+          join(temporary, 'source', 'commands', 'two-step.md'),
+          'utf8',
+        );
+        expect(command).toContain(
+          '!{printf ORIGINAL_FIRST > managed-a3-first.txt}',
+        );
+        expect(command).toContain(
+          '!{printf ORIGINAL_SECOND > managed-a3-second.txt}',
+        );
+        return prepared;
+      });
+      await prepareCommandRewriteExtensionPackage(
+        join(temporary, 'source'),
+        join(temporary, 'destination'),
+        join(temporary, 'hooks.jsonl'),
+      );
+      const hook = join(temporary, 'source', 'hook.cjs');
+      const input = {
+        hook_event_name: 'PreToolUse',
+        tool_use_id: 'command-step-one',
+        tool_input: { command: 'printf ORIGINAL_FIRST > managed-a3-first.txt' },
+      };
+      const result = spawnSync(
+        process.execPath,
+        [hook, join(temporary, 'hooks.jsonl')],
+        {
+          input: JSON.stringify(input),
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      const output = JSON.parse(result.stdout);
+      expect(output.hookSpecificOutput.updatedInput).toEqual({
+        command: 'printf REWRITTEN_FIRST > managed-a3-first.txt',
+        timeout: 120000,
+      });
+      expect(output.hookSpecificOutput).not.toHaveProperty(
+        'permissionDecision',
+      );
+      expect(
+        JSON.parse(readFileSync(join(temporary, 'hooks.jsonl'), 'utf8')),
+      ).toEqual(input);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes the exact archive bytes, tenant headers and base64url manifest', async () => {
+    const temporary = mkdtempSync(join(tmpdir(), 'a3-publish-contract-'));
+    let observed;
+    const server = createServer((request, response) => {
+      void (async () => {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        observed = {
+          method: request.method,
+          url: request.url,
+          headers: request.headers,
+          body: Buffer.concat(chunks),
+        };
+        response.writeHead(202, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ extensionId: 'ext_a3' }));
+      })();
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const archivePath = join(temporary, 'package.tar.gz');
+      writeFileSync(archivePath, Buffer.from([0, 1, 2, 253, 254, 255]));
+      const manifest = {
+        schemaVersion: 1,
+        compilerVersion: 1,
+        name: 'a3-recovery',
+        version: '1.0.0',
+        target: { platform: 'linux', arch: 'any' },
+        components: ['commands', 'hooks'],
+      };
+      const { publishPreparedCommandRewriteExtension } = load(
+        [
+          'publishPreparedCommandRewriteExtension',
+          'boundWorkspaceId',
+          'commandRewriteExtensionId',
+          'tenantHeaders',
+          'trustedActorHeader',
+          'trustedActor',
+        ],
+        'publishPreparedCommandRewriteExtension',
+        'readFileSync',
+      )(readFileSync);
+      const pin = await publishPreparedCommandRewriteExtension(
+        `http://127.0.0.1:${server.address().port}`,
+        'tenant-a',
+        { archivePath, packageDigest: 'b'.repeat(64), manifest },
+      );
+      expect(pin).toEqual({
+        extensionId: 'ext_a3',
+        packageRevision: 1,
+        packageDigest: 'b'.repeat(64),
+      });
+      expect(observed.method).toBe('POST');
+      const url = new URL(observed.url, 'http://fixture');
+      expect(url.pathname).toBe(
+        '/v1/agents/workspaces/e2e-workspace/extensions',
+      );
+      expect(url.searchParams.get('packageDigest')).toBe('b'.repeat(64));
+      expect(url.searchParams.get('manifest')).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(
+        JSON.parse(
+          Buffer.from(url.searchParams.get('manifest'), 'base64url').toString(),
+        ),
+      ).toEqual(manifest);
+      expect(observed.headers['x-qwen-tenant-id']).toBe('tenant-a');
+      expect(observed.headers['x-qwen-e2e-trusted-actor']).toBe('e2e-actor');
+      expect(observed.body).toEqual(Buffer.from([0, 1, 2, 253, 254, 255]));
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  });
+
+  it('binds the command package pin and Session to the same Workspace', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain(
+      'workspaceTurns || commandRewriteRecovery\n          ? { workspace: { workspace_id: boundWorkspaceId } }',
+    );
+    expect(source).toContain('extensionPins: [commandRewritePin]');
+  });
+
+  it('wires all extension execution settings into the Spring child environment', () => {
+    const { commandRewriteSpringEnvironment } = load(
+      ['commandRewriteSpringEnvironment', 'trustedActor'],
+      'commandRewriteSpringEnvironment',
+    )();
+    expect(
+      commandRewriteSpringEnvironment(
+        '/sys/fs/cgroup/a3',
+        '/persistent/extension-artifacts',
+        '/persistent/extension-cache',
+      ),
+    ).toEqual({
+      QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED: 'true',
+      QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY:
+        '/persistent/extension-artifacts',
+      QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS: 'e2e-actor',
+      QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED: 'true',
+      QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE: 'linux-cgroup',
+      QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY:
+        '/persistent/extension-cache',
+      QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT: '/sys/fs/cgroup/a3',
+      QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED: 'true',
+      QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+      QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED: 'true',
+    });
+  });
+
+  const commandRewriteAssertions = () =>
+    load(
+      [
+        'assertCommandRewriteCrashBarrier',
+        'assertCommandRewriteFinalEvidence',
+        'assertCommandRewriteStages',
+        'assertCommandRewriteReceipts',
+        'assertCommandRewriteDurableHook',
+        'assertCommandRewriteDecision',
+        'commandRewritePhysicalHookCount',
+        'commandRewriteExpectedCommand',
+        'commandRewriteReceiptFingerprint',
+        'commandRewriteCanonicalDigest',
+        'commandRewriteRewrittenFirst',
+        'commandRewriteRewrittenSecond',
+        'commandRewriteExtensionId',
+      ],
+      'assertCommandRewriteCrashBarrier, assertCommandRewriteFinalEvidence, assertCommandRewriteDecision, commandRewriteReceiptFingerprint',
+      'createHash',
+    )(createHash);
+
+  const commandRewriteFixture = (final = false) => {
+    const commands = [
+      'printf REWRITTEN_FIRST > managed-a3-first.txt',
+      'printf REWRITTEN_SECOND > managed-a3-second.txt',
+    ];
+    const stages = commands.slice(0, final ? 2 : 1).map((command, index) => ({
+      toolStageId: `command-step-${index + 1}`,
+      stepIndex: index,
+      runState: 'settled',
+      resultRef: { resourceId: `stage-result-${index + 1}` },
+      inputRef: { resourceId: `stage-input-${index + 1}` },
+      command,
+      timeout: 120000,
+    }));
+    const actions = commands.map((command, index) => ({
+      id: `command_approval_${index + 1}`,
+      state: final || index === 0 ? 'decided' : 'requested',
+      createdAt: 1000 + index,
+      expiresAt: 5000 + index,
+      inputRef: { resourceId: `action-input-${index + 1}` },
+      command,
+      timeout: 120000,
+    }));
+    const durableHooks = stages.flatMap((stage) =>
+      ['PreToolUse', 'PostToolUse'].map((eventName) => ({
+        hookExecutionId: `${eventName}-${stage.stepIndex}`,
+        occurrenceId: `hook-plan-${eventName}-${stage.stepIndex}`,
+        toolUseId: stage.toolStageId,
+        eventName,
+        hookId: `hook-${eventName}`,
+        registrationId: 'registration-1',
+        ordinal: 0,
+        runState: 'settled',
+        resultRef: { resourceId: `${eventName}-${stage.stepIndex}` },
+      })),
+    );
+    durableHooks.push(
+      ...stages.flatMap((stage) =>
+        ['PreToolUse', 'PostToolUse'].map((eventName) => ({
+          hookExecutionId: `plan-${eventName}-${stage.stepIndex}`,
+          occurrenceId: `hook-plan-${eventName}-${stage.stepIndex}`,
+          toolUseId: stage.toolStageId,
+          eventName,
+          hookId: '__plan__',
+          registrationId: 'registration-1',
+          ordinal: -1,
+          runState: 'settled',
+          resultRef: { resourceId: `plan-${eventName}-${stage.stepIndex}` },
+        })),
+      ),
+    );
+    if (!final)
+      durableHooks.push({
+        hookExecutionId: 'PreToolUse-2',
+        occurrenceId: 'hook-plan-PreToolUse-2',
+        toolUseId: 'command-step-2',
+        eventName: 'PreToolUse',
+        hookId: 'hook-PreToolUse',
+        registrationId: 'registration-1',
+        ordinal: 0,
+        runState: 'settled',
+        resultRef: { resourceId: 'PreToolUse-2' },
+      });
+    const physicalHooks = stages.flatMap((stage) =>
+      ['PreToolUse', 'PostToolUse'].map((hook_event_name) => ({
+        hook_event_name,
+        tool_use_id: stage.toolStageId,
+        tool_input: { command: commands[stage.stepIndex] },
+      })),
+    );
+    if (!final)
+      physicalHooks.push({
+        hook_event_name: 'PreToolUse',
+        tool_use_id: 'command-step-2',
+        tool_input: { command: commands[1] },
+      });
+    return {
+      actions,
+      checkpoint: {
+        phase: 'await_action',
+        requestId: actions[1].id,
+      },
+      stages,
+      durableHooks,
+      physicalHooks,
+      effects: final
+        ? ['REWRITTEN_FIRST', 'REWRITTEN_SECOND']
+        : ['REWRITTEN_FIRST', null],
+      receipts: [],
+      ...(final ? { modelRequests: { initial: 1, afterResults: 1 } } : {}),
+    };
+  };
+
+  const withCommandRewriteReceipts = (assertions, evidence) => {
+    const identity = {
+      runtimeSessionId: 'runtime-session',
+      harnessSessionId: 'session',
+      revision: 1,
+    };
+    evidence.receipts = evidence.stages.map((stage) => ({
+      operationId: stage.toolStageId,
+      fingerprint: assertions.commandRewriteReceiptFingerprint(identity, stage),
+      state: 'settled',
+    }));
+    return identity;
+  };
+
+  it('decodes A3 resources without mysql batch escaping', () => {
+    const value = {
+      tool_use_id: 'command-step-1',
+      tool_response: '{"ok":true}\nnext',
+    };
+    const queries = [];
+    const runMysql = (_port, sql) => {
+      queries.push(sql);
+      const json = JSON.stringify(value);
+      return sql.includes('HEX(')
+        ? Buffer.from(json, 'utf8').toString('hex')
+        : json.replaceAll('\\', '\\\\');
+    };
+    const readers = load(
+      ['readCommandRewriteResource', 'readCommandRewriteDomainRecords'],
+      'readCommandRewriteResource, readCommandRewriteDomainRecords',
+      'runMysql',
+      'sqlString',
+    )(runMysql, (value) => `'${value}'`);
+    expect(
+      readers.readCommandRewriteResource(1, 'session_filter', {
+        resourceId: 'resource-1',
+      }),
+    ).toEqual(value);
+    expect(
+      readers.readCommandRewriteDomainRecords(
+        1,
+        'session_filter',
+        'hook_execution',
+      ),
+    ).toEqual([value]);
+    expect(queries.every((query) => query.includes('HEX('))).toBe(true);
+  });
+
+  it('enforces the two-Action crash barrier and no-rerun final evidence on data', () => {
+    const assertions = commandRewriteAssertions();
+    const crash = commandRewriteFixture(false);
+    const identity = withCommandRewriteReceipts(assertions, crash);
+    expect(() =>
+      assertions.assertCommandRewriteCrashBarrier(crash, identity),
+    ).not.toThrow();
+    const final = commandRewriteFixture(true);
+    withCommandRewriteReceipts(assertions, final);
+    expect(() =>
+      assertions.assertCommandRewriteFinalEvidence(final, identity),
+    ).not.toThrow();
+  });
+
+  it('holds the restored A3 command decision to the answered option (R2-3)', () => {
+    const assertions = commandRewriteAssertions();
+    const options = { inputRevision: 2, policyRevision: 'policy-1' };
+    const decision = {
+      optionId: 'allow',
+      inputRevision: 2,
+      policyRevision: 'policy-1',
+    };
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        decision,
+        options,
+        'command_approval_1',
+      ),
+    ).not.toThrow();
+    // A decision bound to a different input revision answered a different
+    // step; a different option or policy revision is equally not the Allow
+    // the browser gave. Each must red the read-back.
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        { ...decision, inputRevision: 3 },
+        options,
+        'command_approval_1',
+      ),
+    ).toThrow(/A3 command decision differs from the chosen option/);
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        { ...decision, optionId: 'deny' },
+        options,
+        'command_approval_1',
+      ),
+    ).toThrow(/A3 command decision differs from the chosen option/);
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        { ...decision, policyRevision: 'policy-2' },
+        options,
+        'command_approval_1',
+      ),
+    ).toThrow(/A3 command decision differs from the chosen option/);
+  });
+
+  it.each([
+    [
+      'missing settled PostToolUse resultRef',
+      (evidence) => {
+        evidence.durableHooks.find(
+          (hook) => hook.eventName === 'PostToolUse',
+        ).resultRef = null;
+      },
+      /A3 durable PostToolUse Hook evidence differs/,
+    ],
+    [
+      'durable Hook occurrence used as the command stage identity',
+      (evidence) => {
+        evidence.durableHooks[0].toolUseId =
+          evidence.durableHooks[0].occurrenceId;
+      },
+      /A3 durable PreToolUse Hook evidence differs/,
+    ],
+    [
+      'only a plan marker remains for the command step',
+      (evidence) => {
+        for (const hook of evidence.durableHooks) {
+          if (
+            hook.toolUseId === evidence.stages[0].toolStageId &&
+            hook.eventName === 'PreToolUse'
+          )
+            hook.hookId = '__plan__';
+        }
+      },
+      /A3 durable PreToolUse Hook evidence differs/,
+    ],
+    [
+      'step two ran before the crash',
+      (evidence) => {
+        evidence.effects[1] = 'REWRITTEN_SECOND';
+      },
+      /A3 crash physical Hook\/effect boundary differs/,
+    ],
+    [
+      'the two steps shared an Action',
+      (evidence) => {
+        evidence.actions[1].id = evidence.actions[0].id;
+        evidence.checkpoint.requestId = evidence.actions[1].id;
+      },
+      /A3 crash did not land/,
+    ],
+    [
+      'the pending Action was already decided',
+      (evidence) => {
+        evidence.actions[1].state = 'decided';
+      },
+      /A3 crash did not land/,
+    ],
+    [
+      'the checkpoint pointed at the decided Action',
+      (evidence) => {
+        evidence.checkpoint.requestId = evidence.actions[0].id;
+      },
+      /A3 crash did not land/,
+    ],
+    [
+      'the checkpoint had left await_action',
+      (evidence) => {
+        evidence.checkpoint.phase = 'dispatch';
+      },
+      /A3 crash did not land/,
+    ],
+    [
+      'step two PostToolUse physically ran',
+      (evidence) => {
+        evidence.physicalHooks.push({
+          hook_event_name: 'PostToolUse',
+          tool_use_id: 'command-step-2',
+          tool_input: {},
+        });
+      },
+      /A3 crash physical Hook\/effect boundary differs/,
+    ],
+  ])(
+    'rejects a command-rewrite crash barrier with %s',
+    (_name, mutate, expected) => {
+      const assertions = commandRewriteAssertions();
+      const evidence = commandRewriteFixture(false);
+      const identity = withCommandRewriteReceipts(assertions, evidence);
+      mutate(evidence);
+      expect(() =>
+        assertions.assertCommandRewriteCrashBarrier(evidence, identity),
+      ).toThrow(expected);
+    },
+  );
+
+  it.each([
+    [
+      'an undecided recovery Action',
+      (evidence) => {
+        evidence.actions[1].state = 'requested';
+      },
+      /A3 final Action identities/,
+    ],
+    [
+      'the two steps shared an Action',
+      (evidence) => {
+        evidence.actions[1].id = evidence.actions[0].id;
+      },
+      /A3 final Action identities/,
+    ],
+    [
+      'a repeated physical Hook',
+      (evidence) => {
+        evidence.physicalHooks.push(evidence.physicalHooks[0]);
+      },
+      /A3 physical PreToolUse count differs/,
+    ],
+    [
+      'a third extension command receipt',
+      (evidence) => {
+        evidence.receipts.push({
+          operationId: 'command-step-3',
+          fingerprint: 'unexpected',
+          state: 'settled',
+        });
+      },
+      /A3 extension command receipts differ/,
+    ],
+    [
+      'a receipt for different input',
+      (evidence) => {
+        evidence.receipts[0].fingerprint = '0'.repeat(64);
+      },
+      /A3 extension command receipts differ/,
+    ],
+    [
+      'a duplicate toolStageId',
+      (evidence) => {
+        evidence.stages[1].toolStageId = evidence.stages[0].toolStageId;
+      },
+      /A3 command stage evidence differs/,
+    ],
+  ])(
+    'rejects command-rewrite final evidence with %s',
+    (_name, mutate, expected) => {
+      const assertions = commandRewriteAssertions();
+      const evidence = commandRewriteFixture(true);
+      const identity = withCommandRewriteReceipts(assertions, evidence);
+      mutate(evidence);
+      expect(() =>
+        assertions.assertCommandRewriteFinalEvidence(evidence, identity),
+      ).toThrow(expected);
+    },
+  );
+
   it('pins the #14481 approval fault arms to durable barriers', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const workflow = read('.github/workflows/sdk-java.yml');
@@ -474,6 +1164,10 @@ describe('managed-agent-server e2e runner', () => {
       'Cleanup fault was not retried after the replacement',
     );
     expect(source).toContain("owner_kind='HOSTED_CLEANUP'");
+    expect(source).toMatch(
+      /if \(!commandRewriteRecovery\)\s*await waitUntil\(\s*'Runtime cleanup before next Turn'/,
+    );
+    expect(source).toContain('const relief = await fetch(reliefUrl');
     // A4 loses the first takeover load reply once via a test-gated hook on the
     // replacement, and asserts the fault landed before trusting the recovery
     // (a redrive that never lost a reply would prove nothing).
@@ -2038,9 +2732,9 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(
       source.match(
-        /\.\.\.\(workspaceTurns\s*\?\s*\{\s*workspace:\s*\{\s*workspace_id:\s*boundWorkspaceId\s*\}\s*\}/,
+        /\.\.\.\(workspaceTurns \|\| commandRewriteRecovery\s*\?\s*\{\s*workspace:\s*\{\s*workspace_id:\s*boundWorkspaceId\s*\}\s*\}/,
       ),
-      'every workspaceTurns mode must create a Workspace-bound Session',
+      'every workspaceTurns or command-rewrite mode must create a Workspace-bound Session',
     ).not.toBeNull();
     expect(
       source.match(
@@ -2617,9 +3311,11 @@ describe('managed-agent-server e2e runner', () => {
     // pass line on stdout too, so it defers the same way — no eager
     // console.log of a JSON payload remains inside the try at all.
     expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(5);
+    // Native approvals share one summary; the rewritten-command arm has its
+    // own receipt/stage summary instead of forging native execution fields.
     expect(
       source.match(/approvalResultJson = JSON\.stringify\(/g),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(source.match(/g3SummaryJson = JSON\.stringify\(/g)).toHaveLength(1);
     expect(source.match(/fencedWriterJson = JSON\.stringify\(/g)).toHaveLength(
       2,

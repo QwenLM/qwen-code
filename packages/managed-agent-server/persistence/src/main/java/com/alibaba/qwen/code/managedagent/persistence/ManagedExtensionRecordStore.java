@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.Body;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.TaskProjection;
@@ -126,6 +125,7 @@ public class ManagedExtensionRecordStore
     private final ManagedTaskEventStore taskEvents;
     private final ManagedModelDiagnosticProjection modelDiagnostics;
     private final ManagedActivityDiagnosticProjection activityDiagnostics;
+    private final ManagedMcpSettingsProjection mcpSettingsProjection;
 
     @Autowired
     public ManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
@@ -135,6 +135,7 @@ public class ManagedExtensionRecordStore
         this.taskEvents = taskEvents;
         this.modelDiagnostics = new ManagedModelDiagnosticProjection(jdbc, this);
         this.activityDiagnostics = new ManagedActivityDiagnosticProjection(jdbc, this);
+        this.mcpSettingsProjection = new ManagedMcpSettingsProjection(jdbc, sessions);
     }
 
     /** A store beside no public Session table, which announces nothing. */
@@ -516,7 +517,7 @@ public class ManagedExtensionRecordStore
             // domain must not skip into the journal the reader refuses.
             requireDomainCommitted(payload, domain, body != null);
             if (ManagedMcpSettings.DOMAIN.equals(domain)) {
-                projectMcpSettings(tenantId, workspaceId, sessionId, payload, resources,
+                mcpSettingsProjection.project(tenantId, workspaceId, sessionId, payload, resources,
                         firstSequence + index, occurredAt, lines);
             }
             if (body != null) {
@@ -562,7 +563,7 @@ public class ManagedExtensionRecordStore
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD'"
                 + " AND owner_key = ?", scope, key);
         for (StoredResource referenced : historyResources(ref, resources)) {
-            referenceProjectionResource(scope, key, sequence, tenantId, workspaceId, sessionId, referenced.resourceId());
+            referenceProjectionResource(jdbc, scope, key, sequence, tenantId, workspaceId, sessionId, referenced.resourceId());
         }
         ManagedModelDiagnosticProjection.clearLegacyModelContext(jdbc, tenantId, sessionId);
         ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
@@ -589,7 +590,7 @@ public class ManagedExtensionRecordStore
         return closure;
     }
 
-    void referenceProjectionResource(String scope, String key, long revision,
+    static void referenceProjectionResource(JdbcTemplate jdbc, String scope, String key, long revision,
             String tenantId, String workspaceId, String sessionId, String resourceId) {
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
                 + " resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES"
@@ -663,78 +664,6 @@ public class ManagedExtensionRecordStore
                 + " " + ManagedSchemaTime.SQL_NOW + ")", scope, key, sequence,
                 ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId,
                 sessionId, resource.resourceId());
-    }
-
-    private void projectMcpSettings(String tenantId, String workspaceId, String sessionId, JsonNode payload,
-            Function<String, StoredResource> resources, long sequence, long occurredAt, String[] lines) {
-        require(sessions != null, "Configuration management admission is unavailable");
-        JsonNode ref = payload.get("recordRef");
-        StoredResource resource = resources.apply(ref.get("resourceId").textValue());
-        requireReference(resource, ref);
-        JsonNode settings = readBody(resource);
-        try {
-            ManagedMcpSettings.require(settings);
-        } catch (InvalidRecordException error) {
-            throw rejected(error.getMessage());
-        }
-        require(settings.get("operationId").equals(payload.get("operationId")), "Configuration command identity conflicts");
-        JsonNode previous = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
-        if (ManagedConfigInstall.isPackageConfig(settings)) {
-            sessions.requireConfigurationCommit(tenantId, workspaceId, sessionId, settings);
-            try {
-                ManagedConfigInstall.successor(previous, settings);
-            } catch (InvalidRecordException error) {
-                throw rejected(error.getMessage());
-            }
-            requireConfigurationBinding(settings, lines);
-        } else {
-            require(!ManagedConfigInstall.isPackageConfig(previous), "Legacy MCP writes cannot replace package configuration");
-            sessions.requireMcpSettingsCommit(tenantId, workspaceId, sessionId);
-        }
-        Long settledAt = ManagedConfigInstall.barrier(settings) ? null : occurredAt;
-        long revision = settings.get("revision").longValue();
-        require(revision == (previous == null ? 1 : previous.get("revision").longValue() + 1), "MCP settings revision conflicts");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        String key = ManagedExtensionProjection.recordKey(sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
-        if (previous == null) {
-            jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, workspace_id,"
-                            + " session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
-                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId, workspaceId,
-                    sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision, resource.resourceId(),
-                    occurredAt, settledAt, sequence);
-        } else {
-            JsonNode predecessor = settings.get("previousRecordRef");
-            String previousResource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record"
-                    + " WHERE session_scope_key=? AND record_key=?", String.class, scope, key);
-            require(previousResource.equals(predecessor.path("resourceId").asText()), "MCP settings predecessor conflicts");
-            requireReference(resources.apply(previousResource), predecessor);
-            jdbc.update("UPDATE ma_session_record SET revision=?, record_resource_id=?, settled_at=?"
-                    + " WHERE session_scope_key=? AND record_key=? AND revision=?",
-                    revision, resource.resourceId(), settledAt, scope, key, revision - 1);
-        }
-        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?", scope, key);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
-                        + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, "
-                        + ManagedSchemaTime.SQL_NOW + ")", scope, key, revision,
-                ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId, sessionId, resource.resourceId());
-    }
-
-    private static void requireConfigurationBinding(JsonNode settings, String[] lines) {
-        List<JsonNode> bindings = java.util.Arrays.stream(lines).map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
-                .filter(Objects::nonNull).map(line -> line.path("managedSession"))
-                .filter(event -> "config.bound".equals(event.path("kind").asText())).map(event -> event.path("payload")).toList();
-        if (!"committed".equals(settings.path("phase").asText())) {
-            require(bindings.isEmpty(), "Only a committed configuration may bind");
-            return;
-        }
-        require(bindings.size() == 1, "Configuration binding must commit atomically");
-        JsonNode binding = bindings.getFirst();
-        ManagedExtensionRecords.closed(binding, Set.of("revision", "previousRevision", "bundleRef", "rootSnapshotRef"), "Configuration binding");
-        require(binding.path("revision").equals(settings.get("configRevision"))
-                && (settings.path("previousConfigRevision").asLong() == 0
-                        ? binding.path("previousRevision").isNull() : binding.path("previousRevision").equals(settings.get("previousConfigRevision")))
-                && binding.get("bundleRef").equals(settings.get("bundleRef"))
-                && binding.get("rootSnapshotRef").equals(settings.get("rootSnapshotRef")), "Configuration binding conflicts");
     }
 
     /**
@@ -1637,7 +1566,7 @@ public class ManagedExtensionRecordStore
                 if (!ref.isNull()) {
                     for (StoredResource referenced : historyResources(ref, resources)) {
                         if (retained.add(referenced.resourceId())) {
-                            referenceProjectionResource(scopeKey, recordKey, revision, tenantId,
+                            referenceProjectionResource(jdbc, scopeKey, recordKey, revision, tenantId,
                                     workspaceId, sessionId, referenced.resourceId());
                         }
                     }
@@ -2113,7 +2042,7 @@ public class ManagedExtensionRecordStore
         }
     }
 
-    private static ManagedAgentException rejected(String message) {
+    static ManagedAgentException rejected(String message) {
         return new ManagedAgentException(409, ERROR_REJECTED, message);
     }
 

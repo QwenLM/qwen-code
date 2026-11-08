@@ -312,6 +312,9 @@ describe('Hosted context compression', () => {
       sessionIdGenerated: true,
       chatRecording: false,
     });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]).toMatchObject({
+      lspDisabled: true,
+    });
     const result = compression.status(request.operationId)!;
     expect(result).toMatchObject({
       status: 'completed',
