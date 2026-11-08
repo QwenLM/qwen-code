@@ -380,9 +380,15 @@ describe('SettingsSchema', () => {
       expectTypeOf<Compaction['screenshotTriggerThreshold']>().toEqualTypeOf<
         number | undefined
       >();
+      // `imageTokenEstimate` is the only `'number'` knob here; without it a
+      // narrowing of the widened branch to `'integer'` passes every assertion.
+      expectTypeOf<Compaction['imageTokenEstimate']>().toEqualTypeOf<
+        number | undefined
+      >();
 
       const writable: Compaction = {
         imagePayloadThreshold: 0,
+        imageTokenEstimate: 800,
         maxRecentImagesToRetain: 9,
         screenshotTriggerThreshold: 12345,
       };
