@@ -13,6 +13,7 @@ import {
   expect,
   beforeAll,
   beforeEach,
+  afterEach,
   afterAll,
   vi,
 } from 'vitest';
@@ -207,6 +208,13 @@ describe('toWindowsPath', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
+  // Restore after every test too: the platform/tmpdir spies are created inside
+  // each test, so beforeEach alone leaves the last test's spy live when the
+  // block ends and it leaks into the next suite (which fails under CI's
+  // non-ignoring unhandled-error handling on Linux).
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('is a no-op outside Windows', () => {
     vi.spyOn(os, 'platform').mockReturnValue('linux');
@@ -240,6 +248,9 @@ describe('toWindowsPath', () => {
 
 describe('normalizeFilePath', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
     vi.restoreAllMocks();
   });
 
