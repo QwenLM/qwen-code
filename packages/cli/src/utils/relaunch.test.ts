@@ -29,6 +29,7 @@ import {
   resetEnvironmentTrackingForTesting,
 } from '../config/environment.js';
 import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../config/shared-env-keys.js';
+import { CHECKED_NODE_VERSION_ENV } from './env-provenance.js';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -166,6 +167,7 @@ describe('relaunchAppInChildProcess', () => {
 
     process.env = { ...originalEnv };
     delete process.env['QWEN_CODE_NO_RELAUNCH'];
+    delete process.env[CHECKED_NODE_VERSION_ENV];
 
     process.execArgv = [...originalExecArgv];
     process.argv = [...originalArgv];
@@ -218,7 +220,10 @@ describe('relaunchAppInChildProcess', () => {
       [],
       {
         interpreter: { command: '/installed/private/bun', runtime: 'bun' },
-        childEnv: { QWEN_CODE_NPM_RUNTIME_CONTEXT: 'private-context' },
+        childEnv: {
+          QWEN_CODE_NPM_RUNTIME_CONTEXT: 'private-context',
+          [CHECKED_NODE_VERSION_ENV]: 'stale-version',
+        },
         replaceProcess: true,
         onUpdateRelaunch,
       },
@@ -232,6 +237,7 @@ describe('relaunchAppInChildProcess', () => {
         env: expect.objectContaining({
           QWEN_CODE_NO_RELAUNCH: 'true',
           QWEN_CODE_NPM_RUNTIME_CONTEXT: 'private-context',
+          [CHECKED_NODE_VERSION_ENV]: process.versions.node,
           QWEN_CODE_RELAUNCH_SUPERVISED: '1',
         }),
       }),
@@ -322,7 +328,10 @@ describe('relaunchAppInChildProcess', () => {
       ['--max-old-space-size=4096'],
       ['--debug'],
       {
-        childEnv: { QWEN_TEST_CHILD: '1' },
+        childEnv: {
+          QWEN_TEST_CHILD: '1',
+          [CHECKED_NODE_VERSION_ENV]: 'stale-version',
+        },
         replaceProcess: true,
       },
     );
@@ -341,6 +350,7 @@ describe('relaunchAppInChildProcess', () => {
       expect.objectContaining({
         QWEN_CODE_NO_RELAUNCH: 'true',
         QWEN_TEST_CHILD: '1',
+        [CHECKED_NODE_VERSION_ENV]: process.versions.node,
       }),
     );
     // A replaced process has no supervisor to follow.
@@ -372,6 +382,7 @@ describe('relaunchAppInChildProcess', () => {
     // Child-only state stays out of the continuing process's environment,
     // which every tool subprocess inherits.
     expect(process.env['QWEN_TEST_CHILD']).toBeUndefined();
+    expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
   });
 
   it('still replaces the process when the environment changed since boot', async () => {
@@ -464,6 +475,10 @@ describe('relaunchAppInChildProcess', () => {
         '/app/cli.js',
         '--acp',
       ]);
+      expect(
+        mockedSpawn.mock.calls[0][2]?.env?.[CHECKED_NODE_VERSION_ENV],
+      ).toBe(process.versions.node);
+      expect(process.env[CHECKED_NODE_VERSION_ENV]).toBeUndefined();
       child.emit('close', 0);
       await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
     });

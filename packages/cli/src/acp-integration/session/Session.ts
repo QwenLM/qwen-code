@@ -6629,7 +6629,7 @@ export class Session implements SessionContext {
       if (completedResult.stopReason === 'end_turn') {
         this.config.getLlmClient().captureCacheSafeParams();
       }
-      this.#maybeEmitFollowupSuggestion(completedResult);
+      this.#maybeEmitFollowupSuggestion(completedResult, channelPromptTurn);
       if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
           sessionId: this.sessionId,
@@ -6896,6 +6896,7 @@ export class Session implements SessionContext {
    *   - Triggers only on `stopReason === 'end_turn'` (the daemon
    *     equivalent of "the assistant finished cleanly"). Cancelled /
    *     errored turns don't get a suggestion.
+   *   - Skips a channel's turn; the interactive CLI never runs one.
    *   - Aborted via `this.followupAbort`, which is reset on the next
    *     `prompt()` and on `cancelPendingPrompt()`.
    *   - Filter-reason logging only — accept / dismiss telemetry stays
@@ -6906,8 +6907,14 @@ export class Session implements SessionContext {
    * error here would propagate up through `prompt()` and break the
    * primary response path.
    */
-  #maybeEmitFollowupSuggestion(result: PromptResponse): void {
+  #maybeEmitFollowupSuggestion(
+    result: PromptResponse,
+    channelTurn: boolean,
+  ): void {
     if (result.stopReason !== 'end_turn') return;
+    // The turn answered a relayed message, not the person's prompt: a
+    // suggestion after every relayed event would add a model call to each.
+    if (channelTurn) return;
     if (
       this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
       this.todoStopGuardQueuedPromptPriority
@@ -8389,6 +8396,9 @@ export class Session implements SessionContext {
                     type: roundType,
                     options: {
                       interactionSpanByHost: true,
+                      // Every round: the client schedules the turn's memory
+                      // work at whichever round's stop ends it.
+                      ...(channelTurn && { skipMemoryExtraction: true }),
                       ...(roundType === SendMessageType.UserQuery && {
                         userTurnRecordedByHost: true,
                         workflowModeEligible,
@@ -8772,7 +8782,7 @@ export class Session implements SessionContext {
                       result,
                       responseCapture,
                       isFreshUserTurn,
-                      sharedModelRound,
+                      { channelTurn, sharedModelRound },
                     );
                     return result;
                   }
@@ -8846,8 +8856,7 @@ export class Session implements SessionContext {
                 result,
                 responseCapture,
                 isFreshUserTurn,
-                sharedModelRound,
-                memoryTasksRanInClient,
+                { channelTurn, sharedModelRound, memoryTasksRanInClient },
               );
               return { stopReason: result.stopReason };
             } finally {
@@ -11582,10 +11591,20 @@ export class Session implements SessionContext {
     },
     responseCapture: AgentResponseCapture,
     isFreshUserTurn: boolean,
-    // The turn's model rounds went through `LlmClient`.
-    sharedModelRound = false,
-    // The client ran the memory tasks when the turn's last response stopped.
-    memoryTasksRanInClient = false,
+    {
+      channelTurn,
+      sharedModelRound = false,
+      memoryTasksRanInClient = false,
+    }: {
+      // The turn answers a channel's message: it runs no memory extraction
+      // or Dream (see `SendMessageOptions.skipMemoryExtraction`).
+      channelTurn: boolean;
+      // The turn's model rounds went through `LlmClient`.
+      sharedModelRound?: boolean;
+      // The client ran the memory tasks when the turn's last response
+      // stopped.
+      memoryTasksRanInClient?: boolean;
+    },
   ): void {
     if (result.stopReason !== 'cancelled') {
       responseCapture.agentOutput.writeToSpan(getActiveInteractionSpan());
@@ -11603,6 +11622,7 @@ export class Session implements SessionContext {
         llmClient.captureCacheSafeParams();
         llmClient.runManagedAutoMemoryBackgroundTasks(
           SendMessageType.UserQuery,
+          { skipMemoryExtraction: channelTurn },
         );
       }
       // ACP reports no memory updates, so take the tasks the client queued for
@@ -11630,6 +11650,10 @@ export class Session implements SessionContext {
             error,
           );
         });
+    }
+    // As the client does for a shared round's channel turn.
+    if (channelTurn) {
+      return;
     }
     void memoryManager
       .scheduleExtract({
