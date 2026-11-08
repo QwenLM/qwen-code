@@ -362,6 +362,7 @@ export async function runHostedHarnessTextTurn(input: {
     true,
     {
       toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
       ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
     },
   );
