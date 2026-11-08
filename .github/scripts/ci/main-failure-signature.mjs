@@ -420,39 +420,50 @@ export function renderFailureComment({
   // A timeout cancels every sibling, but only the lane that hit its cap is
   // the failure. The download step narrows the list the same way; without it
   // here a five-shard matrix names five failures for one lane.
-  const timedOut =
-    timedOutJobIds?.length
-      ? new Set([...timedOutJobIds].map((id) => String(id)))
-      : undefined;
+  const timedOut = timedOutJobIds?.length
+    ? new Set([...timedOutJobIds].map((id) => String(id)))
+    : undefined;
   const reported = jobs.filter((job) => {
-    if (!['failure', 'cancelled'].includes(job.conclusion)) return false;
-    if (cancellationKind !== 'timeout') return true;
-    if (timedOut) {
-      // An explicit set is authoritative: a cancelled job is named only when
-      // it is the one that timed out.
-      return job.conclusion === 'failure' || timedOut.has(String(job.id));
-    }
     if (job.conclusion === 'failure') return true;
+    if (job.conclusion !== 'cancelled') return false;
+    // A `cancelled` job is only ever collateral of a timeout. On any other
+    // path it is a sibling a concurrent push or a fail-fast took down, and
+    // naming it reports a lane that did not break.
+    if (cancellationKind !== 'timeout') return false;
+    // An explicit set is authoritative: a cancelled job is named only when it
+    // is the one that timed out.
+    if (timedOut) return timedOut.has(String(job.id));
     // A sibling the timeout took down is cancelled mid-flight: every step is
     // `success`, `skipped` or `cancelled`, with no failure of its own. The
     // lane that hit its cap has a step that failed before the cancel, which is
-    // what marks it as the lane to name. (Run 42227747366 has both shapes.)
-    const steps = job.steps ?? [];
-    if (!steps.length) return true;
-    return steps.some(
+    // what marks it as the lane to name. A job with no steps never ran — a
+    // trailing shard still queued when the cap cancelled the matrix — so it
+    // cannot be the culprit either. (Run 42227747366 has both shapes.)
+    return job.steps.some(
       (step) =>
         !['success', 'skipped', 'pending', 'cancelled'].includes(
           step.conclusion,
         ),
     );
   });
+  // A timeout whose culprit shows no failed step would otherwise name nothing
+  // at all, and the comment is the only record of the occurrence. The
+  // step-shape read is a heuristic, so fall back to every cancelled job rather
+  // than report an empty body.
+  const named = reported.length
+    ? reported
+    : jobs.filter(
+        (job) =>
+          job.conclusion === 'failure' ||
+          (job.conclusion === 'cancelled' && cancellationKind === 'timeout'),
+      );
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
     `### ${code(analysis.workflow)} failed`,
     '',
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
-    ...reported.map((job) => {
+    ...named.map((job) => {
       const steps = (job.steps ?? [])
         .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
         .map((step) => code(step.name));

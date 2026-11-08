@@ -746,11 +746,13 @@ jobs:
     # comment above describes unreachable for the timeout path, so a dispatch
     # that died mid-flight left no issue, no comment and no rerun.
     #
-    # `== 'failure'` rather than `!= 'success'` on purpose: a skipped rerun is
-    # a provisional or unreadable-annotation run that files through its own
-    # path, and must not file a second time here. A job-level `if` can only
-    # read `needs.*`, so this expression is the whole rule.
-    if: "${{ always() && needs.analyze.result == 'success' && (needs.analyze.outputs.file_issue == 'true' || (needs.analyze.outputs.rerun_pending == 'true' && needs.rerun_infra.result == 'failure')) && (needs.analyze.outputs.infra_only != 'true' || needs.analyze.outputs.timeout_attempts_exhausted == 'true' || needs.rerun_infra.result == 'failure') }}"
+    # `!= 'success'` rather than `== 'failure'`: `rerun_infra` skips itself for
+    # a provisional report, so a provisional infrastructure-only main failure
+    # reaches this gate with a `skipped` rerun and no other job to file it. A
+    # skipped rerun cannot double-file — nothing was dispatched, so there is no
+    # second occurrence — and the `rerun_pending` arm alone governs the
+    # deferred-timeout case, where the rerun does run.
+    if: "${{ always() && needs.analyze.result == 'success' && (needs.analyze.outputs.file_issue == 'true' || (needs.analyze.outputs.rerun_pending == 'true' && needs.rerun_infra.result == 'failure')) && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
     # and the pool being the REASON CI broke would queue the report behind
     # the very failure it documents.

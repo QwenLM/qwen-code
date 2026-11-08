@@ -1459,7 +1459,10 @@ test('runCli plan renders the named job into the filed body', () => {
 
 test('names the cancelled job of a run a job timeout ended', () => {
   // A timeout cancels the run, so no job in it concludes `failure` — the
-  // comment has to name the cancelled job or it names nothing at all.
+  // comment has to name the cancelled job or it names nothing at all. The
+  // kind is set because a cancelled job on any other path is collateral: the
+  // workflow classifies every cancelled run before this point, and returns
+  // early for a superseded one.
   const comment = renderFailureComment({
     analysis: { workflow: 'E2E Tests', tests: [] },
     occurrence: {
@@ -1467,6 +1470,7 @@ test('names the cancelled job of a run a job timeout ended', () => {
       runId: '41743539611',
       runUrl: 'https://example.com/run',
     },
+    cancellationKind: 'timeout',
     jobs: [
       {
         name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',

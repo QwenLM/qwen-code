@@ -457,6 +457,10 @@ cat "\${RUNNER_TEMP}/pulls.json"
             cancellation_kind: 'timeout',
             timeout_attempts_exhausted: 'false',
             provisional: 'false',
+            // A main push writes `pr_number=` and a never-written output is
+            // `''` to Actions, so the fixture models the empty string the
+            // workflow actually sees rather than an absent key.
+            pr_number: '',
           },
         },
         // The dispatch the `if:` above admits has succeeded, which is the
@@ -471,12 +475,21 @@ cat "\${RUNNER_TEMP}/pulls.json"
       expect(evaluate(String(jobs.report_pr.if), needs)).toBe(false);
       // A rerun that never dispatched leaves `file_issue` false too, so the
       // comment is the only record of the timeout and must still post.
+      // A rerun that never dispatched leaves `file_issue` false too, so the
+      // comment is the only record of the timeout and must still post. That
+      // needs a PR to post on: a main push writes `pr_number=` and files the
+      // issue instead, so this models a merged PR's dispatch, where the
+      // workflow's own comment says both writers run.
       expect(
         evaluate(String(jobs.report_pr.if), {
           ...needs,
           analyze: {
             ...needs.analyze,
-            outputs: { ...needs.analyze.outputs, comment_body: '### x failed' },
+            outputs: {
+              ...needs.analyze.outputs,
+              comment_body: '### x failed',
+              pr_number: '14472',
+            },
           },
           rerun_infra: { result: 'failure' },
         }),
@@ -584,11 +597,18 @@ cat "\${RUNNER_TEMP}/pulls.json"
           live: { outputs: { cancellation_kind: 'timeout' } },
         }),
       ).toBe(true);
-      // A superseded run is not a timeout, so it must not start building a
-      // comment just because it resolves to a PR.
+      // A superseded run resolves to no destination at all — the destination
+      // step is gated on `superseded != 'true'`, so it writes `pr_number=` —
+      // and must not start building a comment.
       expect(
         evaluateSummary({
-          destination: { outputs: destinationOutputs() },
+          destination: {
+            outputs: {
+              pr_number: '',
+              file_issue: 'false',
+              rerun_pending: 'false',
+            },
+          },
           live: { outputs: { cancellation_kind: 'superseded' } },
         }),
       ).toBe(false);
@@ -1197,9 +1217,32 @@ esac
         expect(String(jobs.rerun_infra.if)).toContain(
           "needs.analyze.outputs.rerun_pending == 'true'",
         );
-        expect(String(jobs.file_issue.if)).toContain(
-          "needs.analyze.outputs.timeout_attempts_exhausted == 'true'",
-        );
+        // The exhausted run files through `file_issue`, which the destination
+        // leaves true because `timeout_pending_rerun` is false past the limit.
+        // The gate must not also require `timeout_attempts_exhausted`: that
+        // flag is set only at `RUN_ATTEMPT >= 3` while `infra_only` is set
+        // only at attempt 1, so requiring both makes the disjunct dead.
+        const evaluate = (condition, needs) =>
+          new Function(
+            'needs',
+            'always',
+            `return (${condition.slice(3, -2)});`,
+          )(needs, () => true);
+        expect(
+          evaluate(String(jobs.file_issue.if), {
+            analyze: {
+              result: 'success',
+              outputs: {
+                file_issue: 'true',
+                rerun_pending: 'false',
+                infra_only: 'false',
+                timeout_attempts_exhausted: 'true',
+                provisional: 'false',
+              },
+            },
+            rerun_infra: { result: 'skipped' },
+          }),
+        ).toBe(true);
       });
 
       it('keeps rerunning a timed-out run below the attempt limit', () => {
@@ -2715,6 +2758,43 @@ printf '%s\\n' '{"jobs":[]}'
       // step-shape heuristic rather than rendering an empty report.
       const body = renderWith([timedOutLane, ...collateral]);
       expect(body).toContain('shard 1/5');
+      // A trailing shard still queued when the cap cancelled the matrix has
+      // no steps at all, so it cannot be the lane that hit its cap.
+      expect(body).not.toContain('shard 4/5');
+    });
+
+    it('names a cancelled job only on a timeout path', () => {
+      // An ordinary failure run concludes `failure`, never `cancelled`, so
+      // every cancelled job on it is collateral — a sibling a concurrent push
+      // or a fail-fast took down. Naming one reports a lane that did not
+      // break (run 42381463939: a capped shard buried under a real failure).
+      const failed = {
+        id: 201,
+        name: 'E2E Test - macOS - shard 1/1',
+        conclusion: 'failure',
+        html_url: 'https://github.com/QwenLM/qwen-code/runs/201',
+        steps: [{ name: 'Run E2E tests', conclusion: 'failure' }],
+      };
+      const capped = {
+        id: 202,
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        conclusion: 'cancelled',
+        html_url: 'https://github.com/QwenLM/qwen-code/runs/202',
+        steps: [{ name: 'Run E2E tests', conclusion: 'cancelled' }],
+      };
+      const body = renderFailureComment({
+        analysis: { workflow: 'E2E Tests', tests: [] },
+        occurrence: {
+          sha: 'abc123456789',
+          runId: '42381463939',
+          runUrl:
+            'https://github.com/QwenLM/qwen-code/actions/runs/42381463939',
+        },
+        jobs: [failed, capped],
+        cancellationKind: 'none',
+      });
+      expect(body).toContain('E2E Test - macOS - shard 1/1');
+      expect(body).not.toContain('sandbox:docker - shard 1/1');
     });
   });
 
@@ -3011,11 +3091,59 @@ printf '%s\\n' '{"jobs":[]}'
       expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
       // A rerun that could not be dispatched must not swallow the report:
       // the issue is then the only record of a red main. It has to be
-      // `== 'failure'` rather than `!= 'success'`: a SKIPPED rerun is a
-      // provisional or unreadable-annotation run that files through its own
-      // path, and `!= 'success'` would make every such run file here too.
-      expect(condition).toContain("needs.rerun_infra.result == 'failure'");
-      expect(condition).not.toContain("needs.rerun_infra.result != 'success'");
+      // `!= 'success'` rather than `== 'failure'`: `rerun_infra` skips itself
+      // for a provisional report, and a provisional infrastructure-only main
+      // failure would otherwise reach no filing job at all. A skipped rerun
+      // cannot double-file — nothing was dispatched.
+      expect(condition).toContain("needs.rerun_infra.result != 'success'");
+      expect(condition).not.toContain(
+        "needs.analyze.outputs.timeout_attempts_exhausted == 'true'",
+      );
+    });
+
+    it('files a provisional infra-only main failure whose rerun was skipped', () => {
+      // `rerun_infra` refuses a provisional report, so the rerun is `skipped`
+      // and this gate is the only thing left that can record the occurrence.
+      // The PR's earlier `== 'failure'` operator excluded it, so a red main
+      // was neither rerun nor filed.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            file_issue: 'true',
+            rerun_pending: 'false',
+            infra_only: 'true',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'true',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(true);
+      // The deferred-timeout case the `== 'failure'` operator existed for: a
+      // dispatch that died must still file. It reaches the gate on its own
+      // `rerun_pending` arm, so nothing regressed by restoring the operator.
+      expect(
+        evaluate(String(jobs.file_issue.if), {
+          ...needs,
+          analyze: {
+            ...needs.analyze,
+            outputs: {
+              ...needs.analyze.outputs,
+              infra_only: 'false',
+              rerun_pending: 'true',
+              provisional: 'false',
+            },
+          },
+          rerun_infra: { result: 'failure' },
+        }),
+      ).toBe(true);
     });
 
     it('pins the timeout wiring each step depends on', () => {
