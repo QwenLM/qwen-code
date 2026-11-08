@@ -27,6 +27,7 @@ import type {
 } from '@qwen-code/channel-base';
 import {
   boundActionTemplateEntries,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
   BoundSessionGoneError,
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
@@ -7444,8 +7445,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const renderBody = (body: string | undefined): string => {
       const display = sanitizeDisplayText((body ?? '').trim());
       const total = Array.from(display).length;
-      return total > MAX_AGGREGATE_COMMENT_CHARS
-        ? `${truncateCodePoints(display, MAX_AGGREGATE_COMMENT_CHARS)}… [comment truncated: ${total - MAX_AGGREGATE_COMMENT_CHARS} more characters]`
+      // A watch delivery carries ONE comment, so it uses the bound prompt's
+      // body ceiling, not the aggregate lane's per-comment batch budget (400):
+      // cutting a single finding at 400 code points drops the actionable steps
+      // past the cut. The bound prompt caps the final body at the same value.
+      return total > BOUND_PROMPT_BODY_MAX_CODE_POINTS
+        ? `${truncateCodePoints(display, BOUND_PROMPT_BODY_MAX_CODE_POINTS)}… [comment truncated: ${total - BOUND_PROMPT_BODY_MAX_CODE_POINTS} more characters]`
         : display;
     };
     // The watch closes the SAME-account gap: GitHub sends the channel account no

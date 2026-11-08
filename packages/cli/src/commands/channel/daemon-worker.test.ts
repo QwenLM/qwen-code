@@ -4609,14 +4609,43 @@ describe('createBoundSessionsAccessor', () => {
     );
   });
 
-  it('postedCommentIds fail-open: unknown session yields an empty set without a request', async () => {
-    const requestRest = vi.fn();
+  it('postedCommentIds fail-open: a session absent from the snapshot yields an empty set', async () => {
+    const requestRest = vi.fn().mockResolvedValue(bindingsResponse());
     const accessor = createBoundSessionsAccessor(makeClient(requestRest));
 
     const ids = await accessor.postedCommentIds!('unknown-session');
 
     expect(ids.size).toBe(0);
-    expect(requestRest).not.toHaveBeenCalled();
+    // The cold miss refreshes the bindings, but a session the snapshot does
+    // not list is never queried for posted comments.
+    expect(requestRest).toHaveBeenCalledWith(
+      '/sessions/pr-bindings',
+      expect.anything(),
+    );
+    expect(requestRest).not.toHaveBeenCalledWith(
+      expect.stringContaining('/posted-comments'),
+      expect.anything(),
+    );
+  });
+
+  it('postedCommentIds refreshes bindings on a cold cwd miss (evicted author still attributed)', async () => {
+    // The cwd hint cache is FIFO-capped; an author evicted from it must still
+    // be attributed, else it receives its own comments. A cold miss re-reads
+    // the fresh snapshot like the delivery path does.
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(200, { ids: ['ic:555'] }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    // No prior listPrBindings: the cwd cache is cold, as after FIFO eviction.
+    const ids = await accessor.postedCommentIds!('session-1');
+
+    expect([...ids]).toEqual(['ic:555']);
+    expect(requestRest).toHaveBeenLastCalledWith(
+      '/sessions/session-1/posted-comments?workspaceCwd=%2Fws%2Fa',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it('postedCommentIds fail-open: a non-200 answer yields an empty set and names the cause', async () => {

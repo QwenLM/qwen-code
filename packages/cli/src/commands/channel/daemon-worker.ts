@@ -703,11 +703,25 @@ export function createBoundSessionsAccessor(
       }
     },
     postedCommentIds: async (sessionId) => {
-      // Fail-open: missing cwd, a non-200, or a malformed body all resolve to
-      // an empty set so the comment watch never suppresses delivery on
-      // missing authorship evidence. The cwd comes from the bindings cache.
-      const cwd = cwdBySession.get(sessionId);
-      if (cwd === undefined) return new Set<string>();
+      // Fail-open: a non-200 or a malformed body resolves to an empty set so
+      // the comment watch never suppresses delivery on missing authorship
+      // evidence. The cwd hint cache is capped (FIFO): a listed session beyond
+      // the cap is evicted, so on a cold miss re-read the fresh snapshot like
+      // the delivery path does — otherwise an evicted author is credited with
+      // nothing and receives its own comments. Absence from the snapshot stays
+      // fail-open (unknown, not evidence of having posted nothing).
+      let cwd = cwdBySession.get(sessionId);
+      if (cwd === undefined) {
+        try {
+          const snapshot = await listPrBindings();
+          cwd = snapshot.bindings.find(
+            (binding) => binding.sessionId === sessionId,
+          )?.workspaceCwd;
+        } catch {
+          return new Set<string>();
+        }
+        if (cwd === undefined) return new Set<string>();
+      }
       let res: Response | undefined;
       try {
         res = await client.requestRest(

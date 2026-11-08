@@ -24389,6 +24389,27 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           '2026-07-01T00:00:00.000Z',
         );
       });
+
+      it('delivers a single long comment intact, not cut to the aggregate batch budget', async () => {
+        // A watch delivery carries one comment; the aggregate lane's 400-char
+        // per-comment budget would cut the actionable steps past the cut.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({
+            body: `${'repro detail '.repeat(100)} FINAL-ACTIONABLE-STEP`,
+          }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'FINAL-ACTIONABLE-STEP',
+        );
+      });
     });
   });
 });

@@ -54,6 +54,9 @@ const SUBCOMMAND_PATTERNS: readonly RegExp[] = [
 const PATH_PATTERNS: readonly RegExp[] = [
   // gh api / curl writing to a comments collection.
   /\bgh\s+api\b[\s\S]*?\b(?:issues|pulls)\/\d+\/comments\b[\s\S]*?(?:-X\s+POST|--method\s+POST|-f\s|--field\s|-F\s|--raw-field\s|--input\s)/,
+  // gh api can put the write flags before the collection path too
+  // (`gh api --method POST --input p.json repos/o/r/issues/5/comments`).
+  /\bgh\s+api\b[\s\S]*?(?:-X\s+POST|--method\s+POST|-f\s|--field\s|-F\s|--raw-field\s|--input\s)[\s\S]*?\b(?:issues|pulls)\/\d+\/comments\b/,
   /\bcurl\b[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/comments\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)/,
   // curl commonly puts the write flags before the URL.
   /\bcurl\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/comments\b/,
@@ -152,14 +155,15 @@ function commandSegments(command: string): string[] {
 
 /**
  * A path-based creation must be led by `gh api` / `curl`, optionally behind a
- * wrapper command (env/time/nohup/command/sudo with its flags/assignments) or an
- * assignment capture (`cid=$(…)` / backticks). The lead-in is what rejects a
- * read-only search that merely quotes a creation (`rg 'gh api … -X POST'`): its
- * stage starts with the search tool, not a wrapper or the API command. A flag's
- * optional value never consumes the `gh` of `gh api`.
+ * wrapper command (env/time/nohup/command/sudo with its flags/assignments), an
+ * assignment capture (`cid=$(…)` / backticks), or bare environment assignments
+ * (`FOO=1 gh api …`). The lead-in is what rejects a read-only search that merely
+ * quotes a creation (`rg 'gh api … -X POST'`): its stage starts with the search
+ * tool, not a wrapper or the API command. A flag's optional value never consumes
+ * the `gh` of `gh api`.
  */
 const API_STAGE_START =
-  /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*)*(?:gh\s+api|curl)\b/;
+  /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)*(?:gh\s+api|curl)\b/;
 
 function segmentIsCreation(segment: string): boolean {
   // An explicit GET is a read even with field flags (gh api sends them as query

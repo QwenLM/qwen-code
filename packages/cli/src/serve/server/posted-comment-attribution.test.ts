@@ -375,6 +375,30 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(apiReview)).toEqual([]);
   });
 
+  it('attributes a gh api creation whose write flags precede the collection path', () => {
+    const entry = shellResult(
+      'gh api --method POST --input p.json repos/o/r/issues/5/comments',
+      '{"id":987}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('987')]);
+  });
+
+  it('does not attribute a flags-first gh api GET listing', () => {
+    const entry = shellResult(
+      'gh api -F per_page=100 repos/o/r/issues/42/comments --method GET',
+      '[{"id":111},{"id":222}]',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('attributes a creation behind bare environment assignments', () => {
+    const entry = shellResult(
+      'FOO=1 BAR=2 gh api repos/o/r/issues/5/comments -X POST -f body=x',
+      '{"id":701}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('701')]);
+  });
+
   it('ignores non-shell tool results and malformed entries', () => {
     expect(extractPostedCommentIds(null)).toEqual([]);
     expect(extractPostedCommentIds({})).toEqual([]);
