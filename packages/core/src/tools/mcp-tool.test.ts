@@ -2932,8 +2932,11 @@ describe('DiscoveredMCPTool', () => {
 
     // A cancelled call must not be replayed, but the connection it tore down
     // is still repairable: otherwise every later MCP call in a session that
-    // survives the cancel inherits the dead transport (issue #12160).
-    it('repairs the connection after an abort leaves the server disconnected', async () => {
+    // survives the cancel inherits the dead transport (issue #12160). The
+    // transport reports the teardown one round trip AFTER the local abort
+    // rejection, so the repair has to hang off the status transition rather
+    // than a read inside the abort catch.
+    it('repairs the connection the abort tore down once the server reports it', async () => {
       const abortError = new Error('The operation was aborted');
       abortError.name = 'AbortError';
       const retryClient = okClient();
@@ -2950,10 +2953,10 @@ describe('DiscoveredMCPTool', () => {
                 () => reject(abortError),
                 { once: true },
               );
-              updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
             }),
         ),
       };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
       const executePromise = exec(
         mkTool({ config, client }),
         'test',
@@ -2963,8 +2966,16 @@ describe('DiscoveredMCPTool', () => {
 
       await expect(executePromise).rejects.toThrow('Tool call aborted');
 
+      // Nothing reconnected while the status still claimed CONNECTED.
       expect(client.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      // The transport dies after the cancel, as it does on the wire.
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
       expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
@@ -2985,10 +2996,10 @@ describe('DiscoveredMCPTool', () => {
                 () => reject(abortError),
                 { once: true },
               );
-              updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
             }),
         ),
       };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
       const executePromise = exec(
         mkTool({ config, client }),
         'test',
@@ -2998,8 +3009,14 @@ describe('DiscoveredMCPTool', () => {
 
       await expect(executePromise).rejects.toThrow('Tool call aborted');
 
-      expect(client.callTool).toHaveBeenCalledTimes(1);
+      // A later disconnect that walked through CONNECTING (an ordinary
+      // reconnect, not a teardown of a live session) must not trigger it
+      // either.
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTING);
+      await Promise.resolve();
       expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      expect(client.callTool).toHaveBeenCalledTimes(1);
       expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
@@ -3185,10 +3202,10 @@ describe('DiscoveredMCPTool', () => {
 
       const rejection = await executePromise.catch((error) => error);
       expect(rejection).toMatchObject({ name: 'AbortError' });
-      // Repaired, not replayed: the cancelled request is not re-issued, but
-      // the transport the abort tore down is re-initialized so the next call
-      // in this session does not inherit it (issue #12160).
-      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      // Repaired, not replayed: the cancelled request is not re-issued, and
+      // the repair runs detached from this rejection, so nothing reconnects
+      // before the transport has actually reported the teardown (#12160).
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(client.callTool).toHaveBeenCalledTimes(1);
       expect(rejection).not.toMatchObject({
         errorType: ToolErrorType.EXECUTION_TIMEOUT,
