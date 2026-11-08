@@ -125,6 +125,7 @@ describe('workspace Git routes', () => {
       branch: 'feature/web-shell',
     }));
     registerWorkspaceQualifiedGitRoutes(app, {
+      daemonEnv: {},
       workspaceRegistry: registry([primary, secondary]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
       sendBridgeError,
@@ -150,6 +151,7 @@ describe('workspace Git routes', () => {
       branch: 'main',
     }));
     registerWorkspaceQualifiedGitRoutes(app, {
+      daemonEnv: {},
       workspaceRegistry: registry([primary]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
       sendBridgeError,
@@ -173,6 +175,7 @@ describe('workspace Git routes', () => {
     const untrusted = runtime('untrusted', '/work/untrusted', false);
     const getStatus = vi.fn();
     registerWorkspaceQualifiedGitRoutes(app, {
+      daemonEnv: {},
       workspaceRegistry: registry([primary, untrusted]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
       sendBridgeError,
@@ -196,6 +199,7 @@ describe('workspace Git routes', () => {
     };
     const getStatus = vi.fn();
     registerWorkspaceQualifiedGitRoutes(app, {
+      daemonEnv: {},
       workspaceRegistry: registry([primary, secondary]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
       sendBridgeError,
@@ -213,6 +217,7 @@ describe('workspace Git routes', () => {
     const primary = runtime('primary', '/work/main', true);
     const getStatus = vi.fn();
     registerWorkspaceQualifiedGitRoutes(app, {
+      daemonEnv: {},
       workspaceRegistry: registry([primary]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
       sendBridgeError,
@@ -236,6 +241,7 @@ describe('workspace Git routes', () => {
       });
     });
     registerWorkspaceQualifiedGitRoutes(app, {
+      daemonEnv: {},
       workspaceRegistry: registry([primary]),
       gitState: { getStatus } as unknown as WorkspaceGitState,
       sendBridgeError,
