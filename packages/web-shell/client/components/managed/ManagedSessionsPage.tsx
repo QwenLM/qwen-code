@@ -84,6 +84,8 @@ import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
+import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
+import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
 import { getLatestSuccessfulTodos } from '../../utils/todos';
@@ -365,6 +367,7 @@ function ManagedSessionsContent({
   navigationSearch: string;
 }) {
   const { t, language } = useI18n();
+  const diagnosticsText = useManagedDiagnosticsText();
   const recoveryText = useManagedRecoveryText();
   const home = hostSessionOnly || navigationTarget !== undefined;
   const clientId = useMemo(
@@ -430,6 +433,19 @@ function ManagedSessionsContent({
   );
   const pageRef = useRef<HTMLDivElement>(null);
   const taskTriggerRef = useRef<HTMLButtonElement>(null);
+  const diagnosticsTriggerRef = useRef<HTMLButtonElement>(null);
+  const [diagnosticsOwner, setDiagnosticsOwner] = useState<{
+    provider: ManagedAgentProvider;
+    clientId: string;
+    sessionId: string;
+  }>();
+  useEffect(
+    () => setDiagnosticsOwner(undefined),
+    [provider, clientId, sessionId],
+  );
+  useEffect(() => {
+    if (detail.signals?.session) setDiagnosticsOwner(undefined);
+  }, [detail.signals?.session]);
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
@@ -1251,6 +1267,25 @@ function ManagedSessionsContent({
   }, [summary, cancellationEnabled, busy, turnCancelBusy, requestTurnCancel]);
 
   const currentSummary = summary?.sessionId === sessionId ? summary : undefined;
+  const diagnosticsButton =
+    currentSummary?.capabilities.diagnostics &&
+    !detail.signals?.session &&
+    provider.diagnostics ? (
+      <Button
+        ref={diagnosticsTriggerRef}
+        variant="outline"
+        size="sm"
+        onClick={() =>
+          setDiagnosticsOwner({
+            provider,
+            clientId,
+            sessionId: currentSummary.sessionId,
+          })
+        }
+      >
+        {diagnosticsText('title')}
+      </Button>
+    ) : null;
   function prepareHandoff() {
     if (
       !currentSummary ||
@@ -1779,6 +1814,7 @@ function ManagedSessionsContent({
                         : summary.title}
                     </span>
                     {sessionActions(summary)}
+                    {diagnosticsButton}
                   </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
@@ -1828,6 +1864,7 @@ function ManagedSessionsContent({
                   {t('sidebar.rename')}
                 </Button>
               )}
+              {diagnosticsButton}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
@@ -2896,6 +2933,33 @@ function ManagedSessionsContent({
             }}
           />
         )}
+        {provider.diagnostics &&
+          currentSummary?.capabilities.diagnostics &&
+          !detail.signals?.session &&
+          diagnosticsOwner?.provider === provider &&
+          diagnosticsOwner.clientId === clientId &&
+          diagnosticsOwner.sessionId === sessionId && (
+            <ManagedDiagnosticsPanel
+              key={`${provider.storageKey}:${clientId}:${sessionId}`}
+              provider={provider.diagnostics}
+              sessionId={diagnosticsOwner.sessionId}
+              clientId={clientId}
+              running={isManagedSessionRunning(currentSummary.phase)}
+              revision={`${currentSummary.compactionRevision}:${currentSummary.modelSelection?.revision}:${currentSummary.workspace?.contextRevision}:${currentSummary.phase}:${currentSummary.activeTurnId}`}
+              onClose={() => setDiagnosticsOwner(undefined)}
+              restoreFocus={() => diagnosticsTriggerRef.current?.focus()}
+              onOpenChild={(child) => {
+                setDiagnosticsOwner(undefined);
+                setChildView({
+                  provider,
+                  clientId,
+                  root: diagnosticsOwner.sessionId,
+                  child,
+                  trigger: diagnosticsTriggerRef.current,
+                });
+              }}
+            />
+          )}
         {childView &&
           childView.provider === provider &&
           childView.clientId === clientId &&
