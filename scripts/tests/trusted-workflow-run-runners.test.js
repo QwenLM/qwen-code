@@ -11,15 +11,18 @@ const workflow = (name) =>
   parse(readFileSync(`.github/workflows/${name}.yml`, 'utf8'));
 
 // These two files, not the whole tree: qwen-triage.yml deliberately routes
-// triage / publish-triage / verify to ecs-qwen through a
-// `fromJSON([...]) || fromJSON(['ubuntu-latest'])` ternary, so a tree-wide
-// "every job is hosted" assertion would fail on intentional code.
+// authorize, triage, publish-triage, publish-tmux, tmux-testing and verify to
+// ecs-qwen — some through a `fromJSON([...]) || fromJSON(['ubuntu-latest'])`
+// ternary, some as a bare `['self-hosted', 'linux', 'x64', 'ecs-qwen']` list
+// with no hosted fallback at all — so a tree-wide "every job is hosted"
+// assertion would fail on intentional code.
 const PINNED = ['web-shell-visuals-publish', 'main-ci-failure-issue'];
 
 // Derived from the parsed file, never a job list: a job added later is read by
 // the same loop, while a list is a second copy that drifts. Compared as a
-// literal, because a pool expression always carries ubuntu-latest as its
-// fallback — substring matching would let it through.
+// literal, never by substring: the routing form either of these two files
+// would grow is `... && fromJSON([pool]) || fromJSON(['ubuntu-latest'])`, whose
+// text contains `ubuntu-latest`, so a substring check would pass it.
 describe('workflows that must stay off the persistent pool', () => {
   // The publisher holds CI_BOT_PAT and the Aliyun OSS key pair and uploads to a
   // bucket that also serves release and live-host downloads. A reused pool slot
