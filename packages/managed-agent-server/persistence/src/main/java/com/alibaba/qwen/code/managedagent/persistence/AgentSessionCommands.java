@@ -1213,4 +1213,16 @@ final class AgentSessionCommands {
             String idempotencyKey, String phase) {
         return "control:" + operation + ":" + idempotencyKey + ":" + phase;
     }
+
+    // Automation-verb session boot-id bind (#14548); fill only when still empty.
+    void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
+        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        if (harnessBootId.equals(session.harnessBootId())) {
+            return;
+        }
+        jdbc.update("UPDATE ma_session SET harness_boot_id = COALESCE(harness_boot_id, ?),"
+                        + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                harnessBootId, clock.millis(), tenantId, sessionId);
+    }
 }
