@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/generated-ui",
-  "version": "0.26.9",
+  "version": "0.26.9-nightly.20261107.65e1f1aeaa",
   "private": true,
   "description": "Bounded locally interactive HTML and JavaScript views over MCP Apps",
   "repository": {
