@@ -13,10 +13,15 @@ import java.util.Map;
 
 /**
  * The principal-based entry arm of the Managed Agent facade, split out of
- * ManagedAgentStore so the facade stays under the class-size ratchet. These
- * are the same interface entries with the same transaction attributes; the
- * facade inherits them and keeps the legacy actor-based delegates. Pure
- * delegation — the bodies are the ones the facade declared inline.
+ * ManagedAgentStore so the facade stays under the class-size ratchet. The
+ * bodies are the ones the facade declared inline. Since issue #16605 the
+ * six annotated mutation entries are ALSO redeclared on the facade with
+ * {@code @Transactional}: inheriting an annotated entry whose signature is
+ * an interface default makes javac emit an annotation-less bridge on the
+ * facade, and Spring then resolves no transaction attribute through the
+ * interface path. The unannotated reads and ownership checks below carry
+ * no such hazard. PrincipalEntryTransactionBoundaryTest is the permanent
+ * witness for the boundary.
  */
 class ManagedAgentPrincipalEntries {
     private final AgentSessionAdmissions sessionAdmissions;

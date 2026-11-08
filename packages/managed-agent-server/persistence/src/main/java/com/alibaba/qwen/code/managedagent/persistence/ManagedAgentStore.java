@@ -11,19 +11,14 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStor
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
@@ -41,7 +36,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
@@ -68,7 +62,7 @@ import java.util.Set;
 
 @Repository
 @Qualifier("managedAgentTransactionManager")
-public class ManagedAgentStore extends ManagedAgentPrincipalEntries implements AgentStateStore {
+public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentStateStore {
     private final AgentEventJournal eventJournal;
     private final AgentSessionQueries sessionQueries;
     private final AgentMessageProjection messageProjection;
@@ -155,6 +149,73 @@ public class ManagedAgentStore extends ManagedAgentPrincipalEntries implements A
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
         return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+    }
+
+    // The principal-carrying mutation entries must stay DECLARED on the
+    // facade with their transaction attribute. Inheriting them from
+    // ManagedAgentPrincipalEntries made javac emit annotation-less
+    // ACC_BRIDGE delegates here (the contract interfaces declare
+    // same-signature defaults), and Spring's
+    // AnnotationTransactionAttributeSource resolved no attribute through
+    // the interface path — silently dropping the transaction boundary the
+    // ownership contract requires (ownership row, Session, receipt and
+    // creation event in one transaction). These overrides restore the
+    // pre-decomposition boundary; the bodies remain pure super delegates.
+    // PrincipalEntryTransactionBoundaryTest is the permanent witness.
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return super.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig) {
+        return super.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionPrincipal principal) {
+        return super.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, principal);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, SessionPrincipal principal) {
+        return super.insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId, principal);
+    }
+
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionRename(String tenantId,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String title, String actorId, SessionPrincipal principal) {
+        return super.beginSessionRename(tenantId, idempotencyKey, requestDigest, sessionId, title, actorId, principal);
+    }
+
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId,
+            SessionPrincipal principal) {
+        return super.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind, actorId, principal);
     }
 
     @Override
@@ -701,104 +762,12 @@ public class ManagedAgentStore extends ManagedAgentPrincipalEntries implements A
         lifecycleOperations.markOperationAnswered(tenantId, sessionId, operationId, owner, claimGeneration);
     }
 
-    public Admission replayCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest) {
-        return sessionCommands.replayCommand(tenantId, operation, idempotencyKey, requestDigest);
-    }
-
-    public Optional<CommandRecord> findCommand(String tenantId,
-            String operation, String idempotencyKey) {
-        return sessionCommands.findCommand(tenantId, operation, idempotencyKey);
-    }
-
-    public Optional<SessionRecord> findSession(String tenantId, String sessionId) {
-        return sessionQueries.findSession(tenantId, sessionId);
-    }
-
-    public Optional<SessionRecord> findSessionById(String sessionId) {
-        return sessionQueries.findSessionById(sessionId);
-    }
-
-    public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit) {
-        return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, "all", "");
-    }
-
-    public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
-        return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId,
-                limit, archiveState, "");
-    }
-
-    public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
-        return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
-    }
-
-    public Map<String, WebShellLifecycleOperation>
-            findLatestLifecycleOperations(String tenantId, List<String> sessionIds) {
-        return sessionQueries.findLatestLifecycleOperations(tenantId, sessionIds);
-    }
-
-    public Optional<TurnRecord> findTurn(String tenantId, String sessionId, String turnId) {
-        return sessionQueries.findTurn(tenantId, sessionId, turnId);
-    }
-
-    public Map<String, TurnSummary> findActiveTurns(String tenantId, List<String> sessionIds) {
-        return sessionQueries.findActiveTurns(tenantId, sessionIds);
-    }
-
-    public Map<String, TurnSummary> findLatestTurns(String tenantId,
-            List<String> sessionIds) {
-        return sessionQueries.findLatestTurns(tenantId, sessionIds);
-    }
-
-    @Override
-    public Map<String, WebShellModelContext> findModelContexts(
-            String tenantId, List<String> sessionIds) {
-        return sessionQueries.findModelContexts(tenantId, sessionIds);
-    }
-
-    @Override
-    public List<WebShellModelOption> modelOptions() {
-        return sessionQueries.modelOptions();
-    }
-
-    @Override
-    public Map<String, WebShellModelSelection> findModelSelections(String tenantId,
-            List<String> sessionIds) {
-        return sessionQueries.findModelSelections(tenantId, sessionIds);
-    }
-
-    @Override
-    public WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
-            String promptId) {
-        return sessionQueries.findTurnModelSelection(tenantId, sessionId, promptId);
-    }
-
     @Override
     @Transactional
     public WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
         return sessionPolicies.changeSessionModel(tenantId, actorId, sessionId, key, digest, modelId, expectedRevision, supported);
-    }
-
-    @Override
-    public Map<String, WebShellApprovalSelection> findApprovalSelections(String tenantId,
-            List<String> sessionIds) {
-        return sessionQueries.findApprovalSelections(tenantId, sessionIds);
-    }
-
-    @Override
-    public Set<String> findApprovalOwners(String tenantId, String actorId, List<String> sessionIds) {
-        return sessionQueries.findApprovalOwners(tenantId, actorId, sessionIds);
-    }
-
-    @Override
-    public WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
-            String promptId) {
-        return sessionQueries.findTurnApprovalSelection(tenantId, sessionId, promptId);
     }
 
     @Override
