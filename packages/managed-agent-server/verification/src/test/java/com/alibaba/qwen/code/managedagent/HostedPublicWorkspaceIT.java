@@ -215,18 +215,24 @@ class HostedPublicWorkspaceIT {
                 .findFirst().orElseThrow();
         assertThat(first.path("sessionId")).isNotEqualTo(second.path("sessionId"));
         Map<String, String> originalBindings = new java.util.HashMap<>();
+        Map<String, String> runtimeSessions = new java.util.HashMap<>();
         for (JsonNode action : pending) {
             String child = action.path("sessionId").asText();
             String turn = action.path("turnId").asText();
+            String runtimeSession = jdbc.queryForObject(
+                    "SELECT prompt_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                    String.class, tenant, child, turn);
+            assertThat(runtimeSession).isNotBlank();
+            runtimeSessions.put(child, runtimeSession);
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_runtime_session rs JOIN ma_runtime_binding rb ON rs.binding_id=rb.binding_id"
                             + " AND rs.runtime_generation=rb.runtime_generation WHERE rs.tenant_id=? AND rs.harness_session_id=?"
                             + " AND rs.runtime_session_id=? AND rs.session_state='READY' AND rs.execution_storage_key IS NULL"
                             + " AND rb.binding_state='READY' AND rb.provisioner_kind='local-process'",
-                    Integer.class, tenant, child, turn)).isEqualTo(1));
+                    Integer.class, tenant, child, runtimeSession)).isEqualTo(1));
             originalBindings.put(child, jdbc.queryForObject(
                     "SELECT binding_id FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=? AND runtime_session_id=?",
-                    String.class, tenant, child, turn));
+                    String.class, tenant, child, runtimeSession));
         }
         assertThat(request("POST", "/api/agent/web-shell/v1/tasks/query", Map.of("sessionId", parent), null, "actor", 200)
                 .path("activeChildCount").asInt()).isEqualTo(2);
@@ -264,7 +270,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(root.resolve("question-A.txt")).doesNotExist();
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE tenant_id=? AND harness_session_id=?"
                         + " AND runtime_session_id=? AND binding_id=? AND session_state='READY' AND execution_storage_key IS NULL",
-                        Integer.class, tenant, first.path("sessionId").asText(), first.path("turnId").asText(),
+                        Integer.class, tenant, first.path("sessionId").asText(), runtimeSessions.get(first.path("sessionId").asText()),
                         originalBindings.get(first.path("sessionId").asText()))).isEqualTo(1);
             }
         }
