@@ -611,7 +611,10 @@ jobs:
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`),
       # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from
       # an interrupted review, or stale per-run capture-tools dirs under
-      # RUNNER_TEMP. Reset all of them per run; never fail the job.
+      # RUNNER_TEMP. Reset all of them per run. The sweeps are best-effort
+      # EXCEPT the agent home: a foreign-owned qwen-home that survives the
+      # reclaim fails the job here, before checkout — proceeding would only
+      # die later at the first settings write (PR #16610 incident).
       - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
@@ -619,7 +622,39 @@ jobs:
           # below) + drop any leftover stage drafts.
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           rm -rf "$QWEN_HOME" 2>/dev/null || true
+          # A foreign-owned leftover defeats the rm above: triage's node
+          # container chowns this same path to uid 1000, and on the shared
+          # pool this host user cannot unlink it. `rm || true` plus mkdir -p
+          # on the still-existing dir both "succeed", so the job used to run
+          # on and die minutes later writing settings.json (PR #16610
+          # incident). Reclaim via sudo when available; otherwise fail HERE,
+          # before the checkout, with the cause named.
+          if [ -e "$QWEN_HOME" ]; then
+            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null ||
+              sudo -n chown -R "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            rm -rf "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ -e "$QWEN_HOME" ]; then
+            echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           mkdir -p "$QWEN_HOME"
+          # mkdir just created this dir as the runner user, so under a normal
+          # umask it is already usable. This check covers the residual races
+          # and environments: another process re-creating the path between
+          # the sweep and mkdir, or a hostile umask stripping owner bits.
+          # settings.json needs write AND traverse, so test both — -w alone
+          # passes a mode-0600 home that cannot hold the file.
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            sudo -n chown "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            chmod u+rwx "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            echo "::error::fresh qwen-home is not writable by the runner user: $QWEN_HOME"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a

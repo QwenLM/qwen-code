@@ -1673,6 +1673,7 @@ describe('POST /session/:id/load worktree classifications', () => {
 
       expect(res.status).toBe(500);
       expect(res.body.error).toBe(LOCK_NOT_HELD);
+      expect(res.body.code).toBeUndefined();
       expect(fixture.fake.loadSession).toHaveBeenCalledTimes(1);
       expect(fixture.fake.changeSessionCwd).not.toHaveBeenCalled();
       expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
@@ -1681,6 +1682,40 @@ describe('POST /session/:id/load worktree classifications', () => {
       });
     },
   );
+
+  it('detaches an already-live session instead of closing it', async () => {
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId);
+    await fixture.createMarker(sessionId);
+    const sidecarPath =
+      fixture.sessionService.getWorktreeSessionPath(sessionId);
+    const clientId = randomUUID();
+    fixture.fake.loadSession.mockImplementationOnce(
+      async (req: { sessionId: string; workspaceCwd: string }) => ({
+        sessionId: req.sessionId,
+        workspaceCwd: req.workspaceCwd,
+        currentCwd: req.workspaceCwd,
+        attached: true,
+        clientId,
+        hasActivePrompt: false,
+      }),
+    );
+    overrideFirstSidecarRead(sidecarPath, () => ({ state: 'missing' }));
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
+    expect(fixture.fake.detachClient).toHaveBeenCalledWith(sessionId, clientId);
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+    expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
+    // The refusal leaves the persisted sidecar in place.
+    expect(existsSync(sidecarPath)).toBe(true);
+  });
 
   it('refuses to attest a checkout other than the one it locked', async () => {
     const fixture = makeFixture();
@@ -1711,6 +1746,7 @@ describe('POST /session/:id/load worktree classifications', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
     expect(fixture.fake.changeSessionCwd).not.toHaveBeenCalled();
     expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
     expect(fixture.fake.killSession).toHaveBeenCalledWith(sessionId, {
@@ -1740,6 +1776,7 @@ describe('POST /session/:id/load worktree classifications', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
     expect(res.body.replacementSessionId).toBeUndefined();
     expect(fixture.fake.loadSession).not.toHaveBeenCalled();
   });
@@ -1774,6 +1811,7 @@ describe('POST /session/:id/load worktree classifications', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.error).toBe(LOCK_NOT_HELD);
+    expect(res.body.code).toBeUndefined();
     expect(fixture.fake.setSessionWorktree).not.toHaveBeenCalled();
     expect(fixture.fake.killSession).toHaveBeenCalledWith(sessionId, {
       requireZeroAttaches: true,
@@ -1894,6 +1932,7 @@ describe('POST /session/:id/load worktree classifications', () => {
 
       expect(loadResponse.status).toBe(500);
       expect(loadResponse.body.error).toBe(LOCK_NOT_HELD);
+      expect(loadResponse.body.code).toBeUndefined();
       expect(loadResponse.body.replacementSessionId).toBeUndefined();
       expect(fixture.fake.killSession).toHaveBeenCalledWith(oldId, {
         requireZeroAttaches: true,

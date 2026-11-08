@@ -11,7 +11,7 @@
   "ttlSeconds": 10800,
   "shutdownGraceSeconds": 60,
   "minDiskBytes": 10737418240,
-  "stallAlertRetries": 30,
+  "stallAlertSeconds": 1800,
   "stateDir": "/var/lib/qwen-ephemeral-runner",
   "logDir": "/var/log/qwen-ephemeral-runner"
 }
