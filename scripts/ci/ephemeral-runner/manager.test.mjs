@@ -1672,3 +1672,59 @@ test('a recovered slot that stalls again raises a second alert', async (t) => {
   assert.match(found[0], /across 4 consecutive identical failures/);
   assert.match(found[1], /across 4 consecutive identical failures/);
 });
+
+test('a changed failure message re-arms the stall alert for the new episode', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  const alerts = () =>
+    messages.filter((message) => message.includes('STALL ALERT'));
+  // The slot never recovers: it alerts on one failure message, the message
+  // changes, and the new episode has to alert again on its own clock. Only the
+  // new-episode reset clears the latch here, so this is the case that pins it.
+  let switched = false;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      if (alerts().length >= 1) switched = true;
+      return Promise.reject(
+        new Error(switched ? 'network unreachable' : 'docker unavailable'),
+      );
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 20 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+        if (alerts().length >= 2 || now >= 1_000_000 + 3_600_000)
+          manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  const found = alerts();
+  assert.equal(
+    found.length,
+    2,
+    `a changed failure message raised ${found.length} alerts instead of 2`,
+  );
+  assert.match(found[0], /docker unavailable/);
+  assert.match(found[1], /network unreachable/);
+});
