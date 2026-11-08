@@ -312,7 +312,7 @@ public final class ToolPublicationCollector {
             Duration grace) {
         return switch (blocker) {
             case "legacy_write_evidence_missing", "quarantined", "not_accepted_complete",
-                    "is_recovery_protected" -> now + PROTECTED_RECHECK_MILLIS;
+                    "recovery_protected" -> now + PROTECTED_RECHECK_MILLIS;
             case "grace_period" -> Math.addExact(
                     jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ?"
                             + " AND session_id = ?", Long.class, tenant, session),

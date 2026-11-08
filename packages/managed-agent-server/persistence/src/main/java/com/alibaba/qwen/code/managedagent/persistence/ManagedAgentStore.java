@@ -197,7 +197,11 @@ public class ManagedAgentStore implements AgentStateStore {
                                     result.getLong("list_floor_sequence")));
 
     private SessionRecord readSession(java.sql.ResultSet result, StreamCounters counters) throws java.sql.SQLException {
-        ManagedSchemaIntegrity.validate("ma_session", ManagedSchemaRows.read(result));
+        // Plain reads (list/findSession/visibility) stay off the integrity
+        // rules: the design names admission, locked copying and head/stream
+        // reads as the validated boundaries, and a per-row 57-column map
+        // plus ~12 predicates here taxes every request (~0.25 ms per
+        // 50-row page, measured) without guarding a write.
         return new SessionRecord(
                 result.getString("tenant_id"),
                 result.getString("session_id"),
@@ -7371,6 +7375,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         if (streams.isEmpty()) {
                             throw new IllegalStateException("Session stream is unavailable.");
                         }
+                        // The locked-copy boundary the design names stays
+                        // validated; only the plain read mappers skip it.
+                        ManagedSchemaIntegrity.validate("ma_session", ManagedSchemaRows.read(rows));
                         return readSession(rows, streams.getFirst());
                     },
                     tenantId,

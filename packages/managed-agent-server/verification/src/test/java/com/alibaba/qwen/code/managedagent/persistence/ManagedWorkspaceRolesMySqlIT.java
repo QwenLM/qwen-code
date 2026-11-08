@@ -7,7 +7,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 
@@ -46,33 +45,42 @@ class ManagedWorkspaceRolesMySqlIT {
 
     @Test
     void roleCheckStoresOnlyByteExactEnumNames() {
-        jdbc.update("INSERT INTO ma_workspace (tenant_id,"
-                + " workspace_id, workspace_generation, storage_id,"
-                + " display_name, config_ref, policy_ref, state) VALUES"
-                + " ('tenant', 'workspace', 1, 'storage', 'Workspace',"
-                + " 'config', 'policy', 'ACTIVE')");
-        for (String canonical : List.of("READER", "OPERATOR", "OWNER")) {
-            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
-                    + " workspace_id, actor_id, role) VALUES ('tenant',"
-                    + " 'workspace', ?, ?)",
-                    ("actor-" + canonical).getBytes(StandardCharsets.UTF_8),
-                    canonical);
-        }
+        // Drive a REAL writer end to end on the engine: the store's
+        // completion path is what inserts the OWNER grant, so a writer that
+        // stops validating (or stores a drifted literal) fails here instead
+        // of being blessed by a helper-only call.
+        var store = new SshWorkspaceStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(data));
+        var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
+        var intent = store.claim("tenant", "actor", operation.operationId(), "owner");
+        assertThat(intent).isNotNull();
+        java.util.Map<String, Object> identity = java.util.Map.of(
+                "root", "/work/project", "hostId", "host", "device", "1",
+                "inode", "2", "birthTime", "3");
+        var marker = new java.util.LinkedHashMap<String, Object>(identity);
+        marker.put("version", 2);
+        marker.put("tenantId", intent.tenantId());
+        marker.put("storageId", intent.storageId());
+        marker.put("registrationId", intent.registrationId());
+        store.reserve(intent, "owner", java.util.Map.of(
+                "nodeId", intent.nodeId(), "identity", identity,
+                "marker", marker, "qwenVersion", "0.25.1"));
+        store.complete(intent, "owner");
         assertThat(jdbc.queryForList("SELECT DISTINCT role FROM"
                 + " ma_workspace_access", String.class))
-                .containsExactlyInAnyOrder("READER", "OPERATOR", "OWNER");
+                .containsExactly("OWNER");
+        // The domain rule the writers route through still refuses every
+        // case/space variant before persistence.
         for (String rejected : List.of("NONE", "SPECTATOR", "reader",
                 "READER ", "OPERATOR ", "OWNER ", "REA DER")) {
             assertThatThrownBy(() -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                    "ma_workspace_access", com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row(
-                            "role", rejected)))
+                    "ma_workspace_access",
+                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row("role", rejected)))
                     .as("role %s must be rejected before persistence", rejected)
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("ck_ma_access_role");
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " ma_workspace_access WHERE actor_id = ?",
-                Integer.class, "padded".getBytes(StandardCharsets.UTF_8)))
-                .isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace_access",
+                Integer.class)).isEqualTo(1);
     }
 }

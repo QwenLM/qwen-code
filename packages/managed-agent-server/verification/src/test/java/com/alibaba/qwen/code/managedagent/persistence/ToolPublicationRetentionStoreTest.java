@@ -309,7 +309,7 @@ public class ToolPublicationRetentionStoreTest {
         jdbc.update("UPDATE ma_output_capture SET is_accepted_complete = TRUE, producer_phase = 'FINISHING' WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("not_accepted_complete");
         jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ?", tenant);
-        assertThat(blocker()).isEqualTo("is_recovery_protected");
+        assertThat(blocker()).isEqualTo("recovery_protected");
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -325,7 +325,7 @@ public class ToolPublicationRetentionStoreTest {
         jdbc.update("UPDATE ma_session_head SET recovery_status = ?"
                 + " WHERE tenant_id = ? AND session_id = ?", recovery, tenant, session);
         retire();
-        assertThat(blocker()).isEqualTo("READY".equals(recovery) ? null : "is_recovery_protected");
+        assertThat(blocker()).isEqualTo("READY".equals(recovery) ? null : "recovery_protected");
         assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_key = ?",
                 Long.class, scope)).isEqualTo(1000);
     }

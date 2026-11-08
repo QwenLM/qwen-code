@@ -197,7 +197,7 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(transaction(() -> store.completeOperation(tenant, session, claimed.operationId(), "delete-worker", claimed.claimGeneration(), false))).isTrue();
         assertThat(jdbc.queryForObject("SELECT is_recovery_protected FROM ma_session WHERE retirement_generation > 0", Boolean.class)).isTrue();
         var retention = new ToolPublicationRetentionStore(jdbc, new DataSourceTransactionManager(source));
-        assertThat(retention.observe(Duration.ZERO)).singleElement().extracting(ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("is_recovery_protected");
+        assertThat(retention.observe(Duration.ZERO)).singleElement().extracting(ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("recovery_protected");
         assertThatThrownBy(() -> transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter(tenant, session, TOKEN,
                 new AcquireWriterRequest("workspace", "new-writer", 60_000L))))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));

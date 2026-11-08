@@ -88,7 +88,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @Test
     void protectedBacklogWaitsForDailyRecheckAndYieldsAfterItsFirstSweep() {
         var blockers = List.of("legacy_write_evidence_missing", "quarantined",
-                "not_accepted_complete", "is_recovery_protected");
+                "not_accepted_complete", "recovery_protected");
         int publicationsPerBlocker = 40;
         int protectedCount = blockers.size() * publicationsPerBlocker;
         for (String blocker : blockers) {
@@ -109,7 +109,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                         + " SET is_quarantined = TRUE WHERE session_id = ?", heldSession);
                 case "not_accepted_complete" -> jdbc.update("UPDATE ma_output_capture"
                         + " SET is_accepted_complete = FALSE WHERE session_id = ?", heldSession);
-                case "is_recovery_protected" -> jdbc.update("UPDATE ma_session"
+                case "recovery_protected" -> jdbc.update("UPDATE ma_session"
                         + " SET is_recovery_protected = TRUE WHERE session_id = ?", heldSession);
                 default -> throw new AssertionError(blocker);
             }

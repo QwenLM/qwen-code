@@ -292,7 +292,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         var collector = collector(true, Duration.ZERO);
         assertThat(collector.runOnce()).isFalse();
         var ledger = ledger();
-        assertThat(ledger.get("gc_blocker")).isEqualTo("is_recovery_protected");
+        assertThat(ledger.get("gc_blocker")).isEqualTo("recovery_protected");
         long now = System.currentTimeMillis();
         assertThat(((Number) ledger.get("gc_next_at")).longValue())
                 .isBetween(now + Duration.ofHours(24).toMillis() - 10_000, now + Duration.ofHours(24).toMillis() + 60_000);
@@ -1442,7 +1442,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             ageMediaRetirement();
             assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
             assertThat(ledger().get("gc_blocker"))
-                    .isEqualTo(reader ? "reader_active" : "is_recovery_protected");
+                    .isEqualTo(reader ? "reader_active" : "recovery_protected");
             assertThat(rows()).allSatisfy(row -> assertThat(row.get("inline_bytes")).isNotNull());
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE"
                     + " session_scope_key = ?", Long.class, resScope)).isEqualTo(expectedRefs);

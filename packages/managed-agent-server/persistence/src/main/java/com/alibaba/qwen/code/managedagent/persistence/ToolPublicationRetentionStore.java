@@ -677,7 +677,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         if (roots.isEmpty()) {
             blocker = "session_not_retired";
         } else if (flag(roots.getFirst(), "is_recovery_protected")) {
-            blocker = "is_recovery_protected";
+            blocker = "recovery_protected";
         } else if (number(roots.getFirst(), "retired_at") > now(jdbc) - grace.toMillis()) {
             blocker = "grace_period";
         } else if (!flag(row, "is_write_evidence")) {

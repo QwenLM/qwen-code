@@ -223,7 +223,7 @@ public final class SessionResourceCollectionCollector {
                                 JsonNode body = progress(row);
                                 if (blocker != null) {
                                     long next = now + CLAIM_MILLIS;
-                                    if ("is_recovery_protected".equals(blocker)) {
+                                    if ("recovery_protected".equals(blocker)) {
                                         next = now + PROTECTED_RECHECK_MILLIS;
                                     } else if ("grace_period".equals(blocker)) {
                                         long retiredAt =
@@ -298,7 +298,7 @@ public final class SessionResourceCollectionCollector {
             return "session_not_retired";
         }
         if (ToolPublicationRetentionStore.flag(roots.getFirst(), "is_recovery_protected")) {
-            return "is_recovery_protected";
+            return "recovery_protected";
         }
         if (ToolPublicationRetentionStore.number(roots.getFirst(), "retired_at")
                 > now - properties.getToolPublication().getDeletionGrace().toMillis()) {
