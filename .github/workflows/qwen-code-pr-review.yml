@@ -619,6 +619,21 @@ jobs:
           # below) + drop any leftover stage drafts.
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           rm -rf "$QWEN_HOME" 2>/dev/null || true
+          # A foreign-owned leftover defeats the rm above: triage's node
+          # container chowns this same path to uid 1000, and on the shared
+          # pool this host user cannot unlink it. `rm || true` plus mkdir -p
+          # on the still-existing dir both "succeed", so the job used to run
+          # on and die minutes later writing settings.json (PR #16610
+          # incident). Reclaim via sudo when available; otherwise fail HERE,
+          # before the checkout, with the cause named.
+          if [ -e "$QWEN_HOME" ]; then
+            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ -e "$QWEN_HOME" ]; then
+            echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           mkdir -p "$QWEN_HOME"
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
