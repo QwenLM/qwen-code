@@ -49,8 +49,15 @@ used for a trial. Runner and base versions need routine security updates.
 Run one manager on each host, managing only that host's Docker socket. Give each
 host a unique `poolId`; matching runner labels let GitHub share work across the
 hosts without a central scheduler. `slots` is a per-host limit, not a fleet total.
-New runner names start with `ecs-qwen-` so the existing CI worker caps and test
-timeouts apply. Restart recovery also accepts the earlier `qwen-` identities.
+Runner display names use `ecs-qwen-<poolId>-<slot>-<suffix>`, with two-digit
+slots and an eight-hex-character suffix, for example
+`ecs-qwen-hz4-ephemeral-01-1a2b3c4d`. The suffix is fresh for every
+registration, so a leftover registration that still owns an earlier name can
+never reject a replacement with HTTP 422; each job also gets a fresh GitHub
+runner ID, container and internal UUID for state and diagnostics. The
+`ecs-qwen-` prefix preserves existing CI worker caps and timeouts. Restart
+recovery accepts the suffixed form, earlier UUID-based runner names, and the
+old `qwen-` prefix.
 
 Install Docker, Node 22, `gh`, and `flock` on the host. The manager uses a
 dedicated PAT supplied as `GH_TOKEN`. The account must administer the target
@@ -73,11 +80,32 @@ host credentials; ordinary container isolation does not change that boundary.
 Copy `config.example.json` to `/etc/qwen-ephemeral-runner/config.json` and
 replace the placeholders: repository, actual runner group ID, unique host/pool
 ID, immutable image reference, and matching architecture and labels. Use a
-unique test label and a controlled test repository for a trial. The supplied
-manual smoke workflow selects only `ecs-qwen-ephemeral-smoke`; a trial runner
-can register with just that label to avoid matching generic Linux jobs. The example runs
-one slot; increase only after measuring the host. Restrict configuration and
+label set matching the actual CI route. The current ARM64 pool registers only
+`self-hosted` and `ecs-qwen-ephemeral`. Omitting generic Linux/ARM64 labels keeps
+unrelated ARM64 jobs out of this pool. Validate the existing
+CI jobs with these formal labels rather than a separate smoke workflow. The
+example runs one slot; hz4 currently maintains ten fixed slots, and the
+manager accepts up to 64 slots per host. Keep capacity conservative until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
+
+If the host requires an HTTP proxy for external access (GitHub, npm, etc.),
+optionally add a `proxy` object to the config:
+
+```json
+"proxy": {
+  "http": "http://proxy.example:7890",
+  "https": "http://proxy.example:7890",
+  "noProxy": "localhost,127.0.0.1,100.100.100.200"
+}
+```
+
+Use the host's reachable address (not `127.0.0.1`) so containers can reach it.
+The proxy URLs must not embed credentials (`user:pass@`): the values are
+injected into every runner container, including containers that execute
+untrusted fork PR jobs, so embedded credentials would be exposed. The
+manager rejects such URLs at startup.
+`noProxy` should include the cloud metadata endpoint (`100.100.100.200`)
+to avoid leaking instance credentials through the proxy.
 
 The `ttlSeconds` limit starts when the container starts, including idle time.
 A job assigned near the deadline can be interrupted. The manager removes and
@@ -89,6 +117,29 @@ for job success. Diagnostic export is best effort: stderr is not archived, and
 output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
+
+Failed cycles retry with jittered exponential backoff: 10 s doubling to a
+60 s cap, or 30 s doubling to a 300 s cap while GitHub answers HTTP 403/429,
+so a rate-limited pool stops sustaining its own rate limit. The backoff
+sleep stays interruptible and a shutdown cuts it short.
+
+`stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
+repeat the same failure before the manager logs `STALL ALERT` instead of the
+ordinary retry line. The threshold is wall-clock, so it holds under any retry
+cadence, and the default sits well above the 300 s backoff ceiling on purpose:
+a pool-wide rate-limit storm stalls every slot at once, and a threshold shorter
+than the cadence would put one alert per slot in the journal simultaneously.
+The clock resets whenever a cycle succeeds or the failure changes, and each
+stall episode alerts once. Because the check happens when a failure is
+observed, the alert lands on the first failure at or after the threshold, so
+the reported duration is the threshold rounded up to the current cadence. A
+stall alert means the slot is serving no jobs and needs reconciliation; the
+manager keeps retrying and never exits on its own, so systemd does not restart
+it. Alert on that journal marker rather than on service state.
+
+Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
+read. A config that still carries it has no effect and falls back to the
+1800 s default, so set `stallAlertSeconds` explicitly if you had tuned it.
 
 ## Install and operate
 
@@ -124,17 +175,35 @@ resources first. A cleanup or ambiguous registration error blocks that slot;
 inspect its state and GitHub runner list before manual reconciliation. Never
 remove unrelated runners or run a global Docker prune.
 
+A container or network whose slot state was lost is reconciled from its
+`qwen.instance` label, so an interrupted `docker create` no longer wedges the
+slot permanently. Resources whose label does not identify this pool and slot,
+or that disagree about the identity, still block it for manual reconciliation.
+The label carries the instance name, not the registration's display name, so
+recovery matches registrations under both the bare display name written by
+older versions and the current suffixed one; an ambiguous match still blocks
+the slot rather than deleting anything.
+A runner deletion GitHub rejects (for example while it still reports the runner
+busy) keeps the slot state and is retried, instead of dropping the only record
+that can remove the registration.
+
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service
 ```
 
-After validating a single runner and its recovery paths, set the repository
-variable `EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` to route untrusted fork PR
-build, test, lint and no-AK integration jobs to this pool. Unset, `false`, or any
-other value keeps those jobs on `ubuntu-latest`. Trusted and same-repository PRs
-retain their existing routing. The global kill-switch and hosted-fleet override
-still win. Leave the switch off until the host and GitHub access policies have
-been verified. Changing it affects newly evaluated jobs; cancel queued work and
-start a new workflow run when rolling back. It does not detect idle runners or
-migrate a queued job automatically.
-Set `EXTERNAL_PR_EPHEMERAL_ARCH=arm64` for an ARM64 pool; the default is x64.
+The existing CI routes untrusted fork PR build, Linux unit tests, lint and no-AK
+integration jobs directly to the formal ARM64 disposable label set. No
+repository-variable switch, configuration relay or manual smoke workflow is
+needed. Trusted and same-repository PRs retain their existing routes. GitHub
+queues excess jobs; the manager replaces completed runners within ten fixed
+slots, without demand-based autoscaling.
+
+Repository variables are unavailable in fork-triggered CI. Existing global
+overrides still work in contexts where their values are available, but cannot
+be relied on to roll back these fork jobs. To roll back, change the fork branch
+of the CI selector to `pr_test_runner='["ubuntu-latest"]'` while retaining
+`lint_runner="${pr_test_runner}"`, and deploy that workflow change. Cancel
+already-selected work and trigger fresh CI using the updated workflow; reruns
+of saved older workflows retain their old routing. Jobs do not migrate
+automatically. Dedicated-host/network and runner-access-policy limitations
+remain tracked in #16514.
