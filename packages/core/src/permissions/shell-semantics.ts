@@ -2306,7 +2306,13 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
   return ops;
 }
 
-function stripHeredocBodies(command: string): string {
+/**
+ * Drop heredoc bodies so a body line cannot be read as its own command
+ * segment. The permission-rule path and the file-operation path must agree on
+ * segment boundaries, otherwise `Bash(python *)` stops matching
+ * `python - <<'PY' … PY` and every body line falls through to its own ask.
+ */
+export function stripHeredocBodies(command: string): string {
   const lines = command.split('\n');
   const kept: string[] = [];
   const pendingDelimiters: string[] = [];

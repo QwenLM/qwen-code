@@ -2005,6 +2005,31 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate(sh(command))).toBe('allow');
     });
 
+    // A heredoc body is stdin text, not shell words: its newlines must not
+    // become command boundaries, or `Bash(python *)` stops matching the very
+    // invocation it was written for and every body line is asked separately
+    // (#9381).
+    it('keeps a heredoc body inside the segment its command owns', async () => {
+      const command = "python - <<'PY'\nimport os\nprint(os.getcwd())\nPY";
+      pm = makeShellPm('bash', { permissionsAllow: ['Bash(python *)'] });
+      expect(await pm.evaluate(sh(command))).toBe('allow');
+    });
+
+    it('still matches trailing segments that follow a heredoc', async () => {
+      const command = "python - <<'PY'\nimport os\nPY\necho done";
+      pm = makeShellPm('bash', {
+        permissionsAllow: ['Bash(python *)', 'Bash(echo *)'],
+      });
+      expect(await pm.evaluate(sh(command))).toBe('allow');
+    });
+
+    it('does not let a heredoc body smuggle an allowed command', async () => {
+      // `node` is not granted; only the body text looks like a granted call.
+      const command = "node --version <<'EOF'\nrm -rf /tmp/x\nEOF";
+      pm = makeShellPm('bash', { permissionsAllow: ['Bash(rm *)'] });
+      expect(await pm.evaluate(sh(command))).not.toBe('allow');
+    });
+
     // The comment fast path is sound only when the scanned string is what the
     // shell executes: true for run_shell_command, not for monitor, where
     // normalizePermissionContext() analyses the quote-stripped `safetyCommand`

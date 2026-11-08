@@ -17,7 +17,10 @@ import {
 } from './rule-parser.js';
 import type { McpToolIdentity, PathMatchContext } from './rule-parser.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
-import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
+import {
+  extractShellOperationsAcrossCommand,
+  stripHeredocBodies,
+} from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import {
   isShellCommandReadOnlyAST,
@@ -99,6 +102,18 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
  * rules through it.
  */
 function splitCommandForRules(command: string, toolName: string): string[] {
+  if (
+    toolName === 'run_shell_command' &&
+    getShellConfiguration().shell === 'bash'
+  ) {
+    // A newline inside a heredoc body is not a command boundary: the body is
+    // stdin to the command before it, and bash runs it as text, not as shell
+    // words. Segmenting on it turns `import os` into a command named `import`,
+    // so an explicit `Bash(python *)` grant stops matching the invocation the
+    // user actually approved (#9381).
+    command = stripHeredocBodies(command);
+  }
+
   if (
     toolName !== 'run_shell_command' ||
     getShellConfiguration().shell !== 'bash' ||
