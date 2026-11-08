@@ -4291,6 +4291,12 @@ describe('ChatEditor toolbar popovers', () => {
           controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
         ).map((button) => button.getAttribute('data-web-shell-effort')),
       ).toEqual(efforts);
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-effort="max"]')

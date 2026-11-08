@@ -1828,6 +1828,15 @@
   background: var(--accent);
 }
 
+.reasoningEffortRowActive {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.reasoningEffortRowActive .dropdownItemCheck {
+  color: var(--secondary-foreground);
+}
+
 .reasoningEffortRow:disabled {
   cursor: default;
   opacity: 0.45;
