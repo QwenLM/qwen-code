@@ -165,14 +165,19 @@ describe('ECS runner qwen update workflow', () => {
     // Behavioral pins: read the step bodies with comments stripped, so
     // commenting a command out turns these red instead of staying green.
     const update = codeLines(stepBody('Update qwen'));
-    assert.ok(update.includes('npm install -g --prefix /usr '));
     // npm exits EEXIST on a /usr/bin/qwen that is a regular file or a
-    // foreign-prefix symlink; the bin path must be removed first, and only
-    // after the /usr/local install succeeded (one working CLI survives a
-    // failed leg). The second install is gated on the legacy copy having
-    // existed when the step STARTED, not on its presence right now: the
-    // loop's own `rm -f` makes the current-state check true on attempt 2
-    // after a transient /usr failure, exiting 0 with the binary deleted.
+    // foreign-prefix symlink; --force lets npm replace it, but only on a
+    // successful install — a failed one leaves the old file untouched.
+    // A pre-emptive `rm -f` must NOT come back: it deleted the binary
+    // even when all attempts failed, and the next run then snapshotted
+    // "no legacy copy", skipped /usr and verified green forever.
+    assert.ok(update.includes('npm install -g --force --prefix /usr '));
+    assert.ok(
+      !update.includes('rm -f /usr/bin/qwen'),
+      'the /usr install must never pre-delete the binary it may fail to restore',
+    );
+    // The second install is gated on the legacy copy having existed when
+    // the step STARTED, not on its presence right now.
     assert.ok(
       update.includes('if [ -e /usr/bin/qwen ] || [ -L /usr/bin/qwen ]; then'),
     );
@@ -189,11 +194,9 @@ describe('ECS runner qwen update workflow', () => {
         'echo "LEGACY_PRESENT=${legacy_present}" >> "${GITHUB_ENV}"',
       ),
     );
-    const rmIndex = update.indexOf('sudo rm -f /usr/bin/qwen');
     const localInstall = update.indexOf('npm install -g --prefix /usr/local');
-    const usrInstall = update.indexOf('npm install -g --prefix /usr ');
-    assert.ok(rmIndex > localInstall);
-    assert.ok(usrInstall > rmIndex);
+    const usrInstall = update.indexOf('npm install -g --force --prefix /usr ');
+    assert.ok(localInstall !== -1 && usrInstall > localInstall);
     const verify = codeLines(stepBody('Verify version'));
     // A legacy copy present at the start must not silently vanish: the
     // pinned loop below skips missing paths, so without this guard a
@@ -457,19 +460,27 @@ function runUpdate({
   legacyCopy = true,
   danglingLegacy = false,
   usrInstallFailures = 0,
+  keepDir = false,
+  legacyPresentOverride,
+  staleLegacyAfterUpdate = false,
+  root: existingRoot,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ecs-install-'));
   try {
-    const root = join(dir, 'root');
-    for (const prefix of ['usr/local/bin', 'usr/bin', 'usr/lib']) {
-      mkdirSync(join(root, prefix), { recursive: true });
-    }
-    if (legacyCopy) {
-      writeFileSync(join(root, 'usr/bin/qwen'), '#!/bin/sh\necho 0.26.0\n', {
-        mode: 0o755,
-      });
-    } else if (danglingLegacy) {
-      symlinkSync(join(root, 'nonexistent/qwen'), join(root, 'usr/bin/qwen'));
+    // An existingRoot replays a SECOND run on the tree the first run left
+    // behind — the cross-run failure the per-run snapshot cannot see.
+    const root = existingRoot ?? join(dir, 'root');
+    if (!existingRoot) {
+      for (const prefix of ['usr/local/bin', 'usr/bin', 'usr/lib']) {
+        mkdirSync(join(root, prefix), { recursive: true });
+      }
+      if (legacyCopy) {
+        writeFileSync(join(root, 'usr/bin/qwen'), '#!/bin/sh\necho 0.26.0\n', {
+          mode: 0o755,
+        });
+      } else if (danglingLegacy) {
+        symlinkSync(join(root, 'nonexistent/qwen'), join(root, 'usr/bin/qwen'));
+      }
     }
     const counter = join(dir, 'usr-attempts');
     const calls = join(dir, 'npm-calls');
@@ -484,9 +495,16 @@ function runUpdate({
         '#!/usr/bin/env bash',
         `echo "npm $*" >> ${calls}`,
         'prefix=""',
+        'force=0',
+        // Capture --force before the parse loop consumes the arguments.
+        'if [[ " $* " == *" --force "* ]]; then force=1; fi',
         'while [[ $# -gt 0 ]]; do',
         '  if [[ "$1" == "--prefix" ]]; then prefix="$2"; shift 2; else shift; fi',
         'done',
+        // Real npm (measured on 11.16.0) refuses to replace a foreign
+        // /usr/bin/qwen without --force and leaves it untouched on any
+        // failure with --force. The stub mirrors both, so a regression
+        // back to pre-deletion + plain install is observable here.
         // The stub root relocates /usr to <root>/usr; match the basename
         // so the /usr arm is distinguishable from /usr/local.
         'if [[ "$(basename "${prefix}")" == "usr" ]]; then',
@@ -496,8 +514,16 @@ function runUpdate({
         '    echo "npm error code ENOTEMPTY" >&2',
         '    exit 1',
         '  fi',
+        '  if [[ -e "${prefix}/bin/qwen" || -L "${prefix}/bin/qwen" ]] && (( force == 0 )); then',
+        '    echo "npm error EEXIST: file exists, use --force to overwrite" >&2',
+        '    exit 1',
+        '  fi',
         'fi',
         'mkdir -p "${prefix}/bin"',
+        // npm unlinks a foreign bin (regular file or symlink, dangling or
+        // not) before linking its own — but only once the install has
+        // succeeded, which is where this stub now sits.
+        'if (( force == 1 )); then rm -f "${prefix}/bin/qwen"; fi',
         `printf '#!/bin/sh\\necho 0.27.0\\n' > "\${prefix}/bin/qwen"`,
         'chmod +x "${prefix}/bin/qwen"',
       ].join('\n'),
@@ -518,8 +544,10 @@ function runUpdate({
         .replaceAll('/usr/lib', '"${USR_PREFIX}/lib"')
         .replaceAll('/usr/local/bin', '"${LOCAL_PREFIX}/bin"')
         .replaceAll('/usr/bin/qwen', '"${USR_BIN}/qwen"')
-        .replaceAll('--prefix /usr/local', '--prefix "${LOCAL_PREFIX}"')
-        .replaceAll('--prefix /usr ', '--prefix "${USR_PREFIX}" ')
+        // The lookahead keeps the /usr/local arm from matching the /usr
+        // prefix (it also starts with "/usr").
+        .replaceAll(/--prefix \/usr\/local/g, '--prefix "${LOCAL_PREFIX}"')
+        .replaceAll(/--prefix \/usr(?= )/g, '--prefix "${USR_PREFIX}"')
         // Keep the retry wall-clock negligible; the loop shape unchanged.
         .replace('sleep $((attempt * 10))', 'sleep 0'),
     ].join('\n');
@@ -535,6 +563,17 @@ function runUpdate({
         VERSION: '0.27.0',
       },
     });
+    // Failure-direction fixtures: mutate the tree the update left behind
+    // so verify runs against a stale or vanished second copy.
+    if (staleLegacyAfterUpdate) {
+      rmSync(join(root, 'usr/bin/qwen'), { force: true });
+      writeFileSync(join(root, 'usr/bin/qwen'), '#!/bin/sh\necho 0.26.0\n', {
+        mode: 0o755,
+      });
+    }
+    const legacyPresent =
+      legacyPresentOverride ??
+      (readFileSync(ghEnv, 'utf8').includes('LEGACY_PRESENT=1') ? '1' : '0');
     // The verify step against the same tree, with a `qwen` stub on PATH so
     // the PATH-winner check runs; the pinned paths are the real assertion.
     const qwenStub = join(dir, 'qwen');
@@ -550,9 +589,7 @@ function runUpdate({
         ...process.env,
         PATH: `${dir}:${process.env.PATH ?? ''}`,
         VERSION: '0.27.0',
-        LEGACY_PRESENT: readFileSync(ghEnv, 'utf8').includes('LEGACY_PRESENT=1')
-          ? '1'
-          : '0',
+        LEGACY_PRESENT: legacyPresent,
       },
     });
     return {
@@ -562,12 +599,21 @@ function runUpdate({
       ghEnv: readFileSync(ghEnv, 'utf8'),
       npmCalls: existsSync(calls) ? readFileSync(calls, 'utf8') : '',
       usrQwenExists: existsSync(join(root, 'usr/bin/qwen')),
+      usrQwenVersion: existsSync(join(root, 'usr/bin/qwen'))
+        ? spawnSync(join(root, 'usr/bin/qwen'), [], {
+            encoding: 'utf8',
+          }).stdout?.trim()
+        : undefined,
       localQwenExists: existsSync(join(root, 'usr/local/bin/qwen')),
       verifyStatus: verifyResult.status,
       verifyStdout: verifyResult.stdout ?? '',
+      root,
+      dir,
     };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    if (!keepDir) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -686,9 +732,73 @@ describe('ECS runner qwen update replay', { skip: !replayable }, () => {
   it('fails the leg instead of reporting success when /usr never recovers', () => {
     const updated = runUpdate({ legacyCopy: true, usrInstallFailures: 99 });
     assert.equal(updated.status, 1);
-    assert.ok(!updated.usrQwenExists);
+    // The failed install must leave the OLD binary in place: deleting it
+    // here is what let the next run snapshot "no legacy copy" and verify
+    // green forever (the cross-run half of the stale-second-copy bug).
+    assert.ok(updated.usrQwenExists, 'a failed /usr install must not delete');
+    assert.equal(updated.usrQwenVersion, '0.26.0');
     assert.ok(updated.localQwenExists, 'one working CLI survives a failed leg');
     assert.ok(updated.stdout.includes('failed after 3 attempts'));
+    // A verify against this failed tree must stay red, not skip.
+    assert.notEqual(updated.verifyStatus, 0);
+  });
+
+  it('recovers the legacy copy on the run after a persistent failure', () => {
+    // Cross-run replay on ONE host tree: run 1 exhausts its /usr attempts
+    // and fails loudly; run 2 (no failures) must still see the legacy
+    // copy, reinstall BOTH prefixes and verify green. Under the old
+    // pre-deletion shape run 2 snapshotted "no legacy copy", skipped /usr
+    // and reported success with /usr/bin/qwen gone for good.
+    const first = runUpdate({
+      legacyCopy: true,
+      usrInstallFailures: 99,
+      keepDir: true,
+    });
+    try {
+      assert.equal(first.status, 1);
+      assert.ok(first.usrQwenExists);
+      assert.equal(first.usrQwenVersion, '0.26.0');
+      const second = runUpdate({ root: first.root, usrInstallFailures: 0 });
+      assert.equal(second.status, 0);
+      assert.ok(second.ghEnv.includes('LEGACY_PRESENT=1'));
+      assert.equal(second.usrQwenVersion, '0.27.0');
+      assert.equal(second.verifyStatus, 0);
+    } finally {
+      rmSync(first.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('verify fails on a stale second copy even when the PATH winner is current', () => {
+    // Failure-direction pin: the incident shape (fresh /usr/local, stale
+    // /usr/bin) must exit non-zero. A `test … || true` mutation on the
+    // pinned check used to survive the whole suite.
+    const updated = runUpdate({
+      legacyCopy: true,
+      staleLegacyAfterUpdate: true,
+    });
+    assert.equal(updated.status, 0);
+    assert.notEqual(updated.verifyStatus, 0, 'a stale pinned copy must fail');
+  });
+
+  it('verify fails when a legacy copy vanished instead of skipping it', () => {
+    // Failure-direction pin: LEGACY_PRESENT=1 with no /usr/bin/qwen must
+    // exit non-zero. Disabling the guard (`exit 1` → `:`) used to survive
+    // the whole suite while every later run skipped the missing path.
+    const updated = runUpdate({
+      legacyCopy: false,
+      legacyPresentOverride: '1',
+    });
+    assert.equal(updated.status, 0);
+    assert.notEqual(
+      updated.verifyStatus,
+      0,
+      'a vanished legacy copy must fail',
+    );
+    assert.ok(
+      updated.verifyStdout.includes(
+        '/usr/bin/qwen existed before the update but is missing now',
+      ),
+    );
   });
 
   it('skips the second prefix entirely on a host without a legacy copy', () => {

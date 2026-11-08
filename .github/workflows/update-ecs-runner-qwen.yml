@@ -112,10 +112,9 @@ jobs:
           # carry a runner user's custom npm prefix into the sudo install.
           (
             cd "${RUNNER_TEMP:?}"
-            # Snapshot the legacy copy BEFORE the loop: a retry must not
-            # mistake the absence this loop itself created (rm before the
-            # /usr install) for "no legacy copy on this host" and exit 0
-            # with /usr/bin/qwen deleted and never reinstalled.
+            # Snapshot the legacy copy BEFORE the loop so every attempt
+            # gates the /usr install on the host's state at step start,
+            # and verify can catch a legacy copy that vanished mid-run.
             if [ -e /usr/bin/qwen ] || [ -L /usr/bin/qwen ]; then
               legacy_present=1
             else
@@ -145,11 +144,13 @@ jobs:
               elif [ "${legacy_present}" -eq 0 ]; then
                 exit 0
               # npm refuses (EEXIST) to replace a /usr/bin/qwen that is a
-              # regular file or a symlink into another prefix. Remove the
-              # bin path only AFTER the /usr/local install succeeded, so a
-              # failed leg still leaves one working CLI on the host.
-              elif sudo rm -f /usr/bin/qwen \
-                && sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+              # regular file or a symlink into another prefix, so --force
+              # lets npm do the replacement itself — and only on success.
+              # A pre-emptive rm would delete the binary even when all
+              # three attempts fail, and the NEXT run would snapshot
+              # "no legacy copy", skip /usr entirely and verify green:
+              # a permanent silent loss no rerun could repair.
+              elif sudo env -u NPM_CONFIG_PREFIX npm install -g --force --prefix /usr --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then
@@ -168,8 +169,7 @@ jobs:
         run: |-
           set -euo pipefail
           # A legacy copy that existed when the update started must exist
-          # when it ends: the retry loop removes /usr/bin/qwen before the
-          # /usr install, and a vanished binary must fail the leg, not skip
+          # when it ends: a vanished binary must fail the leg, not skip
           # the pinned check below.
           if [ "${LEGACY_PRESENT:-0}" -eq 1 ] && [ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]; then
             echo "::error::/usr/bin/qwen existed before the update but is missing now"
