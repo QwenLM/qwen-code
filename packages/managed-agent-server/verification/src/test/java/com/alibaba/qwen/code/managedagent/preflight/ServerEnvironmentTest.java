@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.ApplicationContextFactory;
 import org.springframework.boot.WebApplicationType;
@@ -20,7 +23,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributes;
-import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -35,6 +37,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -49,6 +52,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * imports and profile files count, and a configuration the server would
  * refuse fails the config row.
  */
+@DisabledOnOs(OS.WINDOWS)
 class ServerEnvironmentTest {
     @TempDir
     Path directory;
@@ -74,22 +78,6 @@ class ServerEnvironmentTest {
     /** What the launcher or server.env sets. */
     private static ConfigurableEnvironment named(String locations) {
         return environment(Map.of("SPRING_CONFIG_ADDITIONAL_LOCATION", locations));
-    }
-
-    @Test
-    void ignoresImportOriginsWithoutAParentDirectory() throws IOException {
-        Path root = directory.toAbsolutePath().getRoot();
-        assertNull(root.getParent());
-        TextResourceOrigin origin = new TextResourceOrigin(new FileSystemResource(root),
-                new TextResourceOrigin.Location(0, 0));
-        assertEquals(root, origin.getResource().getFile().toPath());
-        OriginTrackedMapPropertySource source = new OriginTrackedMapPropertySource("parentless-origin",
-                Map.of("spring.config.import", OriginTrackedValue.of(
-                        "optional:configtree:" + directory + "/", origin)));
-        assertEquals(origin, source.getOrigin("spring.config.import"));
-        ConfigurableEnvironment environment = environment(Map.of());
-        environment.getPropertySources().addFirst(source);
-        assertEquals(List.of(root), ServerEnvironment.files(environment, directory));
     }
 
     private Path write(String name, String text) throws IOException {
@@ -152,24 +140,11 @@ class ServerEnvironmentTest {
      * under macOS's per-user TMPDIR.
      */
     private void assumeOthersCanSearchTheDirectory() {
-        for (Path parent = directory.toAbsolutePath().getParent(); parent != null;
-                parent = parent.getParent()) {
-            try {
-                assumeTrue(Files.getPosixFilePermissions(parent)
-                        .contains(PosixFilePermission.OTHERS_EXECUTE),
-                        parent + " shuts other accounts out");
-            } catch (IOException error) {
-                assumeTrue(false, parent + ": " + error.getMessage());
-            }
-        }
+        ServiceAccountTest.assumeOthersCanSearchAbove(directory);
     }
 
     private static boolean nobodyExists() {
-        try {
-            return ServiceAccount.lookup("nobody").isPresent();
-        } catch (IOException error) {
-            return false;
-        }
+        return ServiceAccountTest.nobodyExists();
     }
 
     @Test
@@ -224,6 +199,63 @@ class ServerEnvironmentTest {
                 + ",optional:file:" + config.getParent() + "/"), checks);
         assertTrue(checks.isEmpty(), checks.toString());
         assertEquals(List.of(config), prepared.files());
+    }
+
+    @Test
+    void stopsAtASymbolicLinkToItself() throws IOException {
+        // Spring reads no file through it, and the check names no directory for it.
+        Path loop = Files.createSymbolicLink(directory.resolve("loop"), Path.of("loop"));
+        ManagedAgentPreflight.Prepared prepared = assertTimeoutPreemptively(Duration.ofSeconds(30),
+                () -> prepare(named("optional:file:" + loop + "/application.yml"), new ArrayList<>()));
+        assertNull(prepared.failure());
+        assertEquals(List.of(), prepared.files());
+        assertEquals(List.of(), prepared.hidden());
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    void followsNoMoreSymbolicLinksThanTheKernel() throws IOException {
+        // A chain of links to a directory this process cannot enter. Linux
+        // follows 40 links and no more, so the server cannot reach the
+        // directory through 41, and the check names none. The chain starts
+        // at the real path, so no link above it counts.
+        Path root = directory.toRealPath();
+        Path linked = Files.createDirectory(root.resolve("linked"));
+        Path chain = linked;
+        for (int link = 1; link <= 41; link++) {
+            chain = Files.createSymbolicLink(root.resolve("link" + link), chain.getFileName());
+        }
+        Path within = root.resolve("link40");
+        assertTrue(Files.isDirectory(within), "the kernel follows 40 links");
+        assertFalse(Files.isDirectory(chain), "the kernel follows no more than 40 links");
+        Files.setPosixFilePermissions(linked, PosixFilePermissions.fromString("---------"));
+        try {
+            assumeFalse(Files.isExecutable(linked), "root enters any directory");
+            ManagedAgentPreflight.Prepared prepared =
+                    prepare(named("optional:file:" + chain + "/"), new ArrayList<>());
+            assertNull(prepared.failure());
+            assertEquals(List.of(), prepared.files());
+            assertEquals(List.of(), prepared.hidden());
+            // Through 40, the directory is one it cannot look in.
+            assertEquals(List.of(new ServerEnvironment.Hidden(linked, false)),
+                    prepare(named("optional:file:" + within + "/"), new ArrayList<>()).hidden());
+        } finally {
+            Files.setPosixFilePermissions(linked, PosixFilePermissions.fromString("rwx------"));
+        }
+    }
+
+    @Test
+    void aReplacedLocationDropsTheClasspathDefaults() throws IOException {
+        // spring.config.location replaces the classpath location as well, and
+        // with it the packaged loopback address, unless it names it again.
+        Path etc = Files.createDirectories(directory.resolve("etc"));
+        assertEquals("127.0.0.1", prepare(environment(Map.of()), new ArrayList<>())
+                .environment().getProperty("server.address"));
+        assertNull(prepare(environment(Map.of("SPRING_CONFIG_LOCATION", "file:" + etc + "/")),
+                new ArrayList<>()).environment().getProperty("server.address"));
+        assertEquals("127.0.0.1", prepare(environment(Map.of("SPRING_CONFIG_LOCATION",
+                "optional:classpath:/,file:" + etc + "/")), new ArrayList<>())
+                .environment().getProperty("server.address"));
     }
 
     @Test
@@ -1346,6 +1378,28 @@ class ServerEnvironmentTest {
     }
 
     @Test
+    void saysWhyItCannotTellTheFilesWhereSpringReadsTheRootAsAFile() {
+        // Under file:/[.properties] Spring reads / as a properties file, its
+        // listing as keys, so an entry of / called spring.config.import is an
+        // import key in a file with no directory. A test cannot write to /,
+        // so the source Spring would add is in place before it prepares.
+        String name = "Config resource 'file [/]' via location 'file:/[.properties]'";
+        ConfigurableEnvironment environment = environment(Map.of());
+        environment.getPropertySources().addLast(new OriginTrackedMapPropertySource(name,
+                Map.of("spring.config.import", OriginTrackedValue.of("",
+                        new TextResourceOrigin(new FileSystemResource("/"), null)))));
+        ManagedAgentPreflight.Prepared prepared = prepare(environment, new ArrayList<>(),
+                "--spring.config.location=optional:file:" + directory + "/");
+        assertNull(prepared.failure());
+        String why = "Spring reads the directory / as a file (" + name + ")";
+        assertEquals(why, prepared.unlisted());
+        List<ManagedAgentPreflight.Check> rows = rows(prepared);
+        ManagedAgentPreflight.Check last = rows.get(rows.size() - 1);
+        assertEquals(ManagedAgentPreflight.Status.WARN, last.status(), rows.toString());
+        assertEquals("cannot tell which other files the server reads: " + why, last.detail());
+    }
+
+    @Test
     void boundsWhatACommentCanCost() throws IOException {
         // Spring's YAML loader follows an alias that holds itself, and
         // expands one alias of another without end; a comment never runs
@@ -1653,15 +1707,15 @@ class ServerEnvironmentTest {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
         }
         assertEquals(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.configFileCheck(
-                url, null, "spring.datasource.url").status());
+                url, null, "spring.datasource.url", Set.of()).status());
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight.configFileCheck(
-                port, null, "server.port").status());
+                port, null, "server.port", Set.of()).status());
         // In UTF-16 too, after its byte order mark.
         Path wide = directory.resolve("tree/spring.datasource.jdbc-url");
         Files.write(wide, "jdbc:mysql://app:s3cret@db/qwen".getBytes(StandardCharsets.UTF_16));
         Files.setPosixFilePermissions(wide, PosixFilePermissions.fromString("rw-r--r--"));
         assertEquals(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.configFileCheck(
-                wide, null, "spring.datasource.jdbc-url").status());
+                wide, null, "spring.datasource.jdbc-url", Set.of()).status());
         // A file whose extension Spring is told, as file:app.conf[.properties].
         Path hinted = write("etc/app.conf", "spring.datasource.password=s3cret\n");
         Files.setPosixFilePermissions(hinted, PosixFilePermissions.fromString("rw-r--r--"));
@@ -2014,6 +2068,8 @@ class ServerEnvironmentTest {
                 throw new AssertionError("--check did not finish: " + Files.readString(output));
             }
             String report = Files.readString(output);
+            // No datasource URL fails the database row, and a FAIL exits 1.
+            assertEquals(1, process.exitValue(), report);
             // The report says where it read the relative locations: the
             // working directory as the JVM sees it, /private/var for macOS's /var.
             Path root = directory.toRealPath();
@@ -2029,6 +2085,13 @@ class ServerEnvironmentTest {
                     rows.get("config"), report);
             assertEquals(1, rows.get("server-port").size(), report);
             assertTrue(rows.get("server-port").get(0).contains(":" + free + " "), report);
+            assertEquals(List.of("FAIL no datasource URL"), rows.get("database"), report);
+            // The only other FAIL could be server-port, should another process
+            // take the port freePort() let go; the line above names it.
+            assertEquals(List.of("database"), rows.entrySet().stream()
+                    .filter(row -> !row.getKey().equals("server-port"))
+                    .filter(row -> row.getValue().stream().anyMatch(line -> line.startsWith("FAIL ")))
+                    .map(Map.Entry::getKey).toList(), report);
         } finally {
             Files.deleteIfExists(output);
         }

@@ -386,6 +386,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
+  workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
+    'no Managed Git ignore query route',
+  ),
   workspace_mcp_restart: {
     standing: 'managed',
     evidence: 'surface:MCP_MANAGEMENT',
@@ -475,6 +478,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   },
   workspace_display_name: NO_MANAGED_EQUIVALENT(
     'Workspace identity is the registered directory',
+  ),
+  workspace_order: NO_MANAGED_EQUIVALENT(
+    'daemon-local workspace presentation order',
   ),
   scratch_workspace_registration: {
     standing: 'managed',
