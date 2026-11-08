@@ -8103,29 +8103,62 @@ describe('stale agent-home reclaim guard (#16616)', () => {
     },
   );
 
-  it('drains a quarantined home once it passes the sweep age gate', () => {
-    // A quarantine keeps the foreign owner that made it unremovable, so the
-    // only deleter that can act on it is the unprivileged sweep — and only
-    // after triage's root container has handed the ownership back. The age
-    // gate is what spares a live review's leftover.
-    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
-    const aged = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-1');
-    const recent = join(runnerTemp, 'qwen-home.stale-20260101T000001Z-2');
-    try {
-      mkdirSync(aged);
-      mkdirSync(recent);
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
+    'drains an aged quarantine on a later run and spares the rest',
+    () => {
+      // Production shape: a foreign 0555 home whose own mtime is old. The
+      // rung sets it aside without touching that mtime, so run one must
+      // leave the copy alone (the sweep runs before the rung), and a later
+      // run drains it only after a chmod — a hand-back restores the owner
+      // without the write bit.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      const keep = join(runnerTemp, 'triage-context');
       const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
-      utimesSync(aged, fiveHoursAgo, fiveHoursAgo);
-      const out = runGuard(runnerTemp);
-      expect(out.status, out.stderr).toBe(0);
-      expect(existsSync(aged)).toBe(false);
-      expect(existsSync(recent)).toBe(true);
-      // The sweep must not match the live home it sits next to.
-      expect(existsSync(join(runnerTemp, 'qwen-home'))).toBe(true);
-    } finally {
-      rmSync(runnerTemp, { recursive: true, force: true });
-    }
-  });
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{"tools":{}}');
+      utimesSync(stale, fiveHoursAgo, fiveHoursAgo);
+      chmodSync(stale, 0o555);
+      try {
+        const first = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+        expect(first.status, first.stderr).toBe(0);
+        const quarantine = readdirSync(runnerTemp).find((name) =>
+          name.startsWith('qwen-home.stale-'),
+        );
+        expect(quarantine).toBeTruthy();
+        expect(existsSync(join(runnerTemp, quarantine, 'settings.json'))).toBe(
+          true,
+        );
+
+        // An aged sibling the name filter must spare, and a quarantine a
+        // prior run made from a recently written home, which the age gate
+        // must spare.
+        const fresh = 'qwen-home.stale-20260101T000001Z-2';
+        mkdirSync(keep);
+        utimesSync(keep, fiveHoursAgo, fiveHoursAgo);
+        mkdirSync(join(runnerTemp, fresh));
+
+        const second = runGuard(runnerTemp);
+        expect(second.status, second.stderr).toBe(0);
+        expect(existsSync(join(runnerTemp, quarantine))).toBe(false);
+        expect(existsSync(keep)).toBe(true);
+        expect(existsSync(join(runnerTemp, fresh))).toBe(true);
+        // The live home survives both runs.
+        expect(existsSync(join(runnerTemp, 'qwen-home'))).toBe(true);
+      } finally {
+        for (const name of readdirSync(runnerTemp)) {
+          try {
+            chmodSync(join(runnerTemp, name), 0o755);
+          } catch {
+            // A drained copy may already be gone.
+          }
+        }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps the step header honest about the fail-fast contract', () => {
     const stepIndex = workflow.indexOf("- name: 'Clean stale agent state'");

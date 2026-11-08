@@ -10200,4 +10200,21 @@ describe('triage agent-state ownership hand-back (#16616)', () => {
     expect(run).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
     expect(run).toContain('chown -R "$RUNNER_UID:$RUNNER_GID" "$handback"');
   });
+
+  it('takes the quarantine prefix from the workflow that mints it', () => {
+    // The prefix is spelled three times — the producer and the sweep in the
+    // review workflow, and this hand-back glob. Renaming it on the review
+    // side updates that suite's own pins, so both suites would stay green
+    // while this glob matched nothing: every quarantine would then strand
+    // permanently, with one warning as the only trace. Read the producer.
+    const review = readFileSync(
+      '.github/workflows/qwen-code-pr-review.yml',
+      'utf8',
+    );
+    const home = review.match(/QWEN_HOME="\$\{RUNNER_TEMP:\?\}\/([^"]+)"/)?.[1];
+    const suffix = review.match(/quarantine="\$\{QWEN_HOME\}\.([^"$]+)/)?.[1];
+    expect(home).toBeTruthy();
+    expect(suffix).toBeTruthy();
+    expect(restoreStep().run).toContain(`"$RUNNER_TEMP"/${home}.${suffix}*`);
+  });
 });
