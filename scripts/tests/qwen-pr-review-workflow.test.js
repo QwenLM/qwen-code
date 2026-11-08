@@ -7889,3 +7889,88 @@ describe('review model canary routing', () => {
     );
   });
 });
+
+describe('stale agent-home reclaim guard (#16616)', () => {
+  const cleanStep = () =>
+    parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Clean stale agent state',
+    ).run;
+
+  // The guard block ends before the stage-draft sweep; slicing keeps the
+  // executed body to the agent-home logic so the fixture needs no git tree.
+  const guardBody = () => {
+    const run = cleanStep();
+    const end = run.indexOf('rm -f /tmp/stage-*.md');
+    expect(end).toBeGreaterThan(-1);
+    return run.slice(0, end);
+  };
+
+  const runGuard = (runnerTemp, { sudoBlocked = false, binDir } = {}) => {
+    binDir = binDir ?? join(runnerTemp, 'stub-bin');
+    mkdirSync(binDir, { recursive: true });
+    if (sudoBlocked) {
+      const sudoStub = join(binDir, 'sudo');
+      writeFileSync(sudoStub, '#!/bin/sh\nexit 1\n');
+      chmodSync(sudoStub, 0o755);
+    }
+    return spawnSync('bash', ['-c', guardBody()], {
+      env: {
+        ...process.env,
+        RUNNER_TEMP: runnerTemp,
+        ...(sudoBlocked ? { PATH: `${binDir}:/usr/bin:/bin` } : {}),
+      },
+      encoding: 'utf8',
+    });
+  };
+
+  it('reclaims a stale home and leaves a fresh runner-writable one', () => {
+    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+    try {
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      const out = runGuard(runnerTemp);
+      expect(out.status, out.stderr).toBe(0);
+      expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+      // The fresh home must accept the settings write that killed #16610.
+      writeFileSync(join(stale, 'settings.json'), '{}');
+    } finally {
+      rmSync(runnerTemp, { recursive: true, force: true });
+    }
+  });
+
+  it('fails before checkout when an unlinkable home survives and sudo is unavailable', () => {
+    // A read-only parent makes the home unlinkable for this uid without
+    // needing a second account; with sudo stubbed out, the guard must
+    // exit 1 and name the directory instead of proceeding.
+    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+    const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+    const stale = join(runnerTemp, 'qwen-home');
+    mkdirSync(stale);
+    chmodSync(runnerTemp, 0o555);
+    try {
+      const out = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+      expect(out.status).toBe(1);
+      expect(out.stdout).toContain('stale qwen-home survives cleanup');
+      expect(out.stdout).toContain(stale);
+    } finally {
+      chmodSync(runnerTemp, 0o755);
+      rmSync(runnerTemp, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a fresh home the runner user cannot write AND traverse', () => {
+    // -w alone would pass a mode-0600 home; settings.json needs w+x.
+    const run = cleanStep();
+    expect(run).toContain('[ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]');
+    expect(run).toContain('fresh qwen-home is not writable');
+  });
+
+  it('keeps the step header honest about the fail-fast contract', () => {
+    const stepIndex = workflow.indexOf("- name: 'Clean stale agent state'");
+    const header = workflow.slice(stepIndex - 900, stepIndex);
+    expect(header).not.toContain('never fail the job');
+    expect(header).toContain('fails the job here, before checkout');
+  });
+});
