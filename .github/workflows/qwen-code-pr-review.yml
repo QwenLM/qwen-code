@@ -351,12 +351,25 @@ jobs:
         startsWith(github.event.comment.body, '@qwen-code /review')) ||
        (github.event_name == 'pull_request_review' &&
         startsWith(github.event.review.body, '@qwen-code /review')))
-    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
-    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner. The job IS the write-permission check, so
-    # it cannot route on its own output; downstream jobs already route on the
-    # repository guard alone.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
+    # but runs no agent, checks out nothing, and processes no untrusted PR
+    # content — it only reads event metadata and calls one read API — so it is
+    # safe on the persistent ECS pool whenever the trigger cannot carry fork
+    # code into it:
+    # - PR-payload events (pull_request_target / pull_request_review /
+    #   pull_request_review_comment) keep the canonical same-repo guard: a fork
+    #   head stays on hosted (ephemeral), an in-repo head uses ECS.
+    # - issue_comment (/review, /resolve) and workflow_dispatch carry no
+    #   github.event.pull_request payload at all, so the same-repo guard alone
+    #   fell through to ubuntu-latest for EVERY command — the gate then sat in
+    #   the hosted queue for hours (PR #15286: 3h10m for a 4-second job) while
+    #   the ECS pool was idle. Route them to ECS like qwen-autofix.yml's
+    #   route/review-scan, which apply the same "no PR payload → no fork code →
+    #   persistent pool" rule to their API-only steps (review-scan there loads
+    #   CI_DEV_BOT_PAT; route only the read-only github.token).
+    # The job IS the write-permission check, so it cannot route on its own
+    # output; downstream jobs already route on the repository guard alone.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -380,6 +393,26 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
+          # Harden gh against the pool's shared, writable HOME config. This
+          # gate runs on the persistent ecs-qwen pool for comment/dispatch
+          # triggers; a planted ~/.config/gh (http_unix_socket) would
+          # otherwise receive CI_BOT_PAT and could forge the permission
+          # response that downstream jobs consume as should_review. Same
+          # pins as qwen-autofix.yml's route/review-scan — but NO
+          # `unset GH_TOKEN` here: it is this step's only credential.
+          export GH_HOST=github.com
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step (the gate
+          # fails closed), not continue with an empty GH_CONFIG_DIR that gh
+          # treats as unset — falling back to the shared config.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the persistent pool; do not
+          # leave the minted config dir behind.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           # Select the principal whose permission gates this trigger.
           case "$EVENT_NAME" in
             pull_request_target)
@@ -500,8 +533,9 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    # The schedule switches hk1/hk2 to `ecs-review` at 17:00 Asia/Shanghai
-    # and back to CI at 05:00. Reviews queue while the pool is closed.
+    # The schedule switches the managed fleet to `ecs-review` at 17:00
+    # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
+    # is closed.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -577,7 +611,10 @@ jobs:
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`),
       # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from
       # an interrupted review, or stale per-run capture-tools dirs under
-      # RUNNER_TEMP. Reset all of them per run; never fail the job.
+      # RUNNER_TEMP. Reset all of them per run. The sweeps are best-effort
+      # EXCEPT the agent home: a foreign-owned qwen-home that survives the
+      # reclaim fails the job here, before checkout — proceeding would only
+      # die later at the first settings write (PR #16610 incident).
       - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
@@ -585,7 +622,39 @@ jobs:
           # below) + drop any leftover stage drafts.
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           rm -rf "$QWEN_HOME" 2>/dev/null || true
+          # A foreign-owned leftover defeats the rm above: triage's node
+          # container chowns this same path to uid 1000, and on the shared
+          # pool this host user cannot unlink it. `rm || true` plus mkdir -p
+          # on the still-existing dir both "succeed", so the job used to run
+          # on and die minutes later writing settings.json (PR #16610
+          # incident). Reclaim via sudo when available; otherwise fail HERE,
+          # before the checkout, with the cause named.
+          if [ -e "$QWEN_HOME" ]; then
+            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null ||
+              sudo -n chown -R "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            rm -rf "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ -e "$QWEN_HOME" ]; then
+            echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           mkdir -p "$QWEN_HOME"
+          # mkdir just created this dir as the runner user, so under a normal
+          # umask it is already usable. This check covers the residual races
+          # and environments: another process re-creating the path between
+          # the sweep and mkdir, or a hostile umask stripping owner bits.
+          # settings.json needs write AND traverse, so test both — -w alone
+          # passes a mode-0600 home that cannot hold the file.
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            sudo -n chown "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            chmod u+rwx "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            echo "::error::fresh qwen-home is not writable by the runner user: $QWEN_HOME"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a

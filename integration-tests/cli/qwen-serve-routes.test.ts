@@ -352,7 +352,7 @@ describe('qwen serve — capabilities envelope', () => {
     // rate-limit opt-in, no `--channel`, no configured batch ASR model):
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
-    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `workspace_voice_transcription`, `rate_limit`.
     // `native_directory_picker` is host-conditional (the daemon host's GUI
     // environment, not a spawn flag) and is spliced at its registry
     // position below, using the boot-time probe captured when the daemon
@@ -370,11 +370,13 @@ describe('qwen serve — capabilities envelope', () => {
     // depends on the mounted runtime's bridge, which the bootstrap envelope
     // cannot see, so the tag appears only once the runtime app serves the
     // envelope.
+    // `channel_reload` also appears once the runtime channel manager mounts.
     expect(
       caps.features.filter(
         (feature) =>
           feature !== 'scheduled_task_session_reuse' &&
-          feature !== 'workspace_runtime_stop',
+          feature !== 'workspace_runtime_stop' &&
+          feature !== 'channel_reload',
       ),
     ).toEqual([
       'health',
@@ -476,10 +478,13 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_tool_toggle',
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
+      'user_skill_activation',
       'workspace_session_refresh',
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',
       'workspace_skill_manage',
+      'skill_archive_install',
+      'skill_zip_file_source',
       'web_shell_brand',
       'workspace_settings',
       'workspace_permissions',
@@ -491,6 +496,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_github_setup',
       'workspace_github_prs',
       'workspace_git_worktrees',
+      'workspace_git_check_ignore',
       'workspace_mcp_restart',
       'session_recap',
       'session_generation',
@@ -520,6 +526,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
+      'workspace_order',
       'workspace_display_name',
       'scratch_workspace_registration',
       ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),

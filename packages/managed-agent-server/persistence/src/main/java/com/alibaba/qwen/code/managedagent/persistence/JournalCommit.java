@@ -71,15 +71,17 @@ final class JournalCommit {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        // Ordinary record commits still hold the placement guard while they
-        // fly: a begin/lifecycle admission serializes with only that row, so
-        // without it an admission sails through mid-commit. The acquisition
-        // stays bounded — a held row degrades to a named failure within the
-        // hot-path budget rather than waiting out the caller (#13800).
-        JournalFencing.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
-                JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
+        if (HostedCleanupReferences.containsCleanup(validated.recordBytes())) {
+            fencing.lockPlacementBounded(tenantId);
+        }
+        // Other ordinary commits queue on their Session before any consistent
+        // read, so lifecycle and placement cannot change it mid-commit. Cleanup
+        // commits already hold placement; lifecycle authority holds both guards.
+        // CSI-pinned Sessions take them behind this root in
+        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
         boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
@@ -88,12 +90,12 @@ final class JournalCommit {
                         return false;
                     }
                     JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
-                    return body != null && body.path("v").asInt() == 3;
+                    return body != null && (body.path("v").asInt() == 3 || body.path("v").asInt() == 4);
                 });
         if (promotes) {
             readerVersion.requireReadable(2);
         }
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId);
+        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
@@ -148,7 +150,13 @@ final class JournalCommit {
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
-        fencing.requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
+        // Physical fencing and migration require stopped writers. Ordinary
+        // commits only read storage state and need not block member updates.
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        }
         JournalStoreRows.HeadRow head = csiHead == null
                 ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);

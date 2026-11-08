@@ -25,7 +25,12 @@ import { loadCliConfig } from '../config/config.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
 
 vi.mock('../config/settings.js', () => ({
-  loadSettings: () => ({ merged: {} }),
+  loadSettings: () => ({
+    merged: {},
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  }),
 }));
 vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
 
@@ -224,6 +229,9 @@ describe('Hosted context compression', () => {
       sessionId: session.authority.sessionHeader.sessionKey.sessionId,
       sessionIdGenerated: true,
       chatRecording: false,
+    });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]).toMatchObject({
+      lspDisabled: true,
     });
     const result = compression.status(request.operationId)!;
     expect(result).toMatchObject({

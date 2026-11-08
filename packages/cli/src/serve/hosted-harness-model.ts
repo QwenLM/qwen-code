@@ -38,6 +38,7 @@ import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/s
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 import {
@@ -351,13 +352,14 @@ export async function runHostedHarnessTextTurn(input: {
     argv,
     input.cwd,
     undefined,
-    undefined,
+    getSeparatedHookSettings(settings),
     undefined,
     undefined,
     undefined,
     true,
     {
       toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
       ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
     },
   );
