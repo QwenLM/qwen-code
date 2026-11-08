@@ -251,6 +251,13 @@ Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
 remember request and an exact entry ID when a natural reference is ambiguous.
 
+A turn a channel sends also runs no
+[auto-memory](../memory#auto-memory-what-qwen-learns-about-you) extraction or
+periodic cleanup (Dream) and gets no
+[follow-up suggestion](../followup-suggestions), including a message delivered
+to a session bound to a pull request. Auto-memory recall still runs, so a reply
+can draw on saved auto-memories.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
