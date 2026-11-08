@@ -1,0 +1,159 @@
+name: 'Web Shell Managed Host Build'
+
+# The managed-host mount entry is deliberately absent from the package
+# `exports`/`files`, so no ordinary build, test or consumer exercises it. It
+# used to ride `npm run build`, which taxed every local build and every
+# fresh-clone `prepare` with a full non-externalized bundle (~13s, 38 MB) for
+# an artifact nothing in the repo reads. This lane buys the same rot detection
+# on CI only, and only when the entry or its build wiring changes.
+#
+# Security: builds untrusted PR code on an ephemeral hosted runner with
+# `contents: read` and no secrets. It produces no artifact and posts nothing.
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - 'release/**'
+    paths:
+      - 'packages/web-shell/client/**'
+      - 'packages/web-shell/package.json'
+      - 'packages/web-shell/vite.config.ts'
+      - 'packages/web-shell/vite.lib.config.ts'
+      - 'packages/web-shell/pierre-build.ts'
+      - 'packages/core/package.json'
+      - 'packages/core/src/**'
+      - 'packages/acp-bridge/package.json'
+      - 'packages/acp-bridge/src/**'
+      - 'packages/sdk-typescript/package.json'
+      - 'packages/sdk-typescript/src/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/web-shell-managed-host.yml'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'packages/web-shell/client/**'
+      - 'packages/web-shell/package.json'
+      - 'packages/web-shell/vite.config.ts'
+      - 'packages/web-shell/vite.lib.config.ts'
+      - 'packages/web-shell/pierre-build.ts'
+      - 'packages/core/package.json'
+      - 'packages/core/src/**'
+      - 'packages/acp-bridge/package.json'
+      - 'packages/acp-bridge/src/**'
+      - 'packages/sdk-typescript/package.json'
+      - 'packages/sdk-typescript/src/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/web-shell-managed-host.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  # Post-merge runs must not cancel each other: a cancelled push run would
+  # erase the only post-merge witness of a regression.
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}'
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  build:
+    name: 'Managed host bundle (ubuntu-latest, Node 22.x)'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 20
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'Set up Node.js 22.x'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          package-manager-cache: false
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
+
+      - name: 'Configure npm for rate limiting'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      # The entry bundles its own React and runtime dependencies, so it needs no
+      # sibling workspace `dist/` outside the chain the two modules it imports
+      # are built from. Skipping `prepare` keeps this lane to that chain instead
+      # of rebuilding the monorepo first.
+      - name: 'Install dependencies'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+
+      # Those modules are only resolvable through the package `exports` maps,
+      # which point at each package's `dist/` — nothing else in this lane
+      # produces them. The SDK build needs acp-bridge too: its daemon sources
+      # import `@qwen-code/acp-bridge/<subpath>`, and `tsconfig.reference.json`
+      # references core alone, so `tsc --build` never produces that package.
+      # Order is core → acp-bridge → sdk, as in live-host-release.yml.
+      - name: 'Build core for the managed host entry'
+        run: 'corepack pnpm --filter @qwen-code/qwen-code-core build'
+
+      - name: 'Build acp-bridge for the SDK reference build'
+        run: 'corepack pnpm --filter @qwen-code/acp-bridge build'
+
+      - name: 'Build the SDK for the managed host entry'
+        run: 'corepack pnpm --filter @qwen-code/sdk build'
+
+      - name: 'Build the managed host entry'
+        run: 'npm run build:managed-host --workspace=@qwen-code/web-shell'
+
+      # A green build that emitted nothing would not catch the rot this lane
+      # exists for, so assert the entry point and its injected scoped CSS. The
+      # CSS check must key on the injection preamble, not a JSX prop name:
+      # `data-managed-empty` compiles to an object key that survives minification
+      # even when the plugin's per-entry guard stops matching and no stylesheet
+      # is injected at all — a green lane serving an unstyled bundle.
+      - name: 'Verify the host entry emitted a usable bundle'
+        run: |-
+          set -euo pipefail
+          entry='packages/web-shell/dist-managed-host/index.js'
+          test -s "$entry"
+          grep -q 'renderManagedAgentWebShell' "$entry"
+          grep -q '__qwenWebShellCss' "$entry"
+          grep -qF 'data-qwen-web-shell-entry="managed-host"' "$entry"
+          # The portal wrapper ships in its own chunk, and every
+          # `data-web-shell-portal-root` in the entry sits inside the injected
+          # stylesheet, so grepping the entry passes on a bundle whose wrapper
+          # was deleted. Search the whole output for the quoted JSX prop, which
+          # the scoped CSS cannot produce.
+          grep -rqF 'data-web-shell-portal-root":' 'packages/web-shell/dist-managed-host'
+          echo "Managed host entry emitted: $(wc -c < "$entry") bytes"
+
+      # The output must stay outside `dist/`: the app build empties that
+      # directory, which would delete a bundle a host is already serving.
+      - name: 'Verify the host output stays outside the app build directory'
+        run: |-
+          set -euo pipefail
+          test ! -e 'packages/web-shell/dist/managed-host'
+          node -e "
+            const pkg = require('./packages/web-shell/package.json');
+            if (pkg.scripts.build.includes('managed-host'))
+              throw new Error('managed-host must not ride the default build');
+            const targets = Object.values(pkg.exports).flatMap((entry) =>
+              typeof entry === 'string' ? [entry] : Object.values(entry),
+            );
+            if (targets.some((target) => target.includes('managed-host')))
+              throw new Error('managed-host must stay out of published exports');
+            if (!pkg.files.includes('!dist/types/managed-host.d.ts'))
+              throw new Error('managed-host types must stay out of the package');
+          "
