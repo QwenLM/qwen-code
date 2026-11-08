@@ -1385,7 +1385,7 @@ const EN: Messages = {
 
 The main session is waiting for me to answer the questions above. I want to understand the details before answering. Read the relevant code and context first. Base every claim on what you verify, and mark anything unverified.
 
-Write the explanation as a self-contained single-file HTML (inline CSS, no external resources) in English. Borrow the ASD-STE100 controlled-language sentence rules: one idea per sentence, active voice, short sentences (about 20 words max), one term per concept, conditions before actions, lists for three or more items, no metaphors or exclamations. Keep code, commands, paths, and config keys verbatim. Cover the background of each question, every option's meaning, differences, impact and risks, and a recommendation with reasons. Do not answer the questions for me and do not change the main session. Save the file under .qwen/tmp/ (for example .qwen/tmp/ask-details.html), then reply with its path and a one-sentence summary.`,
+Write the explanation as a self-contained single-file HTML (inline CSS, no external resources). Language requirement: write the entire page in English — every heading, body sentence, list item, and label must be in English; do not mix in another language. Borrow the ASD-STE100 controlled-language sentence rules: one idea per sentence, active voice, short sentences (about 20 words max), one term per concept, conditions before actions, lists for three or more items, no metaphors or exclamations. Keep code, commands, paths, and config keys verbatim. Cover the background of each question, every option's meaning, differences, impact and risks, and a recommendation with reasons. Do not answer the questions for me and do not change the main session. Save the file under .qwen/tmp/ (for example .qwen/tmp/ask-details.html), then reply with its path and a one-sentence summary.`,
   'askUser.multiHint': 'multiple choice',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
@@ -2385,6 +2385,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': 'Workspaces',
   'sidebar.pinnedSessions': 'Pinned',
+  'sidebar.sessionSort': 'Sort sessions',
+  'sidebar.sortActivity': 'Recent activity',
+  'sidebar.sortQuestion': 'Last question',
   'sidebar.recentSessions': 'Recent',
   'sidebar.standalonePinUnavailable':
     'Pinning no-workspace sessions is not supported yet.',
@@ -2396,6 +2399,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionIdCopied': 'Session ID copied',
   'sidebar.workspaceUntrusted': 'untrusted',
   'sidebar.manageWorkspaces': 'Manage workspaces…',
+  'sidebar.collapseAllWorkspaces': 'Collapse all workspaces',
+  'sidebar.expandAllWorkspaces': 'Expand all workspaces',
+  'sidebar.workspaceOrderError':
+    'Could not load or save workspace order. Reload and try again.',
   'sidebar.workspaceReadOnly': 'read-only',
   'sidebar.workspaceTrustToOpen': 'Trust this workspace to open the session.',
   'sidebar.addWorkspace': 'Add workspace',
@@ -6418,7 +6425,7 @@ const ZH: Messages = {
 
 主会话正在等我回答上面的问题。我想先了解细节，再作答。请先阅读相关代码与上下文。结论以你核实到的事实为准，未核实的内容要标注。
 
-请把解释写成自包含单文件 HTML（内联 CSS，不引用外部资源），用中文写作。借鉴 ASD-STE100 受控句式：一句一个意思、主动语态、每句不超过 20 字（代码与标识符按 1 词计）、同一概念只用一个词、条件写在动作之前、三项以上用列表、不用比喻和感叹号。代码、命令、路径、配置键名原样保留。内容覆盖：每个问题的背景；每个选项的含义、差异、影响与风险；给出建议并说明理由。不要替我作答，也不要改动主会话。文件保存到 .qwen/tmp/ 下（例如 .qwen/tmp/ask-details.html），完成后回复文件路径和一句话摘要。`,
+请把解释写成自包含单文件 HTML（内联 CSS，不引用外部资源）。语言要求：整页必须用简体中文写作——每个标题、正文句子、列表项和标签都用中文，不要混用其他语言。借鉴 ASD-STE100 受控句式：一句一个意思、主动语态、每句不超过 20 字（代码与标识符按 1 词计）、同一概念只用一个词、条件写在动作之前、三项以上用列表、不用比喻和感叹号。代码、命令、路径、配置键名原样保留。内容覆盖：每个问题的背景；每个选项的含义、差异、影响与风险；给出建议并说明理由。不要替我作答，也不要改动主会话。文件保存到 .qwen/tmp/ 下（例如 .qwen/tmp/ask-details.html），完成后回复文件路径和一句话摘要。`,
   'askUser.multiHint': '可多选',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
@@ -7345,6 +7352,9 @@ const ZH: Messages = {
   'sidebar.liveVoicePending': 'Voice chat',
   'sidebar.project': '工作区',
   'sidebar.pinnedSessions': '置顶',
+  'sidebar.sessionSort': '会话排序',
+  'sidebar.sortActivity': '最近活动',
+  'sidebar.sortQuestion': '最后提问时间',
   'sidebar.recentSessions': '最近',
   'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
@@ -7355,6 +7365,9 @@ const ZH: Messages = {
   'sidebar.sessionIdCopied': '会话 ID 已复制',
   'sidebar.workspaceUntrusted': '未信任',
   'sidebar.manageWorkspaces': '管理工作区…',
+  'sidebar.collapseAllWorkspaces': '收起所有工作区',
+  'sidebar.expandAllWorkspaces': '展开所有工作区',
+  'sidebar.workspaceOrderError': '无法加载或保存工作区顺序，请刷新后重试。',
   'sidebar.workspaceReadOnly': '只读',
   'sidebar.workspaceTrustToOpen': '信任此工作区后才能打开会话。',
   'sidebar.addWorkspace': '添加工作区',

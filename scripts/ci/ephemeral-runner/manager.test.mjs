@@ -11,7 +11,11 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { command as runCommand, createManager } from './manager.mjs';
+import {
+  backoffDelay,
+  command as runCommand,
+  createManager,
+} from './manager.mjs';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'runner-manager-'));
@@ -45,6 +49,9 @@ async function fixture(t) {
   let keepContainerAfterRemove = false;
   let loseJit = false;
   let failDelete = false;
+  let deleteStatus = 422;
+  let jitFailure = null;
+  let listFailure = null;
   const labelsFromArgs = (args) => {
     const labels = {};
     for (let i = 0; i < args.length; i += 1) {
@@ -75,18 +82,20 @@ async function fixture(t) {
       if (path.includes('generate-jitconfig')) {
         const body = JSON.parse(options.input);
         runner = { id: ++counter, name: body.name };
+        if (jitFailure) throw jitFailure();
         if (loseJit) throw new Error('network failure');
         return JSON.stringify({ runner, encoded_jit_config: 'jit-secret' });
       }
       if (args.includes('DELETE')) {
         if (failDelete) {
-          const error = new Error('gh failed (exit 1, HTTP 422)');
-          error.status = 422;
+          const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
+          error.status = deleteStatus;
           throw error;
         }
         runner = undefined;
         return '';
       }
+      if (listFailure) throw listFailure();
       return JSON.stringify(runner ? [runner] : []);
     }
     if (args[0] === 'inspect') {
@@ -163,8 +172,21 @@ async function fixture(t) {
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
     },
-    setFailDelete: (v) => {
+    setFailDelete: (v, status = 422) => {
       failDelete = v;
+      deleteStatus = status;
+    },
+    setJitStatus: (status) => {
+      jitFailure = () =>
+        Object.assign(new Error('gh failed (exit 1)'), {
+          status,
+        });
+    },
+    setListStatus: (status) => {
+      listFailure = () =>
+        Object.assign(new Error('gh failed (exit 1)'), {
+          status,
+        });
     },
     setRunner: (value) => {
       runner = value;
@@ -685,6 +707,35 @@ test('network cleanup failure prevents new runner and is reconciled on the next 
   );
 });
 
+test('backoffDelay escalates exponentially within jittered bounds', (t) => {
+  const assertBounds = (failures, isRateLimited, ceiling) => {
+    const delay = backoffDelay(failures, isRateLimited);
+    assert.ok(
+      delay >= ceiling / 2 && delay <= ceiling,
+      `${delay} outside [${ceiling / 2}, ${ceiling}]`,
+    );
+  };
+  // Rate-limited: 30s base, 300s cap
+  assertBounds(1, true, 30000);
+  assertBounds(2, true, 60000);
+  assertBounds(3, true, 120000);
+  assertBounds(4, true, 240000);
+  assertBounds(5, true, 300000);
+  assertBounds(6, true, 300000);
+  assertBounds(100, true, 300000);
+  // Non-rate-limited: 10s base, 60s cap
+  assertBounds(1, false, 10000);
+  assertBounds(2, false, 20000);
+  assertBounds(3, false, 40000);
+  assertBounds(4, false, 60000);
+  assertBounds(5, false, 60000);
+  // Jitter spreads simultaneous sleepers instead of waking them in lockstep.
+  t.mock.method(Math, 'random', () => 0);
+  assert.equal(backoffDelay(1, true), 15000);
+  t.mock.method(Math, 'random', () => 0.999999);
+  assert.ok(backoffDelay(1, true) > 29990);
+});
+
 test('a lost network create response is recovered using labels', async (t) => {
   const f = await fixture(t);
   const command = async (program, args, options) => {
@@ -960,10 +1011,11 @@ test('backs off before the next JIT request after a failed container', async (t)
     },
   });
   await manager.start();
-  // The 1 s poll that races `docker wait` also goes through the injected sleep;
-  // the replenishment backoff is the 60 s entry.
-  assert.equal(sleeps.filter((ms) => ms === 60000).length, 1);
-  assert.equal(sleeps.at(-1), 60000);
+  // The 1 s poll that races `docker wait` also goes through the injected
+  // sleep; the replenishment backoff is a run of sixty 1 s slices ending
+  // the log, and it must stay sliced so stop() can interrupt it.
+  assert.equal(sleeps.filter((ms) => ms === 60000).length, 0);
+  assert.deepEqual(sleeps.slice(-60), Array(60).fill(1000));
   assert.equal(jitRequests, 2);
 });
 
@@ -1178,7 +1230,7 @@ test('a registration retry uses a fresh unique name untouched by a leftover', as
   );
 });
 
-test('repeated identical failures raise a stall alert and a recovery resets it', async (t) => {
+test('identical failures past the time threshold raise one stall alert; recovery resets it', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
     mode: 0o755,
@@ -1194,35 +1246,363 @@ test('repeated identical failures raise a stall alert and a recovery resets it',
   t.after(() => {
     console.log = previousLog;
   });
+  // The threshold is wall-clock, so drive the clock through the injected
+  // sleep. Jitter is pinned to its floor: delays 5+10+20+40 s carry the
+  // fifth identical failure past a 60 s threshold, and the alert fires
+  // when that failure is observed.
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
   let failures = 0;
+  let recovered = false;
   const command = (program, args, options) => {
-    if (program === 'docker' && args[0] === 'info' && failures < 3) {
+    if (program === 'docker' && args[0] === 'info' && failures < 5) {
       failures += 1;
       return Promise.reject(new Error('docker unavailable'));
+    }
+    // The recovery cycle's own 1 s polls also advance the mock clock; stop
+    // once it is actually replenishing so the run cannot loop forever.
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      if (recovered) manager.stop();
+      recovered = true;
     }
     return f.command(program, args, options);
   };
   const manager = createManager(
-    { ...f.config, stallAlertRetries: 3 },
+    { ...f.config, stallAlertSeconds: 60 },
     {
       command,
-      sleep: async () => {
-        if (failures >= 3) manager.stop();
+      sleep: async (ms) => {
+        now += ms;
       },
     },
   );
   await manager.start();
   const alerts = messages.filter((message) => message.includes('STALL ALERT'));
+  // The episode alerts once; the recovery cycle then resets the clock (a
+  // later identical stall would be a new episode with its own alert).
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0], /slot 1: .*3 consecutive identical failures/);
+  assert.match(
+    alerts[0],
+    /slot 1: .*for \d+s across 5 consecutive identical failures/,
+  );
   assert.match(alerts[0], /docker unavailable/);
+  assert.ok(
+    messages.some(
+      (message) =>
+        message.includes('started runner') &&
+        messages.indexOf(message) >
+          messages.findIndex((m) => m.includes('STALL ALERT')),
+    ),
+    'the slot recovers after the alert',
+  );
+});
+
+test('a changing error restarts the stall clock instead of alerting early', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0.5);
+  let failures = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info' && failures < 6) {
+      failures += 1;
+      return Promise.reject(new Error(`docker unavailable ${failures}`));
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 25 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+        if (failures >= 6) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  assert.equal(
+    messages.filter((message) => message.includes('STALL ALERT')).length,
+    0,
+    'no identical failure ever reached the threshold',
+  );
+});
+
+// Both threshold tests below drive the wall clock through the injected sleep
+// (the manager reads Date.now()), pin Math.random to the jitter floor so the
+// ladder is exact, and stop as soon as the alert lands.
+async function stallThresholdRun(t, { rateLimited, config }) {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  let failures = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      failures += 1;
+      const error = new Error('docker unavailable');
+      if (rateLimited) error.status = 429;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(config ?? f.config, {
+    command,
+    sleep: async (ms) => {
+      now += ms;
+      if (messages.some((message) => message.includes('STALL ALERT')))
+        manager.stop();
+    },
+  });
+  await manager.start();
+  const alerts = messages.filter((message) => message.includes('STALL ALERT'));
+  assert.equal(alerts.length, 1, 'one alert per stall episode');
+  return {
+    alerts,
+    failures,
+    durationSeconds: Number(/for (\d+)s across/.exec(alerts[0])[1]),
+    failureCount: Number(/across (\d+) consecutive/.exec(alerts[0])[1]),
+  };
+}
+
+test('the stall alert defaults to a thirty-minute wall-clock threshold', async (t) => {
+  // Ordinary ladder at the jitter floor: 5 + 10 + 20 + 30 + 30 … s, so the
+  // identical failures land at 0, 5, 15, 35, 65, 95 … and the 63rd is the
+  // first one at or past the 1800 s default (1805 s).
+  const result = await stallThresholdRun(t, { rateLimited: false });
+  assert.equal(result.failureCount, 63);
+  assert.equal(result.failures, 63);
+  assert.ok(
+    result.durationSeconds >= 1800 && result.durationSeconds <= 1830,
+    `the default is a 1800 s wall clock, but the alert reported ${result.durationSeconds}s`,
+  );
+  assert.match(result.alerts[0], /docker unavailable/);
+});
+
+test('the stall threshold tracks wall clock, not the retry count', async (t) => {
+  // Rate-limited ladder at the jitter floor: 15 + 30 + 60 + 120 + 150 … s, so
+  // the identical failures land at 0, 15, 45, 105, 225, 375, 525 … and the
+  // 16th is the first past 1800 s (1875 s). Same threshold as the ordinary
+  // cadence, a quarter of the retries — that is what wall-clock buys.
+  const result = await stallThresholdRun(t, { rateLimited: true });
+  assert.equal(result.failureCount, 16);
+  assert.ok(
+    result.durationSeconds >= 1800 && result.durationSeconds <= 1950,
+    `the alert must land on the first failure past 1800 s, got ${result.durationSeconds}s`,
+  );
+  assert.ok(
+    result.failureCount < 20,
+    `a count-based threshold would need the same retries at any cadence, got ${result.failureCount}`,
+  );
+});
+
+test('stop() interrupts a long backoff sleep instead of waiting it out', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  t.mock.method(Math, 'random', () => 0.999999);
+  const sleeps = [];
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      const error = new Error('gh failed (exit 1, HTTP 403)');
+      error.status = 403;
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      manager.stop();
+    },
+  });
+  await manager.start();
+  // Exactly one slice: stop() fires inside the first 1 s chunk, and the
+  // guard must cut the wait there. >= 1 would also pass on a vacuous
+  // empty array if the loop never ran a slice at all.
+  assert.equal(sleeps.length, 1);
+  assert.ok(
+    sleeps.every((ms) => ms <= 1000),
+    `backoff slept in unsliced chunks: ${sleeps.join(', ')}`,
+  );
 });
 
 test('rejects an invalid stall alert threshold', async (t) => {
   const f = await fixture(t);
-  for (const stallAlertRetries of [0, -1, 1.5, '3'])
+  for (const stallAlertSeconds of [0, -1, '3', 0.5, 1e-9])
     assert.throws(
-      () => createManager({ ...f.config, stallAlertRetries }),
+      () => createManager({ ...f.config, stallAlertSeconds }),
       /Invalid manager configuration/,
     );
+});
+
+test('a rate-limited runner deletion backs off on the 15-300 s ladder', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  // A persisted slot makes the preflight cleanup the first and only failure:
+  // no JIT request is issued before the DELETE is rejected, which is the shape
+  // wenshao measured as 5, 10, 20 … s before the status was preserved.
+  const persisted = `ecs-qwen-trial-01-${'a'.repeat(8)}`;
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+      runnerName: persisted,
+      createdAt: new Date().toISOString(),
+      runnerId: 7,
+      uncertain: false,
+    }),
+  );
+  f.setRunner({ id: 7, name: persisted });
+  f.setFailDelete(true, 403);
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  const deletions = [];
+  const command = (program, args, options) => {
+    if (program === 'gh' && args.includes('DELETE')) deletions.push(now);
+    return f.command(program, args, options);
+  };
+  const manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      now += ms;
+      if (deletions.length >= 4) manager.stop();
+    },
+  });
+  await manager.start();
+  const intervals = deletions
+    .slice(1)
+    .map((stamp, index) => (stamp - deletions[index]) / 1000);
+  assert.deepEqual(
+    intervals.slice(0, 3),
+    [15, 30, 60],
+    `a rate-limited deletion must back off on the 15-300 s ladder, got ${intervals.join(', ')}`,
+  );
+});
+
+test('a rate-limited JIT failure keeps its status when cleanup fails too', async (t) => {
+  const f = await fixture(t);
+  f.setJitStatus(403);
+  // The cleanup that follows the rejected JIT fails for a different reason, so
+  // its status must not replace the rate-limit signal of the original error.
+  f.setListStatus(500);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), (error) => error.status === 403);
+});
+
+test('the shipped example config pins the documented stall threshold', async () => {
+  // config.example.json is what an operator copies to
+  // /etc/qwen-ephemeral-runner/config.json, and an explicit value there
+  // overrides the code default — so a stale example quietly replaces the
+  // threshold the docs promise. The default lives in manager.mjs as
+  // `config.stallAlertSeconds ?? 1800`; change one, change both.
+  const example = JSON.parse(
+    await readFile(new URL('./config.example.json', import.meta.url), 'utf8'),
+  );
+  assert.equal(example.stallAlertSeconds, 1800);
+  // The example is also the only config most operators ever load, so it has to
+  // keep passing the manager's own validation.
+  assert.doesNotThrow(() => createManager(example));
+});
+
+test('a slot that keeps stalling after the alert never alerts again', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  let cycles = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      cycles += 1;
+      return Promise.reject(new Error('docker unavailable'));
+    }
+    return f.command(program, args, options);
+  };
+  const alerts = () =>
+    messages.filter((message) => message.includes('STALL ALERT'));
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 20 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+        // Stay wedged for ten minutes: far past the alert, so a per-cycle
+        // alert would fire many times before the slot is stopped.
+        if (now >= 1_000_000 + 600_000) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  const found = alerts();
+  assert.equal(
+    found.length,
+    1,
+    `a slot that stays stalled alerted ${found.length} times instead of once`,
+  );
+  assert.ok(
+    cycles >= 10,
+    `only ${cycles} failing cycles ran; the scenario needs a sustained stall`,
+  );
+  assert.match(found[0], /across \d+ consecutive identical failures/);
 });
