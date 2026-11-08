@@ -667,7 +667,7 @@ export function ScheduledTasksDialog({
   // Multi-workspace aggregation. `workspaces` mirrors the daemon capabilities;
   // with more than one the page lists every trusted workspace's tasks together
   // and the New form offers a workspace picker. A single (or absent) workspace
-  // keeps the original primary-only view — no badges, no picker. Memoized so the
+  // keeps the original primary-only routing without a picker. Memoized so the
   // derived arrays are stable identities — `reload` depends on them, and a fresh
   // array each render would re-fire its mount effect in a loop.
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
@@ -1708,7 +1708,7 @@ export function ScheduledTasksDialog({
           dismissible={!submitting}
         >
           <div className={styles.formFields}>
-            {isMultiWorkspace && (
+            {isMultiWorkspace ? (
               <label className={styles.field}>
                 <span className={styles.fieldLabel}>
                   {t('scheduledTasks.workspace')}
@@ -1738,7 +1738,32 @@ export function ScheduledTasksDialog({
                   ))}
                 </select>
               </label>
-            )}
+            ) : formWorkspaceCwd ? (
+              <div
+                className={styles.field}
+                role="group"
+                aria-label={t('scheduledTasks.workspace')}
+              >
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.workspace')}
+                </span>
+                <span className={styles.workspacePill} title={formWorkspaceCwd}>
+                  <span className={styles.workspaceIcon} aria-hidden="true">
+                    <FolderIcon />
+                  </span>
+                  <span className={styles.workspaceName}>
+                    {formWorkspace
+                      ? workspaceLabel(formWorkspace)
+                      : workspaceLabelForCwd(formWorkspaceCwd, workspaceList)}
+                  </span>
+                </span>
+                {lockedWorkspace && (
+                  <span className={styles.fieldHint}>
+                    {t('scheduledTasks.workspaceFixedByHost')}
+                  </span>
+                )}
+              </div>
+            ) : null}
 
             <label className={styles.field}>
               <span className={styles.fieldLabel}>
@@ -2197,6 +2222,9 @@ export function ScheduledTasksDialog({
       <div className={styles.list}>
         {(tasks ?? []).map((task) => {
           const title = task.name || task.prompt;
+          const taskWorkspaceCwd =
+            task.workspaceCwd ??
+            (!isMultiWorkspace ? primaryWorkspaceCwd : undefined);
           const deliveryLabel = task.delivery
             ? `${t('scheduledTasks.delivery.cardPrefix')} ${task.delivery.target.channelName} · ${t(`scheduledTasks.delivery.${task.delivery.target.type}`)} · ${task.delivery.target.id}`
             : undefined;
@@ -2309,15 +2337,19 @@ export function ScheduledTasksDialog({
               })()}
 
               <div className={styles.cardFooter}>
-                {isMultiWorkspace && task.workspaceCwd && (
+                {taskWorkspaceCwd && (
                   <span
                     className={styles.workspacePill}
-                    title={task.workspaceCwd}
+                    title={taskWorkspaceCwd}
                   >
                     <span className={styles.workspaceIcon} aria-hidden="true">
                       <FolderIcon />
                     </span>
-                    {workspaceLabelForCwd(task.workspaceCwd, workspaceList)}
+                    <span className={styles.workspaceName}>
+                      {lockedWorkspace?.cwd === taskWorkspaceCwd
+                        ? workspaceLabel(lockedWorkspace)
+                        : workspaceLabelForCwd(taskWorkspaceCwd, workspaceList)}
+                    </span>
                   </span>
                 )}
                 <span className={styles.schedulePill}>
