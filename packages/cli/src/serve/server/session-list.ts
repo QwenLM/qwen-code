@@ -1371,6 +1371,16 @@ async function listWorkspaceSessionsByMetadataForResponse(
         session.parentSessionId === filter.parentSessionId) &&
       matchesSessionMetadataSource(session, filter),
   );
+  readOptions.signal?.throwIfAborted();
+  // Reject a cross-sort cursor before paying for any transcript read.
+  const cursor =
+    options.cursor !== undefined && options.cursor !== ''
+      ? parseMetadataSessionCursor(options.cursor, {
+          paginateMerged: readOptions.paginateMerged === true,
+          ...filter,
+          archiveState,
+        })
+      : undefined;
   if (options.sortBy === 'lastUserPromptAt') {
     await enrichPromptTimes(
       matches,
@@ -1391,15 +1401,6 @@ async function listWorkspaceSessionsByMetadataForResponse(
       getLiveSessionCursorKey(b, options.sortBy),
     ),
   );
-  readOptions.signal?.throwIfAborted();
-  const cursor =
-    options.cursor !== undefined && options.cursor !== ''
-      ? parseMetadataSessionCursor(options.cursor, {
-          paginateMerged: readOptions.paginateMerged === true,
-          ...filter,
-          archiveState,
-        })
-      : undefined;
   const cursorKey = cursor?.last;
   const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const afterCursor =
@@ -1532,14 +1533,20 @@ async function enrichPromptTimes(
       while (nextIndex < sessions.length) {
         readOptions.signal?.throwIfAborted();
         const session = sessions[nextIndex++]!;
-        session.lastUserPromptAt = await waitForQuestionTime(
-          preferCache
-            ? service.getLastUserPromptAt(session.sessionId, archiveState, {
-                preferCache: true,
-              })
-            : service.getLastUserPromptAt(session.sessionId, archiveState),
-          readOptions.signal,
-        );
+        try {
+          session.lastUserPromptAt = await waitForQuestionTime(
+            preferCache
+              ? service.getLastUserPromptAt(session.sessionId, archiveState, {
+                  preferCache: true,
+                })
+              : service.getLastUserPromptAt(session.sessionId, archiveState),
+            readOptions.signal,
+          );
+        } catch {
+          // One unreadable transcript must not fail the page; abort still wins.
+          readOptions.signal?.throwIfAborted();
+          session.lastUserPromptAt = undefined;
+        }
       }
     }),
   );

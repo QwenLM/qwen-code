@@ -19,7 +19,10 @@ import type {
   AcpSessionBridge,
   BridgeSessionSummary,
 } from '../acp-session-bridge.js';
-import { listWorkspaceSessionsForResponse } from './session-list.js';
+import {
+  InvalidCursorError,
+  listWorkspaceSessionsForResponse,
+} from './session-list.js';
 
 describe('merged session catalog pagination', () => {
   let directory: string;
@@ -179,6 +182,54 @@ describe('merged session catalog pagination', () => {
     expect(page.sessions[0]?.lastUserPromptAt).toBe(summary(0).createdAt);
     expect(page.sessions[0]?.updatedAt).toBe(summary(10).createdAt);
     expect(read.mock.calls).toEqual([[summary(0).sessionId, 'active']]);
+  });
+
+  it('rejects a cross-sort cursor before reading any transcript', async () => {
+    const { bridge } = bridgeFor([summary(0), summary(1), summary(2)]);
+    const first = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(first.nextCursor).toBeDefined();
+    const read = vi.spyOn(SessionService.prototype, 'getLastUserPromptAt');
+    await expect(
+      listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { size: 1, sortBy: 'lastUserPromptAt', cursor: first.nextCursor },
+        { runtimeBaseDir, paginateMerged: true },
+      ),
+    ).rejects.toThrow(InvalidCursorError);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('keeps the whole page when one transcript cannot be read', async () => {
+    const { bridge } = bridgeFor([summary(0), summary(1)]);
+    vi.spyOn(
+      SessionService.prototype,
+      'getLastUserPromptAt',
+    ).mockImplementation(async (id) => {
+      if (id === summary(0).sessionId)
+        throw new Error('transcript replaced during read');
+      return summary(1).createdAt;
+    });
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 2 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(page.sessions.map((row) => row.sessionId).sort()).toEqual([
+      summary(0).sessionId,
+      summary(1).sessionId,
+    ]);
+    const rows = new Map(
+      page.sessions.map((row) => [row.sessionId, row.lastUserPromptAt]),
+    );
+    expect(rows.get(summary(0).sessionId)).toBeUndefined();
+    expect(rows.get(summary(1).sessionId)).toBe(summary(1).createdAt);
   });
 
   it('keeps an oversized historical row visible without inventing its question time', async () => {

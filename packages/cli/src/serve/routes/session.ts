@@ -6263,10 +6263,14 @@ export function registerSessionRoutes(
       'GET /session/:id/status',
       async (_req, res, sessionId, runtime) => {
         const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
-        summary.lastUserPromptAt =
-          await createWorkspaceRuntimeSessionService(
-            runtime,
-          ).getLastUserPromptAt(sessionId);
+        const service = createWorkspaceRuntimeSessionService(runtime);
+        try {
+          summary.lastUserPromptAt =
+            await service.getLastUserPromptAt(sessionId);
+        } catch {
+          // An unreadable transcript omits the optional field, not the summary.
+          summary.lastUserPromptAt = undefined;
+        }
         runtime.generationGuard?.assertOpen();
         res.status(200).json(summary);
       },

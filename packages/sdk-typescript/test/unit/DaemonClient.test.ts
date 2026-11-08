@@ -747,6 +747,28 @@ describe('DaemonClient', () => {
       ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
       expect(calls).toHaveLength(1);
     });
+    it('rejects the default sort value too, because older daemons reject the parameter', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { features: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const options = { sortBy: 'updatedAt' as const };
+      await expect(
+        client.listWorkspaceSessionsPage('/a', options),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      await expect(
+        client.workspaceByCwd('/a').listWorkspaceSessionsPage(options),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      await expect(
+        client.listStandaloneSessionsPage(options),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      await expect(
+        client.listSessionsCatalog({ workspaces: 'all', options }),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls.map(({ url }) => url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
+    });
   });
 
   describe('source capability preflight reuse', () => {

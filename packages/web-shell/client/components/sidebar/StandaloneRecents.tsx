@@ -181,6 +181,9 @@ export function StandaloneRecents({
       loadGenerationRef.current = generation;
       setLoadingMore(false);
       setLoading(true);
+      // A discarded page must not leave its cursor behind: it is bound to the
+      // sort that produced it, and the daemon rejects it under another sort.
+      if (!preservePages) setCursor(undefined);
       try {
         const targetCount = preservePages ? sessionsRef.current.length : 0;
         let page = await workspace.client.listStandaloneSessionsPage({
@@ -266,7 +269,7 @@ export function StandaloneRecents({
   }, [expanded]);
 
   const loadMore = useCallback(async () => {
-    if (!cursor || loadingMore) return;
+    if (!cursor || loadingMore || loading) return;
     const generation = loadGenerationRef.current;
     setLoadingMore(true);
     try {
@@ -290,7 +293,7 @@ export function StandaloneRecents({
     } finally {
       if (loadGenerationRef.current === generation) setLoadingMore(false);
     }
-  }, [archiveState, sortBy, cursor, loadingMore, workspace.client]);
+  }, [archiveState, sortBy, cursor, loading, loadingMore, workspace.client]);
 
   const run = useCallback(
     async (
@@ -649,7 +652,7 @@ export function StandaloneRecents({
                 variant="ghost"
                 size="sm"
                 className="w-full"
-                disabled={loadingMore}
+                disabled={loading || loadingMore}
                 onClick={() => void loadMore()}
               >
                 {t('sidebar.showAllSessions')}

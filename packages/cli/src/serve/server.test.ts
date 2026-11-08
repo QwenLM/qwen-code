@@ -27337,6 +27337,31 @@ describe('createServeApp', () => {
       read.mockRestore();
     });
 
+    it('still returns the summary when the transcript cannot be read', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-time',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: true,
+      };
+      const read = vi
+        .spyOn(SessionService.prototype, 'getLastUserPromptAt')
+        .mockRejectedValueOnce(new Error('transcript replaced during read'));
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-time/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(summary);
+      read.mockRestore();
+    });
+
     it('200 with the live session summary', async () => {
       const summary: BridgeSessionSummary = {
         sessionId: 's-1',

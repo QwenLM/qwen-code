@@ -36,6 +36,6 @@ session list 和批量 catalog 复用同一补齐路径；status 使用实际 li
 
 ## 验证
 
-E2E 计划位于忽略目录 `.qwen/e2e-tests/pr14654-hot-prompt-time.md`。同时验证时间真值和扫描计数：一次冷扫描；重读、稠密索引淘汰、助手/自动活动追加、收到真实持久化输入通知后都不新增完整扫描；失败写入不通知。另验证 list/catalog/status 一致性、observer 清理、外部 owner 拒绝、归档隔离、分支恢复和重启。使用隔离合成数据与 loopback daemon，不使用生产历史或模型凭证。
+E2E 计划位于忽略目录 `.qwen/e2e-tests/pr14654-hot-prompt-time.md`。同时验证时间真值和扫描计数：一次冷扫描；重读、稠密索引淘汰、助手/自动活动追加、收到真实持久化输入通知后都不新增完整扫描；失败写入不通知。另验证 list/catalog/status 一致性、observer 清理、外部 owner 拒绝、归档隔离、拓扑恢复和重启。使用隔离合成数据与 loopback daemon，不使用生产历史或模型凭证。
 
 最终结果写入 PR 验证评论；本地 source-level 结果不等于生产性能保证。

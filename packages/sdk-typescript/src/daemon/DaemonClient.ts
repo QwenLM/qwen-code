@@ -3307,7 +3307,7 @@ export class DaemonClient {
   async listStandaloneSessionsPage(
     options: DaemonStandaloneSessionListOptions = {},
   ): Promise<DaemonStandaloneSessionListPage> {
-    if (options?.sortBy === 'lastUserPromptAt')
+    if (options?.sortBy !== undefined)
       await this.requireCapability('session_last_user_prompt_sort');
     const query = new URLSearchParams();
     if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
@@ -3625,7 +3625,7 @@ export class DaemonClient {
     workspaceCwd: string,
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
-    if (options?.sortBy === 'lastUserPromptAt')
+    if (options?.sortBy !== undefined)
       await this.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
@@ -3688,7 +3688,7 @@ export class DaemonClient {
     request: DaemonSessionCatalogRequest,
     opts?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<DaemonSessionCatalogResult> {
-    if (request.options?.sortBy === 'lastUserPromptAt')
+    if (request.options?.sortBy !== undefined)
       await this.requireCapability('session_last_user_prompt_sort');
     const { pageSize, ...options } = request.options ?? {};
     return await this.jsonRequest<DaemonSessionCatalogResult>(
@@ -9068,7 +9068,7 @@ export class WorkspaceDaemonClient {
   async listWorkspaceSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
-    if (options?.sortBy === 'lastUserPromptAt')
+    if (options?.sortBy !== undefined)
       await this.client.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.client.requireCapability('session_source_metadata');
