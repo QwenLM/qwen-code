@@ -74,7 +74,6 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     public boolean selfServiceSupported() { return properties.getExtensions().isSelfServiceEnabled() && supportsPreparation(); }
 
-
     private void requireSelfService() {
         if (!selfServiceSupported()) {
             throw new ManagedAgentException(409, "unsupported_feature", "Managed self-service installation is unavailable.");

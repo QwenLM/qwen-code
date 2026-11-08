@@ -3468,7 +3468,6 @@ class ManagedAgentApiContractTest {
                 "{\"idempotencyKey\":\"lookup\"}");
         exchange(drift, "lookupWebShellSessionExtensionOperation", 401, post(WEB_SHELL + "/session-extensions/operations/lookup").header(TENANT, tenant),
                 query + ",\"idempotencyKey\":\"lookup\"}");
-
     }
 
     private String exchange(Map<String, String> drift, String operationId,
