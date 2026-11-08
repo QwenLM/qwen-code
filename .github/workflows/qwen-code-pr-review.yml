@@ -627,7 +627,9 @@ jobs:
           # incident). Reclaim via sudo when available; otherwise fail HERE,
           # before the checkout, with the cause named.
           if [ -e "$QWEN_HOME" ]; then
-            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null || true
+            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null ||
+              sudo -n chown -R "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            rm -rf "$QWEN_HOME" 2>/dev/null || true
           fi
           if [ -e "$QWEN_HOME" ]; then
             echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
@@ -635,6 +637,18 @@ jobs:
             exit 1
           fi
           mkdir -p "$QWEN_HOME"
+          # The sudo reclaim paths above can leave the home root-owned (sudo
+          # rm on some hosts, sudo chown to root by accident); mkdir -p on a
+          # root-owned leftover would "succeed" and re-arm the same fail-late
+          # bug one step later. Own the fresh home explicitly.
+          if [ ! -w "$QWEN_HOME" ]; then
+            sudo -n chown "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ ! -w "$QWEN_HOME" ]; then
+            echo "::error::fresh qwen-home is not writable by the runner user: $QWEN_HOME"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a
