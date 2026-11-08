@@ -1947,7 +1947,7 @@ it('commits a 32-live-plus-tombstone snapshot that a fresh reader opens', async 
   const previous = Array.from({ length: 32 }, (_, index) => ({
     ...pin,
     serverId: `server-${index}`,
-    state: 'disabled' as const,
+    state: (index === 31 ? 'removed' : 'disabled') as 'removed' | 'disabled',
   }));
   const command = managementCommand('add', 'server-32', 0, {
     ...pin,
