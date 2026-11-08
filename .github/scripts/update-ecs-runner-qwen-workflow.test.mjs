@@ -223,15 +223,38 @@ describe('ECS runner qwen update workflow', () => {
     // a runner NAME queues forever, the leg is cancelled after 24 h, and
     // the reporter deliberately ignores `cancelled` — the exact silent
     // stale pool this workflow exists to prevent.
-    assert.ok(pools.length >= 10);
     for (const pool of pools) {
       assert.match(pool, /^ecs-update-(hk|hz)-\d+$/);
     }
-    // hz4 has no persistent runner; the other five hz hosts each get a leg.
-    for (const host of [1, 2, 3, 5, 6]) {
+    // hz4 and hz5 have no persistent runner — every machine there is an
+    // ephemeral container runner whose image already carries the CLI, so
+    // there is nothing to update and no runner to hang the label on. The
+    // other four hz hosts each get a leg.
+    for (const host of [1, 2, 3, 6]) {
       assert.ok(pools.includes(`ecs-update-hz-${host}`));
     }
-    assert.ok(!pools.some((pool) => pool.includes('hz-4')));
+    for (const host of [4, 5]) {
+      assert.ok(
+        !pools.some((pool) => pool.includes(`hz-${host}`)),
+        `ecs-update-hz-${host} has no runner carrying that label`,
+      );
+    }
+    // Name every hk leg too: the shape check above accepts any digit string,
+    // so renaming one of them (and its actionlint declaration together) used
+    // to survive the whole suite while the leg queued forever.
+    for (const host of [1, 2, 3, 4, 5]) {
+      assert.ok(
+        pools.includes(`ecs-update-hk-${host}`),
+        `ecs-update-hk-${host} lost its leg`,
+      );
+    }
+    // Counted last on purpose: a re-added leg should fail on the host that has
+    // no runner, not on an opaque length mismatch.
+    assert.equal(
+      pools.length,
+      9,
+      'five hk legs plus the four hz hosts that have a persistent runner',
+    );
     // Static runs-on: actionlint can only check labels it can see, and an
     // expression-built label array hides typos from it.
     assert.ok(
