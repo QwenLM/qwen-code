@@ -5,7 +5,11 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 ## 宿主已有 Managed Session
 
-`ManagedAgentWebShell` 支持注入 `managedAgentProvider`，省略时仍创建 Java provider。
+`ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略它时必须同时传 `baseUrl`，
+由它创建内置 Java provider。两者都给不出时渲染的是 shell 自己的错误回退界面（守卫
+的错误信息只打到 `console.error`，不会抛给宿主），不会把请求解析到
+`<origin>/undefined`。恢复需要宿主重新提供 `baseUrl` 或新的 provider：边界只通过
+`resetKeys` 清除错误，回退界面自带的「重试」会用相同 props 重渲染并再次落到同一错误。
 宿主传 `hostSessionOnly: true` 时只打开显式给定的 `sessionId`，隐藏内部会话列表、
 New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建。官方消息列表和 composer
 沿用 provider 的真实 capabilities；四 API 宿主应设置 `canCancel: false`、省略不支持的

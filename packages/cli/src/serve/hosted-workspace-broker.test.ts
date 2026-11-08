@@ -165,6 +165,95 @@ async function fixture(
   );
 }
 
+function runtimeResponse(provisionerKind?: unknown) {
+  return {
+    ...identity,
+    ready: true,
+    acquired: true,
+    scope: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      workspaceGeneration: '3',
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    },
+    runtime: {
+      bindingId: 'binding',
+      generation: '7',
+      ...(provisionerKind !== undefined ? { provisionerKind } : {}),
+    },
+  };
+}
+
+it.each(['local-process', 'ssh-process', 'external-workspace'])(
+  'reads %s provider metadata through HTTP warm and recovery acquire without extending identity',
+  async (provider) => {
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const broker = await fixture((path, body) => {
+      requests.push({ path, body });
+      return { body: runtimeResponse(provider) };
+    });
+    await broker.warm();
+    expect(broker.provisionerKind).toBe(provider);
+    expect(broker.acquired).toBe(false);
+    expect(broker.runtime).toEqual({
+      bindingId: 'binding',
+      generation: '7',
+      workspaceGeneration: '3',
+    });
+    await broker.acquire({ runtimeBindingId: 'binding', generation: '7' });
+    expect(broker.provisionerKind).toBe(provider);
+    expect(broker.acquired).toBe(true);
+    expect(broker.runtime).toEqual({
+      bindingId: 'binding',
+      generation: '7',
+      workspaceGeneration: '3',
+    });
+    expect(requests.map((request) => request.path)).toEqual([
+      '/internal/runtime-broker/v1/runtimes:warm',
+      '/internal/runtime-broker/v1/tool-sessions:acquire',
+    ]);
+    expect(requests[1].body).toMatchObject({
+      recoveryBindingId: 'binding',
+      recoveryGeneration: '7',
+    });
+  },
+);
+
+it.each(['warm', 'acquire'] as const)(
+  'clears stale provider metadata when HTTP %s returns an older binding response',
+  async (operation) => {
+    let response = runtimeResponse('local-process');
+    const broker = await fixture(() => ({ body: response }));
+    await broker[operation]();
+    expect(broker.provisionerKind).toBe('local-process');
+    response = runtimeResponse();
+    await broker[operation]();
+    expect(broker.provisionerKind).toBeUndefined();
+    expect(broker.runtime).toEqual({
+      bindingId: 'binding',
+      generation: '7',
+      workspaceGeneration: '3',
+    });
+  },
+);
+
+it.each(
+  (['warm', 'acquire'] as const).flatMap((operation) =>
+    [null, '', 1, false, {}, []].map((provider) => ({ operation, provider })),
+  ),
+)(
+  'rejects invalid provider metadata from HTTP $operation ($provider)',
+  async ({ operation, provider }) => {
+    const broker = await fixture(() => ({ body: runtimeResponse(provider) }));
+    await expect(broker[operation]()).rejects.toThrow(
+      'Runtime Broker provider is invalid.',
+    );
+    expect(broker.provisionerKind).toBeUndefined();
+    expect(broker.acquired).toBe(false);
+    expect(broker.runtime).not.toHaveProperty('provisionerKind');
+  },
+);
+
 it.each([false, true])(
   'carries the original cleanup fence with drain=%s',
   async (drain) => {
@@ -630,6 +719,20 @@ it.each(['runtime_idempotency_conflict', 'runtime_execution_conflict'])(
     ]);
   },
 );
+
+it('preserves a definite payload-invalid start rejection without polling', async () => {
+  const paths: string[] = [];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return { code: 400, body: { code: 'runtime_payload_invalid' } };
+  });
+  await expect(
+    broker.execute('execution', '{}', new AbortController().signal, 50),
+  ).rejects.toMatchObject({ status: 400, code: 'runtime_payload_invalid' });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+  ]);
+});
 
 it('queries the original identity when start reports an unknown execution', async () => {
   const paths: string[] = [];

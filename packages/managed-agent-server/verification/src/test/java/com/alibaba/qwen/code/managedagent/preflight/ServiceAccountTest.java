@@ -30,6 +30,12 @@ class ServiceAccountTest {
         Path file = Files.writeString(directory.resolve("harness.env"), "");
         PosixFileAttributes attributes = Files.readAttributes(file, PosixFileAttributes.class);
         String owner = attributes.owner().getName();
+        if (owner.equals("root")) {
+            // Root reads any file, so the owner bits need another owner.
+            owner = "nobody";
+            Files.setOwner(file, file.getFileSystem().getUserPrincipalLookupService()
+                    .lookupPrincipalByName(owner));
+        }
         String group = attributes.group().getName();
         ServiceAccount self = new ServiceAccount(owner, Set.of());
         ServiceAccount member = new ServiceAccount(STRANGER, Set.of(group));
@@ -48,6 +54,26 @@ class ServiceAccountTest {
         // The owner bits alone apply to the owner.
         mode(file, "-w-r--r--");
         assertFalse(self.canRead(file));
+    }
+
+    @Test
+    void letsRootReadAndEnterWhateverTheModes(@TempDir Path directory) throws IOException {
+        Path locked = Files.createDirectory(directory.resolve("locked"));
+        Path file = Files.writeString(locked.resolve("application.yml"), "");
+        mode(file, "---------");
+        mode(locked, "---------");
+        try {
+            ServiceAccount root = new ServiceAccount("root", Set.of("root"));
+            assertTrue(root.canEnter(locked));
+            assertTrue(root.canRead(file));
+            assertTrue(root.allows(Files.readAttributes(locked, PosixFileAttributes.class), true));
+            // Not an account of root's group, which the modes keep out.
+            assertFalse(new ServiceAccount(STRANGER, Set.of("root")).canEnter(locked));
+            // Nor root a file that is not there.
+            assertThrows(IOException.class, () -> root.canRead(directory.resolve("missing.env")));
+        } finally {
+            mode(locked, "rwx------");
+        }
     }
 
     @Test

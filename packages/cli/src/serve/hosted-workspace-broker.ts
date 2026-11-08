@@ -136,6 +136,7 @@ export class HostedWorkspaceBroker {
   private leaseAcquired = false;
   private capability?: string;
   private capabilityResolution?: Promise<void>;
+  provisionerKind?: string;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -148,6 +149,10 @@ export class HostedWorkspaceBroker {
 
   get runtimeSessionId(): string {
     return this.identity.runtimeSessionId;
+  }
+
+  get harnessSessionId(): string {
+    return this.identity.harnessSessionId;
   }
 
   get acquired(): boolean {
@@ -332,6 +337,13 @@ export class HostedWorkspaceBroker {
         generation,
         workspaceGeneration,
       };
+      if (
+        binding['provisionerKind'] !== undefined &&
+        (typeof binding['provisionerKind'] !== 'string' ||
+          binding['provisionerKind'].length === 0)
+      )
+        throw new Error('Runtime Broker provider is invalid.');
+      this.provisionerKind = binding['provisionerKind'] as string | undefined;
     }
   }
 
@@ -598,9 +610,12 @@ export class HostedWorkspaceBroker {
       } catch (error) {
         if (
           error instanceof HostedWorkspaceBrokerRejection &&
-          error.status === 409 &&
-          (error.code === 'runtime_idempotency_conflict' ||
-            error.code === 'runtime_execution_conflict')
+          ((error.status === 409 &&
+            (error.code === 'runtime_idempotency_conflict' ||
+              error.code === 'runtime_execution_conflict')) ||
+            // A payload the Broker refused to parse never became an
+            // invocation, so no poll can turn it into a reply.
+            (error.status === 400 && error.code === 'runtime_payload_invalid'))
         )
           throw error;
         // A lost start reply is not permission to start another invocation.
