@@ -7,6 +7,7 @@ import {
   getFileChangePreviewContent,
   getWorkspaceArtifactOpenBlockReason,
   isDownloadableReviewFilePath,
+  isArtifactPreviewable,
   isRenderedFilePath,
   TURN_OUTPUT_VISIBLE_LIMIT,
   visibleTurnOutputs,
@@ -15,6 +16,18 @@ import {
 import { getArtifactIconKind } from './ArtifactIcon';
 
 describe('TurnOutputs helpers', () => {
+  it('does not promise previews for managed artifacts without host support', () => {
+    const artifact = {
+      id: 'managed-image',
+      kind: 'image',
+      storage: 'managed',
+      mimeType: 'image/png',
+    } as DaemonSessionArtifact;
+
+    expect(isArtifactPreviewable(artifact)).toBe(false);
+    expect(isArtifactPreviewable(artifact, true)).toBe(true);
+  });
+
   it('caps collapsed turn outputs at three items', () => {
     const items = [1, 2, 3, 4, 5];
     expect(visibleTurnOutputs(items, false)).toEqual([1, 2, 3]);

@@ -754,6 +754,12 @@ export interface WebShellCustomization {
   compactThinking?: boolean;
   hostOwnsEditDiffPreview?: boolean;
   /**
+   * Whether the embedding host can render managed artifacts when a card is
+   * opened. Defaults to false so the built-in panel does not promise a preview
+   * it cannot render.
+   */
+  hostOwnsArtifactPreview?: boolean;
+  /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving
    * just the prompt and the final answer. The active turn always stays

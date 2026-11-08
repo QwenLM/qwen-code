@@ -186,7 +186,8 @@ function TurnOutputsComponent({
   onError,
 }: TurnOutputsProps) {
   const { t } = useI18n();
-  const { filterArtifact } = useWebShellCustomization();
+  const { filterArtifact, hostOwnsArtifactPreview = false } =
+    useWebShellCustomization();
   const artifacts = filterArtifact
     ? allArtifacts.filter((artifact) =>
         filterArtifact(artifact, { turnId, sourceSessionId }),
@@ -392,6 +393,7 @@ function TurnOutputsComponent({
           <ArtifactCard
             key={artifact.id}
             artifact={artifact}
+            hostOwnsArtifactPreview={hostOwnsArtifactPreview}
             externalUrl={externalUrl}
             onOpen={
               externalUrl || !canOpenWorkspaceArtifact(artifact)
@@ -444,12 +446,14 @@ function TurnOutputsComponent({
 
 function ArtifactCard({
   artifact,
+  hostOwnsArtifactPreview,
   externalUrl,
   onOpen,
   onDownload,
   onError,
 }: {
   artifact: DaemonSessionArtifact;
+  hostOwnsArtifactPreview: boolean;
   externalUrl?: string;
   onOpen?: () => void;
   onDownload?: (isCancelled: () => boolean) => Promise<void>;
@@ -493,8 +497,7 @@ function ArtifactCard({
   // preview tab, so label the action Preview rather than the generic Open.
   // External-URL artifacts only show metadata and an Open link in the panel,
   // so they keep Open even when their kind would otherwise render.
-  const rendered =
-    isRenderedArtifact(artifact) && artifact.storage !== 'external_url';
+  const rendered = isArtifactPreviewable(artifact, hostOwnsArtifactPreview);
   return (
     <div className={styles.card}>
       <div className={`${styles.summary} ${styles.artifactSummary}`}>
@@ -677,6 +680,17 @@ export function getArtifactPreviewContent(
   );
   if (!change) return undefined;
   return getFileChangePreviewContent(change);
+}
+
+export function isArtifactPreviewable(
+  artifact: DaemonSessionArtifact,
+  hostOwnsArtifactPreview = false,
+) {
+  return (
+    isRenderedArtifact(artifact) &&
+    artifact.storage !== 'external_url' &&
+    (artifact.storage !== 'managed' || hostOwnsArtifactPreview)
+  );
 }
 
 export function getFileChangePreviewContent(change: TurnOutputFileChange) {
