@@ -6138,6 +6138,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         waiveGroupMention:
           !envelope.messageId?.startsWith('issue-body-') &&
           this.waivesBoundMention(envelope.chatId, envelope.senderId),
+        // The comment watch delivers the channel account's own comments (the
+        // notification lanes filter that login out, so this can only be the
+        // watch). The sender allowlist guidance excludes that account, which
+        // would otherwise retire every watched comment as preflight_rejected.
+        waiveGroupSender:
+          this.botUsername != null &&
+          envelope.senderId === this.botUsername.toLowerCase(),
       });
       const admitted =
         typeof preflight === 'boolean' ? preflight : await preflight;
@@ -7291,9 +7298,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     candidates.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
     const commitCursor = (newSince: string): void => {
+      // GitHub compares `since` at whole-second granularity while nowIso carries
+      // milliseconds: a comment created later in the same second as the fetch
+      // snapshot would be excluded from every later fetch. Floor the cursor to
+      // the second so that whole second is re-listed next pass (anything already
+      // delivered is deduped), never skipped past.
+      const floored = new Date(
+        Math.floor(Date.parse(newSince) / 1000) * 1000,
+      ).toISOString();
       this.prWatchState.entries[key] = {
         ...(this.prWatchState.entries[key] ?? {}),
-        commentSince: newSince,
+        commentSince: floored,
         commentLastFetchAt: now,
       };
       this.savePrWatchState();

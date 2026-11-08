@@ -114,6 +114,7 @@ describe('GET /sessions/:id/posted-comments', () => {
     };
     writeFileSync(transcript, JSON.stringify(entry) + '\n');
     mockSessionService.mockReturnValue({
+      sessionPrSidecarBelongsToCurrentProject: async () => true,
       getPrSessionPathForArchiveState: () => join(dir, `${SESSION_ID}.pr.json`),
     } as never);
     const app = appWithRuntime({ trusted: true, primary: false });
@@ -122,5 +123,18 @@ describe('GET /sessions/:id/posted-comments', () => {
       .query({ workspaceCwd: '/ws/trusted' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ids: ['ic:42'] });
+  });
+
+  it('answers empty for a session belonging to a different project', async () => {
+    mockSessionService.mockReturnValue({
+      sessionPrSidecarBelongsToCurrentProject: async () => false,
+      getPrSessionPathForArchiveState: () => join(dir, `${SESSION_ID}.pr.json`),
+    } as never);
+    const app = appWithRuntime({ trusted: true, primary: false });
+    const res = await request(app)
+      .get(`/sessions/${SESSION_ID}/posted-comments`)
+      .query({ workspaceCwd: '/ws/trusted' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ids: [] });
   });
 });

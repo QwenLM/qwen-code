@@ -22906,6 +22906,32 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
       });
 
+      it('delivers a same-account comment under a sender allowlist that excludes the channel account', async () => {
+        // The recommended senders:allowlist policy excludes the channel's own
+        // login; the private comment watch must still deliver (sender gate
+        // waived for this lane) rather than retire as preflight_rejected.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            groupPolicy: 'allowlist',
+            groups: {
+              'owner/repo': { senders: 'allowlist', allowedUsers: ['alice'] },
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
       it('delivers an inline review comment with file/line context', async () => {
         await initChannel(commentWatchConfig, { boundSessions });
         boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());

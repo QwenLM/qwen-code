@@ -343,7 +343,10 @@ function initialFieldValue(
 ): string | boolean {
   const value = instance?.config[field.key];
   if (field.kind === 'boolean') {
-    return typeof value === 'boolean' ? value : false;
+    // Honour the declared default when the key is absent so a default-on field
+    // (prCommentWatch) is not silently saved as false by every UI edit. An
+    // explicit stored boolean — including false — is preserved verbatim.
+    return typeof value === 'boolean' ? value : field.default === 'true';
   }
   if (field.kind === 'number') {
     return typeof value === 'number' ? String(value) : '';

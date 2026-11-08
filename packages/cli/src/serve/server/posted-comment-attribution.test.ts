@@ -36,6 +36,19 @@ function shellResult(command: string, output: string): unknown {
 }
 
 describe('extractPostedCommentIds', () => {
+  it('pins the cross-package ic:/rc: wire format with literals', () => {
+    // The adapter builds attrKey with these exact prefixes; a helper-only
+    // expectation would let a prefix rename pass both sides while they no
+    // longer match. Pin the literals the watch relies on.
+    expect(issueCommentKey(1)).toBe('ic:1');
+    expect(reviewCommentKey(2)).toBe('rc:2');
+    const entry = shellResult(
+      'gh pr comment 1 --body a',
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
   it('attributes a gh pr comment creation', () => {
     const entry = shellResult(
       'gh pr comment 16458 --repo QwenLM/qwen-code --body-file report.md',
@@ -191,6 +204,77 @@ describe('extractPostedCommentIds', () => {
       '{"id":102}',
     );
     expect(extractPostedCommentIds(entry)).toContain(reviewCommentKey('102'));
+  });
+
+  it('attributes a creation behind an env wrapper (assignment and -u flag)', () => {
+    const assign = shellResult(
+      'env FOO=1 gh api repos/o/r/issues/42/comments -X POST -f body=x',
+      '{"id":701}',
+    );
+    expect(extractPostedCommentIds(assign)).toContain(issueCommentKey('701'));
+    const unset = shellResult(
+      "env -u HTTP_PROXY gh api repos/o/r/pulls/3820/comments/9/replies -f body=x --jq '.id'",
+      '3182736379',
+    );
+    expect(extractPostedCommentIds(unset)).toContain(
+      reviewCommentKey('3182736379'),
+    );
+  });
+
+  it('attributes a creation behind time/nohup/sudo wrappers', () => {
+    for (const wrapper of ['time', 'nohup', 'sudo']) {
+      const entry = shellResult(
+        `${wrapper} gh api repos/o/r/issues/42/comments -X POST -f body=x`,
+        '{"id":702}',
+      );
+      expect(extractPostedCommentIds(entry)).toContain(issueCommentKey('702'));
+    }
+  });
+
+  it('attributes a creation captured in an assignment', () => {
+    const entry = shellResult(
+      'cid=$(gh api repos/o/r/issues/42/comments -X POST -f body=x)',
+      '{"id":703}',
+    );
+    expect(extractPostedCommentIds(entry)).toContain(issueCommentKey('703'));
+  });
+
+  it('does not attribute a search that quotes a creation with path and write flag', () => {
+    // Pins the stage-start anchor: the stage leads with the search tool, not a
+    // wrapper or gh api/curl, so the quoted creation is not a real command.
+    const entry = shellResult(
+      'grep -n "gh api repos/o/r/issues/1/comments -X POST" notes.md',
+      '{"id":888}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not credit a create-then-list compound with the listed comments', () => {
+    // The output mixes the created URL with a listing; that is ambiguous, so
+    // attribute nothing rather than crediting the mere reader (fail-open).
+    const entry = shellResult(
+      'gh pr comment 42 --body hi && gh api repos/o/r/issues/42/comments',
+      'https://github.com/o/r/pull/42#issuecomment-900\n[{"id":6538275524,"html_url":"https://github.com/o/r/issues/42#issuecomment-6538275524"},{"id":6538275599,"html_url":"https://github.com/o/r/issues/42#issuecomment-6538275599"}]',
+    );
+    const ids = extractPostedCommentIds(entry);
+    expect(ids).not.toContain(issueCommentKey('6538275524'));
+    expect(ids).not.toContain(issueCommentKey('6538275599'));
+  });
+
+  it('harvests only the top-level id of a single creation object, not nested user.id', () => {
+    const entry = shellResult(
+      'gh api repos/o/r/issues/42/comments -X POST -f body=x',
+      '{"id":555,"user":{"id":999}}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('555')]);
+  });
+
+  it('does not attribute a curl -G listing', () => {
+    const entry = shellResult(
+      'curl -sG https://api.github.com/repos/o/r/issues/42/comments -d per_page=100',
+      '[{"id":111},{"id":222}]',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
   it('does not attribute a read backgrounded before an unrelated -f command', () => {

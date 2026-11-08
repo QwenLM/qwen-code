@@ -148,6 +148,17 @@ function commandSegments(command: string): string[] {
   return segments;
 }
 
+/**
+ * A path-based creation must be led by `gh api` / `curl`, optionally behind a
+ * wrapper command (env/time/nohup/command/sudo with its flags/assignments) or an
+ * assignment capture (`cid=$(…)` / backticks). The lead-in is what rejects a
+ * read-only search that merely quotes a creation (`rg 'gh api … -X POST'`): its
+ * stage starts with the search tool, not a wrapper or the API command. A flag's
+ * optional value never consumes the `gh` of `gh api`.
+ */
+const API_STAGE_START =
+  /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*)*(?:gh\s+api|curl)\b/;
+
 function segmentIsCreation(segment: string): boolean {
   // An explicit GET is a read even with field flags (gh api sends them as query
   // parameters on a GET). Unwrap a quoted GET method value first so the veto
@@ -158,15 +169,23 @@ function segmentIsCreation(segment: string): boolean {
   );
   if (EXPLICIT_GET_PATTERN.test(getProbe)) return false;
   const stripped = stripQuotedSpans(segment);
+  // curl -G / --get sends a GET even when -d/--data is present (the data becomes
+  // query parameters), so a -G listing is a read, not a creation.
+  if (
+    /\bcurl\b/.test(stripped) &&
+    /(?:^|\s)(?:--get|-[A-Za-z]*G[A-Za-z]*)(?:\s|$)/.test(stripped)
+  ) {
+    return false;
+  }
   if (SUBCOMMAND_PATTERNS.some((pattern) => pattern.test(stripped)))
     return true;
   // A quoted collection path still counts, so test the path patterns on a copy
-  // with quote characters removed (content kept). Require the stage to actually
-  // start with gh api / curl so a read-only search quoting such a command is not
-  // mistaken for a creation.
+  // with quote characters removed (content kept). Require the stage to be led by
+  // gh api / curl (possibly behind a wrapper or capture) so a read-only search
+  // quoting such a command is not mistaken for a creation.
   const unwrapped = segment.replace(/['"]/g, '');
   if (
-    /^\s*(?:gh\s+api|curl)\b/.test(unwrapped) &&
+    API_STAGE_START.test(unwrapped) &&
     PATH_PATTERNS.some((pattern) => pattern.test(unwrapped))
   ) {
     return true;
@@ -236,34 +255,51 @@ export function extractPostedCommentIds(entry: unknown): string[] {
       output.match(/\nOutput: ([\s\S]*)$/)?.[1] ??
       '';
 
-    for (const match of result.matchAll(/issuecomment-(\d+)/g)) {
-      ids.add(issueCommentKey(match[1]!));
+    // Harvest only a creation-shaped response, never a listing or free text: a
+    // create returns exactly one comment URL, a single JSON object, or a bare
+    // id. A compound "create && list" or a body quoting another comment's URL
+    // yields several candidates, which is ambiguous — attribute nothing there
+    // (fail-open: the author may self-echo once, but a mere reader is never
+    // credited with comments it only listed).
+    const urlMatches = [...result.matchAll(/issuecomment-(\d+)/g)].map((m) =>
+      issueCommentKey(m[1]!),
+    );
+    urlMatches.push(
+      ...[...result.matchAll(/discussion_r(\d+)/g)].map((m) =>
+        reviewCommentKey(m[1]!),
+      ),
+    );
+    if (urlMatches.length === 1) {
+      ids.add(urlMatches[0]!);
     }
-    for (const match of result.matchAll(/discussion_r(\d+)/g)) {
-      ids.add(reviewCommentKey(match[1]!));
-    }
-    // A bare JSON `id` only counts when the creation stage targeted a comments
-    // collection, so an unrelated numeric id in the output is not grabbed.
     const target = creationTarget(segment);
     if (target) {
-      for (const match of result.matchAll(/"id"\s*:\s*(\d+)/g)) {
-        ids.add(
-          target === 'issue-comment'
-            ? issueCommentKey(match[1]!)
-            : reviewCommentKey(match[1]!),
-        );
+      const trimmed = result.trim();
+      const keyFor = (id: string | number): string =>
+        target === 'issue-comment' ? issueCommentKey(id) : reviewCommentKey(id);
+      // A single JSON object's top-level id (not a listing array, not a nested
+      // user.id).
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          const parsed: unknown = JSON.parse(trimmed);
+          if (
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            !Array.isArray(parsed)
+          ) {
+            const id = (parsed as { id?: unknown }).id;
+            if (typeof id === 'number' && Number.isSafeInteger(id)) {
+              ids.add(keyFor(id));
+            }
+          }
+        } catch {
+          // Not JSON; fall through to the bare-id shape.
+        }
       }
       // A recognised creation whose whole output is a bare number is the
-      // `gh api … --input payload.json --jq '.id'` publish shape: the id is the
-      // created comment. Narrower than the JSON-id harvest (single all-digit
-      // result only), so a listing's many ids are never grabbed this way.
-      const bare = result.trim();
-      if (/^\d+$/.test(bare)) {
-        ids.add(
-          target === 'issue-comment'
-            ? issueCommentKey(bare)
-            : reviewCommentKey(bare),
-        );
+      // `gh api … --input payload.json --jq '.id'` publish shape.
+      if (/^\d+$/.test(trimmed)) {
+        ids.add(keyFor(trimmed));
       }
     }
   }

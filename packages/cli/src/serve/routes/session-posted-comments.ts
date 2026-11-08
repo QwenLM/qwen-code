@@ -59,6 +59,19 @@ export function registerSessionPostedCommentsRoutes(
         return;
       }
       const sessionService = createWorkspaceRuntimeSessionService(runtime);
+      // The chats dir is keyed by the sanitized cwd, so two projects whose paths
+      // sanitize identically share it. Gate the read on project membership, as
+      // the sibling /sessions/pr-bindings route does, so a caller cannot scan a
+      // foreign project's transcript by asserting this workspace's cwd.
+      if (
+        !(await sessionService.sessionPrSidecarBelongsToCurrentProject(
+          sessionId,
+          'active',
+        ))
+      ) {
+        res.status(200).json({ ids: [] });
+        return;
+      }
       const prPath = sessionService.getPrSessionPathForArchiveState(
         sessionId,
         'active',
