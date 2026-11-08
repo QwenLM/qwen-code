@@ -40,6 +40,18 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+// The supersede kill dir is minted under RUNNER_TEMP with a fixed prefix and
+// never exported (R4-1), so the replay's forge stub can only DISCOVER it by
+// listing that prefix. The two literals live in different files; renaming one
+// side alone leaves the stub globbing nothing, the forged kill record never
+// lands, and the refusal replay goes vacuously green. Derive the production
+// prefix from the workflow text and pin the stub glob to it (the supersede
+// suite asserts the pair).
+const supersedeKillDirPrefix =
+  workflow.match(/SUPERSEDE_KILL_DIR="[^\n]*?\/tmp\}\/([^."]+)\.XXXXXX/)?.[1] ??
+  '';
+const forgedKillDirGlob = `"\${RUNNER_TEMP}"/qwen-review-supersede-kill.*`;
+
 // Capability probe, not a platform check: the FIFO wedge tests need
 // mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
 // gated test_macos lane runs this suite too, and a host without mkfifo
@@ -114,6 +126,90 @@ describe('qwen pr review runner routing', () => {
     );
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
+  });
+
+  it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
+    // authorize is the write-permission gate for /review and /resolve. It
+    // loads CI_BOT_PAT but checks out nothing and runs no agent, so the
+    // persistent pool is safe whenever the trigger carries no fork code.
+    // issue_comment and workflow_dispatch have no github.event.pull_request
+    // payload: the old same-repo-only guard fell through to ubuntu-latest for
+    // every command, parking the gate in the hosted queue for hours (#15286).
+    // This removes the GATE wait only: the saving lands where the downstream
+    // job is already pool-routed (/review, /triage, /tmux, /verify); /resolve
+    // end-to-end latency is unchanged because resolve-pr stays on ubuntu-latest.
+    // Pin the exact expression so neither the new ECS disjuncts nor the fork
+    // guard / hosted fallback can be dropped silently.
+    const runsOn = String(parse(workflow).jobs['authorize']['runs-on']);
+
+    expect(runsOn).toBe(
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    );
+    // The command events must reach the persistent pool...
+    expect(runsOn).toContain("github.event_name == 'issue_comment'");
+    expect(runsOn).toContain("github.event_name == 'workflow_dispatch'");
+    // ...while PR-payload events keep the same-repo fork guard, and the
+    // hosted fallback + ECS kill switch stay for forks / disabled routing.
+    expect(runsOn).toContain(
+      'github.event.pull_request.head.repo.full_name == github.repository',
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The ECS routing above is only safe while authorize stays checkout-free:
+    // a `uses:` step (e.g. actions/checkout to read a label or config) would
+    // execute contributor-authored files on the persistent pool with
+    // CI_BOT_PAT in the step env while the expression pin stayed green. Scope
+    // to authorize — other jobs in this workflow legitimately check out.
+    const authorizeJob = parse(workflow).jobs['authorize'];
+    expect(authorizeJob.steps.every((s) => s.uses === undefined)).toBe(true);
+    // Pin the run: half of the premise too: the step inventory is exactly
+    // the one permission step, and no event value is spliced into the shell
+    // — everything must keep arriving through env:. A run-only debug step
+    // interpolating github.event.comment.body adds no `uses:` key and would
+    // slip past the assertion above.
+    expect(authorizeJob.steps.map((s) => s.name)).toEqual([
+      'Check principal write permission',
+    ]);
+    for (const s of authorizeJob.steps) {
+      expect(String(s.run ?? '')).not.toContain('${{');
+    }
+    // On the persistent pool the step must also pin gh's config resolution:
+    // GH_HOST plus a private, guarded GH_CONFIG_DIR, like qwen-autofix.yml's
+    // route/review-scan. Without them a planted shared ~/.config/gh
+    // (http_unix_socket) receives CI_BOT_PAT and can forge the permission
+    // response that downstream jobs consume as should_review.
+    const authorizeStep = authorizeJob.steps.find(
+      (s) => s.id === 'principal_permission',
+    );
+    // Evaluate the live (comment-stripped) lines, not mere substrings: an
+    // unguarded `export GH_CONFIG_DIR="$(mktemp ...)"` one-liner (a failed
+    // mktemp then leaves it empty and gh falls back to the shared config) or
+    // a preamble relocated below the first gh call must both red this test.
+    const live = String(authorizeStep.run)
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    // Fail-closed guarded mint in the sibling route/review-scan shape.
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then';
+    expect(live).toContain('export GH_HOST=github.com');
+    expect(live).toContain(guard);
+    expect(live).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+    // Both pins must be exported BEFORE the first permission API call.
+    const api = live.indexOf(
+      'gh api "repos/${GITHUB_REPOSITORY}/collaborators/',
+    );
+    expect(api).toBeGreaterThan(-1);
+    expect(live.indexOf('export GH_HOST=github.com')).toBeLessThan(api);
+    expect(live.indexOf(guard)).toBeLessThan(api);
+    // The body must execute no repository code: on the pool the cwd is the
+    // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+    // files, so a relative-path or interpreter invocation here would run a
+    // planted file with CI_BOT_PAT in the environment.
+    expect(live).not.toMatch(/(^|[\s;&|(`'"])(\.{1,2}\/)/m);
+    expect(live).not.toMatch(
+      /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+    );
   });
 });
 
@@ -488,7 +584,9 @@ function runScenario(
         // the stub DISCOVERS it by listing (no derivation), plants the kill
         // record plus SUPERSEDE_FILE, and dies non-retryably (a fatal
         // skips the retry reset that clears plants).
-        '  supersede_forged_kill_record) for d in "${RUNNER_TEMP}"/qwen-review-supersede-kill.*; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
+        '  supersede_forged_kill_record) for d in ' +
+          forgedKillDirGlob +
+          '; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
         '  retry_watcher_relaunch) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  retry_clears_stale_signals) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else { [ -f "$SUPERSEDE_FILE" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
@@ -4753,6 +4851,19 @@ describe('review supersede salvage (#10110)', () => {
     );
   });
 
+  it('discovers the kill dir with the prefix the workflow mints', () => {
+    // The kill dir is never exported, so the replayed agent can only reach
+    // it by DISCOVERING it: the forge stub lists RUNNER_TEMP for the prefix
+    // production mints. Rename either literal alone and the glob matches
+    // nothing — the forged record never lands, and the refusal replay below
+    // still passes without exercising the refusal. Pin the stub glob to the
+    // prefix derived from the workflow text so that one-sided edit is red.
+    expect(supersedeKillDirPrefix).not.toBe('');
+    expect(forgedKillDirGlob).toBe(
+      `"\${RUNNER_TEMP}"/${supersedeKillDirPrefix}.*`,
+    );
+  });
+
   it('never arms the watcher in a replay even if the environment exports AUTO_REVIEW', () => {
     // runScenario spreads the parent environment and the extraction window
     // contains the arming: without the false pin, an inherited
@@ -6921,7 +7032,7 @@ describe('review supersede salvage (#10110)', () => {
   });
 
   it('exports the salvage-post contract to the agent only where the watcher arms (shape)', () => {
-    // R32-2: the skill's anchorsAtRisk=true rule restarts unless the
+    // R32-2: the skill's anchorsAtRisk=true rule re-anchors unless the
     // environment carries the CI salvage contract; the export sits inside
     // the AUTO_REVIEW-gated arming block, so an explicit run (no watcher,
     // any marker forged) never carries it. Cross-pinned with
@@ -7440,6 +7551,14 @@ describe('review model canary routing', () => {
     expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
       '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
     );
+    // The canary cohort's optional endpoint pair: the URL is a variable,
+    // the key is a secret, and neither is pinned into the script.
+    expect(step.env.REVIEW_BASE_URL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}',
+    );
+    expect(step.env.REVIEW_API_KEY_CANARY).toBe(
+      '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}',
+    );
     // The env no longer carries the model itself: a literal there would make
     // every split a workflow edit, which is the thing a rollout must not need.
     expect(step.env.OPENAI_MODEL).toBeUndefined();
@@ -7448,7 +7567,7 @@ describe('review model canary routing', () => {
     // cohort: the model is recorded nowhere else a later comparison could
     // read it, so without the notice a rollout leaves no trace of which model
     // served a given review.
-    const select = run.indexOf('OPENAI_MODEL="$(review_model_for_bucket');
+    const select = run.indexOf('REVIEW_COHORT=default');
     expect(select).toBeGreaterThan(-1);
     expect(select).toBeLessThan(run.indexOf('MODEL_ARGS=()'));
     expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(
@@ -7457,21 +7576,28 @@ describe('review model canary routing', () => {
   });
 
   it('buckets by PR number and stays inside the configured percent', () => {
-    // The router delegates its clamp to canary_percent_effective, so executing
-    // either needs both. js-yaml has stripped the block scalar's indentation,
-    // so both closing braces sit at column 0.
-    const fn = run.match(
-      /canary_percent_effective\(\) \{[\s\S]*?review_model_for_bucket\(\) \{[\s\S]*?\n\}/,
-    )?.[0];
-    expect(fn).toBeTruthy();
+    const start = run.indexOf('canary_percent_effective() {');
+    const end = run.indexOf('OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"', start);
+    const block = run.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
     const pick = (defaultModel, canaryModel, percent, pr) =>
       execFileSync(
         'bash',
         [
           '-c',
-          `set -euo pipefail\n${fn}\nreview_model_for_bucket '${defaultModel}' '${canaryModel}' '${percent}' '${pr}'`,
+          `set -euo pipefail\n${block}\nif [ "$REVIEW_COHORT" = canary ]; then printf '%s' "$REVIEW_MODEL_CANARY"; else printf '%s' "$REVIEW_MODEL_DEFAULT"; fi`,
         ],
-        { encoding: 'utf8' },
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: defaultModel,
+            REVIEW_MODEL_CANARY: canaryModel,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+          },
+        },
       ).trim();
 
     // Off unless a percent is set: merging this changes nothing, which is
@@ -7490,21 +7616,29 @@ describe('review model canary routing', () => {
       'bash',
       [
         '-c',
-        `set -euo pipefail\n${fn}\nfor pr in {12300..12399}; do if [ "$(review_model_for_bucket main canary 10 "$pr")" = canary ]; then echo "$pr"; fi; done`,
+        `set -euo pipefail\nREVIEW_MODEL_CANARY=canary\nREVIEW_MODEL_CANARY_PERCENT=10\nfor PR_NUMBER in {12300..12399}; do\n${block}\nif [ "$REVIEW_COHORT" = canary ]; then echo "$PR_NUMBER"; fi; done`,
       ],
       { encoding: 'utf8' },
     )
       .trim()
       .split('\n');
     expect(canaried).toEqual(
-      Array.from({ length: 10 }, (_, i) => String(12300 + i)),
+      Array.from({ length: 10 }, (_, index) => String(12300 + index * 10)),
     );
+    for (const decade of [12300, 12310]) {
+      for (let bucket = 0; bucket < 10; bucket++) {
+        expect(pick('main', 'canary', '80', String(decade + bucket))).toBe(
+          bucket < 8 ? 'canary' : 'main',
+        );
+      }
+    }
 
     // Repository-variable typos fail toward off, never toward full rollout.
     // One row per clamp step; deleting that step alone flips its row. The
     // 20-digit value is the digit bound's: bash wraps it to 50.
     expect(pick('main', 'canary', '08', '12307')).toBe('canary');
-    expect(pick('main', 'canary', '0050', '12325')).toBe('canary');
+    expect(pick('main', 'canary', '08', '12308')).toBe('main');
+    expect(pick('main', 'canary', '0050', '12324')).toBe('canary');
     expect(pick('main', 'canary', '250', '12399')).toBe('main');
     expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe(
       'main',
@@ -7519,8 +7653,9 @@ describe('review model canary routing', () => {
   // the four the workflow actually passes: transposing the default and canary
   // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
   // loses the bucket entirely — both with every row above still green. Slice
-  // the real block (helper, router, trim, call site, notice, MODEL_ARGS) and
-  // execute it with the values the step's `env:` supplies.
+  // the real block (helper, router, trim, call site, endpoint override,
+  // notice, MODEL_ARGS) and execute it with the values the step's `env:`
+  // supplies.
   it('routes and reports at the real call site, not a paraphrase of it', () => {
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
@@ -7530,10 +7665,20 @@ describe('review model canary routing', () => {
     expect(notice).toBeGreaterThan(start);
     expect(args).toBeGreaterThan(notice);
     expect(end).toBeGreaterThan(args);
-    const block = run.slice(start, end);
+    // The step logs the pre-override host under its own label; reverting that
+    // rename would report a same-named value the notice no longer means.
+    expect(run).toContain('echo "initial_openai_host=${openai_host}"');
+    expect(run).not.toContain('echo "openai_host=${openai_host}"');
+    // The notice derives its endpoint host from openai_base_host(), which the
+    // workflow defines above configure_qwen_network — outside this slice, and
+    // shared with the proxy bypass. Deleting that helper must fail here.
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
 
     // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
-    // per-run value unnoticed: 9999999 % 100 = 99 is outside every percent a
+    // per-run value unnoticed: 9999999 % 10 = 9 is outside every percent a
     // case below configures, so such a swap routes to the default model.
     const serve = (canary, percent, pr) =>
       execFileSync(
@@ -7549,22 +7694,38 @@ describe('review model canary routing', () => {
             REVIEW_MODEL_DEFAULT: 'default-model',
             REVIEW_MODEL_CANARY: canary,
             REVIEW_MODEL_CANARY_PERCENT: percent,
+            OPENAI_BASE_URL: 'https://default.example.com/v1',
+            OPENAI_API_KEY: 'default-key',
+            REVIEW_BASE_URL_CANARY: '',
+            REVIEW_API_KEY_CANARY: '',
             PR_NUMBER: pr,
             GITHUB_RUN_ID: '9999999',
           },
         },
       );
 
-    // 12309 % 100 = 9 is inside a 10% split; 12310 % 100 = 10 is not. The
+    // 12300 % 10 = 0 is inside a 10% split; 12301 % 10 = 1 is not. The
     // notice's model field is anchored — a bare 'canary' check is satisfied
     // by the percent suffix even when the model field is wrong.
-    expect(serve('canary-model', '10', '12309')).toBe(
-      '::notice title=Review model::canary-model (PR #12309, canary 10%)\n' +
+    expect(serve('canary-model', '10', '12300')).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
         'canary-model|--model canary-model',
     );
-    expect(serve('canary-model', '10', '12310')).toBe(
-      '::notice title=Review model::default-model (PR #12310, canary 10%)\n' +
+    expect(serve('canary-model', '10', '12301')).toBe(
+      '::notice title=Review model::default-model (PR #12301, canary 10%, bucket 1/10, cohort default, endpoint default.example.com)\n' +
         'default-model|--model default-model',
+    );
+
+    // A percent that is not a multiple of ten switches the bucket count to
+    // 100, so a notice hard-coding the count prints a bucket the split never
+    // used: 12387 % 100 = 87 is outside 8%, 12307 % 100 = 7 is inside it.
+    expect(serve('canary-model', '8', '12387')).toBe(
+      '::notice title=Review model::default-model (PR #12387, canary 8%, bucket 87/100, cohort default, endpoint default.example.com)\n' +
+        'default-model|--model default-model',
+    );
+    expect(serve('canary-model', '8', '12307')).toBe(
+      '::notice title=Review model::canary-model (PR #12307, canary 8%, bucket 7/100, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|--model canary-model',
     );
 
     // The notice reports the percent the router APPLIED, not the configured
@@ -7573,7 +7734,7 @@ describe('review model canary routing', () => {
     // nothing about `canary 10 %` looks malformed.
     for (const percent of ['250', '10 ']) {
       expect(serve('canary-model', percent, '12309')).toBe(
-        `::notice title=Review model::default-model (PR #12309, canary 0%)\n` +
+        `::notice title=Review model::default-model (PR #12309, canary 0%, bucket 9/10, cohort default, endpoint default.example.com)\n` +
           'default-model|--model default-model',
       );
     }
@@ -7582,12 +7743,149 @@ describe('review model canary routing', () => {
     // rejects it and that failure is terminal for the whole cohort. Trimming
     // still leaves whitespace-only meaning "no split", not an invented one.
     expect(serve(' canary-model ', '100', '12345')).toBe(
-      '::notice title=Review model::canary-model (PR #12345, canary 100%)\n' +
+      '::notice title=Review model::canary-model (PR #12345, canary 100%, bucket 5/10, cohort canary, endpoint default.example.com)\n' +
         'canary-model|--model canary-model',
     );
     expect(serve('   ', '100', '12345')).toBe(
-      '::notice title=Review model::default-model (PR #12345, canary 100%)\n' +
+      '::notice title=Review model::default-model (PR #12345, canary 100%, bucket 5/10, cohort default, endpoint default.example.com)\n' +
         'default-model|--model default-model',
+    );
+  });
+
+  // The endpoint override lives inside the same sliced block, so the real
+  // call site is exercised again — with the base endpoint env present this
+  // time, plus per-row canary URL/key. The override must never leak the
+  // default key to another provider, and must never touch the default
+  // cohort's endpoint.
+  it('moves the endpoint only for the canary cohort, and only with its own key', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+
+    const serve = (canary, percent, pr, canaryUrl, canaryKey, dflt) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|$REVIEW_COHORT|$OPENAI_BASE_URL|$OPENAI_API_KEY"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: dflt ?? 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+            OPENAI_BASE_URL: 'https://default.example.com/v1',
+            OPENAI_API_KEY: 'default-key',
+            REVIEW_BASE_URL_CANARY: canaryUrl ?? '',
+            REVIEW_API_KEY_CANARY: canaryKey ?? '',
+          },
+        },
+      );
+
+    // Full pair configured: the canary cohort moves model, URL and key
+    // together. 12300 % 10 = 0 is inside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint canary.example.com)\n' +
+        'canary-model|canary|https://canary.example.com/v1|canary-key',
+    );
+
+    // A canary URL without its own key must not receive the default key:
+    // the cohort degrades to the default model and endpoint, with a warning.
+    const noKey = serve(
+      'canary-model',
+      '10',
+      '12300',
+      'https://canary.example.com/v1',
+      undefined,
+    );
+    expect(noKey).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // A key without a URL is inert: the model split still applies, the
+    // endpoint stays with the default gateway.
+    expect(serve('canary-model', '10', '12300', undefined, 'canary-key')).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|canary|https://default.example.com/v1|default-key',
+    );
+
+    // The default cohort never touches the canary endpoint, even when the
+    // pair is fully configured. 12301 % 10 = 1 is outside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12301',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::default-model (PR #12301, canary 10%, bucket 1/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // Same model on both cohorts (a pure endpoint quota split): the bucket
+    // decides, names no longer matter. 12307 % 10 = 7 is inside 80%.
+    expect(
+      serve(
+        'same-model',
+        '80',
+        '12307',
+        'https://username:password@canary.example.com/v1?token=secret',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12307, canary 80%, bucket 7/10, cohort canary, endpoint canary.example.com)\n' +
+        'same-model|canary|https://username:password@canary.example.com/v1?token=secret|canary-key',
+    );
+
+    // ...and the same-model split still respects the bucket boundary:
+    // 12308 % 10 = 8 is outside an 80% split, so no override.
+    expect(
+      serve(
+        'same-model',
+        '80',
+        '12308',
+        'https://canary.example.com/v1',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12308, canary 80%, bucket 8/10, cohort default, endpoint default.example.com)\n' +
+        'same-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // An unparseable canary URL degrades like a missing key.
+    const badUrl = serve(
+      'canary-model',
+      '10',
+      '12300',
+      'not a url',
+      'canary-key',
+    );
+    expect(badUrl).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
     );
   });
 });

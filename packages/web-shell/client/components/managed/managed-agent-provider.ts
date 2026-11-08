@@ -258,7 +258,7 @@ export interface ManagedAgentSessionEvent {
   turnId: string;
   data?: unknown;
   /**
-   * Projected from a durable snapshot item rather than a raw event. The
+   * Projected from a materialized Item rather than a raw event. The
    * server can retract its items (reconciliation), after which these
    * projections must not survive a resync.
    */
@@ -269,6 +269,7 @@ export interface ManagedAgentSessionTranscript {
   events: ManagedAgentSessionEvent[];
   olderCursor?: string;
   lastEventId: number;
+  history?: 'items';
 }
 
 export interface ManagedAgentTurnAdmission {
@@ -324,8 +325,7 @@ export interface ManagedWorkspaceRegistration {
   ): Promise<ManagedWorkspaceCreateOperation>;
 }
 
-/** A Hosted tool approval waiting for the Session owner's answer. */
-export interface ManagedAgentPendingAction {
+interface ManagedAgentActionIdentity {
   actionId: string;
   sessionId: string;
   /** Public Turn ID; absent when the Turn could not be resolved. */
@@ -334,10 +334,36 @@ export interface ManagedAgentPendingAction {
   toolName: string;
   inputRevision: number;
   policyRevision: string;
+  createdAt?: number;
   expiresAt: number;
+}
+
+export interface ManagedAgentPendingPermissionAction
+  extends ManagedAgentActionIdentity {
+  kind?: 'permission';
   options: Array<{ id: string; label: string }>;
   inputPreview?: components['schemas']['WebShellActionInputPreview'];
 }
+
+export interface ManagedAgentPendingQuestionAction
+  extends ManagedAgentActionIdentity {
+  kind: 'question';
+  questions: components['schemas']['WebShellActionQuestion'][];
+}
+
+export type ManagedAgentPendingAction =
+  | ManagedAgentPendingPermissionAction
+  | ManagedAgentPendingQuestionAction;
+
+export type ManagedAgentQuestionAnswer =
+  components['schemas']['WebShellQuestionAnswer'];
+
+export interface ManagedAgentQuestionResponse {
+  kind: 'question';
+  answers: ManagedAgentQuestionAnswer[];
+}
+
+export type ManagedAgentActionResponse = string | ManagedAgentQuestionResponse;
 
 export interface ManagedAgentProvider {
   readonly userMessages?: {
@@ -376,6 +402,7 @@ export interface ManagedAgentProvider {
     sessionId: string,
     options: ManagedAgentRequestOptions & { cursor?: string },
   ): Promise<ManagedExportPage>;
+  readonly exportConsistency?: 'live';
   readonly storageKey: string;
   readonly canCancel: boolean;
   /** Present when the provider can filter the complete Session history by title. */
@@ -478,7 +505,7 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedMcpManagementSnapshot>;
   };
-  /** Present when the provider can serve Hosted permission Actions. */
+  /** Present when the provider can serve Hosted Actions. */
   readonly actions?: {
     listPending(
       sessionId: string,
@@ -486,7 +513,7 @@ export interface ManagedAgentProvider {
     ): Promise<ManagedAgentPendingAction[]>;
     respond(
       action: ManagedAgentPendingAction,
-      optionId: string,
+      response: ManagedAgentActionResponse,
       options: ManagedAgentCommandOptions,
     ): Promise<void>;
   };
@@ -714,7 +741,7 @@ export interface ManagedAgentProvider {
     sessionId: string,
     request: { text: string; input?: ManagedInputBlock[] },
     options: ManagedAgentCommandOptions,
-  ): Promise<ManagedAgentTurnAdmission & { operationId: string }>;
+  ): Promise<ManagedAgentTurnAdmission & { operationId?: string }>;
   cancel(
     sessionId: string,
     turnId: string,

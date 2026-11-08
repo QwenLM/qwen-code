@@ -70,7 +70,7 @@ describe('SkillCommandLoader', () => {
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
-      isTrustedFolder: vi.fn().mockReturnValue(true),
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(true),
       // SkillCommandLoader filters via this. Default to empty so existing
       // assertions about "all skills surface" stay true; per-test cases
       // override to verify the filter behavior.
@@ -346,13 +346,13 @@ describe('SkillCommandLoader', () => {
     }
 
     it('grants no session allow rules in an untrusted folder', async () => {
-      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(false);
       await runProjectSkill();
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
 
     it('grants them in a trusted folder — marked trust-gated for the live revocation check', async () => {
-      vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(true);
+      vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(true);
       await runProjectSkill();
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
       // Exactly `{ trustGated: true }`: suspension keys solely off the
@@ -709,9 +709,7 @@ describe('SkillCommandLoader', () => {
     });
 
     it('registers no hooks for a project skill in an untrusted folder', async () => {
-      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
-        false,
-      );
+      vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(false);
 
       await runSkillCommand(
         makeSkill({
