@@ -70,9 +70,12 @@ original submitted text. Existing query sanitization is retained. Before the
 query is truncated, the shared secret scanner and checks for known credential
 forms suppress recall: Basic headers and bare encoded user/password pairs,
 password-bearing URIs including protocol-relative authorities, curl's
-`-u`/`--user` user/password options, named secret flags and `sshpass -p`. The empty
-query never reaches the provider. Ordinary Basic-auth descriptions, username-only
-options and unrelated short flags remain eligible for recall. Recall uses a
+`-u`/`--user` user/password options, named secret flags, `sshpass -p`,
+MySQL/mysqldump's attached `-pPASSWORD`, `docker login -p` and `redis-cli -a`.
+This screens known patterns rather than providing exhaustive credential detection.
+The empty query never reaches the provider. Ordinary Basic-auth descriptions,
+username-only options and unrelated short flags, including MySQL/Redis ports and
+Docker published ports, remain eligible for recall. Recall uses a
 512-character query, at most five results, 4,000 characters of injected context
 and a five-second provider deadline. Results are untrusted reference material.
 Recovery reuses the accepted input's saved result; tool output and background

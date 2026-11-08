@@ -146,11 +146,19 @@ describe('personal memory boundary', () => {
     'curl --user=bob:hunter2 https://example.com',
     'sshpass -p hunter2 ssh box',
     'sshpass -phunter2 ssh box',
+    'mysql -u root -phunter2',
+    'mysqldump -u root -phunter2 app',
+    'docker login -u bob -p hunter2',
+    'docker login -u bob -phunter2',
+    'docker login -u bob -p "hunter2"',
+    'redis-cli -a hunter2',
+    'redis-cli -a "hunter2"',
     'please run with --password hunter2',
     'please run `--password synthetic-value`',
     'use --api-key synthetic-value',
     `${'x '.repeat(250)}AKIAIOSFODNN7EXAMPLE`,
     `${'x '.repeat(250)}//bob:hunter2@example.com/x`,
+    `${'x '.repeat(250)}mysql -phunter2`,
   ])('withholds automatic recall containing credentials: %s', async (text) => {
     const { session, query } = fixture();
     expect(hostedMemoryRecallQuery(text)).toBe('');
@@ -171,6 +179,11 @@ describe('personal memory boundary', () => {
     'curl --user=bob https://example.com',
     'docker run -u 1000:1000 ubuntu',
     'ssh -p 2222 bob@example.com',
+    'mysql -P 3306',
+    'mysql -P3306',
+    'mysqldump -P3306 app',
+    'docker run -p 8080:80 nginx',
+    'redis-cli -p 6379',
   ])('preserves benign recall text: %s', async (text) => {
     const { session, query } = fixture();
     expect(hostedMemoryRecallQuery(text)).toBe(text);
