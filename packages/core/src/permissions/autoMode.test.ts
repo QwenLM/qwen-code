@@ -1314,10 +1314,7 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
       `node -e 'console.log("a report about git commit --amend behaviour")'`,
       'write a report about the amend guard',
     );
-    expect(decision.via).toBe('fallback');
-    if (decision.via === 'fallback') {
-      expect(decision.reason).toBe('safety_check');
-    }
+    expect(decision.via).toBe('guard-ask');
     const outcome = applyAutoModeDecision(
       decision,
       makeConfig([cwd]) as unknown as Config,
@@ -1332,6 +1329,12 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     );
     // A fallback outcome is the manual-approval dialog, never a silent allow.
     expect(outcome.kind).toBe('fallback');
+    if (outcome.kind === 'fallback') {
+      expect(outcome.reason).toBe('safety_check');
+      // R16-2: the kind alone does not pin the guarantee — a hook must not be
+      // able to waive this escalation, which is what the marker carries.
+      expect(outcome.requiresHumanDecision).toBe(true);
+    }
   });
 
   it('still hard-blocks a direct amend with no session commits', async () => {
@@ -1350,10 +1353,7 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
       'git -C "$OTHER" commit --amend --no-edit',
       'amend the commit',
     );
-    expect(decision.via).toBe('fallback');
-    if (decision.via === 'fallback') {
-      expect(decision.reason).toBe('safety_check');
-    }
+    expect(decision.via).toBe('guard-ask');
   });
 
   it('still hard-blocks an amend after a positive HEAD move', async () => {
@@ -1682,5 +1682,90 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
       expect(message).not.toContain('\n');
       expect(message.length).toBeLessThan(300);
     }
+  });
+});
+
+// ─── guard-ask escalation (R16-2) ─────────────────────────────────────────
+
+describe('applyAutoModeDecision — guard-ask is hook-unwaivable', () => {
+  const fingerprint = 'shell:guard-ask';
+  const guardAsk = {
+    via: 'guard-ask' as const,
+    reason:
+      'This command mentions "git commit --amend" in text the guard cannot prove inert.',
+  };
+
+  it('marks the guard ask escalation requiresHumanDecision', () => {
+    // R16-2 regression: the ask route used to share the generic
+    // `safety_check` fallback arm, whose outcome carries no marker — so a
+    // `PermissionRequest` hook returning `allow` could schedule a command
+    // that really amends HEAD with no human in the loop. The kind/reason
+    // assertions alone stayed green under that bug; the marker is the pin.
+    const { result } = apply(guardAsk, counters(0, 0, 0, 0), fingerprint);
+    expect(result.kind).toBe('fallback');
+    if (result.kind === 'fallback') {
+      expect(result.reason).toBe('safety_check');
+      expect(result.requiresHumanDecision).toBe(true);
+    }
+  });
+
+  it('keeps the marker at every denial-counter state', () => {
+    // Unlike the blocked arm, the ask escalation does not wait for a cap:
+    // it is human-only on the first call, whatever the counters say.
+    for (const state of [
+      counters(0, 0, 0, 0),
+      counters(2, 0, 2, 0),
+      counters(0, 0, 19, 0),
+    ]) {
+      const { result } = apply(guardAsk, state, fingerprint);
+      expect(result.kind).toBe('fallback');
+      if (result.kind === 'fallback') {
+        expect(result.requiresHumanDecision).toBe(true);
+      }
+    }
+  });
+
+  it('leaves the generic safety_check fallback hook-waivable', () => {
+    // Contrast: only the guard's own escalation is human-only. The generic
+    // fallback arm (ask rules, the unknown-via default) must not inherit the
+    // marker, or every ordinary approval becomes hook-unwaivable.
+    const { result } = apply(
+      { via: 'fallback', reason: 'safety_check' },
+      counters(0, 0, 0, 0),
+      fingerprint,
+    );
+    expect(result.kind).toBe('fallback');
+    if (result.kind === 'fallback') {
+      expect(result.requiresHumanDecision).toBeUndefined();
+    }
+  });
+
+  it('does not record a denial for the ask escalation', () => {
+    // Ask is not a denial: the counters must stay untouched when no retry is
+    // armed, so an approval prompt cannot push the session towards the
+    // denial caps on its own.
+    const { result, setAutoModeDenialState } = apply(
+      guardAsk,
+      counters(1, 0, 1, 0),
+      fingerprint,
+    );
+    expect(result.kind).toBe('fallback');
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
+  it('consumes an armed one-shot retry for the same action', () => {
+    // Behaviour preserved from the generic fallback arm the route used to
+    // take: when this exact action already has a manual retry armed, the
+    // human review happening now is that retry, so it cannot fire twice.
+    const { setAutoModeDenialState } = apply(
+      guardAsk,
+      { ...counters(0, 0, 0, 0), pendingManualRetryFingerprint: fingerprint },
+      fingerprint,
+    );
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        pendingManualRetryFingerprint: fingerprint,
+      }),
+    );
   });
 });
