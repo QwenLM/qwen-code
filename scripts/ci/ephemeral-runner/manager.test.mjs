@@ -296,6 +296,16 @@ test('rejects invalid proxy configuration', async (t) => {
     () => createManager(f.config, { command: f.command }),
     /Invalid proxy\.http/,
   );
+  f.config.proxy = { http: 'http://user:pass@proxy.example:7890' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.http/,
+  );
+  f.config.proxy = { https: 'http://user@proxy.example:7890' };
+  assert.throws(
+    () => createManager(f.config, { command: f.command }),
+    /Invalid proxy\.https/,
+  );
 });
 
 test('failed cleanup blocks replacement until recovery cleans the old container', async (t) => {

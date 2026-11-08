@@ -97,6 +97,10 @@ optionally add a `proxy` object to the config:
 ```
 
 Use the host's reachable address (not `127.0.0.1`) so containers can reach it.
+The proxy URLs must not embed credentials (`user:pass@`): the values are
+injected into every runner container, including containers that execute
+untrusted fork PR jobs, so embedded credentials would be exposed. The
+manager rejects such URLs at startup.
 `noProxy` should include the cloud metadata endpoint (`100.100.100.200`)
 to avoid leaking instance credentials through the proxy.
 

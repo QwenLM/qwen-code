@@ -112,9 +112,20 @@ function validate(c) {
     )
       throw new Error('Invalid proxy configuration');
     const { http, https, noProxy } = c.proxy;
-    if (http !== undefined && (typeof http !== 'string' || !http))
+    // The proxy env reaches untrusted fork jobs, so a URL with embedded
+    // credentials would leak them; reject userinfo outright.
+    const validProxyUrl = (value) => {
+      if (typeof value !== 'string' || !value) return false;
+      try {
+        const url = new URL(value);
+        return !url.username && !url.password;
+      } catch {
+        return false;
+      }
+    };
+    if (http !== undefined && !validProxyUrl(http))
       throw new Error('Invalid proxy.http');
-    if (https !== undefined && (typeof https !== 'string' || !https))
+    if (https !== undefined && !validProxyUrl(https))
       throw new Error('Invalid proxy.https');
     if (noProxy !== undefined && (typeof noProxy !== 'string' || !noProxy))
       throw new Error('Invalid proxy.noProxy');
