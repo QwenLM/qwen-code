@@ -26,12 +26,10 @@ import {
   SessionService,
   setStartupEventSink,
   createDebugLogger,
-  persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   resolveUsageStatisticsEnabled,
-  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
@@ -132,6 +130,7 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { startSessionUsageSnapshots } from './utils/session-usage.js';
 import { isInteractiveInvocation } from './utils/interactive-mode.js';
 import { selectNpmBunHandoff } from './utils/npm-runtime.js';
 import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
@@ -1251,28 +1250,9 @@ export async function main() {
       }
     }
 
-    // Persist session usage for cross-session reports (must run before
-    // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
-    registerCleanup(() => {
-      try {
-        const metrics = uiTelemetryService.getMetrics();
-        const hasActivity = Object.values(metrics.models).some(
-          (m) => m.api.totalRequests > 0,
-        );
-        if (!hasActivity) return;
-        persistSessionUsage({
-          sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
-          endTime: new Date(),
-          project: config.getProjectRoot(),
-          metrics,
-        });
-      } catch {
-        // Best-effort — don't block shutdown
-      }
-    });
+    // Persist session usage periodically and on shutdown. Must register before
+    // config.shutdown(), which clears telemetry state.
+    startSessionUsageSnapshots(config);
 
     registerCleanup(() => config.shutdownExecutionEnvironments(), {
       first: true,

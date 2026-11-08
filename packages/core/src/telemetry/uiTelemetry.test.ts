@@ -1275,6 +1275,34 @@ describe('UiTelemetryService', () => {
       expect(metricsB.models['model-a']).toBeUndefined();
     });
 
+    it('tracks the earliest telemetry timestamp for each session', () => {
+      service.addEvent(
+        makeApiEvent('model-a', 100, {
+          'event.timestamp': '2026-07-01T00:02:00.000Z',
+        }),
+        SESSION_A,
+      );
+      service.addEvent(
+        makeApiEvent('model-a', 50, {
+          'event.timestamp': '2026-07-01T00:01:00.000Z',
+        }),
+        SESSION_A,
+      );
+      service.addEvent(
+        makeApiEvent('model-b', 100, {
+          'event.timestamp': '2026-07-02T00:00:00.000Z',
+        }),
+        SESSION_B,
+      );
+
+      expect(service.getSessionStartTimeForSession(SESSION_A)).toEqual(
+        new Date('2026-07-01T00:01:00.000Z'),
+      );
+      expect(service.getSessionStartTimeForSession(SESSION_B)).toEqual(
+        new Date('2026-07-02T00:00:00.000Z'),
+      );
+    });
+
     it('should still accumulate to global metrics', () => {
       service.addEvent(makeApiEvent('model-x', 100), SESSION_A);
       service.addEvent(makeApiEvent('model-x', 200), SESSION_B);

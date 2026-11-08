@@ -29,6 +29,7 @@ import {
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
+import { flushSessionUsageSnapshot } from '../../utils/session-usage.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
@@ -260,6 +261,7 @@ export function useBranchCommand(
         const modSession = getInteractiveModSession(config);
         modSession?.invalidateTools();
         toolsInvalidated = modSession !== undefined;
+        flushSessionUsageSnapshot(config);
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);

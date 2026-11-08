@@ -1854,7 +1854,19 @@ describe('SessionTranscriptReader', () => {
         },
       },
       sys('compression', 'a1', 'chat_compression', compressedTurn()),
-      sys('telemetry', 'compression', 'ui_telemetry', { uiEvent }),
+      sys(
+        'inherited-telemetry',
+        'compression',
+        'ui_telemetry',
+        { uiEvent: { prompt_id: 'parent########1', duration_ms: 99 } },
+        {
+          forkedFrom: {
+            sessionId: 'parent',
+            messageUuid: 'parent-telemetry',
+          },
+        },
+      ),
+      sys('telemetry', 'inherited-telemetry', 'ui_telemetry', { uiEvent }),
       sys('request-start', 'telemetry', 'ui_telemetry', {
         uiEvent: {
           'event.name': 'request_lifecycle',

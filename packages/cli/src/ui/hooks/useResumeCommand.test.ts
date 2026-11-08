@@ -6,7 +6,7 @@
 // @vitest-environment jsdom
 
 import { act, renderHook } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
   useResumeCommand,
@@ -21,6 +21,11 @@ import {
 
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
+
+const mockFlushSessionUsageSnapshot = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/session-usage.js', () => ({
+  flushSessionUsageSnapshot: mockFlushSessionUsageSnapshot,
+}));
 
 const mockSettings = {
   merged: {
@@ -161,6 +166,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  beforeEach(() => {
+    mockFlushSessionUsageSnapshot.mockClear();
+  });
+
   it('waits for the mode snapshot under the swap latch before loading', async () => {
     resumeMocks.reset();
     const client = makeSwapSlotClient();
@@ -529,6 +538,12 @@ describe('useResumeCommand', () => {
       expect.objectContaining({
         conversation: expect.anything(),
       }),
+    );
+    expect(mockFlushSessionUsageSnapshot).toHaveBeenCalledTimes(1);
+    expect(
+      mockFlushSessionUsageSnapshot.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(config.startNewSession).mock.invocationCallOrder[0]!,
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
     expect(seedPromptCount).toHaveBeenCalledWith(3);
@@ -1120,6 +1135,17 @@ describe('useResumeCommand', () => {
       2,
       'old-session-id',
       expect.objectContaining({ conversation: expect.anything() }),
+    );
+    expect(mockFlushSessionUsageSnapshot).toHaveBeenCalledTimes(2);
+    expect(
+      mockFlushSessionUsageSnapshot.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(config.startNewSession).mock.invocationCallOrder[0]!,
+    );
+    expect(
+      mockFlushSessionUsageSnapshot.mock.invocationCallOrder[1],
+    ).toBeLessThan(
+      vi.mocked(config.startNewSession).mock.invocationCallOrder[1]!,
     );
     expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
       'old-session-id',

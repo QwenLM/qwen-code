@@ -26,6 +26,7 @@ import {
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
+import { flushSessionUsageSnapshot } from '../../utils/session-usage.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
@@ -219,6 +220,7 @@ export function useResumeCommand(
         const modSession = getInteractiveModSession(config);
         modSession?.invalidateTools();
         toolsInvalidated = modSession !== undefined;
+        flushSessionUsageSnapshot(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -298,6 +300,7 @@ export function useResumeCommand(
               // Best-effort — see above.
             }
             getInteractiveModSession(config)?.invalidateTools();
+            flushSessionUsageSnapshot(config);
             config.startNewSession(oldSessionId, prevSessionData);
             if (oldWorkflowMode)
               config.restoreWorkflowModeState(oldWorkflowMode);
