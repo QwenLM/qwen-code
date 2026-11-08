@@ -67,7 +67,7 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 export const SDK_INITIALIZE_REPLY_TIMEOUT_MS = 55_000;
 
 // How long before the client's own deadline the reply is given up, so the
-// error frame is written while the client still has the request pending.
+// reply is written while the client still has the request pending.
 export const SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS = 5_000;
 
 // `setTimeout` stores its delay in a signed 32-bit int, so any larger value
