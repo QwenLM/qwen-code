@@ -758,6 +758,28 @@ it.each([
   },
 );
 
+it.each([
+  [
+    'en',
+    'every heading, body sentence, list item, and label must be in English',
+  ],
+  ['zh-CN', '整页必须用简体中文写作'],
+])(
+  'details prompt carries a whole-page language requirement (%s)',
+  (language, requirement) => {
+    const prompt = getTranslator(language as 'en' | 'zh-CN')(
+      'askUser.detailsPrompt',
+      { questions: '1. Which cache backend?' },
+    );
+    expect(prompt).toContain(requirement);
+    // The question snapshot still leads (question-derived naming) and the
+    // instruction tokens survive the language strengthening.
+    expect(prompt.startsWith('1. Which cache backend?')).toBe(true);
+    expect(prompt).toContain('ASD-STE100');
+    expect(prompt).toContain('.qwen/tmp/');
+  },
+);
+
 it('sends a retained initial prompt once transcript loading completes', async () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Side task';

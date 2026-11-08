@@ -688,6 +688,148 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('labels a rendered HTML artifact Preview and opens the preview tab', () => {
+    const onOpenRequest = vi.fn();
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-html"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-artifact',
+                kind: 'html',
+                storage: 'workspace',
+                status: 'available',
+                title: 'ask-details.html',
+                workspacePath: '.qwen/tmp/ask-details.html',
+                mimeType: 'text/html',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const preview = buttons.find(
+      (button) => button.textContent?.trim() === 'Preview',
+    );
+    expect(preview).toBeDefined();
+    expect(preview?.disabled).toBe(false);
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeUndefined();
+
+    act(() => preview?.click());
+    expect(onOpenRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'artifact',
+        artifactId: 'html-artifact',
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('keeps Open for a non-rendered artifact', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-csv"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'csv-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'report.csv',
+                workspacePath: 'reports/report.csv',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
+  it('disables Preview for a missing HTML artifact', () => {
+    const onOpenRequest = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-html-missing"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-missing',
+                kind: 'html',
+                storage: 'workspace',
+                status: 'missing',
+                title: 'ask-details.html',
+                workspacePath: '.qwen/tmp/ask-details.html',
+                mimeType: 'text/html',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const preview = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Preview',
+    );
+    expect(preview?.disabled).toBe(true);
+    act(() => preview?.click());
+    expect(onOpenRequest).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
   it('marks only changed workspace artifacts as modified since recorded', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

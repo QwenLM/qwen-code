@@ -4,7 +4,7 @@ import type {
   DaemonSessionArtifact,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import { DownloadIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
+import { DownloadIcon, EyeIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { useI18n } from '../../i18n';
@@ -486,6 +486,9 @@ function ArtifactCard({
   const openIcon = (
     <SquareArrowOutUpRightIcon size={16} strokeWidth={1.8} aria-hidden="true" />
   );
+  // Rendered artifacts (HTML, Markdown, images) open straight into a rendered
+  // preview tab, so label the action Preview rather than the generic Open.
+  const rendered = isRenderedArtifact(artifact);
   return (
     <div className={styles.card}>
       <div className={`${styles.summary} ${styles.artifactSummary}`}>
@@ -543,8 +546,12 @@ function ArtifactCard({
                 onClick={onOpen}
                 disabled={!onOpen}
               >
-                {openIcon}
-                {t('common.open')}
+                {rendered ? (
+                  <EyeIcon size={16} strokeWidth={1.8} aria-hidden="true" />
+                ) : (
+                  openIcon
+                )}
+                {t(rendered ? 'common.preview' : 'common.open')}
               </button>
             )}
           </span>
