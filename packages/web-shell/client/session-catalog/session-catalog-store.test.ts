@@ -170,6 +170,7 @@ describe('SessionCatalogStore', () => {
       { parentSessionId: 'parent' },
       { sourceType: 'side-task' },
       { sourceId: 'source' },
+      { liveOnly: true },
     ]) {
       expect(getSessionCatalogQueryKey(base)).not.toBe(
         getSessionCatalogQueryKey({

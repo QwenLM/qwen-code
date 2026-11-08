@@ -3115,9 +3115,24 @@ export function createSessionControlPlane(
   /**
    * The additional policy guards shared by automatic teardown paths.
    */
-  function entryIsAutoCloseCandidate(entry: SessionEntry): boolean {
+  function entryIsAutoCloseCandidate(
+    entry: SessionEntry,
+    opts?: { allowChannelSubscribers?: boolean },
+  ): boolean {
     if (!entryCanStartConditionalClose(entry, true)) return false;
-    if (entry.events.subscriberCount > 0) return false;
+    // A channel worker keeps one SSE pump per cached route open. That pump is
+    // not a user watching the session; letting it pin the entry keeps the
+    // workspace at maxSessions after the channel has stopped using it. The
+    // reaper may look past it; the remaining guards below and the child's
+    // conditional-close probe still authorize teardown.
+    if (
+      entry.events.subscriberCount > 0 &&
+      !(
+        opts?.allowChannelSubscribers === true && entry.sourceType === 'channel'
+      )
+    ) {
+      return false;
+    }
     const owner = channelInfoForEntry(entry);
     // A probe the child could not answer is retried on the next snapshot, but
     // not on every snapshot forever: a Session the child can never settle
@@ -4350,7 +4365,13 @@ export function createSessionControlPlane(
         // Shared guards first (`pendingPromptCount` rather than `promptActive`,
         // so queued prompts and the FIFO hand-off gap between two prompts also
         // block the reap), then the reaper's own TTL policy on top.
-        if (!entryIsAutoCloseCandidate(entry)) continue;
+        if (
+          !entryIsAutoCloseCandidate(entry, {
+            allowChannelSubscribers: true,
+          })
+        ) {
+          continue;
+        }
         // Note: clientIds.size is NOT checked here. Close-on-last-detach
         // handles the normal path (client sends detach → immediate close).
         // The reaper covers the crash path where detach was never sent —

@@ -3479,6 +3479,8 @@ curl http://127.0.0.1:4170/workspaces/<workspace-id>/sessions
 
 When `workspace_qualified_rest_core` is advertised, workspace-scoped session batch operations, group CRUD, and session organization mutation are available under `/workspaces/:workspace/sessions/{delete,archive,unarchive}`, `/workspaces/:workspace/session-groups`, and `/workspaces/:workspace/session/:id/organization`. For an untrusted secondary, group GET remains available; every group, session, and organization mutation remains trust-gated. Workspace-less batch and organization mutation routes remain primary-workspace-only for compatibility.
 
+The `liveOnly=1` list reads the workspace bridge instead of `chats/`, so closed persisted history cannot crowd live sessions out of the first page. It requires a trusted workspace and does not accept the persisted-only filters: combining it with `view`, `archiveState=archived`, `parentSessionId`, `sourceType`, `sourceId`, or `sortBy=lastUserPromptAt` returns `400 { code: "invalid_session_live_only_filter" }`. Any value other than `1` returns `400 { code: "invalid_session_live_only" }`.
+
 Query parameters:
 
 | Field          | Required | Notes                                                                                                                                                                                           |
@@ -3488,6 +3490,7 @@ Query parameters:
 | `size`         | no       | Page size. Invalid values return `400 { code: "invalid_cursor" }` or the existing page-size validation.                                                                                         |
 | `view`         | no       | Omit for the legacy recent list. `organized` opts into server-side pinned/group ordering and adds optional organization fields. Any other value returns `400 { code: "invalid_session_view" }`. |
 | `group`        | no       | Only meaningful with `view=organized`. `all` (default), `pinned`, `ungrouped`, or a custom group id. Unknown group ids return `404 { code: "group_not_found" }`.                                |
+| `liveOnly`     | no       | `1` lists only sessions currently live in the workspace bridge, ignoring persisted history. Requires a trusted workspace and rejects the incompatibilities described above.                     |
 
 Response:
 

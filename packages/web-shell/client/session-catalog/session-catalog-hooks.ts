@@ -49,6 +49,7 @@ export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
   sourceType?: string;
   sourceId?: string;
   parentSessionId?: string;
+  liveOnly?: boolean;
 }
 
 export function useSessionCatalogQuery(
@@ -521,6 +522,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sourceType,
     sourceId,
     parentSessionId,
+    liveOnly,
   } = options;
   const workspace = useWorkspace();
   const legacy = useSessions({
@@ -547,12 +549,14 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
       ...(sourceType !== undefined ? { sourceType } : {}),
       ...(sourceId !== undefined ? { sourceId } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      ...(liveOnly === true ? { liveOnly: true } : {}),
     }),
     [
       sortBy,
       archiveState,
       cursor,
       group,
+      liveOnly,
       pageSize,
       parentSessionId,
       sourceId,

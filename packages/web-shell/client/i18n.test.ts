@@ -7,6 +7,7 @@ import {
   languageSettingToWebShellLanguage,
   normalizeLanguage,
 } from './i18n';
+import type { WebShellLanguage } from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -240,6 +241,17 @@ describe('web-shell i18n catalog', () => {
         t('settings.liveSetup.modelCustom'),
       );
     }
+  });
+
+  // A locale outside the shipped union (the provider is typed, but the
+  // runtime value is not checked) must resolve from the EN table: content
+  // assertions, so a mutation of the EN entry itself is caught.
+  it('falls back to EN for a language outside the shipped union', () => {
+    const t = getTranslator('fr' as unknown as WebShellLanguage);
+    expect(t('managed.tasks.title')).toBe('Session tasks');
+    expect(t('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(t('messageDelete.selected', { count: 2 })).toBe('2 groups selected');
+    expect(t('welcome.prompt')).not.toBe('welcome.prompt');
   });
 });
 

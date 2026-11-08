@@ -319,9 +319,7 @@ jobs:
         always() &&
         (
           needs.build.result == 'failure' ||
-          needs.build.result == 'cancelled' ||
-          needs.publish.result == 'failure' ||
-          needs.publish.result == 'cancelled'
+          needs.publish.result == 'failure'
         )
       }}
     runs-on: 'ubuntu-latest'
@@ -340,3 +338,45 @@ jobs:
             --repo "${GH_REPO}" \
             --title "Chrome extension release failed for ${RELEASE_VERSION:-unknown} on $(date +'%Y-%m-%d')" \
             --body "The Chrome Web Store release workflow failed. See the full run for details: ${DETAILS_URL}"
+
+  reconcile-failure:
+    name: 'Close Stale Failure Issue'
+    # Success-gated sibling of report-failure: a re-run that passes skips the
+    # notifier, which is why the issue an earlier attempt filed would otherwise
+    # stay open against a shipped release (#15840).
+    needs:
+      - 'build'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        needs.build.result == 'success' &&
+        needs.publish.result == 'success'
+      }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      contents: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Checkout release workflow scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.workflow_sha }}'
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |-
+            /.github/scripts
+          sparse-checkout-cone-mode: false
+          path: '.release-workflow'
+
+      - name: 'Close the issue an earlier attempt filed'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
+          FAILURE_TITLE_PREFIX: 'Chrome extension release failed for '
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          RUN_ATTEMPT: '${{ github.run_attempt }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh reconcile-failure'

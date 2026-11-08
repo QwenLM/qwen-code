@@ -1853,6 +1853,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Press / to search; Enter releases the selected live session',
   'release.releasing': 'Releasing...',
   'release.title': 'Release Session',
+  'session.limit.reached':
+    'The live-session limit has been reached. Release an idle session, or wait for active work to finish.',
+  'session.limit.release': 'Release idle sessions',
   'dialog.footer.menu': 'Esc to menu',
   'dialog.footer.mcpServers':
     '↑↓ to navigate · Enter details · r refresh · Esc close',
@@ -6824,6 +6827,9 @@ const ZH: Messages = {
   'release.pressSearch': '按 / 搜索；Enter 释放选中的 live session',
   'release.releasing': '释放中...',
   'release.title': '释放会话',
+  'session.limit.reached':
+    '活跃会话已达上限，释放一个空闲会话或等待活跃工作结束后即可继续。',
+  'session.limit.release': '释放空闲会话',
   'dialog.footer.menu': 'Esc 返回菜单',
   'dialog.footer.mcpServers': '↑↓ 导航 · Enter 查看详情 · r 刷新 · Esc 关闭',
   'dialog.footer.mcpSelect': '↑↓ 导航 · Enter 选择 · Esc 返回',
@@ -9962,7 +9968,9 @@ export function languageLabel(language: WebShellLanguage): string {
 }
 
 export function getTranslator(language: WebShellLanguage) {
-  const messages = MESSAGES[language];
+  // The runtime value is not checked: an unshipped locale falls back to the
+  // EN table instead of crashing on the first key lookup.
+  const messages = MESSAGES[language] ?? EN;
   return (key: string, vars?: Record<string, string | number>) => {
     const message = messages[key] ?? EN[key] ?? key;
     return typeof message === 'function' ? message(vars) : message;

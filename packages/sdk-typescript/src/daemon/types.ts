@@ -1953,6 +1953,14 @@ export interface DaemonSessionListPageOptions {
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * List the sessions currently live in the workspace bridge instead of
+   * persisted history, so closed rows cannot crowd live sessions out of the
+   * first page. Served over native REST; the ACP transport does not carry it.
+   * Cannot be combined with `view`, archived `archiveState`,
+   * `parentSessionId`, `sourceType`, or `sourceId`.
+   */
+  liveOnly?: boolean;
 }
 
 export interface DaemonSessionListPage {
@@ -1972,8 +1980,8 @@ export interface DaemonSessionCatalogWorkspace {
 export interface DaemonSessionCatalogRequest {
   /** 1–20 entries; `all` excludes internal workspaces. */
   workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-  /** Shared filters; pageSize is 1–100, default 20. */
-  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  /** Shared filters; pageSize is 1–100, default 20. `liveOnly` is not shared. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor' | 'liveOnly'>;
   includeGroups?: boolean;
 }
 

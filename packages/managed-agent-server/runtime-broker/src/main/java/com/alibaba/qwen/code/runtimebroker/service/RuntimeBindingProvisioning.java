@@ -1250,8 +1250,7 @@ final class RuntimeBindingProvisioning {
                 && lease.getLeaseId().equals(attestation.getLeaseId())
                 && lease.getEpoch() == attestation.getEpoch()
                 && request.getScope().equals(attestation.getScope())
-                && Objects.equals(request.getStorageId(),
-                        attestation.getStorageId())
+                && Objects.equals(request.getStorageId(), attestation.getStorageId())
                 && seed.getProvisionRequestId().equals(
                         attestation.getProvisionRequestId());
     }
