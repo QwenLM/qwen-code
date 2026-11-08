@@ -21,9 +21,11 @@ import {
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
+  statePaths,
   isBranchName,
   isCommandSafeName,
-  repoRoot,
+  trustAnchor,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -32,12 +34,14 @@ import {
 } from './state.js';
 import { assertNoFixInFlight } from './fix.js';
 import {
+  checkoutHoldsWork,
   hasUncommittedChanges,
   isAncestor,
   networkGitEnv,
   remoteRef,
   requireWorktree,
 } from './worktree.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 /**
  * Pre-push hooks may run a test suite; the 2-minute git default is short.
@@ -213,7 +217,7 @@ function pushRef(
 }
 
 export function runPush(prNumber: number, task?: string): PushOutcome {
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () =>
     pushLocked(paths, prNumber, root, task),
@@ -229,10 +233,27 @@ function pushLocked(
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
   assertNoFixInFlight(paths, prNumber);
+  // An in-place watch works in the checkout the state names, not the
+  // worktree path the PR number alone derives.
+  paths = statePaths(root, state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root);
-  if (hasUncommittedChanges(worktree)) {
-    throw new Error(
+  requireWorktree(
+    paths,
+    prNumber,
+    root,
+    false,
+    trustAnchor(state),
+    state.inPlace === true,
+  );
+  // An in-place checkout holds the watch's own files under .qwen/tmp:
+  // they are not the user's work.
+  const dirty =
+    state.inPlace === true
+      ? (checkoutHoldsWork(worktree) ?? true)
+      : hasUncommittedChanges(worktree);
+  if (dirty) {
+    throw new AutofixPrRefusal(
+      'worktree_dirty',
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,
     );
   }
@@ -323,7 +344,8 @@ function pushLocked(
       };
     }
     const detail = (result.stderr || result.stdout).trim().split('\n');
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'push_failed',
       `git push to ${state.headRefName} failed:\n${detail.slice(-20).join('\n')}`,
     );
   }

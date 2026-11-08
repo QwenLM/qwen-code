@@ -37,7 +37,11 @@ import type {
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
-import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
+import type {
+  DaemonReasoningControls,
+  DaemonWorkflowMode,
+  DaemonWorkflowModeStatus,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
@@ -76,6 +80,7 @@ import {
 } from '../utils/composerTag';
 import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
+import { getWorkflowModeControlState } from './workflow-mode-control-state';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
@@ -105,6 +110,7 @@ import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  GitBranchIcon,
   PanelBottomCloseIcon,
   Settings2Icon,
   FolderClosedIcon,
@@ -160,6 +166,7 @@ const MAX_DROP_DIALOG_ROWS = 100;
 export type ComposerToolbarAction =
   | 'approvalMode'
   | 'plan'
+  | 'workflowMode'
   | 'contextUsage'
   | 'gitBranch'
   | 'model'
@@ -191,6 +198,7 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
   'plan',
+  'workflowMode',
   'commands',
   'contextUsage',
   'gitBranch',
@@ -304,6 +312,10 @@ interface ChatEditorProps {
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  workflowMode?: DaemonWorkflowMode;
+  workflowModeStatus?: DaemonWorkflowModeStatus;
+  workflowModePending?: boolean;
+  onWorkflowModeChange?: (requested: boolean) => void;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (
     value: ReasoningSelection,
@@ -1247,6 +1259,8 @@ function ModelReasoningControls({
 
 function SlashCommandPanel({
   menu,
+  commands,
+  skills,
   loading,
   loadError,
   anchorRef,
@@ -1258,6 +1272,8 @@ function SlashCommandPanel({
   onAccept,
 }: {
   menu: SlashMenuState;
+  commands: CommandInfo[];
+  skills: SkillInfo[];
   loading?: boolean;
   loadError?: boolean;
   anchorRef: RefObject<HTMLElement | null>;
@@ -1275,6 +1291,7 @@ function SlashCommandPanel({
     useState<HTMLElement | null>(null);
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
+    extensionName?: string;
     detail: string;
     side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
@@ -1450,8 +1467,31 @@ function SlashCommandPanel({
                                 : rowRect.top - top >= bottom - rowRect.bottom
                                   ? 'top'
                                   : 'bottom';
+                          const name =
+                            item.type === 'skill' ? item.label : item.id;
+                          const skill = skills.find((s) => s.name === name);
+                          const isSkill =
+                            skill ||
+                            item.type === 'skill' ||
+                            item.category === 'skill';
+                          const extensionName =
+                            skill?.extensionName ??
+                            (isSkill &&
+                            commands.find((c) => c.name === name)?.source ===
+                              'plugin-command' &&
+                            name.includes(':')
+                              ? name.slice(0, name.indexOf(':'))
+                              : undefined);
+                          let label = isSkill ? name : item.label;
+                          if (
+                            extensionName &&
+                            label.startsWith(`${extensionName}:`)
+                          ) {
+                            label = label.slice(extensionName.length + 1);
+                          }
                           setHoverDetail({
-                            label: item.label,
+                            label,
+                            extensionName,
                             detail: item.detail,
                             side,
                           });
@@ -1523,6 +1563,11 @@ function SlashCommandPanel({
               <div className={styles.slashDetailCommand}>
                 {hoverDetail.label}
               </div>
+              {hoverDetail.extensionName && (
+                <div className={styles.slashDetailText}>
+                  {t('skills.extension')}: {hoverDetail.extensionName}
+                </div>
+              )}
               <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
             </div>
           </PopoverContent>
@@ -1599,6 +1644,10 @@ export const ChatEditor = memo(
       mountUnavailableModelTooltip,
       onSelectMode,
       onSelectModel,
+      workflowMode,
+      workflowModeStatus,
+      workflowModePending,
+      onWorkflowModeChange,
       reasoning,
       onSelectReasoningEffort,
       workspaces,
@@ -1835,7 +1884,7 @@ export const ChatEditor = memo(
       editorTheme: CHAT_EDITOR_THEME,
     });
 
-    const { t } = useI18n();
+    const { t, language } = useI18n();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
@@ -2169,6 +2218,7 @@ export const ChatEditor = memo(
     }, [core.hasAttachments, onAttachmentsChange]);
 
     const planDescriptionId = useId();
+    const workflowChipDescriptionId = useId();
     const modeItems = useMemo<DropdownItem[]>(
       () =>
         EXECUTION_APPROVAL_MODES.filter((id) =>
@@ -2335,6 +2385,7 @@ export const ChatEditor = memo(
       gitBranch: false,
       mode: false,
       plan: false,
+      workflow: false,
       model: false,
     });
     const toolbarLabelVisibilityRef = useRef(toolbarLabelVisibility);
@@ -2448,9 +2499,7 @@ export const ChatEditor = memo(
     // so it is handed on: to the input, or past a disabled one to a toolbar
     // control beside where the chip was.
     const planChipHadFocusRef = useRef(false);
-    useLayoutEffect(() => {
-      if (showPlanChip || !planChipHadFocusRef.current) return;
-      planChipHadFocusRef.current = false;
+    const handOffChipFocus = useCallback(() => {
       const toolbar = toolbarLeadingRef.current;
       // Focus that is anywhere but lost is somewhere the user put it.
       const doc = toolbar?.ownerDocument;
@@ -2471,7 +2520,41 @@ export const ChatEditor = memo(
           '[data-web-shell-mode-button]:not(:disabled), [data-web-shell-model-button]',
         )
         ?.focus();
-    }, [showPlanChip, disabled, focusComposer]);
+    }, [disabled, focusComposer]);
+    useLayoutEffect(() => {
+      if (showPlanChip || !planChipHadFocusRef.current) return;
+      planChipHadFocusRef.current = false;
+      handOffChipFocus();
+    }, [showPlanChip, handOffChipFocus]);
+    // Workflow, like Plan, is toggled from the add menu, so the toolbar shows
+    // a dismissible chip while the saved preference is on — including while
+    // it cannot take effect, since that is when turning it off matters most.
+    const workflowControl =
+      showAddMenuAction && showToolbarAction('workflowMode')
+        ? getWorkflowModeControlState(
+            {
+              workflowMode,
+              workflowModeStatus,
+              workflowModePending,
+              onWorkflowModeChange,
+            },
+            language,
+          )
+        : null;
+    const showWorkflowChip = Boolean(workflowControl?.mode?.requested);
+    const workflowChipUnavailable =
+      showWorkflowChip && workflowControl?.mode?.effective === false;
+    const workflowChipTooltip = workflowControl
+      ? workflowControl.disabled
+        ? workflowControl.description
+        : `${workflowControl.description} ${workflowControl.messages.clickToTurnOff}`
+      : '';
+    const workflowChipHadFocusRef = useRef(false);
+    useLayoutEffect(() => {
+      if (showWorkflowChip || !workflowChipHadFocusRef.current) return;
+      workflowChipHadFocusRef.current = false;
+      handOffChipFocus();
+    }, [showWorkflowChip, handOffChipFocus]);
     const showModelAction = showToolbarAction('model');
     const showCommandAction = showToolbarAction('commands');
     const modelItems = useMemo<DropdownItem[]>(
@@ -2704,10 +2787,20 @@ export const ChatEditor = memo(
         Boolean(gitContextControl));
 
     useLayoutEffect(() => {
-      if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
+      if (!currentModel && availableModels.length === 0) {
+        setLastConfirmedModelLabel('');
+      } else if (
+        currentModelLabel &&
+        currentModelLabel !== lastConfirmedModelLabel
+      ) {
         setLastConfirmedModelLabel(currentModelLabel);
       }
-    }, [currentModelLabel, lastConfirmedModelLabel]);
+    }, [
+      currentModel,
+      availableModels.length,
+      currentModelLabel,
+      lastConfirmedModelLabel,
+    ]);
 
     const showWorkspaceSelectLabel =
       isMobile || toolbarLabelVisibility.workspaceSelect;
@@ -2715,6 +2808,7 @@ export const ChatEditor = memo(
     const showGitBranchLabel = isMobile || toolbarLabelVisibility.gitBranch;
     const showModeLabel = toolbarLabelVisibility.mode;
     const showPlanLabel = toolbarLabelVisibility.plan;
+    const showWorkflowLabel = toolbarLabelVisibility.workflow;
     const showModelLabel = toolbarLabelVisibility.model;
     // One renderer per chip so the toolbar, the row under the composer, and the
     // mobile row share them: the toolbar drops a label when its width budget is
@@ -2864,6 +2958,9 @@ export const ChatEditor = memo(
           ...(showPlanToolbarControl
             ? [{ id: 'plan', expansionWidth: expansionWidth('plan') }]
             : []),
+          ...(showWorkflowChip
+            ? [{ id: 'workflow', expansionWidth: expansionWidth('workflow') }]
+            : []),
           ...(showModelAction
             ? [
                 {
@@ -2908,6 +3005,7 @@ export const ChatEditor = memo(
           gitBranch: itemVisibility.gitBranch ?? false,
           mode: itemVisibility.mode ?? false,
           plan: itemVisibility.plan ?? false,
+          workflow: itemVisibility.workflow ?? false,
           model: itemVisibility.model ?? false,
         };
         const unchanged = Object.keys(next).every(
@@ -2976,6 +3074,7 @@ export const ChatEditor = memo(
       showModelAction,
       showModeAction,
       showPlanToolbarControl,
+      showWorkflowChip,
       workspaceChipInToolbar,
       workspaceIndicatorVisible,
       workspaceName,
@@ -3060,6 +3159,16 @@ export const ChatEditor = memo(
           skillsLoading={skillsLoading}
           skillsLoadError={skillsLoadError}
           skillsLoaded={skillsLoaded}
+          workflow={
+            showAddMenuAction && showToolbarAction('workflowMode')
+              ? {
+                  workflowMode,
+                  workflowModeStatus,
+                  workflowModePending,
+                  onWorkflowModeChange,
+                }
+              : undefined
+          }
           btw={
             !isSimple && btwEnabled && !core.shellMode
               ? {
@@ -3236,6 +3345,57 @@ export const ChatEditor = memo(
                   {planTooltip}
                 </span>
                 <TooltipContent side="top">{planTooltip}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {showWorkflowChip && workflowControl && (
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={`${styles.toolBtn} ${styles.planChip} ${styles.workflowChip}`}
+                    data-web-shell-workflow-chip
+                    data-workflow-state={workflowControl.status}
+                    data-unavailable={workflowChipUnavailable ? '' : undefined}
+                    data-labelled={showWorkflowLabel ? '' : undefined}
+                    aria-pressed
+                    aria-label={workflowControl.messages.label}
+                    aria-describedby={workflowChipDescriptionId}
+                    aria-busy={workflowControl.pending || undefined}
+                    // Not the native attribute, so focus survives the
+                    // pending write the chip's own click starts.
+                    aria-disabled={workflowControl.disabled || undefined}
+                    onFocus={() => {
+                      workflowChipHadFocusRef.current = true;
+                    }}
+                    onBlur={() => {
+                      workflowChipHadFocusRef.current = false;
+                    }}
+                    onClick={() => {
+                      if (workflowControl.disabled) return;
+                      onWorkflowModeChange?.(false);
+                    }}
+                  >
+                    <span
+                      className={`${styles.toolBtnModeIcon} ${styles.planChipIcon}`}
+                    >
+                      <GitBranchIcon />
+                      <span className={styles.planChipClose} aria-hidden="true">
+                        <XIcon size={12} strokeWidth={2} />
+                      </span>
+                    </span>
+                    {showWorkflowLabel && (
+                      <span className={styles.toolBtnText}>Workflow</span>
+                    )}
+                  </button>
+                </TooltipTrigger>
+                <span id={workflowChipDescriptionId} className="sr-only">
+                  {workflowChipTooltip}
+                </span>
+                <TooltipContent side="top">
+                  {workflowChipTooltip}
+                </TooltipContent>
               </Tooltip>
             </TooltipProvider>
           )}
@@ -4172,6 +4332,8 @@ export const ChatEditor = memo(
             {core.slashMenu && (
               <SlashCommandPanel
                 menu={core.slashMenu}
+                commands={commands}
+                skills={skills}
                 loading={skillsLoading}
                 loadError={skillsLoadError}
                 anchorRef={containerRef}
@@ -4202,19 +4364,19 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            {mobileContextRowVisible && (
-              <div
-                ref={mobileContextRowRef}
-                className={styles.mobileContextRow}
-              >
-                {workspaceControls(false)}
-              </div>
-            )}
             {core.mobileComposer && !isSimple && !mobileVoiceActive && (
               <div
                 className={styles.mobileEditingActions}
                 data-web-shell-mobile-editing-actions
               >
+                {mobileContextRowVisible && (
+                  <div
+                    ref={mobileContextRowRef}
+                    className={styles.mobileContextRow}
+                  >
+                    {workspaceControls(false)}
+                  </div>
+                )}
                 {!showAddMenuAction && (
                   <button
                     type="button"
@@ -4242,7 +4404,9 @@ export const ChatEditor = memo(
                     )}
                   </button>
                 )}
-                <span className={styles.mobileEditingSpacer} />
+                {!mobileContextRowVisible && (
+                  <span className={styles.mobileEditingSpacer} />
+                )}
                 {mobileFocused && (
                   <button
                     type="button"
@@ -4422,6 +4586,27 @@ export const ChatEditor = memo(
                   >
                     <span className={styles.toolBtnText}>{planLabel}</span>
                     <Switch size="sm" tabIndex={-1} checked={planMode} />
+                  </span>
+                </>
+              )}
+              {showWorkflowChip && (
+                <>
+                  <span
+                    data-toolbar-measure="workflow:collapsed"
+                    className={`${styles.toolBtn} ${styles.planChip}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <GitBranchIcon />
+                    </span>
+                  </span>
+                  <span
+                    data-toolbar-measure="workflow:expanded"
+                    className={`${styles.toolBtn} ${styles.planChip}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <GitBranchIcon />
+                    </span>
+                    <span className={styles.toolBtnText}>Workflow</span>
                   </span>
                 </>
               )}

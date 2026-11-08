@@ -4,6 +4,11 @@
 
 - 状态：已在本改动中实现（见证：`ManagedSessionGuardConvoyIT`）；「后续」
   一节列出的车道仍保留无界获取
+- 2026-11-03 更新：Turn 提交准入不再获取 placement 守卫；参见
+  [Turn 准入设计](2026-11-03-managed-turn-admission-tenant-guard.zh-CN.md)
+- 2026-11-03 更新：普通 journal commit 改为在其 Session 行上排队，不再获取
+  placement 守卫；参见
+  [journal commit 设计](2026-11-03-managed-journal-commit-tenant-guard.zh-CN.md)
 - Issue：[#13800](https://github.com/QwenLM/qwen-code/issues/13800)——一个处于
   `recovery_blocked` 的 Session 楔死同 daemon 上其他 Session 的后续轮次。
   本改动并不实现该 issue 的 W1 或 W2，见「范围」。
