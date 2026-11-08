@@ -108,6 +108,8 @@ function validate(c) {
 
 export function createManager(config, dependencies = {}) {
   validate(config);
+  const runnerName = (slot) =>
+    `ecs-qwen-${config.poolId}-${String(slot).padStart(2, '0')}`;
   const execute = dependencies.command || command;
   const run = (program, args, options = {}) => {
     if (program !== 'docker') return execute(program, args, options);
@@ -168,6 +170,8 @@ export function createManager(config, dependencies = {}) {
       if (
         !name.startsWith(prefix) ||
         !/^[0-9a-f-]{36}$/.test(name.slice(prefix.length)) ||
+        (state.runnerName !== undefined &&
+          state.runnerName !== runnerName(slot)) ||
         typeof state.uncertain !== 'boolean' ||
         (!state.uncertain &&
           (!Number.isSafeInteger(state.runnerId) || state.runnerId < 1)) ||
@@ -301,14 +305,14 @@ export function createManager(config, dependencies = {}) {
     if ((await listNetworks(slot)).length)
       throw new Error('Network cleanup failed');
     if (state?.name) {
+      const name = state.runnerName ?? state.name;
       const all = await listRunners();
-      const runners = all.filter((runner) => runner.name === state.name);
+      const runners = all.filter((runner) => runner.name === name);
       if (
         state.runnerId &&
         (runners.some((runner) => runner.id !== state.runnerId) ||
           all.some(
-            (runner) =>
-              runner.id === state.runnerId && runner.name !== state.name,
+            (runner) => runner.id === state.runnerId && runner.name !== name,
           ))
       )
         throw new Error(
@@ -365,6 +369,7 @@ export function createManager(config, dependencies = {}) {
       );
     state = {
       name: `ecs-qwen-${config.poolId}-${slot}-${randomUUID()}`,
+      runnerName: runnerName(slot),
       createdAt: new Date().toISOString(),
       uncertain: true,
     };
@@ -379,7 +384,7 @@ export function createManager(config, dependencies = {}) {
             `/repos/${config.repo}/actions/runners/generate-jitconfig`,
           ],
           {
-            name: state.name,
+            name: state.runnerName,
             runner_group_id: config.runnerGroupId,
             labels: config.labels,
             work_folder: '_work',
@@ -396,7 +401,7 @@ export function createManager(config, dependencies = {}) {
     }
     try {
       if (
-        result?.runner?.name !== state.name ||
+        result?.runner?.name !== state.runnerName ||
         !Number.isSafeInteger(result.runner.id) ||
         result.runner.id < 1
       )
@@ -471,7 +476,7 @@ export function createManager(config, dependencies = {}) {
       if (!stopping) {
         await run('docker', ['start', id]);
         log(
-          `slot ${slot}: started runner ${state.name}, id ${state.runnerId}, container ${id}`,
+          `slot ${slot}: started runner ${state.runnerName}, id ${state.runnerId}, container ${id}`,
         );
         const deadline = Date.now() + config.ttlSeconds * 1000;
         let exitCode;
