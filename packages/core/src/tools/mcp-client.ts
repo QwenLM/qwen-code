@@ -45,6 +45,7 @@ export {
   getAllMCPServerStatuses,
   getMCPServerLastError,
   getMCPServerStatus,
+  markMCPServerTeardownIntent,
   MCPServerStatus,
   recordMCPServerLastError,
   removeMCPServerStatus,
