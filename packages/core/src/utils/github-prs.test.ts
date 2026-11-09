@@ -13,18 +13,53 @@ vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 
+// Root enters any directory, so a test that needs one it cannot enter sets
+// the error accessSync throws, and the path it throws for, instead of
+// relying on chmod. The path is compared as given: the view passes `cwd`
+// to accessSync unchanged.
+const fsControl = vi.hoisted(() => ({
+  accessError: undefined as NodeJS.ErrnoException | undefined,
+  accessPath: undefined as string | undefined,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    // Refuses only the search (X_OK) check of the one path the test names,
+    // so a check for another mode or of another directory passes and the
+    // test notices.
+    accessSync: (...args: Parameters<typeof actual.accessSync>) => {
+      const mode = args[1] ?? actual.constants.F_OK;
+      if (
+        fsControl.accessError &&
+        args[0] === fsControl.accessPath &&
+        mode & actual.constants.X_OK
+      ) {
+        throw fsControl.accessError;
+      }
+      return actual.accessSync(...args);
+    },
+  };
+});
+
 import { execFile } from 'node:child_process';
 import {
+  aggregateChecks,
   createGitHubPullRequest,
   fetchAttributionRepoKeys,
   fetchCurrentBranchName,
   fetchCurrentBranchPullRequest,
   fetchGitHubPullRequests,
+  fetchGitHubPullRequestView,
   fetchRemoteWebUrl,
   normalizeRemoteToWebUrl,
   parseGhPrList,
+  parseGhPrView,
+  pullRequestViewUrl,
   repoKeyFromWebUrl,
+  resolveGhBinary,
   GITHUB_PR_LIST_LIMIT,
+  GITHUB_PR_VIEW_FAILING_CHECKS_MAX,
 } from './github-prs.js';
 
 const mockExecFile = vi.mocked(execFile);
@@ -55,13 +90,30 @@ function mockGhSuccess(payload: unknown, expectArgs?: string[]) {
   mockStdout(JSON.stringify(payload), expectArgs);
 }
 
-/** Fails with Error(`message`) plus `fields`, passing its stderr through. */
+/**
+ * Fails the way execFile's callback does: an Error(`message`) carrying
+ * `code`, `signal` and `killed` — by default those of a plain `exit 1` — and
+ * the stderr only as the callback's third argument, since execFile's error
+ * has no `stderr` property of its own.
+ */
 function mockExecError(
   message: string,
-  fields: { code?: string; stderr?: string; killed?: boolean } = {},
+  {
+    stderr = '',
+    ...fields
+  }: {
+    code?: string | number | null;
+    signal?: string | null;
+    stderr?: string;
+    killed?: boolean;
+  } = {},
 ) {
-  const error = Object.assign(new Error(message), fields);
-  mockExec((cb) => cb(error, '', error.stderr ?? ''));
+  const error = Object.assign(
+    new Error(message),
+    { code: 1, signal: null, killed: false },
+    fields,
+  );
+  mockExec((cb) => cb(error, '', stderr));
 }
 
 /** Gives each test a fresh temp dir (and, by default, reset mocks). */
@@ -243,7 +295,7 @@ describe('fetchGitHubPullRequests', () => {
       pullRequests: [expect.objectContaining({ number: 1, state: 'open' })],
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'pr',
         'list',
@@ -262,6 +314,47 @@ describe('fetchGitHubPullRequests', () => {
     );
   });
 
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess([ghPrEntry()]);
+
+    await fetchGitHubPullRequests(dir, { PATH: '/nonexistent', HOME: home });
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
+  });
+
+  it('forwards the spawn directory when resolving gh', async () => {
+    const dir = tmp.repo();
+    fakeGh(path.join(dir, 'bin'));
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess([ghPrEntry()]);
+
+    await fetchGitHubPullRequests(dir, { PATH: 'bin', HOME: home });
+
+    // Literal, not the widened matcher: the fallback would satisfy that too,
+    // and this case exists to tell "child PATH resolved" from "fallback won".
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe('gh');
+  });
+
+  it('reports the fallback binary on a spawn failure', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockExecError('spawn EACCES', { code: 'EACCES' });
+
+    const result = await fetchGitHubPullRequests(dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    // The route redacts this exact value: it names the host's HOME and may
+    // contain spaces, which a token sweep cannot own.
+    expect(result).toMatchObject({ kind: 'failed', binary });
+  });
+
   it('uses slim fields and the requested state/limit when asked', async () => {
     const dir = tmp.repo();
     mockGhSuccess([ghPrEntry({ state: 'MERGED' })]);
@@ -277,7 +370,7 @@ describe('fetchGitHubPullRequests', () => {
       pullRequests: [expect.objectContaining({ number: 1, state: 'merged' })],
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'pr',
         'list',
@@ -302,10 +395,11 @@ describe('fetchGitHubPullRequests', () => {
   it('names the timeout when gh is killed after the deadline', async () => {
     mockExecError('Command failed: gh pr list --state open', {
       killed: true,
-      stderr: '',
+      code: null,
+      signal: 'SIGTERM',
     });
     const result = await fetchGitHubPullRequests(tmp.repo());
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       kind: 'failed',
       message: 'gh pr list timed out after 10s',
       gitRoot: tmp.dir,
@@ -315,10 +409,41 @@ describe('fetchGitHubPullRequests', () => {
   it('returns failed with a single-line stderr message when gh exits non-zero', async () => {
     mockExecError('exit 1', { stderr: 'gh: not logged in\nRun gh auth login' });
     const result = await fetchGitHubPullRequests(tmp.repo());
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       kind: 'failed',
       message: 'gh: not logged in Run gh auth login',
       gitRoot: tmp.dir,
+    });
+  });
+
+  it('names the exit, not the argv, when gh fails with nothing on stderr', async () => {
+    const dir = tmp.repo();
+    mockExecError('Command failed: gh pr list --state open --limit 100', {
+      code: 1,
+    });
+    expect(await fetchGitHubPullRequests(dir)).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr list exited with code 1',
+    });
+
+    mockExecError('Command failed: gh pr list --state open --limit 100', {
+      code: null,
+      signal: 'SIGKILL',
+    });
+    expect(await fetchGitHubPullRequests(dir)).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr list was killed by SIGKILL',
+    });
+  });
+
+  it("keeps Node's message for its own failures even when gh wrote stderr", async () => {
+    mockExecError('stdout maxBuffer length exceeded', {
+      code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      stderr: 'some progress output\n',
+    });
+    expect(await fetchGitHubPullRequests(tmp.repo())).toMatchObject({
+      kind: 'failed',
+      message: 'stdout maxBuffer length exceeded',
     });
   });
 
@@ -341,6 +466,477 @@ describe('fetchGitHubPullRequests', () => {
     mockStdout('not json');
     const result = await fetchGitHubPullRequests(tmp.repo());
     expect(result.kind).toBe('failed');
+  });
+});
+
+describe('aggregateChecks', () => {
+  it.each([
+    [undefined, 'none'],
+    [[], 'none'],
+    [[{ __typename: 'CheckRun', conclusion: 'SUCCESS' }], 'passing'],
+    [[{ __typename: 'CheckRun', conclusion: 'skipped' }], 'passing'],
+    [[{ __typename: 'CheckRun', conclusion: null }], 'pending'],
+    // gh prints an unset conclusion as an empty string.
+    [
+      [{ __typename: 'CheckRun', status: 'IN_PROGRESS', conclusion: '' }],
+      'pending',
+    ],
+    [[{ conclusion: 'FAILURE' }], 'failing'],
+    [[{ __typename: 'StatusContext', state: 'failure' }], 'failing'],
+    [[{ __typename: 'StatusContext', state: 'PENDING' }], 'pending'],
+    [[{ __typename: 'StatusContext', state: 'SUCCESS' }], 'passing'],
+    [[{ __typename: 'StatusContext', state: 'ERROR' }], 'failing'],
+    [[{ __typename: 'CheckRun', conclusion: 'cancelled' }], 'failing'],
+    [[{ __typename: 'CheckRun', conclusion: 'STALE' }], 'failing'],
+    [[{ __typename: 'CheckRun', conclusion: 'ACTION_REQUIRED' }], 'failing'],
+    [[{ __typename: 'CheckRun', conclusion: 'STARTUP_FAILURE' }], 'failing'],
+    [
+      [
+        { __typename: 'CheckRun', conclusion: null },
+        { __typename: 'CheckRun', conclusion: 'TIMED_OUT' },
+      ],
+      'failing',
+    ],
+    [
+      [
+        { __typename: 'CheckRun', conclusion: 'SUCCESS' },
+        { __typename: 'StatusContext', state: 'EXPECTED' },
+      ],
+      'pending',
+    ],
+  ])('reduces %j to %s', (rollup, expected) => {
+    expect(aggregateChecks(rollup)).toBe(expected);
+  });
+
+  it('counts every run, including a failed attempt a rerun superseded', () => {
+    // Attempts of one check are not told from runs of other triggers (gh
+    // exports no trigger, app or workflow id): every run counts.
+    const run = (conclusion: string, extra = {}) => ({
+      __typename: 'CheckRun',
+      name: 'build',
+      workflowName: 'CI',
+      conclusion,
+      ...extra,
+    });
+    expect(
+      aggregateChecks([
+        run('FAILURE', { startedAt: '2026-11-07T10:00:00Z' }),
+        run('SUCCESS', { startedAt: '2026-11-07T11:00:00Z' }),
+      ]),
+    ).toBe('failing');
+    // A later run its `if:` skipped does not hide the failure either.
+    expect(aggregateChecks([run('FAILURE'), run('SKIPPED')])).toBe('failing');
+  });
+});
+
+function ghPrView(overrides: Record<string, unknown> = {}) {
+  return {
+    url: 'https://github.com/o/r/pull/7',
+    title: 'Fix the build',
+    headRefOid: 'abc123',
+    mergeable: 'MERGEABLE',
+    state: 'OPEN',
+    statusCheckRollup: [
+      { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+    ],
+    ...overrides,
+  };
+}
+
+describe('parseGhPrView', () => {
+  const parse = (overrides: Record<string, unknown> = {}) =>
+    parseGhPrView(JSON.stringify(ghPrView(overrides)));
+
+  it('maps the view to the watch shape', () => {
+    expect(parse()).toEqual({
+      url: 'https://github.com/o/r/pull/7',
+      title: 'Fix the build',
+      headSha: 'abc123',
+      state: 'open',
+      mergeable: 'mergeable',
+      checks: 'passing',
+      failingChecks: [],
+    });
+  });
+
+  it.each([
+    ['OPEN', 'open'],
+    ['MERGED', 'merged'],
+    ['CLOSED', 'closed'],
+    ['closed', 'closed'],
+  ])('maps state %s to %s', (state, expected) => {
+    expect(parse({ state }).state).toBe(expected);
+  });
+
+  it('maps CONFLICTING and leaves UNKNOWN or anything else absent', () => {
+    expect(parse({ mergeable: 'CONFLICTING' }).mergeable).toBe('conflicting');
+    expect(parse({ mergeable: 'mergeable' }).mergeable).toBe('mergeable');
+    for (const mergeable of ['UNKNOWN', undefined, null, 'clean', 3]) {
+      const view = parse({ mergeable });
+      expect(view).not.toHaveProperty('mergeable');
+    }
+  });
+
+  it('names the failing checks as GitHub labels them, in rollup order, once each, capped', () => {
+    const view = parse({
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'zeta', conclusion: 'FAILURE' },
+        { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+        { __typename: 'StatusContext', context: 'ci/legacy', state: 'ERROR' },
+        {
+          __typename: 'CheckRun',
+          name: 'zeta',
+          workflowName: 'Nightly',
+          conclusion: 'CANCELLED',
+        },
+        { __typename: 'CheckRun', name: 'e2e', conclusion: null },
+        { __typename: 'CheckRun', conclusion: 'FAILURE' },
+        // Failing but nameless: they count towards `checks`, unnamed.
+        { __typename: 'CheckRun', name: '', conclusion: 'FAILURE' },
+        { __typename: 'StatusContext', context: '', state: 'FAILURE' },
+        {
+          __typename: 'CheckRun',
+          name: 'alpha',
+          workflowName: '',
+          conclusion: 'TIMED_OUT',
+        },
+        { __typename: 'CheckRun', name: 'zeta', conclusion: 'FAILURE' },
+        null,
+        'junk',
+      ],
+    });
+    expect(view.checks).toBe('failing');
+    expect(view.failingChecks).toEqual([
+      'zeta',
+      'ci/legacy',
+      'Nightly / zeta',
+      'alpha',
+    ]);
+
+    // Nameless failures alone still fail the head, with nothing to name.
+    for (const entry of [
+      { __typename: 'CheckRun', name: '', conclusion: 'FAILURE' },
+      { __typename: 'StatusContext', context: '', state: 'FAILURE' },
+    ]) {
+      const nameless = parse({
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+          entry,
+        ],
+      });
+      expect(nameless.checks).toBe('failing');
+      expect(nameless.failingChecks).toEqual([]);
+    }
+
+    // The cap is pinned, not derived from the constant it is checked by.
+    expect(GITHUB_PR_VIEW_FAILING_CHECKS_MAX).toBe(20);
+    const many = parse({
+      statusCheckRollup: Array.from(
+        { length: GITHUB_PR_VIEW_FAILING_CHECKS_MAX + 1 },
+        (_, i) => ({
+          __typename: 'CheckRun',
+          name: `job-${i}`,
+          conclusion: 'FAILURE',
+        }),
+      ),
+    });
+    expect(many.failingChecks).toEqual(
+      Array.from({ length: 20 }, (_, i) => `job-${i}`),
+    );
+  });
+
+  it('keeps a failed attempt a rerun superseded, and names it', () => {
+    const view = parse({
+      statusCheckRollup: [
+        {
+          __typename: 'CheckRun',
+          name: 'build',
+          workflowName: 'CI',
+          conclusion: 'FAILURE',
+        },
+        {
+          __typename: 'CheckRun',
+          name: 'build',
+          workflowName: 'CI',
+          conclusion: 'SUCCESS',
+        },
+      ],
+    });
+    expect(view.checks).toBe('failing');
+    expect(view.failingChecks).toEqual(['CI / build']);
+  });
+
+  it('drops entries gh would never print instead of failing the view', () => {
+    const view = parse({
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'odd', conclusion: 7 },
+        { __typename: 'StatusContext', context: 'odd', state: false },
+        { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+      ],
+    });
+    expect(view.checks).toBe('passing');
+  });
+
+  it('reports no checks and an empty title as such', () => {
+    const view = parse({ statusCheckRollup: undefined, title: undefined });
+    expect(view.checks).toBe('none');
+    expect(view.title).toBe('');
+  });
+
+  it.each([
+    ['[]', 'expected a JSON object'],
+    ['null', 'expected a JSON object'],
+    [JSON.stringify(ghPrView({ url: '' })), 'missing url'],
+    [JSON.stringify(ghPrView({ headRefOid: undefined })), 'missing headRefOid'],
+    [JSON.stringify(ghPrView({ state: 'DRAFT' })), 'unknown state'],
+  ])('rejects %s', (stdout, message) => {
+    expect(() => parseGhPrView(stdout)).toThrow(message);
+  });
+});
+
+describe('fetchGitHubPullRequestView', () => {
+  const tmp = useTmpDir('github-pr-view-test-');
+  const url = 'https://github.com/o/r/pull/7';
+  /** An env whose PATH resolves gh, so no fallback binary is reported. */
+  const ghOnPath = () => ({
+    PATH: path.dirname(fakeGh(path.join(tmp.dir, 'bin'))),
+  });
+
+  it('views the PR by URL from the given directory', async () => {
+    mockGhSuccess(ghPrView());
+
+    const result = await fetchGitHubPullRequestView(url, tmp.dir, {
+      GH_TOKEN: 'workspace-token',
+      GH_REPO: 'other/repo',
+    });
+
+    expect(result).toEqual({
+      kind: 'ok',
+      view: expect.objectContaining({ headSha: 'abc123', state: 'open' }),
+    });
+    expect(mockExecFile).toHaveBeenCalledWith(
+      expect.stringMatching(/(?:^|[/\\])gh$/),
+      [
+        'pr',
+        'view',
+        url,
+        '--json',
+        'url,title,headRefOid,mergeable,state,statusCheckRollup',
+      ],
+      expect.objectContaining({
+        cwd: tmp.dir,
+        timeout: 10_000,
+        env: expect.objectContaining({ GH_TOKEN: 'workspace-token' }),
+      }),
+      expect.any(Function),
+    );
+    // ghEnv strips repository selectors: only the URL names the PR.
+    const options = mockExecFile.mock.calls[0]?.[2] as {
+      env: Record<string, string | undefined>;
+    };
+    expect(options.env).not.toHaveProperty('GH_REPO');
+  });
+
+  it.each([
+    [
+      'https://user:pw@github.com:8443/o/r/pull/7/files?x=1#y',
+      'https://github.com:8443/o/r/pull/7',
+    ],
+    [
+      'https://github.com/O.rg/R_e-po/pull/7.diff',
+      'https://github.com/O.rg/R_e-po/pull/7',
+    ],
+    [
+      'HTTP://GHE.example.com/o/r/pull/12.patch',
+      'http://ghe.example.com/o/r/pull/12',
+    ],
+    ['https://www.github.com/o/r/pull/7/', 'https://www.github.com/o/r/pull/7'],
+    ['https://github.com/o/r/pull/007', 'https://github.com/o/r/pull/7'],
+  ])('hands gh the rebuilt URL for %s', async (input, expected) => {
+    mockGhSuccess(ghPrView());
+    await fetchGitHubPullRequestView(input, tmp.dir);
+    expect(mockExecFile.mock.calls[0]?.[1]).toEqual([
+      'pr',
+      'view',
+      expected,
+      '--json',
+      'url,title,headRefOid,mergeable,state,statusCheckRollup',
+    ]);
+  });
+
+  it.each([
+    '-R',
+    '--repo=o/r',
+    '7',
+    'github.com/o/r/pull/7',
+    'ftp://h/o/r/pull/7',
+    'https://github.com/o/r/issues/7',
+    'https://github.com/o/r',
+    'https://github.com/o/r/PULL/7',
+    'https://github.com/o/r/pull/0',
+    'https://github.com/o/r/pull/000',
+    'https://github.com/o/r/pull/abc',
+    'https://github.com/o/r/pull/7x',
+    'https://github.com/o%2Fx/r/pull/7',
+    'https://github.com/o/r/pull/99999999999999999999',
+  ])('refuses %s without spawning gh', async (bad) => {
+    // A spawn would succeed, so a missing guard fails fast instead of hanging.
+    mockGhSuccess(ghPrView());
+    expect(pullRequestViewUrl(bad)).toBeUndefined();
+    const result = await fetchGitHubPullRequestView(bad, tmp.dir);
+    expect(result).toEqual({
+      kind: 'failed',
+      reason: 'not_a_pr_url',
+      message: 'not a pull request URL',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a working directory that is a file without spawning gh', async () => {
+    const file = path.join(tmp.dir, 'file');
+    fs.writeFileSync(file, '');
+    mockGhSuccess(ghPrView());
+    expect(await fetchGitHubPullRequestView(url, file)).toEqual({
+      kind: 'failed',
+      reason: 'cwd_missing',
+      message: 'gh pr view working directory is not a directory',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a working directory that does not exist without spawning gh', async () => {
+    mockGhSuccess(ghPrView());
+    const result = await fetchGitHubPullRequestView(
+      url,
+      path.join(tmp.dir, 'gone'),
+    );
+    expect(result).toEqual({
+      kind: 'failed',
+      reason: 'cwd_missing',
+      message: 'gh pr view working directory does not exist',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a working directory below a file as missing', async () => {
+    const file = path.join(tmp.dir, 'file');
+    fs.writeFileSync(file, '');
+    mockGhSuccess(ghPrView());
+    expect(
+      await fetchGitHubPullRequestView(url, path.join(file, 'sub')),
+    ).toEqual({
+      kind: 'failed',
+      reason: 'cwd_missing',
+      message: 'gh pr view working directory does not exist',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  // Creating a symlink needs a privilege Windows runners may lack.
+  it.skipIf(process.platform === 'win32')(
+    'names a working directory that cannot be inspected, without spawning gh',
+    async () => {
+      const loop = path.join(tmp.dir, 'loop');
+      fs.symlinkSync(loop, loop);
+      mockGhSuccess(ghPrView());
+      expect(await fetchGitHubPullRequestView(url, loop)).toEqual({
+        kind: 'failed',
+        reason: 'cwd_unusable',
+        message: 'gh pr view working directory cannot be inspected (ELOOP)',
+      });
+      expect(mockExecFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names a working directory that cannot be entered, without spawning gh', async () => {
+    mockGhSuccess(ghPrView());
+    fsControl.accessError = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    fsControl.accessPath = tmp.dir;
+    try {
+      expect(await fetchGitHubPullRequestView(url, tmp.dir)).toEqual({
+        kind: 'failed',
+        reason: 'cwd_unusable',
+        message: 'gh pr view working directory cannot be entered (EACCES)',
+      });
+    } finally {
+      fsControl.accessError = undefined;
+      fsControl.accessPath = undefined;
+    }
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('resolves a relative PATH entry against the given directory', async () => {
+    fakeGh(path.join(tmp.dir, 'bin'));
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess(ghPrView());
+
+    await fetchGitHubPullRequestView(url, tmp.dir, { PATH: 'bin', HOME: home });
+
+    // Literal: the fallback would also match a looser matcher.
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe('gh');
+  });
+
+  it('maps a missing gh to cli_unavailable', async () => {
+    mockExecError('spawn gh ENOENT', { code: 'ENOENT' });
+    expect(await fetchGitHubPullRequestView(url, tmp.dir)).toEqual({
+      kind: 'cli_unavailable',
+    });
+  });
+
+  it("passes gh's stderr through and names the view command on a timeout", async () => {
+    const env = ghOnPath();
+    mockExecError('Command failed', {
+      stderr: 'GraphQL: Could not resolve to a PullRequest\n',
+    });
+    expect(await fetchGitHubPullRequestView(url, tmp.dir, env)).toEqual({
+      kind: 'failed',
+      reason: 'gh_failed',
+      message: 'GraphQL: Could not resolve to a PullRequest',
+    });
+
+    mockExecError('Command failed: gh pr view', {
+      killed: true,
+      code: null,
+      signal: 'SIGTERM',
+    });
+    expect(await fetchGitHubPullRequestView(url, tmp.dir, env)).toEqual({
+      kind: 'failed',
+      reason: 'timed_out',
+      message: 'gh pr view timed out after 10s',
+    });
+  });
+
+  it('reports the fallback binary on a spawn failure', async () => {
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockExecError('spawn EACCES', { code: 'EACCES' });
+
+    const result = await fetchGitHubPullRequestView(url, tmp.dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    expect(result).toMatchObject({
+      kind: 'failed',
+      reason: 'gh_failed',
+      binary,
+    });
+  });
+
+  it('fails on output it cannot parse without naming the binary', async () => {
+    // A fallback binary is in play, so only the parse path can omit it.
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockStdout('not json');
+    const result = await fetchGitHubPullRequestView(url, tmp.dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+    expect(result).toMatchObject({ kind: 'failed', reason: 'unparsable' });
+    expect(result).not.toHaveProperty('binary');
   });
 });
 
@@ -378,6 +974,39 @@ describe('createGitHubPullRequest', () => {
     expect(seen.env).not.toHaveProperty('GIT_WORK_TREE');
   });
 
+  it('gives gh pr create its longer 30 s timeout', async () => {
+    mockExecFile.mockClear();
+    const dir = tmp.repo();
+    answerWithUrl('https://github.com/o/r/pull/7');
+
+    await createGitHubPullRequest(dir, { title: 'My PR' });
+
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+    expect(mockExecFile.mock.calls[0]?.[2]).toMatchObject({
+      timeout: 30_000,
+    });
+  });
+
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    answerWithUrl('https://github.com/o/r/pull/7');
+
+    await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      { PATH: '/nonexistent', HOME: home },
+    );
+
+    expect(mockExecFile).toHaveBeenCalledWith(
+      binary,
+      expect.any(Array),
+      expect.anything(),
+      expect.any(Function),
+    );
+  });
+
   it('forwards a workspace env while still stripping repository selectors', async () => {
     const dir = tmp.repo();
     const seen = answerWithUrl('https://github.com/o/r/pull/7');
@@ -396,6 +1025,40 @@ describe('createGitHubPullRequest', () => {
     expect(seen.env).toBeDefined();
     expect(seen.env?.['GH_TOKEN']).toBe('ws-token');
     expect(seen.env).not.toHaveProperty('GH_REPO');
+  });
+
+  it("reports gh's stderr, not Node's argv, when gh pr create fails", async () => {
+    const dir = tmp.repo();
+    mockExecError('Command failed: gh pr create --title My PR --body draft', {
+      stderr: 'pull request create failed: No commits between main and x\n',
+    });
+
+    const result = await createGitHubPullRequest(dir, {
+      title: 'My PR',
+      body: 'draft',
+    });
+
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'pull request create failed: No commits between main and x',
+    });
+  });
+
+  it('does not report the PR title and body when gh pr create fails silently', async () => {
+    const dir = tmp.repo();
+    mockExecError('Command failed: gh pr create --title My PR --body secret', {
+      code: 1,
+    });
+
+    const result = await createGitHubPullRequest(dir, {
+      title: 'My PR',
+      body: 'secret',
+    });
+
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr create exited with code 1',
+    });
   });
 
   it('uses XDG gh credentials without exposing XDG git config to subprocesses', async () => {
@@ -576,8 +1239,100 @@ describe('fetchRemoteWebUrl', () => {
   });
 });
 
+/** Creates `<dir>/gh` and returns its path. */
+function fakeGh(dir: string): string {
+  fs.mkdirSync(dir, { recursive: true });
+  const binary = path.join(dir, 'gh');
+  fs.writeFileSync(binary, '');
+  return binary;
+}
+
+describe('resolveGhBinary', () => {
+  const tmp = useTmpDir('github-prs-gh-binary-');
+
+  it('executes the gh that PATH resolves even when a fallback is installed', () => {
+    const binDir = path.join(tmp.dir, 'bin');
+    fakeGh(binDir);
+    // A fallback that exists on the host must not outrank PATH. Creating one
+    // makes "PATH wins" observable regardless of this machine's installs.
+    fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary(
+        {
+          PATH: binDir,
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        tmp.dir,
+      ),
+    ).toBe('gh');
+  });
+
+  it('resolves a relative PATH entry against the child directory', () => {
+    const cwd = path.join(tmp.dir, 'repo');
+    fs.mkdirSync(cwd, { recursive: true });
+    fakeGh(path.join(cwd, 'bin'));
+    // The fallback is the discriminator: reaching it means the relative entry
+    // was probed under this process's cwd instead of the spawn directory.
+    fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary({ PATH: 'bin', HOME: path.join(tmp.dir, 'home') }, cwd),
+    ).toBe('gh');
+  });
+
+  it('resolves an empty PATH component against the child directory', () => {
+    const cwd = path.join(tmp.dir, 'repo2');
+    fs.mkdirSync(cwd, { recursive: true });
+    fakeGh(cwd);
+    fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary(
+        {
+          PATH: `${path.delimiter}${path.join(tmp.dir, 'missing')}`,
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        cwd,
+      ),
+    ).toBe('gh');
+  });
+
+  it('falls back to the per-user install when PATH cannot resolve gh', () => {
+    // A daemon launched by launchd inherits `/usr/bin:/bin:…` — no
+    // package-manager bin dir — so a bare name would fail with ENOENT and
+    // every gh consumer would silently degrade.
+    const binary = fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary(
+        {
+          PATH: '/nonexistent',
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        tmp.dir,
+      ),
+    ).toBe(binary);
+  });
+});
+
 describe('fetchCurrentBranchPullRequest', () => {
   const tmp = useTmpDir('github-prs-branch-pr-');
+
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+      headRefName: 'feat/x',
+    });
+
+    await fetchCurrentBranchPullRequest(dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
+  });
 
   it('resolves number, url, state, and head branch from gh', async () => {
     mockGhSuccess(
@@ -633,7 +1388,11 @@ describe('fetchCurrentBranchPullRequest', () => {
     // Timeouts, rate limits, and auth failures prove nothing about the
     // branch's PRs; the attribution gate must decline on them instead of
     // reading them as "no prior PR".
-    mockExecError('network timeout', { killed: true });
+    mockExecError('network timeout', {
+      killed: true,
+      code: null,
+      signal: 'SIGTERM',
+    });
     expect(await fetchCurrentBranchPullRequest(tmp.repo())).toEqual({
       status: 'error',
     });
@@ -692,6 +1451,17 @@ describe('fetchAttributionRepoKeys', () => {
     });
   });
 
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess({ url: 'https://github.com/o/r' });
+
+    await fetchAttributionRepoKeys(dir, { PATH: '/nonexistent', HOME: home });
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
+  });
+
   it('omits the parent key for a non-fork repo', async () => {
     mockGhSuccess({ url: 'https://github.com/o/r', parent: {} });
     expect(await fetchAttributionRepoKeys(tmp.repo())).toEqual({
@@ -708,7 +1478,11 @@ describe('fetchAttributionRepoKeys', () => {
     // An unresolvable pre-run identity must decline attribution, not read
     // as "any repo may bind".
     const dir = tmp.repo();
-    mockExecError('network timeout', { killed: true });
+    mockExecError('network timeout', {
+      killed: true,
+      code: null,
+      signal: 'SIGTERM',
+    });
     expect(await fetchAttributionRepoKeys(dir)).toEqual({});
 
     mockStdout('not json');

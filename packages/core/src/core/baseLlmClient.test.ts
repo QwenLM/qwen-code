@@ -24,7 +24,7 @@ import type { ContentGenerator } from './contentGenerator.js';
 import type { Config } from '../config/config.js';
 import { AuthType } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
@@ -270,6 +270,22 @@ describe('BaseLlmClient', () => {
 
       expect(retryWithBackoff).toHaveBeenCalledTimes(1);
       expectRetriedWith({ maxAttempts: 3 });
+    });
+
+    it('keeps explicitly bounded JSON requests out of persistent retries', async () => {
+      vi.mocked(isUnattendedMode).mockReturnValue(true);
+      try {
+        await generateJsonWith(
+          { color: 'cyan' },
+          { maxAttempts: 1, boundedRetries: true },
+        );
+        expectRetriedWith({ maxAttempts: 1, persistentMode: false });
+        vi.mocked(retryWithBackoff).mockClear();
+        await generateJsonWith({ color: 'blue' });
+        expectRetriedWith({ persistentMode: true });
+      } finally {
+        vi.mocked(isUnattendedMode).mockReturnValue(false);
+      }
     });
 
     it('should call retryWithBackoff with default maxAttempts when not provided', async () => {
@@ -808,6 +824,43 @@ describe('BaseLlmClient', () => {
       expect(resolved.contentGenerator).toBe(mockContentGenerator);
       expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
       expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the main generator for a provider-qualified selector naming the main model', async () => {
+      const mainBaseUrl = 'https://main.invalid/v1';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'main-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: mainBaseUrl,
+      });
+      registerOnly(AuthType.USE_OPENAI, 'main-model', { id: 'main-model' });
+
+      const resolved = await resolve('openai:main-model');
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(resolved.model).toBe('main-model');
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the main generator for an endpoint-pinned selector matching the main base URL', async () => {
+      const mainBaseUrl = 'https://main.invalid/v1';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'main-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: mainBaseUrl,
+      });
+      registerOnly(
+        AuthType.USE_OPENAI,
+        'main-model',
+        { id: 'main-model' },
+        mainBaseUrl,
+      );
+
+      const resolved = await resolve(`openai:main-model\0${mainBaseUrl}`);
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(resolved.model).toBe('main-model');
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 

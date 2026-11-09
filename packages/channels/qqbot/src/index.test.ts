@@ -71,7 +71,7 @@ describe('QQ management descriptor', () => {
 
 describe('QQ groupAllPolicy cross-field validation', () => {
   const usable = {
-    sessionScope: 'single',
+    sessionScope: 'thread',
     groups: { '*': { requireMention: false } },
   };
 
@@ -80,16 +80,36 @@ describe('QQ groupAllPolicy cross-field validation', () => {
     expect(validate({ groupAllPolicy: 'log' })).toBeUndefined();
   });
 
-  it('rejects non-mention policies without the single session scope', () => {
-    for (const policy of ['keyword', 'all']) {
+  it('requires the thread scope the adapter documents for shared group context', () => {
+    // 'single' merges every group and direct message into one context and
+    // 'user' fragments groups per sender, so neither is acceptable.
+    for (const sessionScope of ['single', 'user', 'chat_thread']) {
       expect(
         validate({
-          groupAllPolicy: policy,
-          keywordTriggers: ['hi'],
+          groupAllPolicy: 'all',
+          sessionScope,
           groups: { '*': { requireMention: false } },
         }),
-      ).toContain('One Shared Session');
+      ).toContain('Per Thread');
     }
+  });
+
+  it('treats an absent scope as the plugin default', () => {
+    expect(plugin.defaultSessionScope).toBe('thread');
+    expect(
+      validate({
+        groupAllPolicy: 'all',
+        groups: { '*': { requireMention: false } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects non-mention policies alongside named sessions', () => {
+    // multiSession pins sessionScope to 'user', so the pair is mutually
+    // exclusive even when the stored scope still reads 'thread'.
+    expect(
+      validate({ ...usable, groupAllPolicy: 'all', multiSession: true }),
+    ).toContain('Named Sessions');
   });
 
   it('rejects non-mention policies when the group gate would drop them', () => {
@@ -102,9 +122,24 @@ describe('QQ groupAllPolicy cross-field validation', () => {
       { '*': { requireMention: true } },
     ]) {
       expect(
-        validate({ groupAllPolicy: 'all', sessionScope: 'single', groups }),
+        validate({ groupAllPolicy: 'all', sessionScope: 'thread', groups }),
       ).toContain('Require Mention');
     }
+  });
+
+  it('accepts a per-group override, matching the GroupGate check', () => {
+    // The runtime accepts any group with requireMention false, not only the
+    // wildcard entry, so validation must not be stricter than the gate.
+    expect(
+      validate({
+        groupAllPolicy: 'all',
+        sessionScope: 'thread',
+        groups: {
+          '*': { requireMention: true },
+          'group-1': { requireMention: false },
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it('requires keywords for the keyword policy', () => {

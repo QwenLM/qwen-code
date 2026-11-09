@@ -44,7 +44,7 @@ export const plugin: ChannelPlugin = {
         kind: 'enum',
         default: 'log',
         description:
-          'How to handle group messages that do not mention the bot. Requires One Shared Session and Require Mention off.',
+          'How to handle group messages that do not mention the bot. Requires Per Thread sessions, Named Sessions off, and Require Mention off for a group.',
         options: [
           { value: 'log', label: 'Log Only' },
           { value: 'keyword', label: 'Keyword Triggered' },
@@ -114,20 +114,29 @@ export const plugin: ChannelPlugin = {
     validateConfig: (config) => {
       const policy = config['groupAllPolicy'];
       if (policy !== 'keyword' && policy !== 'all') return undefined;
-      if (config['sessionScope'] !== 'single') {
-        return 'Non-mention group messages require Session Scope "One Shared Session"; otherwise the adapter silently overrides it.';
+      // multiSession pins sessionScope to 'user', which fragments group
+      // messages per sender, so the two features cannot coexist.
+      if (config['multiSession'] === true) {
+        return 'Non-mention group messages are not supported with Named Sessions enabled; turn Named Sessions off or choose Log Only.';
       }
+      // Absent scope resolves to this plugin's defaultSessionScope.
+      const scope = config['sessionScope'] ?? 'thread';
+      if (scope !== 'thread') {
+        return 'Non-mention group messages require Session Scope "Per Thread"; other scopes either fragment group messages per sender or merge direct messages into the group context.';
+      }
+      // GroupGate accepts a per-group override, not just the wildcard entry.
       const groups = config['groups'];
-      const wildcard =
-        groups !== null && typeof groups === 'object'
-          ? (groups as Record<string, unknown>)['*']
-          : undefined;
-      const requireMention =
-        wildcard !== null && typeof wildcard === 'object'
-          ? (wildcard as Record<string, unknown>)['requireMention']
-          : undefined;
-      if (requireMention !== false) {
-        return 'Non-mention group messages require "Require Mention" to be off, otherwise the group gate drops them.';
+      const anyMentionOff =
+        groups !== null &&
+        typeof groups === 'object' &&
+        Object.values(groups as Record<string, unknown>).some(
+          (group) =>
+            group !== null &&
+            typeof group === 'object' &&
+            (group as Record<string, unknown>)['requireMention'] === false,
+        );
+      if (!anyMentionOff) {
+        return 'Non-mention group messages require "Require Mention" to be off for at least one group, otherwise the group gate drops them.';
       }
       if (policy === 'keyword') {
         const triggers = config['keywordTriggers'];
@@ -138,6 +147,13 @@ export const plugin: ChannelPlugin = {
       return undefined;
     },
   },
+  // Per-group/per-chat thread sessions by default: routing key is
+  // channel:chatId, so every group / private chat gets its own shared session.
+  // groupAllPolicy 'keyword'/'all' relies on this for shared group context;
+  // without it, zero-config users would fragment group messages per sender
+  // ('user' scope). Explicit sessionScope in config still wins (see
+  // parseChannelConfig in packages/cli/src/commands/channel/config-utils.ts).
+  defaultSessionScope: 'thread',
   createChannel: (name, config, bridge, options) =>
     new QQChannel(name, config, bridge, options),
 };

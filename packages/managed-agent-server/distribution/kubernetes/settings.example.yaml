@@ -1,0 +1,21 @@
+apiVersion: 'v1'
+kind: 'ConfigMap'
+metadata:
+  name: 'qwen-harness-settings'
+data:
+  # Replace with the digest selected and verified by Java and this Harness build.
+  capability-digest: 'sha256:REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS'
+  broker-url: 'https://runtime-broker.example.internal'
+  settings.json: |
+    {
+      "security": { "auth": { "selectedType": "openai" } },
+      "model": { "name": "REPLACE_WITH_APPROVED_MODEL_ID" },
+      "telemetry": { "enabled": false },
+      "modelProviders": {
+        "openai": [{
+          "id": "REPLACE_WITH_APPROVED_MODEL_ID",
+          "envKey": "OPENAI_API_KEY",
+          "baseUrl": "https://model-gateway.example.internal/v1"
+        }]
+      }
+    }

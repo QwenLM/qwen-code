@@ -375,6 +375,45 @@ describe('channel registry', () => {
         'Channel field "retentionDays" can only declare exclusiveMinimum on number fields.',
     },
     {
+      type: 'invalid-maximum-on-string',
+      fields: [
+        {
+          key: 'retentionDays',
+          label: 'Retention days',
+          kind: 'string',
+          maximum: 0,
+        },
+      ],
+      message:
+        'Channel field "retentionDays" can only declare maximum on number fields.',
+    },
+    {
+      type: 'invalid-non-finite-maximum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          maximum: Number.NaN,
+        },
+      ],
+      message: 'Channel field "retries" must declare a finite maximum.',
+    },
+    {
+      type: 'invalid-maximum-leaves-no-valid-value',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          maximum: 5,
+        },
+      ],
+      message:
+        'Channel field "retries" declares a maximum that leaves no valid value.',
+    },
+    {
       type: 'invalid-env-resolvable-number',
       fields: [
         {
@@ -808,6 +847,7 @@ describe('channel registry', () => {
       'dws',
       'email',
       'wecom',
+      'wecom-callback',
       'feishu',
       'qq',
       'github',
@@ -822,6 +862,7 @@ describe('channel registry', () => {
       'dws',
       'email',
       'wecom',
+      'wecom-callback',
       'feishu',
       'qq',
       'github',

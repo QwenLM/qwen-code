@@ -245,12 +245,16 @@ Device flow 是 daemon 全局的,因为 OAuth 凭据是进程级的。而 QQ 登
 `packages/cli/src/commands/channel/channel-registry.ts:213-215`)以及编辑器的初值逻辑。
 
 **D7 —— 跨字段约束变成编辑器可见的校验。**
-`groupAllPolicy` 取 `keyword` 或 `all` 时会把 `sessionScope` 强制改为 `single`
-且只在 stderr 警告(`packages/channels/qqbot/src/QQChannel.ts:339-349`),
-并且仍然需要 `groups['*'].requireMention: false`,否则 `GroupGate` 会静默丢弃
-所有非 @ 消息(`packages/channels/base/src/GroupGate.ts:92-97`)。在 daemon worker
-里那条 stderr 警告不可见,于是 UI 会展示一份「保存干净、随后丢流量」的配置。
+`groupAllPolicy` 取 `keyword` 或 `all` 时需要 `sessionScope: 'thread'` 以获得
+按群共享的上下文,并且需要至少一个群设置 `requireMention: false`,否则 `GroupGate`
+会静默丢弃所有非 @ 消息。适配器只在 stderr 警告,且不再覆盖用户选择的 scope,
+因此在 daemon worker 里警告不可见,UI 会展示一份「保存干净、随后丢流量」的配置。
 `validateConfig` 必须用可操作的报错拒绝不受支持的组合。
+
+上游在本设计初稿之后修正了这些语义:所需 scope 是 `thread` 而非 `single`
+(`single` 会把所有群与私聊并入同一上下文);`multiSession` 把 scope 钉在 `user`,
+因此与这两种策略互斥;群组闸接受任意群的 `requireMention: false`,而不只是通配条目。
+已实现的校验及其测试均以当前上游行为为准。
 
 `groups['*'].requireMention` 同时在共享群组区获得一个编辑器控件,使 `keyword` 与
 `all` 可以完全从 UI 配置,而不需要手工编辑。由于该区被所有适配器共用,此改动需要

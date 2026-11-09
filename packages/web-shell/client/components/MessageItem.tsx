@@ -12,6 +12,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { CompactModeContext } from '../WebShellContexts';
 import type {
   WebShellAssistantFeedbackRating,
@@ -53,6 +54,11 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -70,6 +76,8 @@ interface MessageItemProps {
    * owns the edit lifecycle — then the inline editor stays closed.
    */
   onEditUserMessage?: () => boolean | void;
+  onDeleteMessage?: () => void;
+  deleteMessageDisabled?: boolean;
   /**
    * Send the text the user confirmed in the inline editor. Resolves `false`
    * when the resend was refused or failed; the editor stays open then.
@@ -80,6 +88,7 @@ interface MessageItemProps {
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
+  assistantFooterAlwaysVisible?: boolean;
   showAssistantBranch?: boolean;
   /** Turn id marks are keyed by; unset hides the marks for this message. */
   assistantFeedbackTurnId?: string;
@@ -102,6 +111,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onOpenMemoryFile,
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
@@ -114,10 +124,13 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onEditUserMessage,
+  onDeleteMessage,
+  deleteMessageDisabled,
   onSubmitUserMessageEdit,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
+  assistantFooterAlwaysVisible = false,
   showAssistantBranch = false,
   assistantFeedbackTurnId,
   assistantFeedbackPromptId,
@@ -227,6 +240,7 @@ export const MessageItem = memo(function MessageItem({
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
+            footerAlwaysVisible={assistantFooterAlwaysVisible}
             showBranchAction={showAssistantBranch}
             showAssistantFeedback={assistantFeedbackPromptId !== undefined}
             assistantFeedbackRating={assistantFeedbackRating}
@@ -298,6 +312,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onOpenMemoryFile={onOpenMemoryFile}
             onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
@@ -428,6 +443,9 @@ export const MessageItem = memo(function MessageItem({
           : undefined
       }
       editTitle={t('userMessage.edit')}
+      onDelete={onDeleteMessage}
+      deleteDisabled={deleteMessageDisabled}
+      deleteTitle={t('messageDelete.entry')}
       onOpenTurnCalls={
         openTurnCalls && turnCallsTurnId
           ? () => openTurnCalls(turnCallsTurnId)
@@ -473,6 +491,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onOpenMemoryFile !== next.onOpenMemoryFile) return false;
   if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
     return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
@@ -485,12 +504,16 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onDeleteMessage !== next.onDeleteMessage) return false;
+  if (prev.deleteMessageDisabled !== next.deleteMessageDisabled) return false;
   if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
     return false;
   if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (prev.assistantFooterAlwaysVisible !== next.assistantFooterAlwaysVisible)
+    return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
     return false;

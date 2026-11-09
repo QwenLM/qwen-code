@@ -43,6 +43,7 @@ export interface WorkspaceRegistrationSnapshot {
   primaryWorkspace: string;
   workspaces: string[];
   displayNames?: Record<string, string>;
+  workspaceOrder?: string[];
 }
 
 export class WorkspaceDisplayNameValidationError extends Error {
@@ -94,6 +95,36 @@ export class WorkspaceRegistrationStoreLimitError extends WorkspaceRegistrationS
 export class WorkspaceRegistrationStoreTooLargeError extends WorkspaceRegistrationStoreError {}
 
 export class WorkspaceRegistrationStoreCommittedError extends WorkspaceRegistrationStoreError {}
+
+export class WorkspaceOrderValidationError extends WorkspaceRegistrationStoreError {}
+
+export function normalizeWorkspaceOrder(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_CONFIGURED_REGISTERED_WORKSPACES
+  ) {
+    throw new WorkspaceOrderValidationError(
+      'Workspace order must be an array of at most 256 paths',
+    );
+  }
+  const seen = new Set<string>();
+  return Array.from(value, (entry, index) => {
+    let cwd: string;
+    try {
+      cwd = validateWorkspacePath(entry, `workspaceOrder[${index}]`);
+    } catch (err) {
+      throw new WorkspaceOrderValidationError((err as Error).message);
+    }
+    const key = normalizedScopePath(cwd);
+    if (seen.has(key)) {
+      throw new WorkspaceOrderValidationError(
+        'Workspace order contains duplicate paths',
+      );
+    }
+    seen.add(key);
+    return cwd;
+  });
+}
 
 function normalizedScopePath(primaryWorkspace: string): string {
   return os.platform() === 'win32'
@@ -278,6 +309,9 @@ function parseSnapshot(
     primaryWorkspace,
     workspaces,
     ...(displayNames ? { displayNames } : {}),
+    ...(record['workspaceOrder'] !== undefined
+      ? { workspaceOrder: normalizeWorkspaceOrder(record['workspaceOrder']) }
+      : {}),
   };
 }
 
@@ -537,6 +571,16 @@ export class WorkspaceRegistrationStore {
       return true;
     });
     return removed;
+  }
+
+  async setWorkspaceOrder(cwds: readonly string[]): Promise<void> {
+    const order = normalizeWorkspaceOrder(cwds);
+    await this.update((snapshot) => {
+      if (JSON.stringify(snapshot.workspaceOrder) === JSON.stringify(order))
+        return false;
+      snapshot.workspaceOrder = order;
+      return true;
+    });
   }
 
   private async update(

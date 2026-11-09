@@ -91,7 +91,7 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 
 - `packages/core/src/managed-runtime/`: `managed-session-records.ts` (kind gate + assertion), `managed-session-authority.ts` (kind-selective admission and the reverse acceptance check), new `managed-child-operations.ts` (the six operation bodies — launch/attach/dispatch/settle/fail/cancel and the acceptance — plus launch-envelope coding and idempotent command builders), `managed-extension-projection.ts` (nothing — the `child_agent` task mapping already exists; tests pin it), plus collocated tests mirroring the H4a suites.
 - `packages/core/src/tools/` or tool-turn wiring in `packages/cli/src/serve/hosted-workspace-tool-turn.ts`: the managed `agent` tool admission (kind-gate + profile), its pending-settlement waiter and restart re-derivation; a new `hosted-child-agent-session.ts` verb funnel beside `hosted-child-run-session.ts` (admit/dispatchStarted/attach/settle/settleFailed/requestStop, the acceptance act and the delivery advances — deep-equal short-circuit, `${id}:${rev}` command ids, `trusted_entry`, one serial writes chain, exactly H3's funnel discipline); notification writing mirrors `hosted-monitor-notification.ts`; wake scheduling reuses the embedded scheduler with `pendingSessionInputs`; consumption commits ride the wake-turn/tool-turn settle path; the reopen verifier's `domain.committed` whitelist admits `child_acceptance` (H3 already whitelisted `child_run`), and the close-time pending-input settlement covers child notifications.
-- `packages/sdk-java/managed-agent-server`: `V54__managed_child_lineage_relay.sql` (lineage columns, `qwen_managed_child_result_relay`, scan index), lineage fields on the session entity/creation paths, `createChildSession` in `ManagedAgentService`, the `ChildResultRelay` worker, cascade steps in `SessionLifecycleCoordinator.settle`, the reverse acceptance check in `ManagedExtensionRecordStore`, child-operation endpoints on the embedded session-command surface toward `qwen serve`, and store/contract tests mirroring TypeScript.
+- `packages/managed-agent-server`: `V54__managed_child_lineage_relay.sql` (lineage columns, `qwen_managed_child_result_relay`, scan index), lineage fields on the session entity/creation paths, `createChildSession` in `ManagedAgentService`, the `ChildResultRelay` worker, cascade steps in `SessionLifecycleCoordinator.settle`, the reverse acceptance check in `ManagedExtensionRecordStore`, child-operation endpoints on the embedded session-command surface toward `qwen serve`, and store/contract tests mirroring TypeScript.
 - The reverse acceptance gate pinned by authority and store tests in both languages (the check is an authority commitment rule, not a body-grammar property — no shared fixture carries it), plus operation suites following `managed-session-authority.child-agent.test.ts`.
 - This design in both languages; the E2E plan in `.qwen/e2e-tests/`.
 
@@ -140,6 +140,28 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 ## Amendments (2026-10-09, R25 review round)
 
 1. **The G3 reset mark is evidence-neutral, never evidence-negative.** `withdrawSubmissionAttempted` after a lost reply leaves the Turn `CANCELLED` with neither dispatch mark nor epoch — the identical field shape as the genuine pre-admission failure — while the historical binding remains, so the terminal shape `FAILED|CANCELLED && !dispatched()` still cannot prove never-started alone. The intent reconciliation now orders its evidence: an outstanding Turn outcome (live, neither dispatched nor terminal pre-admission) always owes the bounded defer; the proven pair or the historical binding row takes the dispatch replay with the same identity; only their joint absence plus a terminal pre-admission failure settles the named never-started pairing. Terminal status never upgrades a reset to a proof.
+
+## Cold control-plane child attachments (#13838)
+
+Child-result relay and lifecycle/task cancellation verbs write existing
+child-run records; they do not admit a new parent input. When the connector
+cache is empty but the Session records a prior Harness attachment, the
+connector reloads that original Session with passive recovery before sending
+the child operation. It does not set `driveRuntimeRecovery` or cancellation
+takeover. A parked parent Turn remains owned by its coordinator.
+
+The existing passive-load path preserves Workspace/profile authorization,
+approval-mode confirmation, pinned AgentDefinition and generation checks. The
+attachment resolves before the current client is read, and subsequent child
+operations reuse the verified attachment. A refused load or unknown operation
+continues through the existing relay reconciliation; no success or terminal
+child result is invented to hide a failure.
+
+The connector regression models a resident Harness refusing an ordinary cold
+load after a control-plane restart, and requires the passive/no-drive load of
+the same Session followed by successful child operations without repeated
+loading. This is controlled connector evidence; physical restart and durable
+relay settlement require the separate isolated Hosted fault acceptance.
 
 ## Follow-up work
 

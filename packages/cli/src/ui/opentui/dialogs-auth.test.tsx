@@ -12,7 +12,7 @@
  * hooks/jsx runtime are replaced with fakes (same harness as
  * input-prompt.test.tsx) so the tests verify what the dialog guarantees:
  *
- *  - the main menu renders the three top-level entries (ink AuthDialog
+ *  - the main menu renders the four top-level entries (ink AuthDialog
  *    parity) and Esc is blocked while unauthenticated;
  *  - main → sub-menu navigation and back follow the ink view stack;
  *  - the custom-provider wizard walks the full seven-step flow
@@ -23,11 +23,12 @@
  *  - a rejected install plan surfaces the error and keeps the dialog open.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { C } from './theme.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -54,10 +55,10 @@ const mocks = vi.hoisted(() => {
     ) => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
-      if (type === 'box' || type === 'text') {
-        // `bg` is the one style prop carried through: the dialog gives a
-        // background colour to exactly one cell, the software cursor.
+      if (type === 'box' || type === 'text' || type === 'span') {
+        // Preserve colors for software-cursor and inline-tag assertions.
         const bg = (config as { bg?: string }).bg;
+        const fg = (config as { fg?: string }).fg;
         // `flexShrink` comes through too so the frame's shrink behaviour is
         // assertable without booting the native renderer.
         const flexShrink = (config as { flexShrink?: number }).flexShrink;
@@ -66,6 +67,7 @@ const mocks = vi.hoisted(() => {
           {
             ...(key === undefined ? null : { key }),
             ...(bg === undefined ? null : { 'data-bg': bg }),
+            ...(fg === undefined ? null : { 'data-fg': fg }),
             ...(flexShrink === undefined
               ? null
               : { 'data-flex-shrink': flexShrink }),
@@ -73,16 +75,49 @@ const mocks = vi.hoisted(() => {
           children,
         );
       }
-      return React.createElement(
+      const element = React.createElement(
         type as React.ElementType,
         config as Record<string, unknown>,
         children,
       );
+      if (typeof type === 'function' && type.name === 'FieldText') {
+        return React.createElement(
+          'span',
+          { key, 'data-field-text': '' },
+          element,
+        );
+      }
+      return element;
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
   return { state, renderer, buildJsxRuntime };
 });
+
+const subscription = vi.hoisted(() => ({
+  state: {
+    status: 'waiting',
+  } as import('../auth/use-subscription.js').SubscriptionState,
+  email: 'real@example.com',
+  deviceAuth: {
+    verification_uri_complete:
+      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=cli&entry=qwen_code&paywallScene=cli',
+  },
+  checking: false,
+  connecting: false,
+  connectionError: undefined as string | undefined,
+  modelSelectionRequired: false,
+  connect: vi.fn(),
+  canCheckAgain: false,
+  openPlans: vi.fn(),
+  checkAgain: vi.fn(),
+  switchAccount: vi.fn(),
+  cancel: vi.fn(),
+}));
+vi.mock('../auth/use-subscription.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../auth/use-subscription.js')>()),
+  useSubscription: () => subscription,
+}));
 
 const core = vi.hoisted(() => ({
   applyProviderInstallPlan: vi.fn(),
@@ -121,8 +156,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 import { AuthType } from '@qwen-code/qwen-code-core';
 import * as coreRuntime from '@qwen-code/qwen-code-core';
-import { ICON } from '../constants.js';
+import { ICON, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from '../constants.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
+import { setLanguageAsync } from '../../i18n/index.js';
+import * as providerSetupFlow from '../auth/useProviderSetupFlow.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -189,11 +226,11 @@ async function typeBatched(text: string): Promise<void> {
 }
 
 async function pressEsc(): Promise<boolean> {
-  const handler = mocks.state.inputHandlers.at(-1);
-  if (!handler) throw new Error('no raw input handler registered');
+  const handlers = [...mocks.state.inputHandlers].reverse();
+  if (!handlers.length) throw new Error('no raw input handler registered');
   let consumed = false;
   await act(async () => {
-    consumed = handler('\x1b');
+    consumed = handlers.some((handler) => handler('\x1b'));
   });
   return consumed;
 }
@@ -227,6 +264,7 @@ async function pasteText(text: string): Promise<FakePasteEvent> {
 
 function createMockConfig(authType?: AuthType): Config {
   return {
+    isBrowserLaunchSuppressed: () => false,
     getAuthType: vi.fn(() => authType),
     getContentGeneratorConfig: vi.fn(() => ({})),
     getModelsConfig: vi.fn(() => ({
@@ -249,6 +287,7 @@ function createMockSettings(
 
 function renderDialog(overrides?: {
   authType?: AuthType;
+  openedViaCommand?: boolean;
   initialError?: string;
   merged?: Record<string, unknown>;
   availableTerminalHeight?: number;
@@ -264,6 +303,7 @@ function renderDialog(overrides?: {
       onClose={onClose}
       notify={notify}
       initialError={overrides?.initialError}
+      openedViaCommand={overrides?.openedViaCommand}
       availableTerminalHeight={availableTerminalHeight}
     />
   );
@@ -286,6 +326,8 @@ async function runCustomProviderFlow(): Promise<{
   const { onClose, notify } = renderDialog();
   await press('down');
   await press('down');
+  await press('down');
+  await press('down');
   await press('return'); // main: CUSTOM_PROVIDER → provider-setup (protocol)
   await press('return'); // protocol: OpenAI-compatible → API selection
   await press('return'); // API: Chat Completions → baseUrl input
@@ -306,6 +348,8 @@ async function runCustomProviderFlow(): Promise<{
  */
 async function runPresetFlowToTerminalModels(): Promise<void> {
   renderDialog();
+  await press('down');
+  await press('down');
   await press('down'); // main: THIRD_PARTY_PROVIDERS
   await press('return'); // → thirdparty-select, DeepSeek on top
   await press('return'); // DeepSeek → apiKey
@@ -324,13 +368,39 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     core.logAuth.mockReset();
   });
 
-  it('renders the main menu with the three top-level options', () => {
+  it('renders the main menu with the five top-level options', () => {
     renderDialog();
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
     expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
     expect(screen.getByText('Third-party Providers')).toBeTruthy();
     expect(screen.getByText('Custom Provider')).toBeTruthy();
   });
+
+  it.each([
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://api.deepseek.com',
+  ])(
+    'starts on the subscription entry with active provider %s',
+    async (baseUrl) => {
+      const config = createMockConfig(AuthType.USE_OPENAI);
+      vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'test-model',
+        baseUrl,
+      });
+      render(
+        <OpenTuiAuthDialog
+          config={config}
+          settings={createMockSettings()}
+          onClose={vi.fn()}
+        />,
+      );
+      await press('return');
+      expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
+    },
+  );
 
   it('blocks Esc on the main view while unauthenticated', async () => {
     const { onClose } = renderDialog();
@@ -346,6 +416,26 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     const { onClose } = renderDialog({ authType: AuthType.USE_OPENAI });
     await pressEsc();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a command-opened dialog after logout without authenticating', async () => {
+    const { onClose, config } = renderDialog({ openedViaCommand: true });
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/You must connect a provider/)).toBeNull();
+    expect(config.getAuthType()).toBeUndefined();
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('returns to the main menu before dismissing a command-opened dialog', async () => {
+    const { onClose } = renderDialog({ openedViaCommand: true });
+    await press('down');
+    await press('return');
+    await pressEsc();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('closes via Esc when the error was seeded from boot (R2-1)', async () => {
@@ -372,6 +462,8 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it('navigates main → sub-menu and back with Esc', async () => {
     const { onClose } = renderDialog();
+    await press('down');
+    await press('down');
     await press('return'); // main: Alibaba ModelStudio → alibaba-select
     expect(
       screen.getByText('Alibaba ModelStudio · Access Method'),
@@ -387,11 +479,12 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await act(async () => {
       handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
       handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
       handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
-    // Two downs land on Custom Provider. The cursor the handler was registered
-    // with still pointed at Alibaba ModelStudio, whose Enter opens the
-    // access-method sub-menu instead.
+    // Four downs land on Custom Provider. The cursor the handler was registered
+    // with still pointed at the subscription entry.
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
     expect(screen.queryByText(/Access Method/)).toBeNull();
   });
@@ -399,7 +492,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   it('wraps the main-menu cursor from the first row to the last (#160)', async () => {
     renderDialog();
     // ink builds this list on DescriptiveRadioButtonSelect, whose useSelectionList
-    // steps modulo the row count; a clamp would stay on Alibaba ModelStudio and
+    // steps modulo the row count; a clamp would stay on QwenCloud and
     // Enter would open the access-method sub-menu instead.
     await press('up');
     await press('return');
@@ -412,10 +505,10 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
+    await press('down');
     await press('return');
-    expect(
-      screen.getByText('Alibaba ModelStudio · Access Method'),
-    ).toBeTruthy();
+    expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
   });
 
   it('keeps authentication open when only service models were saved', async () => {
@@ -471,6 +564,8 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     const { onClose } = renderDialog();
     await press('down');
     await press('down');
+    await press('down');
+    await press('down');
     await press('return');
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
     expect(screen.queryByText('OpenAI Responses')).toBeNull();
@@ -519,6 +614,8 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     });
     await press('down');
     await press('down');
+    await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API
     // The parity RadioList gives the marker its own cell, so read it off the row.
@@ -549,6 +646,8 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     renderDialog();
     await press('down');
     await press('down');
+    await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -566,6 +665,8 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it("renders ink's no-recommendations branch for a provider without models", async () => {
     renderDialog();
+    await press('down');
+    await press('down');
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
@@ -654,6 +755,32 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       build.mockRestore();
     }
   });
+
+  it('renders QwenCloud flow title in Chinese when locale is zh (T1)', async () => {
+    await setLanguageAsync('zh');
+    try {
+      renderDialog();
+      await press('down');
+      await press('return'); // main: QwenCloud → qwencloud-select
+      expect(screen.getByText('千问AI平台 · 接入方式')).toBeTruthy();
+      await press('return'); // Token Plan → provider-setup
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain('千问AI平台');
+      });
+      expect(document.body.textContent).not.toContain('QwenCloud · Step');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('shows Token Plan and Standard API Key in QwenCloud sub-menu but not Coding Plan (T3+T4)', async () => {
+    renderDialog();
+    await press('down');
+    await press('return'); // main: QwenCloud → qwencloud-select
+    expect(screen.getByText('Token Plan')).toBeTruthy();
+    expect(screen.getByText('Standard API Key')).toBeTruthy();
+    expect(screen.queryByText('Coding Plan')).toBeNull();
+  });
 });
 
 describe('bracketed-paste into dialog inputs (#57)', () => {
@@ -670,6 +797,8 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     renderDialog();
     await press('down');
     await press('down');
+    await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -680,6 +809,8 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
   /** Walk the wizard up to the base-URL input step. */
   async function runToBaseUrlInput(): Promise<void> {
     renderDialog();
+    await press('down');
+    await press('down');
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
@@ -964,6 +1095,8 @@ describe('caret editing in dialog text fields (#107)', () => {
     renderDialog();
     await press('down');
     await press('down');
+    await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -982,25 +1115,48 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('down'); // modality → context window (index 2 while it's closed)
   }
 
-  /**
-   * The focused field's rendered text and the cell the cursor sits on, read off
-   * the cursor cell's neighbours so a row that labels its own field — the
-   * context-window row — contributes only the value. Valid while the field holds
-   * a value: an empty field puts the cell on its placeholder's first character,
-   * which is the row's first text element.
-   */
+  /** Read only the FieldText component, excluding adjacent prompts and labels. */
   function focusedField(): { text: string; cell: string } {
     const cell = cursorCell();
     if (!cell) throw new Error('no field renders a cursor cell');
-    const at = cell.textContent ?? '';
+    const field = cell.closest('[data-field-text]');
+    if (!field) throw new Error('cursor cell is outside FieldText');
     return {
-      text:
-        (cell.previousElementSibling?.textContent ?? '') +
-        at +
-        (cell.nextElementSibling?.textContent ?? ''),
-      cell: at,
+      text: field.textContent ?? '',
+      cell: cell.textContent ?? '',
     };
   }
+
+  it.each(['URL', 'API key'])(
+    'clears only the %s field and retains local undo without consuming global Ctrl+C',
+    async (fieldName) => {
+      await runToBaseUrlStep();
+      if (fieldName === 'API key') {
+        await typeText('https://api.example.com/v1');
+        await press('return');
+      }
+      const empty = focusedField();
+      await typeText('ab😀');
+      await press('left');
+      const previous = focusedField();
+      const preventDefault = vi.fn();
+      const stopPropagation = vi.fn();
+      await press('c', {
+        ctrl: true,
+        sequence: '\x03',
+        preventDefault,
+        stopPropagation,
+      });
+      expect(focusedField()).toEqual(empty);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField()).toEqual(previous);
+      await press('c', { ctrl: true, shift: true, sequence: '\x03' });
+      await press('d', { ctrl: true, sequence: '\x04' });
+      expect(focusedField()).toEqual(previous);
+    },
+  );
 
   it('inserts at the position the arrows left the caret', async () => {
     await runToBaseUrlStep();
@@ -1093,6 +1249,185 @@ describe('caret editing in dialog text fields (#107)', () => {
       text: 'https://two.tests',
       cell: 'h',
     });
+  });
+
+  it('keeps numeric history and sends only accepted digits to the real owner', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('123');
+      await typeText('x');
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('12');
+      await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('123');
+      await pasteText('1,024');
+      expect(focusedField().text.trimEnd()).toBe('1231024');
+      expect(observed).toContain('123');
+      expect(observed).toContain('1231024');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('123');
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('12');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps older accepted edits across a normalized numeric paste', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    await pasteText('1,024');
+    expect(focusedField().text.trimEnd()).toBe('121024');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('12');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('1');
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('121024');
+    await press('return');
+    expect(document.body.textContent).toContain('"contextWindowSize": 121024');
+  });
+
+  it('handles an invalid numeric key between edit and history in one read', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: '3', sequence: '3' }));
+      handler(baseKeyEvent({ name: 'x', sequence: 'x' }));
+      handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+      handler(
+        baseKeyEvent({ name: 'z', ctrl: true, shift: true, sequence: '\x1a' }),
+      );
+      handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+    });
+    expect(focusedField().text.trimEnd()).toBe('12');
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('123');
+    await press('return');
+    expect(document.body.textContent).toContain('"contextWindowSize": 123');
+  });
+
+  it('keeps redo when a numeric paste contains no valid characters', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('1');
+    const event = await pasteText('invalid,');
+    expect(event.preventDefault).toHaveBeenCalled();
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('12');
+  });
+
+  it('accepts a numeric clear through the real flow and Undo submits its prior number', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('12');
+      await press('c', { ctrl: true, sequence: '\x03' });
+      expect(observed.at(-1)).toBe('');
+      expect(contextRow()).toMatch(/Context window: auto$/);
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(document.body.textContent).toContain('"contextWindowSize": 12');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the context window when a same-read arrow left the row before Ctrl+C', async () => {
+    await runToContextWindowRow();
+    await typeText('128000');
+    // Focus wraps, so the ↓ of this read leaves the context-window row and the
+    // Ctrl+C behind it belongs to the toggle row it landed on. Read from the
+    // render that armed the handler, the clear still sees the old row and
+    // silently turns the stored number into auto.
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: 'down', sequence: 'down' }));
+      handler(baseKeyEvent({ name: 'c', ctrl: true, sequence: '\x03' }));
+    });
+    await press('up'); // back onto the context-window row
+    expect(focusedField().text.trimEnd()).toBe('128000');
+    expect(contextRow()).toMatch(/Context window: 128000\s*$/);
+  });
+
+  it('does not spend Undo on a numeric Space in the same read before submit', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('12');
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        handler(baseKeyEvent({ name: '3', sequence: '3' }));
+        handler(baseKeyEvent({ name: 'space', sequence: ' ' }));
+        handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(document.body.textContent).toContain('"contextWindowSize": 12');
+      expect(document.body.textContent).not.toContain(
+        '"contextWindowSize": 123',
+      );
+      expect(observed).toContain('123');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('edits the context-window field in place', async () => {
@@ -1213,6 +1548,8 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
    */
   async function runToModelsStep(availableTerminalHeight?: number) {
     const dialog = renderDialog({ availableTerminalHeight });
+    await press('down');
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select, DeepSeek on top
     await press('return'); // DeepSeek → apiKey
@@ -1238,7 +1575,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
 
   it('refuses the recommended rows a short region cannot paint', async () => {
     // At region 21 the step's measured chrome pays for exactly one model row,
-    // so `deepseek-v4-flash` sits below the clip. A held ↓ walks `focus` on
+    // so `deepseek-flash` sits below the clip. A held ↓ walks `focus` on
     // to it and Space would toggle a model the user never saw — which the
     // Enter of the same read then writes into the install plan.
     const dialog = await runToModelsStep();
@@ -1246,16 +1583,16 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await press('tab'); // custom-ID input → search field
     await press('tab'); // search field → the one painted row
     expect(screen.getByText(/^deepseek-v4-pro(\s|$)/)).not.toBeNull();
-    expect(screen.queryByText(/^deepseek-v4-flash(\s|$)/)).toBeNull();
+    expect(screen.queryByText(/^deepseek-flash(\s|$)/)).toBeNull();
 
     const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
     try {
       await pressBatched([DOWN, SPACE, ENTER]);
       await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
       // Only the painted row's tick was undone. Without the window the ↓
-      // reaches `deepseek-v4-flash` below the clip and the Space unticks it,
+      // reaches `deepseek-flash` below the clip and the Space unticks it,
       // so the plan ships `deepseek-v4-pro` alone.
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-flash']);
     } finally {
       build.mockRestore();
     }
@@ -1296,7 +1633,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     try {
       await pressBatched([SPACE, ENTER]);
       await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-flash']);
     } finally {
       build.mockRestore();
     }
@@ -1315,7 +1652,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await runToRecommendedList();
     await pressBatched([DOWN, SPACE]);
     expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
-    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.CIRCLE_EMPTY);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.CIRCLE_EMPTY);
   });
 
   it('filters the recommended list from the search field one Tab away', async () => {
@@ -1323,7 +1660,32 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await press('tab'); // custom-ID input → search field
     await typeText('flash');
     expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
-    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.RADIO_FILLED);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
+  });
+
+  it('clears the search query on Ctrl+C and paints the whole list again', async () => {
+    await runToModelsStep();
+    await press('tab'); // custom-ID input → search field
+    await typeText('flash');
+    expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
+    await press('c', { ctrl: true, sequence: '\x03' });
+    // The empty active field paints its placeholder under the caret cell.
+    expect(
+      screen.getByText((_, element) => element?.textContent === '> search'),
+    ).toBeTruthy();
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
+  });
+
+  it('clears the custom-model-ID field on Ctrl+C before the step submits', async () => {
+    await runToModelsStep();
+    await typeText('my-model');
+    expect(document.body.textContent).toContain('my-model');
+    await press('c', { ctrl: true, sequence: '\x03' });
+    expect(document.body.textContent).not.toContain('my-model');
+    // The field stays editable: the clear is an edit, not a submit.
+    await typeText('next-model');
+    expect(document.body.textContent).toContain('next-model');
   });
 });
 
@@ -1373,6 +1735,8 @@ describe('the wizard frame keeps its natural height', () => {
     // nine paint into a region that clips them, and Enter commits whichever
     // row the cursor names.
     renderDialog({ availableTerminalHeight: 13 });
+    await press('down');
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select
     expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
@@ -1399,13 +1763,15 @@ describe('the wizard frame keeps its natural height', () => {
     // wizard stays usable.
     const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
     expect(screen.getByText(/Terms of Services/)).toBeTruthy();
-    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
 
     rerenderAt(12);
     expect(screen.queryByText(/Terms of Services/)).toBeNull();
-    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
-    expect(screen.getByText('Third-party Providers')).toBeTruthy();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
 
+    await press('down');
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS — a painted row
     await press('return');
     expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
@@ -1419,13 +1785,11 @@ describe('the wizard frame keeps its natural height', () => {
     // the painted row.
     const { onClose } = renderDialog({ availableTerminalHeight: 7 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
-    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
-    expect(screen.queryByText('Third-party Providers')).toBeNull();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
+    expect(screen.queryByText('QwenCloud')).toBeNull();
 
     await press('return');
-    expect(
-      screen.getByText('Alibaba ModelStudio · Access Method'),
-    ).toBeTruthy();
+    expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
 
     await pressEsc(); // a sub-view's Esc is goBack, unchanged
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
@@ -1442,6 +1806,7 @@ describe('the wizard frame keeps its natural height', () => {
     // later Esc.
     const { onClose } = renderDialog({ availableTerminalHeight: 6 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.queryByText('QwenCloud')).toBeNull();
     expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
     expect(screen.queryByText('Third-party Providers')).toBeNull();
 
@@ -1464,6 +1829,8 @@ describe('the wizard frame keeps its natural height', () => {
     // past the region.
     mocks.state.width = 38;
     renderDialog({ availableTerminalHeight: 14 });
+    await press('down');
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select
     expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
@@ -1476,6 +1843,8 @@ describe('the wizard frame keeps its natural height', () => {
     // region 9 leaves one row — less than a provider row's three — so
     // nothing paints, and the arrows and Enter address nothing.
     const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
+    await press('down');
+    await press('down');
     await press('down');
     await press('return'); // → thirdparty-select
     expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
@@ -1503,6 +1872,8 @@ describe('wire-API step cursor out of one read (#207)', () => {
     renderDialog();
     await press('down');
     await press('down');
+    await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     // ↓ and Enter out of one stdin read. Read from the render that armed the
@@ -1527,5 +1898,193 @@ describe('wire-API step cursor out of one read (#207)', () => {
       expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
       expect.anything(),
     );
+  });
+});
+
+describe('real subscription entry', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.width = 100;
+    vi.clearAllMocks();
+    vi.stubEnv('DEV', false);
+    delete process.env['DEV'];
+    vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://auth.qwen.ai');
+    subscription.state = { status: 'waiting' };
+    subscription.canCheckAgain = false;
+    subscription.checking = false;
+    subscription.connecting = false;
+    subscription.connectionError = undefined;
+    subscription.modelSelectionRequired = false;
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('opens the real view from the menu and exposes the real URL', async () => {
+    const { config } = renderDialog();
+    await press('return');
+    expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
+    expect(document.body.textContent).toContain(
+      'user_code=REAL-CODE&client=cli',
+    );
+    expect(document.body.textContent).not.toContain('Local Mock');
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    await pressEsc();
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+  });
+
+  it('animates the waiting indicator and stops it when the panel closes', async () => {
+    vi.useFakeTimers();
+    renderDialog();
+    try {
+      await press('return');
+      const waiting = screen.getByText('Waiting for sign-in…');
+      expect(waiting.textContent).toContain(SPINNER_FRAMES[0]);
+      expect(
+        screen
+          .getByText("If the browser didn't open, visit:")
+          .getAttribute('data-fg'),
+      ).toBe(C.dim);
+      expect(
+        screen
+          .getByText('c to copy link · Esc to cancel')
+          .getAttribute('data-fg'),
+      ).toBe(C.dim);
+      act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
+      expect(waiting.textContent).toContain(SPINNER_FRAMES[1]);
+      await pressEsc();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('opens plans and switches to the complete provider menu without signing out', async () => {
+    subscription.state = { status: 'purchase-required', plan: 'Free' };
+    renderDialog();
+    await press('return');
+    expect(document.body.textContent).toContain('real@example.com');
+    expect(screen.queryByText('Retry Connection')).toBeNull();
+    expect(screen.queryByText('Sign out')).toBeNull();
+    await press('return');
+    expect(subscription.openPlans).toHaveBeenCalledTimes(1);
+    await press('down');
+    await press('return');
+    expect(subscription.cancel).toHaveBeenCalledOnce();
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
+    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
+    expect(screen.getByText('Third-party Providers')).toBeTruthy();
+    expect(screen.getByText('Custom Provider')).toBeTruthy();
+  });
+
+  it('replaces plans with Retry Connection after the automatic wait', async () => {
+    subscription.state = { status: 'purchase-required', plan: 'Free' };
+    subscription.canCheckAgain = true;
+    renderDialog();
+    await press('return');
+    expect(screen.queryByText('View Plans')).toBeNull();
+    expect(screen.queryByText('Switch Provider')).toBeNull();
+    expect(screen.queryByText('Sign out')).toBeNull();
+    expect(screen.getByText('Retry Connection')).toBeTruthy();
+    await press('return');
+    expect(subscription.checkAgain).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'switches accounts without leaving the subscription view (canCheckAgain=%s)',
+    async (canCheckAgain) => {
+      subscription.state = { status: 'purchase-required', plan: 'Free' };
+      subscription.canCheckAgain = canCheckAgain;
+      renderDialog();
+      await press('return');
+      for (let index = 0; index < (canCheckAgain ? 1 : 2); index++)
+        await press('down');
+      expect(screen.getByText('Use another account')).toBeTruthy();
+      await press('return');
+      expect(subscription.switchAccount).toHaveBeenCalledOnce();
+      expect(subscription.cancel).not.toHaveBeenCalled();
+      expect(screen.queryByText('Connect a Provider')).toBeNull();
+    },
+  );
+
+  it('shows the development entry before configuring OAuth', () => {
+    delete process.env['QWEN_OAUTH_BASE_URL'];
+    renderDialog();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
+  });
+
+  it('waits for activation without a second Connect step', async () => {
+    subscription.state = { status: 'ready', plan: 'Pro' };
+    renderDialog();
+    await press('return');
+    expect(document.body.textContent).toContain(
+      'Loading models from provider…',
+    );
+    expect(screen.queryByText('Connect')).toBeNull();
+    expect(screen.queryByText('Sign out')).toBeNull();
+  });
+
+  it('returns to input for /model instead of offering inline model choices', async () => {
+    subscription.state = { status: 'ready', plan: 'Pro' };
+    subscription.connectionError =
+      'The selected model, removed, is no longer available. Run /model to choose another model.';
+    subscription.modelSelectionRequired = true;
+    const { onClose } = renderDialog();
+    await press('return');
+    expect(document.body.textContent).toContain('Run /model');
+    expect(screen.queryByText('Retry')).toBeNull();
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(subscription.connect).not.toHaveBeenCalled();
+  });
+
+  it('offers activation Retry only after failure and preserves cancellation', async () => {
+    subscription.state = { status: 'ready', plan: 'Pro' };
+    subscription.connectionError = '';
+    renderDialog();
+    await press('return');
+    expect(screen.getByText('Retry')).toBeTruthy();
+    expect(screen.queryByText('Connect')).toBeNull();
+    expect(screen.queryByText('Loading models from provider…')).toBeNull();
+    await press('return');
+    expect(subscription.connect).toHaveBeenCalledOnce();
+    await pressEsc();
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.queryByText('Retry')).toBeNull();
+  });
+
+  it('returns from the timeout message without signing out', async () => {
+    subscription.state = {
+      status: 'timeout',
+      message: 'Authentication timed out.',
+    };
+    renderDialog();
+    await press('return');
+    expect(screen.getByText('Authentication timed out.')).toBeTruthy();
+    await press('x');
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(subscription.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a first membership query failure open and retries the query', async () => {
+    subscription.state = {
+      status: 'query-error',
+      message: 'Subscription query failed.',
+    };
+    renderDialog();
+    await press('return');
+    expect(screen.getByText('Subscription query failed.')).toBeTruthy();
+    expect(
+      screen.queryByText(
+        'Press any key to return to authentication type selection.',
+      ),
+    ).toBeNull();
+    await press('x');
+    expect(screen.getByText('Retry Connection')).toBeTruthy();
+    await press('return');
+    expect(subscription.checkAgain).toHaveBeenCalledTimes(1);
+    expect(subscription.cancel).not.toHaveBeenCalled();
   });
 });

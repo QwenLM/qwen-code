@@ -21,13 +21,16 @@ export const HOSTED_RECOVERY_RESOURCE_KINDS = new Set([
   'hosted-turn-cleanup',
 ]);
 
+export const HOSTED_MODEL_REQUEST_BYTES = 32 * 1024 * 1024;
+
 export function parseHostedRecoveryResource(
   bytes: Buffer,
   expectedKey?: ManagedSessionKey,
+  kind?: string,
 ): Record<string, ManagedSessionJsonValue> {
   const value = parseManagedSessionRecordJson(
     bytes.toString('utf8'),
-    64 * 1024,
+    kind === 'hosted-model-request' ? HOSTED_MODEL_REQUEST_BYTES : 64 * 1024,
   );
   if (
     !value ||

@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -100,7 +101,10 @@ async function withSession<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -841,7 +845,7 @@ describe('HostedChannelSession outbound', () => {
     });
   });
 
-  it('records unknown after a send, never resends by itself, and resends only on request', async () => {
+  it('records a claim-fenced unknown after a send, never resends by itself, and resends only on request', async () => {
     const harness = await createHarness();
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
@@ -849,7 +853,17 @@ describe('HostedChannelSession outbound', () => {
       await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       await channels.claim(planned.deliveryId);
-      const unknown = await channels.settle(planned.deliveryId, 'unknown');
+      const operationId = `channel-reconcile:${'a'.repeat(64)}`;
+      const commit = vi.spyOn(authority, 'commitExtensionRecord');
+      const unknown = await channels.settle(
+        planned.deliveryId,
+        'unknown',
+        operationId,
+      );
+      expect(commit.mock.calls.at(-1)?.[0]).toMatchObject({
+        commandId: operationId,
+        operation: 'acceptChannelReceipt',
+      });
       expect(unknown.run).toMatchObject({
         state: 'waiting',
         reason: null,

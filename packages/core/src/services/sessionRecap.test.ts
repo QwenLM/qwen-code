@@ -7,6 +7,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { LlmChat } from '../core/llm-chat.js';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
@@ -18,6 +20,52 @@ const reminder = (body: string) =>
   `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
 
 describe('generateSessionRecap', () => {
+  it.each(['CATALOG_SENTINEL', ''])(
+    'omits catalog metadata while preserving raw dialog boundaries, catalog=%j',
+    async (catalog) => {
+      const first = content('user', { text: 'First parser request' });
+      const second = content('user', { text: 'Second parser request' });
+      const answer = content('model', { text: 'Fixed parser' });
+      const history = [
+        content(
+          'user',
+          ...first.parts!,
+          getAutoMemorySnapshot([], 'CATALOG_SENTINEL')!,
+        ),
+        content('model', { text: '' }),
+        second,
+        answer,
+      ];
+      const original = structuredClone(history);
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => catalog } as Config,
+        {},
+        history,
+      );
+      const generateText = vi.fn(async (_opts: { contents: Content[] }) => ({
+        text: '<recap>Fixing parser.</recap>',
+        usage: undefined,
+      }));
+      const config = {
+        getFastModel: () => 'qwen-turbo',
+        getModel: () => 'qwen-plus',
+        getLlmClient: () => chat,
+        getBaseLlmClient: () => ({ generateText }),
+        getOutputLanguageFilePath: () => undefined,
+      } as unknown as Config;
+      expect(
+        await generateSessionRecap(config, new AbortController().signal),
+      ).toBe('Fixing parser.');
+      expect(generateText).toHaveBeenCalledTimes(1);
+      expect(generateText.mock.calls[0][0].contents.slice(0, -1)).toEqual([
+        first,
+        second,
+        answer,
+      ]);
+      expect(chat.getHistoryShallow()).toEqual(original);
+    },
+  );
+
   it('strips startup and mid-session system reminders from recap input', async () => {
     const history: Content[] = [
       content(

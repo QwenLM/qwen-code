@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
+import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -11,7 +14,10 @@ import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFra
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
-import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+import {
+  SubagentDetailsProvider,
+  type OpenSubagentDetails,
+} from '../../subagentDetailsContext';
 import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
@@ -20,6 +26,7 @@ import {
   getArtifactsByTurn,
   getFileChangesByTurn,
 } from './turnOutputSelectors';
+import { fileChangeOwnerSessionId } from './workspace-file-changes';
 import styles from './SubagentDetail.module.css';
 
 interface SubagentResolution {
@@ -125,13 +132,13 @@ function SubagentDetailContent({
 }: {
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
-  onStop: () => Promise<{ cancelled: boolean }>;
+  onStop?: () => Promise<{ cancelled: boolean }>;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
-  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
@@ -144,14 +151,16 @@ function SubagentDetailContent({
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
     [artifacts, connection.workspaceCwd, messages],
   );
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        messages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [artifactsByTurn, connection.workspaceCwd, messages],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    messages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId
+      ? fileChangeOwnerSessionId(connection.sessionId)
+      : undefined,
+    connection.workspaceCwd ? undefined : null,
   );
   const description = getAgentDescription(rootTool);
   const metrics = useMemo(
@@ -172,14 +181,34 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
+  const reviewSourceRef = useRef({ messages, artifactsByTurn });
+  reviewSourceRef.current = { messages, artifactsByTurn };
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
+      const source = reviewSourceRef.current;
       onRightPanelOpen?.({
         ...request,
+        ...(request.kind === 'review'
+          ? {
+              unfilteredChanges:
+                getFileChangesByTurn(
+                  source.messages,
+                  source.artifactsByTurn,
+                  connection.workspaceCwd ||
+                    connection.standaloneSession?.projectlessOutputDirectory ||
+                    '',
+                ).get(request.turnId) ?? request.changes,
+            }
+          : {}),
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      onRightPanelOpen,
+    ],
   );
 
   useEffect(() => {
@@ -189,7 +218,7 @@ function SubagentDetailContent({
   }, [isRunning]);
 
   const handleStop = async () => {
-    if (stopping) return;
+    if (stopping || !onStop) return;
     setStopping(true);
     setStopError('');
     try {
@@ -238,7 +267,7 @@ function SubagentDetailContent({
             >
               {statusLabel(metrics.status, t)}
             </Badge>
-            {isRunning && (
+            {isRunning && onStop && (
               <button
                 type="button"
                 className={styles.stopButton}
@@ -309,6 +338,7 @@ export function SubagentDetail({
     key: 0,
     clientId: createDetailClientId(),
   }));
+  const availability = useDaemonAvailabilityController();
   const [resolution, setResolution] = useState<SubagentResolution>();
   const [loadError, setLoadError] = useState(false);
 
@@ -317,10 +347,18 @@ export function SubagentDetail({
     let hasResolved = false;
     let retryCount = 0;
     let lastResolvedRunning = false;
+    let inFlight = false;
+    let refreshOnRecovery = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     setResolution(undefined);
     setLoadError(false);
     const refresh = async () => {
+      if (
+        inFlight ||
+        (availability && availability.getSnapshot() !== 'available')
+      )
+        return;
+      inFlight = true;
       try {
         const resolved = await workspace.client.resolveSubagentSession(
           sessionId,
@@ -331,11 +369,20 @@ export function SubagentDetail({
         retryCount = 0;
         lastResolvedRunning = resolved.status === 'running';
         setResolution(resolved);
-        if (resolved.status === 'running') {
+        setLoadError(false);
+        if (
+          resolved.status === 'running' &&
+          (!availability || availability.getSnapshot() === 'available')
+        ) {
           refreshTimer = setTimeout(() => void refresh(), 3_000);
         }
-      } catch {
-        if (cancelled) return;
+      } catch (error) {
+        if (
+          cancelled ||
+          isDaemonUnavailableError(error) ||
+          (availability && availability.getSnapshot() !== 'available')
+        )
+          return;
         if (retryCount < 3) {
           retryCount += 1;
           refreshTimer = setTimeout(() => void refresh(), 3_000);
@@ -344,14 +391,37 @@ export function SubagentDetail({
         } else if (lastResolvedRunning) {
           refreshTimer = setTimeout(() => void refresh(), 30_000);
         }
+      } finally {
+        inFlight = false;
+        if (
+          refreshOnRecovery &&
+          !cancelled &&
+          (!availability || availability.getSnapshot() === 'available')
+        ) {
+          refreshOnRecovery = false;
+          if (refreshTimer) clearTimeout(refreshTimer);
+          void refresh();
+        }
       }
     };
+    let wasAvailable = availability?.getSnapshot() === 'available';
+    const unsubscribeAvailability = availability?.subscribe(() => {
+      const available = availability.getSnapshot() === 'available';
+      if (available === wasAvailable) return;
+      wasAvailable = available;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      if (available && (!hasResolved || lastResolvedRunning)) {
+        if (inFlight) refreshOnRecovery = true;
+        else void refresh();
+      }
+    });
     void refresh();
     return () => {
       cancelled = true;
+      unsubscribeAvailability?.();
       if (refreshTimer) clearTimeout(refreshTimer);
     };
-  }, [instance.key, rootToolCallId, sessionId, workspace.client]);
+  }, [availability, instance.key, rootToolCallId, sessionId, workspace.client]);
 
   if (loadError) {
     return (
@@ -394,12 +464,21 @@ export function SubagentDetail({
         onArtifactsChange={onArtifactsChange}
         onOpenSubagent={
           onOpenSubagent
-            ? (tool) => onOpenSubagent(tool, sessionId, workspaceCwd)
+            ? (tool, parentSessionId) =>
+                onOpenSubagent(tool, parentSessionId ?? sessionId, workspaceCwd)
             : undefined
         }
         onError={onError}
-        onStop={() =>
-          workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
+        onStop={
+          initialRootTool.rawOutput &&
+          typeof initialRootTool.rawOutput === 'object' &&
+          'workflowRunId' in initialRootTool.rawOutput
+            ? undefined
+            : () =>
+                workspace.client.cancelSubagentSession(
+                  sessionId,
+                  rootToolCallId,
+                )
         }
       />
     </DaemonSessionProvider>

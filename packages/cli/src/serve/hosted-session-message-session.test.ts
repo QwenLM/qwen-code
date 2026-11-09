@@ -360,6 +360,98 @@ describe('send_message to a child task (H4d-b)', () => {
     );
   });
 
+  // #13753 I3: a snapshot child has no message lane, so a message to it
+  // while it runs is refused before anything commits; once it completes,
+  // the message continues it as a new snapshot, on a host that serves them.
+  it('refuses a running snapshot child and continues a completed one only where snapshots are served', async () => {
+    const parent = await side(PARENT);
+    await parent.children.admit({
+      childRunId: 'run-1',
+      ownerScopeId: PARENT,
+      rootSessionId: PARENT,
+      completion: 'sent',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: DEFINITION,
+      workingDirectory: '.',
+      workspaceMode: 'snapshot',
+      executionCallId: 'run-1',
+    });
+    const sendSnapshot = (
+      call: string,
+      childSnapshots: boolean,
+      closing = false,
+    ) =>
+      parent.children.sendToChild({
+        taskId: parent.children.taskIdOf('run-1'),
+        text: 'now check the tests',
+        messageId: `msg_${call}`,
+        continuationRunId: `prompt:${call}`,
+        executionCallId: `prompt:${call}`,
+        closing,
+        childWorkspaces: true,
+        childSnapshots,
+      });
+    // A running worktree child still takes messages: only a snapshot has
+    // no lane for them.
+    await parent.children.admit({
+      childRunId: 'run-2',
+      ownerScopeId: PARENT,
+      rootSessionId: PARENT,
+      completion: 'sent',
+      description: 'edit the code',
+      prompt: 'fix the bug',
+      definition: DEFINITION,
+      workingDirectory: '.',
+      workspaceMode: 'worktree',
+      executionCallId: 'run-2',
+    });
+    expect(
+      await parent.children.sendToChild({
+        taskId: parent.children.taskIdOf('run-2'),
+        text: 'also check the tests',
+        messageId: 'msg_call-w',
+        continuationRunId: 'prompt:call-w',
+        executionCallId: 'prompt:call-w',
+        closing: false,
+        childWorkspaces: true,
+        childSnapshots: true,
+      }),
+    ).toEqual({ kind: 'message', childRunId: 'run-2' });
+    const running = await sendSnapshot('call-1', true);
+    expect(running).toMatchObject({ kind: 'refused' });
+    expect((running as { reason: string }).reason).toContain(
+      'is a read-only snapshot and takes no messages while it runs',
+    );
+    expect(parent.messages.message('msg_call-1')).toBeUndefined();
+    expect(parent.children.messagesTo('run-1')).toHaveLength(0);
+    await attach(parent.children);
+    expect(await sendSnapshot('call-2', true)).toMatchObject({
+      kind: 'refused',
+    });
+    expect(parent.children.messagesTo('run-1')).toHaveLength(0);
+    // A closing Session admits no continuation, so its refusal must not
+    // promise one.
+    const closing = await sendSnapshot('call-c', true, true);
+    expect(closing).toEqual({
+      kind: 'refused',
+      reason: 'This Session is closing and sends no more messages.',
+    });
+    expect(parent.messages.message('msg_call-c')).toBeUndefined();
+    expect(parent.children.messagesTo('run-1')).toHaveLength(0);
+    await complete(parent.children);
+    expect(await sendSnapshot('call-3', false)).toMatchObject({
+      kind: 'refused',
+    });
+    expect(parent.children.record('prompt:call-3')).toBeUndefined();
+    expect(await sendSnapshot('call-4', true)).toMatchObject({
+      kind: 'continuation',
+    });
+    expect(parent.children.record('prompt:call-4')?.workspaceMode).toBe(
+      'snapshot',
+    );
+  });
+
   it('continues a completed child with the message as its next prompt', async () => {
     const parent = await side(PARENT);
     await launch(parent.children);

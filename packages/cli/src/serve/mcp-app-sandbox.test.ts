@@ -162,6 +162,18 @@ describe('MCP App sandbox', () => {
     );
   });
 
+  it('never scrolls the proxy page around the App frame', async () => {
+    const response = await request(makeApp())
+      .get('/mcp-app-sandbox')
+      .query({ hostOrigin: 'http://localhost:4170', mode: 'data' });
+    expect(response.status).toBe(200);
+    // An inline frame leaves a baseline gap below it, which made the proxy a
+    // few pixels taller than its frame and showed light default scrollbars.
+    expect(response.text).toContain('html,body{overflow:hidden}');
+    expect(response.text).toContain('iframe{display:block}');
+    expect(response.text).toContain("'display:block;width:100%;height:100%");
+  });
+
   it('isolates large Unicode HTML as a data document and pins message peers', async () => {
     const response = await request(makeApp())
       .get('/mcp-app-sandbox')

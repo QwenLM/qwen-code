@@ -286,13 +286,20 @@ save. Allowing a boolean `default` requires touching the descriptor type,
 initial-value logic together.
 
 **D7 — Cross-field constraints become editor-visible validation.**
-`groupAllPolicy` of `keyword` or `all` forces `sessionScope` to `single` and only
-warns on stderr (`packages/channels/qqbot/src/QQChannel.ts:339-349`), and still
-requires `groups['*'].requireMention: false` or `GroupGate` silently drops every
-non-mention message (`packages/channels/base/src/GroupGate.ts:92-97`). In a
-daemon worker that stderr warning is invisible, so the UI would show a
-configuration that saves cleanly and then drops traffic. `validateConfig` must
-reject the unsupported combination with an actionable message.
+`groupAllPolicy` of `keyword` or `all` needs `sessionScope: 'thread'` for
+per-group shared context, and needs at least one group with
+`requireMention: false` or `GroupGate` silently drops every non-mention message.
+The adapter only warns on stderr and no longer overrides the user's scope, so in
+a daemon worker the warning is invisible and the UI would show a configuration
+that saves cleanly and then drops traffic. `validateConfig` must reject the
+unsupported combination with an actionable message.
+
+Upstream corrected these semantics after this design was first written: the
+required scope is `thread`, not `single` (`single` merges every group and direct
+message into one context), `multiSession` pins the scope to `user` and is
+therefore mutually exclusive with these policies, and the gate accepts a
+per-group `requireMention: false` rather than only the wildcard entry. The
+implemented validation and its tests follow the current upstream behavior.
 
 `groups['*'].requireMention` also gets an editor control in the shared group
 section, so `keyword` and `all` can be configured entirely from the UI instead of
