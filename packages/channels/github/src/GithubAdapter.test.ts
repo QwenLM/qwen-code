@@ -25481,6 +25481,34 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(deliveredTo).not.toContain('author-A');
       });
 
+      it('rejects a task record whose authorExclude is not a string array', async () => {
+        // Every other optional field on the record is shape-checked; a
+        // hand-edited or corrupt `authorExclude` must be caught at the store
+        // boundary too, not at the `for … of task.authorExclude` loop that
+        // would throw (a number) or silently exclude characters (a string).
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'corrupt-author-exclude',
+            state: 'accepted',
+            issueNumber: 42,
+            delivery: { kind: 'bound-session', sessionId: 'winner-B' },
+            privateOnly: true,
+            authorExclude: 42 as unknown as string[],
+          }),
+        ]);
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          inboundPersistenceBlocked: boolean;
+        };
+        await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+          'invalid GitHub inbound task state',
+        );
+        expect(recovery.inboundPersistenceBlocked).toBe(true);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
       it('does not reselect the author during LEGACY-mode task recovery (F3)', async () => {
         // Same exclusion contract without boundSessionActions: legacy mode
         // re-resolves the single winner, so once the author becomes the newest

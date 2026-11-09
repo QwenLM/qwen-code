@@ -1271,6 +1271,7 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
       typeof record.backpressure === 'boolean') &&
     (record.privateOnly === undefined ||
       typeof record.privateOnly === 'boolean') &&
+    isOptionalStringArray(record.authorExclude) &&
     (record.lostSessionId === undefined ||
       typeof record.lostSessionId === 'string')
   );
