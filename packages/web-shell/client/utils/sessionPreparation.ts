@@ -6,6 +6,7 @@ import {
 import type {
   DaemonSessionClient,
   ReasoningSelection,
+  SessionStartupConfig,
 } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
@@ -17,6 +18,7 @@ type PromptSessionActions = {
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    startupConfig?: SessionStartupConfig;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
@@ -60,7 +62,7 @@ function isSupersededSessionLoad(error: unknown): boolean {
 export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
-  setSessionModel,
+  startupConfig,
   reasoningEffort,
   modeId,
   planMode = false,
@@ -79,11 +81,7 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
-  setSessionModel?: (
-    sessionId: string,
-    modelId: string,
-    detachedSession?: DaemonSessionClient,
-  ) => Promise<unknown>;
+  startupConfig?: SessionStartupConfig;
   reasoningEffort?: ReasoningSelection;
   modeId?: string;
   planMode?: boolean;
@@ -149,6 +147,7 @@ export async function createAndAttachSessionForPrompt({
           getCurrentWorkspaceCwd,
           sessionContext,
           sourceType: sessionSourceType,
+          ...(startupConfig ? { startupConfig } : {}),
           ...(approvalMode ? { approvalMode } : {}),
           ...(worktree ? { worktree } : {}),
           ...(branch ? { branch } : {}),
@@ -210,8 +209,7 @@ export async function createAndAttachSessionForPrompt({
       if (modelId && sessionContext?.kind !== 'standalone') {
         preparationStep = 'set model for new session';
         try {
-          await (setSessionModel?.(sessionId, modelId, detachedSession) ??
-            detachedSession.setModel(modelId));
+          await detachedSession.setModel(modelId);
         } catch (error) {
           if (reasoningEffort) throw error;
           warn('[WebShell] failed to set model for new session:', error);
@@ -297,8 +295,7 @@ export async function createAndAttachSessionForPrompt({
     if (modelId && sessionContext?.kind !== 'standalone') {
       preparationStep = 'set model for new session';
       try {
-        await (setSessionModel?.(sessionId, modelId) ??
-          sessionActions.setModel(modelId));
+        await sessionActions.setModel(modelId);
       } catch (error) {
         if (reasoningEffort) throw error;
         warn('[WebShell] failed to set model for new session:', error);

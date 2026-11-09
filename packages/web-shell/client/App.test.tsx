@@ -24839,6 +24839,49 @@ describe('App session callbacks', () => {
     );
   });
 
+  it.each([true, false])(
+    'uses the activated subscription on first send only while its draft is current (%s)',
+    async (keepDraft) => {
+      mockConnection.sessionId = undefined;
+      mockConnection.currentModel = 'legacy-api-model(openai)';
+      mockWorkspace.capabilities = {
+        workspaces: [
+          { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+          { id: 'secondary', cwd: '/work/secondary', trusted: true },
+        ],
+      };
+      const props = { initialSelectedWorkspaceCwd: '/work/secondary' };
+      const { rerender } = renderApp({
+        ...props,
+        subscriptionDraft: { modelId: 'qwen3.8-max' },
+      });
+      await flush();
+
+      act(() => {
+        testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+      });
+      await flush();
+      if (!keepDraft) rerender(props);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first message');
+        await vi.waitFor(() => {
+          expect(mockSessionActions.createSession).toHaveBeenCalled();
+        });
+      });
+      expect(mockSessionActions.createSession.mock.calls[0]?.[0]).toMatchObject(
+        { workspaceCwd: '/work/secondary' },
+      );
+      const options = mockSessionActions.createSession.mock.calls[0]?.[0];
+      if (keepDraft) {
+        expect(options).toMatchObject({
+          startupConfig: { modelServiceId: 'qwen3.8-max(qwen-subscription)' },
+        });
+      } else {
+        expect(options).not.toHaveProperty('startupConfig');
+      }
+    },
+  );
+
   it('clears the git mode intent when starting a new session from the sidebar', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {

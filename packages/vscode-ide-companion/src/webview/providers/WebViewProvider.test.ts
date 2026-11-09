@@ -2399,13 +2399,13 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     }
 
     it.each([
-      [null, false, 'qwen3.8-max'],
-      ['session-a', false, 'qwen3.8-max'],
-      [null, true, 'fixture-openai'],
-      ['session-a', true, 'qwen3.8-max'],
+      [null, false],
+      ['session-a', false],
+      [null, true],
+      ['session-a', true],
     ] as const)(
       'activates through its captured owner (session: %s, project override: %s)',
-      async (sessionId, projectOverride, modelId) => {
+      async (sessionId, projectOverride) => {
         const attached = await openSidebar(sessionId);
         if (projectOverride) {
           attached.calls.providers.mockResolvedValue({
@@ -2457,17 +2457,17 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
             undefined,
             { persistDefault: false },
           );
-          expect(attached.calls.providers).not.toHaveBeenCalled();
         } else {
           expect(attached.calls.setModel).not.toHaveBeenCalled();
-          expect(attached.calls.providers).toHaveBeenCalledOnce();
         }
+        expect(attached.calls.providers).not.toHaveBeenCalled();
         expect(attached.postMessage).toHaveBeenCalledWith({
           type: 'qwenSubscriptionActivationResult',
           data: {
             flowId: attached.flowId,
             requestId: 'request',
-            modelId,
+            modelId: 'qwen3.8-max',
+            draft: !sessionId,
           },
         });
         expect(attached.postMessage).not.toHaveBeenCalledWith(

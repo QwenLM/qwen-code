@@ -1450,7 +1450,10 @@ export class WebViewProvider {
       if (this.authState === true) {
         this.sendMessageToWebView({
           type: 'authSuccess',
-          data: { message: 'Provider configured successfully!' },
+          data: {
+            message: 'Provider configured successfully!',
+            ...(plan.modelSelection ? { chatProviderConfigured: true } : {}),
+          },
         });
       } else {
         // Auth failed against the live backend — roll the bad credentials
@@ -1952,7 +1955,6 @@ export class WebViewProvider {
           assertOwner();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
-          let modelId = result.modelId;
           if (owner.sessionId) {
             await owner.client.setSessionModel(
               owner.sessionId,
@@ -1961,25 +1963,14 @@ export class WebViewProvider {
               { persistDefault: false },
             );
             assertOwner();
-          } else {
-            const providers = await owner.client
-              .workspaceByCwd(owner.workspaceCwd)
-              .workspaceProviders();
-            assertOwner();
-            if (!providers.initialized) {
-              throw new Error('Subscription runtime activation failed.');
-            }
-            const current = providers.providers
-              .find((provider) => provider.current)
-              ?.models.find((model) => model.isCurrent);
-            modelId = current?.baseModelId ?? modelId;
           }
           this.sendMessageToWebView({
             type: 'qwenSubscriptionActivationResult',
             data: {
               flowId: flow.id,
               requestId: data.requestId,
-              modelId,
+              modelId: result.modelId,
+              draft: !owner.sessionId,
             },
           });
         } catch (error) {

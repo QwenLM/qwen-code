@@ -65,6 +65,7 @@ interface AuthMessageProps {
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onModelActivated?: (modelId: string) => void;
+  onChatProviderConfigured?: () => void;
   getWorkspaceCwd?: () => string | undefined;
   activateSessionSubscriptionModel: (
     workspaceCwd: string | undefined,
@@ -162,6 +163,7 @@ function normalizeModelIds(value: string): string[] {
 export function AuthMessage({
   onMessage,
   onModelActivated,
+  onChatProviderConfigured,
   getWorkspaceCwd,
   activateSessionSubscriptionModel,
   onClose,
@@ -569,6 +571,7 @@ export function AuthMessage({
           }
         }
         if (!isCurrent()) return;
+        if (!syncFailed && purpose === 'chat') onChatProviderConfigured?.();
         onMessage(
           syncFailed
             ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
@@ -592,10 +595,12 @@ export function AuthMessage({
     advancedConfig,
     validateAdvanced,
     models,
+    onChatProviderConfigured,
     onClose,
     onMessage,
     protocol,
     provider,
+    purpose,
     saving,
     sessionActions,
     t,

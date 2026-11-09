@@ -141,6 +141,7 @@ async function openAndSave(
 ) {
   const onMessage = vi.fn();
   const onClose = vi.fn();
+  const onChatProviderConfigured = vi.fn();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -150,6 +151,7 @@ async function openAndSave(
         <AuthMessage
           activateSessionSubscriptionModel={vi.fn()}
           onMessage={onMessage}
+          onChatProviderConfigured={onChatProviderConfigured}
           onClose={onClose}
           allowAdd={allowAdd}
         />
@@ -179,12 +181,13 @@ async function openAndSave(
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  return { onMessage, onClose };
+  return { onMessage, onClose, onChatProviderConfigured };
 }
 
 describe('AuthMessage runtime provider sync', () => {
   it('closes after save and appends a warning when runtime sync failed', async () => {
-    const { onMessage, onClose } = await install('failed');
+    const { onMessage, onClose, onChatProviderConfigured } =
+      await install('failed');
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -192,16 +195,19 @@ describe('AuthMessage runtime provider sync', () => {
       ),
     );
     expect(onClose).toHaveBeenCalledOnce();
+    expect(onChatProviderConfigured).not.toHaveBeenCalled();
     expect(sessionActions.refreshModels).not.toHaveBeenCalled();
   });
 
   it.each([undefined, 'applied', 'deferred'] as const)(
     'keeps the existing success message for runtime sync %s',
     async (status) => {
-      const { onMessage, onClose } = await install(status);
+      const { onMessage, onClose, onChatProviderConfigured } =
+        await install(status);
 
       expect(onMessage).toHaveBeenCalledWith('Provider saved.');
       expect(onClose).toHaveBeenCalledOnce();
+      expect(onChatProviderConfigured).toHaveBeenCalledOnce();
       expect(sessionActions.refreshModels).toHaveBeenCalledExactlyOnceWith(
         undefined,
         { reloadProviders: false },

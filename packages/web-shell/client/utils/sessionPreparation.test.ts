@@ -68,17 +68,20 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
   });
 
-  it('applies the authenticated draft model with the session-only setter', async () => {
-    const actions = createActions();
-    const setSessionModel = vi.fn().mockResolvedValue({});
+  it('sends the authenticated draft model with the create request', async () => {
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        ...sessionResult,
+        modelApplied: true,
+      })),
+    });
+    const startupConfig = { modelServiceId: 'qwen3.8-max(qwen-subscription)' };
     await prepareSession({
       sessionActions: actions,
-      modelId: 'qwen3.8-max(qwen-subscription)',
-      setSessionModel,
+      startupConfig,
     });
-    expect(setSessionModel).toHaveBeenCalledExactlyOnceWith(
-      sessionResult.sessionId,
-      'qwen3.8-max(qwen-subscription)',
+    expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ startupConfig }),
     );
     expect(actions.setModel).not.toHaveBeenCalled();
   });
@@ -789,23 +792,23 @@ describe('createAndAttachSessionForPrompt', () => {
       expect(actions.clearSession).not.toHaveBeenCalled();
     });
 
-    it('uses the session-only model setter when the created session is detached', async () => {
-      const client = createDetachedClient();
-      const setSessionModel = vi.fn().mockResolvedValue({});
-      const modelId = 'qwen3.8-max(qwen-subscription)';
+    it('keeps the authenticated draft model when the created session is detached', async () => {
+      const client = { ...createDetachedClient(), modelApplied: true };
+      const actions = createUnboundActions(client);
+      const startupConfig = {
+        modelServiceId: 'qwen3.8-max(qwen-subscription)',
+      };
 
       await prepareSession({
-        sessionActions: createUnboundActions(client),
-        modelId,
-        setSessionModel,
+        sessionActions: actions,
+        startupConfig,
         getCurrentSessionId: () => 'session-2',
       });
 
-      expect(setSessionModel).toHaveBeenCalledExactlyOnceWith(
-        'session-1',
-        modelId,
-        client,
+      expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ startupConfig }),
       );
+      expect(actions.attachSession).not.toHaveBeenCalled();
       expect(client.setModel).not.toHaveBeenCalled();
     });
 
