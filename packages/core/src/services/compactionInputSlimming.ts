@@ -225,7 +225,10 @@ export function estimatePartChars(
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
-    return part.text.length;
+    // A thought's signature is replayed beside its text, so it takes room in
+    // the request too (#9455). Other parts reach `JSON.stringify` below,
+    // which already counts it.
+    return part.text.length + (part.thoughtSignature?.length ?? 0);
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see

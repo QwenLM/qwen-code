@@ -3864,15 +3864,24 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expectCompressed(result);
   });
 
-  it.each([
-    ['filled the window', windowFillingUsage],
-    ['left the window room', undefined],
-  ])(
-    'drops a summary cut inside the snapshot opening tag when the usage %s',
-    async (_label, usage) => {
-      // A model does not stop at `<state_snap`; only a cut leaves it, so the
-      // usage cannot vouch for it (#15936 R5-9).
-      mockVllmBackend(WINDOW, false, { text: '\n<state_snap', usage });
+  it.each(
+    [
+      '\n<state_snap',
+      '<',
+      'Summary: <state_snap',
+      'Summary: <state_snapshot>',
+      'Summary: <state_snapshot>\n',
+    ].flatMap((text) => [
+      [text, 'filled the window', windowFillingUsage],
+      [text, 'left the window room', undefined],
+    ]),
+  )(
+    'drops a summary cut at or inside the snapshot opening tag (%j) when the usage %s',
+    async (text, _label, usage) => {
+      // A model does not stop at `<state_snap`, or right after opening the
+      // snapshot; only a cut leaves either, so the usage cannot vouch for it.
+      // The tag can follow prose on its line (#15936 R5-9, round 6).
+      mockVllmBackend(WINDOW, false, { text, usage });
 
       const result = await compressChars(182_000, 45_000);
 
@@ -4121,6 +4130,22 @@ describe('issue #9455: compression requests fit the receiving window', () => {
           (part) => isUserText(entry, part) === userText,
         ),
       }));
+    // The provider bills a thought signature whether or not the local
+    // estimate counts one, so the bill sets signatures aside from the
+    // estimate and adds them back at char/4 (#15936 R5-1).
+    const billed = (contents: Content[]) => {
+      let signatureChars = 0;
+      const unsigned = contents.map((entry) => ({
+        ...entry,
+        parts: (entry.parts ?? []).map((part) => {
+          if (typeof part.thoughtSignature !== 'string') return part;
+          signatureChars += part.thoughtSignature.length;
+          const { thoughtSignature: _signature, ...rest } = part;
+          return rest;
+        }),
+      }));
+      return estimateContentTokens(unsigned) + Math.ceil(signatureChars / 4);
+    };
     const generateText = vi.fn(async (opts: GenerateTextOptions) => {
       const contents = opts.contents as Content[];
       const systemText =
@@ -4131,15 +4156,13 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       const promptTokens =
         o.userTextRatio === undefined
           ? Math.ceil(
-              (estimateContentTokens(contents) +
-                Math.ceil(systemText.length / 4)) *
-                ratio,
+              (billed(contents) + Math.ceil(systemText.length / 4)) * ratio,
             )
           : Math.ceil(
-              (estimateContentTokens(split(contents, false)) +
+              (billed(split(contents, false)) +
                 Math.ceil(systemText.length / 4)) *
                 ratio +
-                estimateContentTokens(split(contents, true)) * o.userTextRatio,
+                billed(split(contents, true)) * o.userTextRatio,
             );
       const maxOutputTokens = Math.min(
         (opts.config as { maxOutputTokens?: number } | undefined)
@@ -4509,6 +4532,45 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       result,
       CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
     );
+  });
+
+  it('sizes the first request for the thought signatures it replays', async () => {
+    // Signed thought parts go out with their signatures: 30K tokens of text
+    // plus 20K of signatures. Counting only the text leaves room for the full
+    // output budget, and the provider rejects 50K + 20K against a 64K window
+    // (#9455; #15936 R5-1).
+    mockBackend();
+    const signature = 's'.repeat(8_000);
+    const history: Content[] = [userText('original request: port the parser')];
+    for (let i = 0; i < 10; i++) {
+      history.push({
+        role: 'model',
+        parts: [
+          {
+            text: 't'.repeat(2_000),
+            thought: true,
+            thoughtSignature: signature,
+          },
+          { text: 'm'.repeat(10_000) },
+        ],
+      });
+      history.push(userText(`continue ${i}`));
+    }
+    history.push(modelText('done'));
+
+    const result = await compressHistory(history, 50_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    expect(
+      sent[0]!.contents
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.thoughtSignature === signature),
+    ).toHaveLength(10);
+    expect(sent[0]!.maxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(
+      sent[0]!.promptTokens + sent[0]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(WINDOW);
   });
 
   it('retries when another attempt rides along in the error', async () => {

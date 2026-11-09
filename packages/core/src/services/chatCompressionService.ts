@@ -567,17 +567,18 @@ function hasUnclosedStateSnapshot(summary: string): boolean {
 const STATE_SNAPSHOT_OPENING = '<state_snapshot>';
 
 /**
- * Whether the summary ends inside the snapshot's opening tag (`<state_snap`).
- * A model does not stop there, so only a cut can leave it, whatever the usage
- * says (#15936 R5-9).
+ * Whether the summary ends inside the snapshot's opening tag (`<state_snap`,
+ * down to a bare `<`) or right after it. A model does not stop there, so only
+ * a cut can leave it, whatever the usage says. Only the text from the last
+ * line's last `<` is read, so prose before the tag on its line does not hide
+ * it (#15936 R5-9); a mention followed by anything (`<state_snapshot>.`)
+ * is not a cut.
  */
 function endsInsideSnapshotOpening(summary: string): boolean {
-  const lastLine = summary.slice(summary.lastIndexOf('\n') + 1).trim();
-  return (
-    lastLine.length > 1 &&
-    lastLine.length < STATE_SNAPSHOT_OPENING.length &&
-    STATE_SNAPSHOT_OPENING.startsWith(lastLine)
-  );
+  const trimmed = summary.trimEnd();
+  const lastLine = trimmed.slice(trimmed.lastIndexOf('\n') + 1);
+  const tail = lastLine.slice(lastLine.lastIndexOf('<'));
+  return tail.startsWith('<') && STATE_SNAPSHOT_OPENING.startsWith(tail);
 }
 
 export class ChatCompressionService {

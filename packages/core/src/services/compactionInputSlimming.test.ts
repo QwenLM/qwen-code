@@ -284,6 +284,29 @@ describe('compactionInputSlimming', () => {
       expect(estimateContentChars(c, 1600)).toBe(6402);
     });
 
+    it('counts a signed thought part in full', () => {
+      // The signature is replayed to the provider beside the thought text,
+      // so it takes room in the request (#9455; #15936 R5-1).
+      const c: Content = {
+        role: 'model',
+        parts: [
+          { text: 'abc', thought: true, thoughtSignature: 'x'.repeat(1_000) },
+          { text: 'done' },
+        ],
+      };
+      expect(estimateContentChars(c, 1600)).toBe(3 + 1_000 + 4);
+    });
+
+    it('counts a signature on a function call part once', () => {
+      const call = {
+        functionCall: { name: 'read_file', args: { path: '/a' } },
+        thoughtSignature: 'x'.repeat(1_000),
+      };
+      expect(estimateContentChars({ role: 'model', parts: [call] }, 1600)).toBe(
+        JSON.stringify(call).length,
+      );
+    });
+
     it('returns 0 for parts-less Content', () => {
       expect(estimateContentChars({ role: 'user' }, 1600)).toBe(0);
     });
