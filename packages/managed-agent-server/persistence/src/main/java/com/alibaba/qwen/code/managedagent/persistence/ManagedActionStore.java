@@ -199,7 +199,7 @@ public class ManagedActionStore
             String id = payload.path("requestId").asText();
             String state = payload.path("state").asText();
             require(
-                    id.matches("tool_approval_[0-9a-f]{32}")
+                    ManagedActionStore.ACTION_ID.matcher(id).matches()
                             && List.of("permission", "question").contains(payload.path("kind").asText())
                             && "tool_call".equals(payload.path("source").asText())
                             && List.of("requested", "decided", "expired", "cancelled")
@@ -403,7 +403,7 @@ public class ManagedActionStore
     }
 
     public Optional<Action> find(String tenantId, String sessionId, String id) {
-        if (!id.matches("tool_approval_[0-9a-f]{32}")) {
+        if (!ManagedActionStore.ACTION_ID.matcher(id).matches()) {
             return Optional.empty();
         }
         return jdbc
