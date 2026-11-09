@@ -401,7 +401,7 @@ describe('stopPrWatch', () => {
       JSON.stringify({ ...record, pidNs: (record.pidNs ?? 0) + 1 }),
     );
     expect(claimPrWatchOwnershipSync(dir, () => {}).kind).toBe('blocked');
-    expect(releaseOwnedPrWatchSync(dir)).toBe(false);
+    expect(releaseOwnedPrWatchSync(dir)).toBe('foreign');
     expect(existsSync(ownerPath)).toBe(true);
   });
 
@@ -427,11 +427,60 @@ describe('stopPrWatch', () => {
           startedAt: new Date().toISOString(),
         }),
       );
-      expect(releaseOwnedPrWatchSync(dir)).toBe(false);
+      expect(releaseOwnedPrWatchSync(dir)).toBe('foreign');
       expect(existsSync(ownerPath)).toBe(true);
     } finally {
       child.kill('SIGKILL');
     }
+  });
+
+  it('logs a refused release but stays silent when it never claimed', async () => {
+    // An operator has to be able to tell "released", "kept — work in flight",
+    // "kept — release refused" and "never claimed" apart.
+    const logs: string[] = [];
+    await stopPrWatch({
+      state,
+      watchDir: dir,
+      stopTimer: () => {},
+      log: (m) => logs.push(m),
+    });
+    expect(logs).toEqual([]);
+
+    claimPrWatchOwnershipSync(dir, () => {});
+    writeFileSync(
+      prWatchOwnerPath(dir),
+      JSON.stringify({
+        pid: process.pid,
+        procStart: 'foreign-boot:0',
+        startedAt: new Date().toISOString(),
+      }),
+    );
+    logs.length = 0;
+    await stopPrWatch({
+      state,
+      watchDir: dir,
+      stopTimer: () => {},
+      log: (m) => logs.push(m),
+    });
+    expect(existsSync(prWatchOwnerPath(dir))).toBe(true);
+    expect(logs).toEqual([
+      'PR watch: shutdown finished but kept the owner record (foreign)',
+    ]);
+  });
+
+  it('reports an unreadable owner record rather than a clean release', async () => {
+    claimPrWatchOwnershipSync(dir, () => {});
+    writeFileSync(prWatchOwnerPath(dir), '{ not json', 'utf8');
+    const logs: string[] = [];
+    await stopPrWatch({
+      state,
+      watchDir: dir,
+      stopTimer: () => {},
+      log: (m) => logs.push(m),
+    });
+    expect(logs).toEqual([
+      'PR watch: shutdown finished but kept the owner record (unreadable)',
+    ]);
   });
 
   it('waits for a restore the tick dispatches after shutdown began', async () => {

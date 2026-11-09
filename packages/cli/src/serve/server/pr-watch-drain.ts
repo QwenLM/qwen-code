@@ -241,8 +241,14 @@ export async function stopPrWatch(
     );
     return;
   }
-  if (releaseOwnedPrWatchSync(options.watchDir)) {
+  const outcome = releaseOwnedPrWatchSync(options.watchDir);
+  if (outcome === 'released') {
     log('PR watch: released the owner record on shutdown');
+  } else if (outcome !== 'absent') {
+    // 'absent' is the ordinary never-claimed case and stays silent. Every
+    // other refusal kept a record this daemon expected to hand back, which an
+    // operator cannot otherwise distinguish from a clean release.
+    log(`PR watch: shutdown finished but kept the owner record (${outcome})`);
   }
 }
 

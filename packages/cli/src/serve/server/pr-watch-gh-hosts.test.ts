@@ -41,6 +41,24 @@ function read(env: Record<string, string | undefined>): string[] {
   return [...readGhConfiguredHosts(env, (m) => logs.push(m))].sort();
 }
 
+/** Read a hosts.yml while capturing everything the library emits itself. */
+function readCapturingEmissions(content: string): {
+  hosts: string[];
+  emitted: string;
+} {
+  const env = configWith(content);
+  const spy = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  try {
+    const hosts = read(env);
+    // Capture before restoring: mockRestore clears the call history, so
+    // reading it afterwards makes the containment assertion vacuous.
+    const emitted = spy.mock.calls.map((call) => String(call[0])).join('\n');
+    return { hosts, emitted };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
 describe('ghConfigDir', () => {
   it('prefers GH_CONFIG_DIR over every other source', () => {
     expect(
@@ -176,27 +194,41 @@ describe('readGhConfiguredHosts', () => {
   });
 
   it('never emits a token through a YAML warning either', () => {
-    // The warning path bypasses both the catch and the caller's log: `parse()`
-    // hands it to process.emitWarning with the offending source line attached.
+    // The warning path bypasses both the catch and the caller's log: the
+    // library hands it to process.emitWarning with the source line attached.
     // An unresolved tag on a token line parses successfully and still writes
     // the whole line to stderr.
-    const env = configWith(
+    const { hosts, emitted } = readCapturingEmissions(
       'github.com:\n  oauth_token: !unknown super-secret-token\n',
     );
-    const spy = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
-    let hosts: string[];
-    try {
-      hosts = read(env);
-    } finally {
-      spy.mockRestore();
-    }
-    const emitted = spy.mock.calls.map((call) => String(call[0])).join('\n');
     expect(emitted).not.toContain('super-secret-token');
     // A warning does not invalidate the host names.
     expect(hosts).toEqual(['github.com']);
     expect(logs.join('\n')).not.toContain('super-secret-token');
     expect(logs.join('\n')).toContain('YAML warning');
     expect(logs.join('\n')).toMatch(/at line \d+/);
+  });
+
+  it('never emits a token when toJS stringifies a collection key', () => {
+    // A third emission path: toJS() warns on its own when a mapping key is a
+    // collection, embedding the key text, and leaves doc.errors/doc.warnings
+    // empty — so neither log line nor any redaction runs. The library
+    // truncates long keys, so assert on the token prefix, not the whole token.
+    const shapes = [
+      '? [oauth_token: super-secret-token]\n: {}\n',
+      '? {oauth_token: super-secret-token}\n: {}\n',
+      'github.com: {}\n? [oauth_token: super-secret-token]\n: {}\n',
+    ];
+    for (const shape of shapes) {
+      logs = [];
+      const { hosts, emitted } = readCapturingEmissions(shape);
+      expect(emitted).not.toContain('super-secret');
+      expect(logs.join('\n')).not.toContain('super-secret');
+      // A normal host entry beside the collection key still enumerates.
+      expect(hosts).toEqual(
+        shape.startsWith('github.com') ? ['github.com'] : [],
+      );
+    }
   });
 
   it('degrades to an empty set with a log on malformed YAML', () => {
@@ -211,15 +243,21 @@ describe('readGhConfiguredHosts', () => {
     expect(logs).toEqual([]);
   });
 
-  it('degrades with a log when hosts.yml is a symlink', () => {
-    const dir = path.join(root, 'link-config');
-    mkdirSync(dir, { recursive: true });
-    const target = path.join(root, 'elsewhere.yml');
-    writeFileSync(target, 'github.com:\n  user: x\n', 'utf8');
-    symlinkSync(target, path.join(dir, 'hosts.yml'));
-    expect(read({ GH_CONFIG_DIR: dir })).toEqual([]);
-    expect(logs.some((l) => l.includes('cannot read gh hosts'))).toBe(true);
-  });
+  // POSIX-only like the FIFO case below: readRegularFile's O_NOFOLLOW is
+  // undefined on Windows, so the flag is 0, the link is followed and the read
+  // succeeds — the refusal this pins does not exist there.
+  it.runIf(process.platform !== 'win32')(
+    'degrades with a log when hosts.yml is a symlink',
+    () => {
+      const dir = path.join(root, 'link-config');
+      mkdirSync(dir, { recursive: true });
+      const target = path.join(root, 'elsewhere.yml');
+      writeFileSync(target, 'github.com:\n  user: x\n', 'utf8');
+      symlinkSync(target, path.join(dir, 'hosts.yml'));
+      expect(read({ GH_CONFIG_DIR: dir })).toEqual([]);
+      expect(logs.some((l) => l.includes('cannot read gh hosts'))).toBe(true);
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'does not hang when hosts.yml is a FIFO',

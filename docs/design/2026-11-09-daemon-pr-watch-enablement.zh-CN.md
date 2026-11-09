@@ -74,14 +74,14 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 `idle()` 本身无界：由 `stopPrWatch` 用超时与整个序列赛跑，因为只有调用方知道自己的关停 deadline。owner 记录**只在等待成功之后**释放，因此后继者绝不与在途工作重叠（主 §2）。超时则刻意**保留**记录——在 restore 仍在准入时释放会让后继者把同一转换投递两次，而留着是安全的，因为 claim 会清扫进程已确证消失的记录。从未 claim 的 daemon 不释放任何东西，本进程不拥有的记录也原样留下。
 
-「不拥有」按 **claim 自己的身份规则**判定，且次序相同：先 `isLocalIdentity`，再 `isSameProcess`。PID 号相同并不授权删除来自共享同一 home 的另一次启动、另一台机器或另一个 PID namespace 的记录；而单靠 `isSameProcess` 在读不到 process token 的平台（macOS/Windows）会退化为 PID 存活检查——那就会删掉 claim 明确拒绝认领的记录。
+「不拥有」按 **claim 自己的身份规则**判定，且次序相同：先 `isLocalIdentity`，再 `isSameProcess`。两侧共用同一个谓词（`isOwnedByThisProcess`），因此将来扩展判别式不会只落在其中一侧。释放返回原因（`released` / `absent` / `foreign` / `unreadable` / `lock`）而非裸布尔，关停对除 `absent` 外的每种拒绝都记一行——`absent` 是「从未 claim」的常态，保持静默。PID 号相同并不授权删除来自共享同一 home 的另一次启动、另一台机器或另一个 PID namespace 的记录；而单靠 `isSameProcess` 在读不到 process token 的平台（macOS/Windows）会退化为 PID 存活检查——那就会删掉 claim 明确拒绝认领的记录。
 
 ### 4. deps 填充（host 枚举器已落地于 #16732，其余尚未）
 
 `run-qwen-serve.ts` 在 `getArchiveCoordinator` 旁经 late-bound getter 填充两个接缝：
 
 - **watch 目录与锁**：`defaultPrWatchDir()`，一个由观测与 drain 共享的 `PathMutexRegistry`，使 owner 的进程内锁对每个文件都权威（主 §2）。
-- **allowed hosts**：`github.com`、daemon 自己 `gh` 配置中的 hosts，以及本 daemon 托管的每个 GitHub channel 的 web origin。新 helper 按 go-gh 的 ConfigDir 优先级（`GH_CONFIG_DIR`、`XDG_CONFIG_HOME`、`%AppData%\GitHub CLI`、`HOME/.config/gh`）枚举 `gh` 的 `hosts.yml` 键，用仓库的 `node yaml` 经 `parseDocument` 读 YAML，**绝不用 `parse`**：`parse` 会把 warning 交给 `process.emitWarning` 并附上出错的源行，绕过 catch 与调用方的 log，而 `hosts.yml` 的行携带 oauth token。error 与 warning 都从 document 上收集，只记不回显的 code 加行号；无法解析的文档不产出 host，有 warning 仍产出 host 名。托管 channel 来自 `resolveChannelWorkspaceGroups`，因此非受信 workspace 的设置绝不贡献；`resolveGithubWebOrigin` 给出各自的主机。每个主机都用 `normalizeWatchHost` 归一化。读取失败降级为 `github.com` 加托管 channel，并记一行日志——绝不降级为会静默禁用所有 view 的空集。
+- **allowed hosts**：`github.com`、daemon 自己 `gh` 配置中的 hosts，以及本 daemon 托管的每个 GitHub channel 的 web origin。新 helper 按 go-gh 的 ConfigDir 优先级（`GH_CONFIG_DIR`、`XDG_CONFIG_HOME`、`%AppData%\GitHub CLI`、`HOME/.config/gh`）枚举 `gh` 的 `hosts.yml` 键，用仓库的 `node yaml` 经 `parseDocument(text, { logLevel: 'error' })` 读 YAML，**绝不用 `parse`**：库会自己把 warning 交给 `process.emitWarning` 并附上出错的源文本，绕过 catch 与调用方的 log，而 `hosts.yml` 的行携带 oauth token。有两条这样的路径——未解析的 tag，以及 `toJS()` 把集合值的映射键字符串化——两者都不进入 `doc.errors`/`doc.warnings`。`'error'` 关闭整类且仍收集诊断；**不可用 `'silent'`**，因为它连 `MULTIPLE_DOCS` 错误也会吞掉。error 与 warning 都从 document 上收集，只记不回显的 code 加行号；无法解析的文档不产出 host，有 warning 仍产出 host 名。托管 channel 来自 `resolveChannelWorkspaceGroups`，因此非受信 workspace 的设置绝不贡献；`resolveGithubWebOrigin` 给出各自的主机。每个主机都用 `normalizeWatchHost` 归一化。读取失败降级为 `github.com` 加托管 channel，并记一行日志——绝不降级为会静默禁用所有 view 的空集。
 - **准入**：`admitSessionPrompt` 配 app 的 archive coordinator，沿用 bound relay 的 classification（`channelPrompt: true`），使注入文本不跑 PR-binding backfill（主 §4）。
 - **restore**：§1 的共享 restore，把其 typed 结果映射为 `PrWatchWakeOutcome`——成功映射为带 registration `release` 的 `restored`，Gone 集映射为 `gone`，其余映射为 `unavailable`。`session_writer_conflict` 属临时，正如 drain 自己的划分已要求。
 - **自推账本**：从候选者的 clone（bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`）跑 `cloneWorktreesOf`，然后 `vouchedScanRoots`、`autofixPrPaths`、`readState`，仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 仅用坐标——其检出里不跑 git。任何拒绝意味着无账本、转换照常投递。
@@ -118,7 +118,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 4. **owner 记录最后释放，且两条臂要按序等。** 停 timer 不够；持有 claim 的 observation tick 与在途 restore 与准入都必须先落定，否则后继者与它们重叠。只等 drain 空闲会漏掉 observation——它从不进入 drain tick；而与 tick 并行采样又会漏掉该 tick 在收尾时派发的 restore。释放还要套用 claim 的身份规则，而不只是进程存活。
 5. **组装后的 allowed-host 集失败开放，绝不向空集。** 枚举器本身在每条读取或解析失败路径都返回空集且绝不抛错；失败开放的保证在组装那一层——它总是包含 `github.com`。空的 allowed-host 集会静默禁用所有 view，却看起来健康，所以这条保证要写在真正施加它的地方。
 6. **仍然关闭。** 每条新路径都在既有开关与「PR B 前不填充」的设置之后，因此本增量不改变任何生产行为。
-7. **凭据绝不经任何路径到达 stderr。** 只脱敏被抛出的解析错误并不够：YAML 库的 warning 路径自己就会回显源行。要从 document 上收集诊断，而不是让库自行 emit。
+7. **凭据绝不经任何路径到达 stderr。** 只脱敏被抛出的解析错误并不够：库在 parse 与 `toJS()` 两步都会自己 emit warning 并附上源文本。设 `logLevel: 'error'` 让它永不 emit，再从 document 上收集诊断。围堵断言要同时针对 `process.emitWarning` 与注入的 log——并且必须在恢复 spy **之前**捕获其调用记录，因为 `mockRestore` 会清空历史，恢复后再读的断言是空转的。
 
 ## 约束与风险
 
@@ -133,8 +133,8 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 - 路由 parity：既有 load/resume、worktree 分类、prompt-terminal、multi-workspace 与 REST 契约套件原样通过——它们是字节兼容的判据。
 - 单元（wake 映射）：每个 Gone 码映射为 `gone`，每个临时码映射为 `unavailable`，成功映射为带「恰好 detach 一次」release 的 `restored`。
 - 单元（钩子）：resume 会 drain 该会话绑定的 PR；挂起的 drain 不拉长 restore；per-PR 锁绝不被重入。
-- 单元（lifecycle）：close 停 timer、等在途工作、然后释放记录；挂起的 restore 超时而非阻塞；非 owner 不释放。两个次序用例承重：关停落在 observation 中途（此时 drain 空闲已为真），以及关停落在 observation 中途、该 tick 随后派发一个比它活得更久的 restore——记录必须存活到那个 restore 落定。身份：claim 拒绝的记录（外部 boot，或 process token 仍匹配的外部 PID namespace）在任何平台都绝不删除；由另一个存活 PID 持有、且没有 process token 的记录同样拒绝。接线：一次真实 daemon 启动（refresh timer 打桩）必须经 `close()` 到达 `stopWatch`——兄弟 serve 套件把 refresh chunk mock 成抛错，所以这条放在自己的文件里。Windows 的 `%AppData%` 分支用平台打桩来执行，而不是按平台门控，因为 PR 的 CI profile 跳过 Windows 车道。
-- 单元（hosts）：无 channel 时只有 `github.com`；`hosts.yml` 条目；托管 channel 的企业 web origin；非受信 workspace 的 channel 不贡献；读取失败降级为已知安全集并记日志。凭据围堵覆盖两条诊断路径：被抛出的解析错误，以及否则会到达 `process.emitWarning` 的 warning；两者都同时对 log 与 emit 出的 warning 断言。
+- 单元（lifecycle）：close 停 timer、等在途工作、然后释放记录；挂起的 restore 超时而非阻塞；非 owner 不释放。两个次序用例承重：关停落在 observation 中途（此时 drain 空闲已为真），以及关停落在 observation 中途、该 tick 随后派发一个比它活得更久的 restore——记录必须存活到那个 restore 落定。身份：claim 拒绝的记录（外部 boot，或 process token 仍匹配的外部 PID namespace）在任何平台都绝不删除；由另一个存活 PID 持有、且没有 process token 的记录同样拒绝。停止 timer 那一臂按效果而非机制钉住：`stopWatch` 之后再推进三个 interval，不得产生 view、listing 或重新 claim。被拒绝的释放要记日志，从未 claim 的保持静默。接线：一次真实 daemon 启动（refresh timer 打桩）必须经 `close()` 到达 `stopWatch`——兄弟 serve 套件把 refresh chunk mock 成抛错，所以这条放在自己的文件里。Windows 的 `%AppData%` 分支用平台打桩来执行，而不是按平台门控，因为 PR 的 CI profile 跳过 Windows 车道。
+- 单元（hosts）：无 channel 时只有 `github.com`；`hosts.yml` 条目；托管 channel 的企业 web origin；非受信 workspace 的 channel 不贡献；读取失败降级为已知安全集并记日志。凭据围堵覆盖每一条 emit 路径：被抛出的解析错误、未解析 tag 的 warning，以及 `toJS()` 把集合值键字符串化（三种拼写，按 token 前缀断言，因为库会截短长键）——每种都同时对 log 与 `process.emitWarning` 断言。symlink 拒绝与 FIFO 一样按 POSIX 门控，因为 Windows 上不存在 `O_NOFOLLOW`。
 - 单元（listing）：被列出的 closed PR 离开 view 轮转；listing 的 `state` 写入静默初始化并取得 per-PR 锁；`partial` 到达 drain。
 - 关闭态 parity：开关关闭时新接缝一个都不被读取，refresh 不变。
 - 真实场景：扩展既有 POSIX 场景套件，经 drain 的 `wakeSession` 驱动真实共享 restore，并加一个真实关停顺序探针。

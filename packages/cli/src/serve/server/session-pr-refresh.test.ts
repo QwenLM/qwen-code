@@ -2082,6 +2082,17 @@ describe('startSessionPrRefreshTimer', () => {
       path.join(os.tmpdir(), 'qwen-pr-watch-stop-'),
     );
     const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+    const view = vi.fn(async (url: string) => ({
+      kind: 'ok' as const,
+      view: {
+        url,
+        title: 'PR 42',
+        headSha: 'a'.repeat(40),
+        state: 'open' as const,
+        checks: 'passing' as const,
+        failingChecks: [] as string[],
+      },
+    }));
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
       pullRequests: [],
@@ -2096,17 +2107,7 @@ describe('startSessionPrRefreshTimer', () => {
         watchDir,
         locks: new PathMutexRegistry(),
         allowedHosts: new Set(['github.com']),
-        viewPullRequest: async (url: string) => ({
-          kind: 'ok' as const,
-          view: {
-            url,
-            title: 'PR 42',
-            headSha: 'a'.repeat(40),
-            state: 'open' as const,
-            checks: 'passing' as const,
-            failingChecks: [] as string[],
-          },
-        }),
+        viewPullRequest: view,
         now,
       }),
     });
@@ -2123,6 +2124,18 @@ describe('startSessionPrRefreshTimer', () => {
         ).toBe('state');
       });
       await handle?.stopWatch();
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+      // Pin the stop-timer arm by its effect, not its mechanism: three more
+      // intervals must produce no further view or listing, and must not
+      // re-claim the record this daemon just handed back.
+      const viewsAtStop = view.mock.calls.length;
+      const listingsAtStop = fetchGitHubPullRequestsMock.mock.calls.length;
+      expect(viewsAtStop).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      expect(view.mock.calls.length).toBe(viewsAtStop);
+      expect(fetchGitHubPullRequestsMock.mock.calls.length).toBe(
+        listingsAtStop,
+      );
       await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
     } finally {
       handle?.dispose();

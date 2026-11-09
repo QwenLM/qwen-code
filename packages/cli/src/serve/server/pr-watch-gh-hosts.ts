@@ -78,11 +78,14 @@ export function readGhConfiguredHosts(
   };
   let parsed: unknown;
   try {
-    // parseDocument, not parse: `parse` forwards warnings to
-    // process.emitWarning with the source line attached, bypassing both this
-    // catch and the caller's log. An unresolved tag on a token line parses
-    // successfully and still writes the token to stderr.
-    const doc = parseDocument(text);
+    // parseDocument at logLevel 'error', not parse: the library emits its own
+    // process.emitWarning with the offending source text attached, bypassing
+    // both this catch and the caller's log. Two paths do that — an unresolved
+    // tag on a token line, and `toJS()` stringifying a collection-valued
+    // mapping key — and neither lands in doc.errors/doc.warnings. 'error'
+    // closes the whole class while still collecting errors and warnings here.
+    // Not 'silent': that also drops the MULTIPLE_DOCS error.
+    const doc = parseDocument(text, { logLevel: 'error' });
     if (doc.errors.length > 0) {
       log(
         `PR watch: cannot parse gh hosts ${filePath} (${diagnostic(
