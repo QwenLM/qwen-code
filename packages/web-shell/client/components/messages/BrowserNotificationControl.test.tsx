@@ -49,6 +49,15 @@ it('keeps generic guidance for an unrecognized browser platform', () => {
   ).toBe('other');
 });
 
+it('does not classify iOS as desktop macOS', () => {
+  expect(
+    detectClientOperatingSystem(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+      'iPhone',
+    ),
+  ).toBe('other');
+});
+
 it.each([
   [
     'MacIntel',

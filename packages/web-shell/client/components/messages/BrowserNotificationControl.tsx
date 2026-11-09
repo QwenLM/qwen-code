@@ -24,6 +24,9 @@ export function detectClientOperatingSystem(
   platform = typeof navigator === 'undefined' ? '' : navigator.platform,
 ): ClientOperatingSystem {
   const identity = `${platform} ${userAgent}`;
+  // iOS user agents contain "Mac OS X", but iOS uses mobile notification
+  // settings and must not receive the desktop macOS instructions.
+  if (/iphone|ipad|ipod/i.test(identity)) return 'other';
   if (/macintosh|mac os x|macintel/i.test(identity)) return 'macos';
   if (/windows/i.test(identity)) return 'windows';
   return 'other';
@@ -218,7 +221,11 @@ export function BrowserNotificationControl() {
           )}
           <p>{t('browserNotifications.helpWhen')}</p>
           <p className="text-muted-foreground">
-            {t('browserNotifications.helpSystem')}
+            {t(
+              clientOperatingSystem === 'other'
+                ? 'browserNotifications.helpSystemOther'
+                : 'browserNotifications.helpSystem',
+            )}
           </p>
           {clientOperatingSystem === 'macos' && (
             <details className="group shrink-0">
@@ -247,6 +254,11 @@ export function BrowserNotificationControl() {
                 {t('browserNotifications.helpWindows')}
               </p>
             </details>
+          )}
+          {clientOperatingSystem === 'other' && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.helpOther')}
+            </p>
           )}
         </PopoverContent>
       </Popover>
