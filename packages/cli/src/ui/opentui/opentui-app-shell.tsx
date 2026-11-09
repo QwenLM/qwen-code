@@ -44,6 +44,7 @@ import {
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
+  runOutsideAgentContext,
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
@@ -1637,7 +1638,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       goalOwnsSessionTurns(config)
     )
       return;
-    onRunModPrompt();
+    // As ink's drain (#7156): this effect can run in a commit that batched a
+    // subagent's progress update made inside its agent frame, and the turn,
+    // with everything it starts, would then resolve the subagent's model.
+    runOutsideAgentContext(() => onRunModPrompt());
   }, [
     streaming,
     dialog,

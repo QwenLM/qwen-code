@@ -63,6 +63,8 @@ import {
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -4118,6 +4120,29 @@ describe('OpenTuiApp shell wiring', () => {
       expect(onRunModPrompt).toHaveBeenCalledTimes(2);
       expect(mods.waiting).toBe(0);
       expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    });
+
+    // #7156: a subagent's progress update, made inside its agent frame, can
+    // batch into the commit that runs the drain, and the Mod's turn would
+    // then resolve the subagent's model.
+    it("starts the Mod's turn outside a subagent's frame", async () => {
+      const { mods, queue } = installMods(0);
+      let runtimeView: unknown = 'unset';
+      const onRunModPrompt = vi.fn(() => {
+        runtimeView = getRuntimeContentGenerator();
+        mods.waiting -= 1;
+        return true;
+      });
+      renderApp({ onRunModPrompt });
+      await settle();
+      const subagentView = {
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'small-default' },
+      } as never;
+      await runWithRuntimeContentGenerator(subagentView, () => queue());
+
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(runtimeView).toBeUndefined();
     });
 
     it('waits while a Goal owns the turns, and runs once it lets go', async () => {

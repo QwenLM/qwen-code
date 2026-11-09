@@ -2568,6 +2568,44 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     expect(mods.returnSubmittedPrompt).toHaveBeenCalledTimes(2);
   });
 
+  it("lets a reset release a Mod's prompt its stale turn puts back", async () => {
+    const { mods, submitted } = installMods();
+    let loaded!: () => void;
+    Object.assign(mods, {
+      starting: true,
+      ready: new Promise<void>((resolve) => {
+        loaded = resolve;
+      }),
+    });
+    mods.returnSubmittedPrompt.mockImplementation((prompt: ModQueuedPrompt) =>
+      submitted.unshift(prompt),
+    );
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: modConfig().config }),
+    );
+    const prompt = { plugin: 'followup-mod', text: 'one' };
+    submitted.push(prompt);
+    // The turn waits for the Mods to load when the transcript resets.
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    await act(async () => {
+      result.current.resetTranscript([]);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mods.returnSubmittedPrompt).toHaveBeenCalledExactlyOnceWith(
+        prompt,
+      ),
+    );
+    expect(live.turns).toHaveLength(0);
+    // The stale turn's put-back does not hold it again.
+    Object.assign(mods, { starting: false });
+    loaded();
+    live.holds.add(1);
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    expect(options(1).modPrompt).toBe(prompt);
+    await settle(result);
+  });
+
   it("spends a Mod's prompt that reached the model client, as ink does", async () => {
     const { mods, submitted } = installMods();
     const { result } = renderHook(() =>

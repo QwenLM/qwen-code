@@ -919,7 +919,9 @@ export function useOpenTuiLiveTurn(
         const returned = !!modPrompt && !sent;
         if (returned && mods) {
           mods.returnSubmittedPrompt(modPrompt);
-          modPromptHeldRef.current = true;
+          // Only the current turn holds it: a turn the transcript reset left
+          // behind must not undo the reset's release, or hold a later turn's.
+          if (seq === turnSeqRef.current) modPromptHeldRef.current = true;
         }
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
