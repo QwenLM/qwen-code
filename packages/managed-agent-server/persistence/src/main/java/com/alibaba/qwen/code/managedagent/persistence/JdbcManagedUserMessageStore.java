@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.UserMessagePolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,8 +23,8 @@ import java.util.UUID;
 
 @Service
 @Qualifier("managedAgentTransactionManager")
-public class ManagedUserMessageStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore {
+public class JdbcManagedUserMessageStore
+        implements ManagedUserMessageStore {
     private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
     @org.springframework.beans.factory.annotation.Autowired
     public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
@@ -34,7 +35,7 @@ public class ManagedUserMessageStore
     private final RequestDigests digests;
     private final UserMessagePolicy agents;
 
-    public ManagedUserMessageStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, RequestDigests digests, @Qualifier("managedUserMessagePolicy") UserMessagePolicy agents) {
+    public JdbcManagedUserMessageStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, RequestDigests digests, @Qualifier("managedUserMessagePolicy") UserMessagePolicy agents) {
         this.jdbc = jdbc;
         this.json = json;
         this.digests = digests;
@@ -81,7 +82,7 @@ public class ManagedUserMessageStore
         reconcile(tenant, session);
         switch (command.action()) {
             case "submit" -> {
-                SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, session);
+                JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, session);
                 List<Map<String, Object>> input = agents.userMessageInput(command.input());
                 Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_user_message WHERE tenant_id = ?"
                         + " AND session_id = ? AND state IN ('queued', 'claimed', 'recovery_blocked')", Integer.class, tenant, session);
@@ -117,7 +118,7 @@ public class ManagedUserMessageStore
                 }
             }
             case "resume" -> {
-                SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, session);
+                JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, session);
                 if ("RECOVERY_BLOCKED".equals(latestTurn(tenant, session).get("status"))) {
                     throw conflict("user_message_recovery_blocked");
                 }

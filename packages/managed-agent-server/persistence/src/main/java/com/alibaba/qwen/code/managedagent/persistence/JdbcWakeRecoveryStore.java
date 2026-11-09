@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,8 +24,8 @@ import java.util.Set;
 
 /** Discovers committed wake inputs independently of their source relay or MQ notice. */
 @Repository
-public class WakeRecoveryStore
-        implements com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore {
+public class JdbcWakeRecoveryStore
+        implements WakeRecoveryStore {
     private static final Set<String> SOURCES = Set.of("monitor", "channel", "child_agent",
             "workflow", "automation", "session_message");
     private static final int JOURNAL_PAGE = 1;
@@ -35,7 +37,7 @@ public class WakeRecoveryStore
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Proof> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
 
-    public WakeRecoveryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcWakeRecoveryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         transactions = new TransactionTemplate(new DataSourceTransactionManager(Objects.requireNonNull(jdbc.getDataSource())));
     }
@@ -157,7 +159,7 @@ public class WakeRecoveryStore
                     throw corrupt();
                 }
                 for (int index = 0; index < chunk.eventCount(); index++) {
-                    JsonNode record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(lines[index]);
+                    JsonNode record = ManagedExtensionRecordStore.parse(lines[index]);
                     JsonNode event = record == null ? null : record.get("managedSession");
                     if (event == null || !"managed_session_event_v1".equals(record.path("subtype").asText())
                             || !event.path("v").isIntegralNumber() || event.path("v").intValue() != 1

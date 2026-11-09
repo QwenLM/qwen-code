@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
+import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,8 +24,8 @@ import java.util.Map;
 import java.util.UUID;
 
 @Repository
-public class SessionWorktreeStore
-        implements com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore {
+public class JdbcSessionWorktreeStore
+        implements SessionWorktreeStore {
     private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
     @org.springframework.beans.factory.annotation.Autowired
     public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
@@ -35,18 +37,18 @@ public class SessionWorktreeStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final TransactionTemplate readTransaction;
-    private final ManagedWorkspaceRegistry registry;
+    private final JdbcManagedWorkspaceRegistry registry;
     private final WorkspaceStorageGuard guard;
     private String resumeAfter = "";
 
     @Autowired
-    public SessionWorktreeStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard) {
+    public JdbcSessionWorktreeStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            JdbcManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard) {
         this(jdbc, new DataSourceTransactionManager(jdbc.getDataSource()), registry, guard);
     }
 
-    public SessionWorktreeStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard) {
+    public JdbcSessionWorktreeStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
+            JdbcManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
         this.readTransaction = new TransactionTemplate(manager);
@@ -59,7 +61,7 @@ public class SessionWorktreeStore
         WorkspaceStorageKindGuard.requireFreshTransaction();
         SourceLocation before = readSource(tenant, actor, selection);
         if (!before.equals(readSource(tenant, actor, selection))) {
-            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_source_changed");
+            throw SessionWorktreeStore.error("worktree_source_changed");
         }
         return before;
     }
@@ -94,19 +96,19 @@ public class SessionWorktreeStore
     public void admit(String tenant, String actor, String session, Plan plan, ResolvedBinding source) {
         plan.target(source);
         if (!tenant.equals(plan.tenantId()) || !guard.verifiedRoot(source.binding()).toString().equals(plan.root())) {
-            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_source_changed");
+            throw SessionWorktreeStore.error("worktree_source_changed");
         }
         worktreeFiles.requireRoot(plan);
         if (plan.storageIdentity() != null && !plan.storageIdentity().equals(storageIdentity(source.binding(), true))) {
-            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_source_changed");
+            throw SessionWorktreeStore.error("worktree_source_changed");
         }
         long now = System.currentTimeMillis();
-        String physical = WorkspaceExecutionStore.storageKey(jdbc, plan.source());
+        String physical = JdbcWorkspaceExecutionStore.storageKey(jdbc, plan.source());
         jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
                         + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, 'PREPARING', 1, ?, ?, ?, ?)",
                 tenant, session, plan.workspaceId(), plan.storageId(), physical, plan.worktreeId(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor), json(plan), plan.worktreeId(), now, now);
+                ManagedWorkspaceRegistry.actorKey(tenant, actor), json(plan), plan.worktreeId(), now, now);
         createOperation(tenant, session, plan, plan.worktreeId(), "PREPARING", null);
     }
 
@@ -160,20 +162,20 @@ public class SessionWorktreeStore
     public static void requireReady(WorktreeFiles worktreeFiles, JdbcTemplate jdbc, String tenant, String session) {
         Descriptor descriptor = descriptor(worktreeFiles, jdbc, tenant, session);
         if (descriptor != null && !"ready".equals(descriptor.state())) {
-            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error(descriptor.errorCode() == null ? "worktree_" + descriptor.state() : descriptor.errorCode());
+            throw SessionWorktreeStore.error(descriptor.errorCode() == null ? "worktree_" + descriptor.state() : descriptor.errorCode());
         }
     }
 
     public static void requireCwd(JdbcTemplate jdbc, String tenant, String session, String cwd) {
         Row row = find(jdbc, tenant, session);
         if (row != null && !Path.of(cwd).normalize().startsWith(Path.of(row.plan().worktreeRoot()))) {
-            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_cwd_outside");
+            throw SessionWorktreeStore.error("worktree_cwd_outside");
         }
     }
 
     public static Row find(JdbcTemplate jdbc, String tenant, String session) {
         List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.session_id = ?",
-                SessionWorktreeStore::row, tenant, session);
+                JdbcSessionWorktreeStore::row, tenant, session);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -185,13 +187,13 @@ public class SessionWorktreeStore
         List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.workspace_id = ? AND w.worktree_id = ?"
                         + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = w.tenant_id"
                         + " AND s.session_id = w.session_id AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?))",
-                SessionWorktreeStore::row, tenant, workspace, id,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor));
+                JdbcSessionWorktreeStore::row, tenant, workspace, id,
+                ManagedWorkspaceRegistry.actorKey(tenant, actor));
         if (rows.size() != 1) {
             throw notFound();
         }
         if (write && jdbc.queryForList("SELECT 1 FROM ma_session_worktree WHERE tenant_id = ? AND worktree_id = ?"
-                        + " AND owner_actor_key = ?", Integer.class, tenant, id, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor)).isEmpty()) {
+                        + " AND owner_actor_key = ?", Integer.class, tenant, id, ManagedWorkspaceRegistry.actorKey(tenant, actor)).isEmpty()) {
             throw notFound();
         }
         return rows.getFirst();
@@ -205,8 +207,8 @@ public class SessionWorktreeStore
                         + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = w.tenant_id"
                         + " AND s.session_id = w.session_id AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?))"
                         + " ORDER BY w.gmt_create DESC",
-                SessionWorktreeStore::row, tenant, workspace,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor));
+                JdbcSessionWorktreeStore::row, tenant, workspace,
+                ManagedWorkspaceRegistry.actorKey(tenant, actor));
         var descriptions = descriptors(worktreeFiles, jdbc, tenant, rows.stream().map(Row::sessionId).toList());
         return rows.stream().map(row -> descriptions.get(row.sessionId())).toList();
     }
@@ -215,7 +217,7 @@ public class SessionWorktreeStore
         long now = System.currentTimeMillis();
         return jdbc.query(SELECT + " WHERE w.state IN ('PREPARING', 'REMOVING') AND o.delivery_state = 'PENDING'"
                 + " AND o.available_at <= ? AND (o.claim_until IS NULL OR o.claim_until <= ?) ORDER BY o.available_at LIMIT 20",
-                SessionWorktreeStore::row, now, now);
+                JdbcSessionWorktreeStore::row, now, now);
     }
 
     public List<String[]> failedInitialSessions() {
@@ -233,7 +235,7 @@ public class SessionWorktreeStore
                             + " AND (claim_until IS NULL OR claim_until <= ?) FOR UPDATE", Integer.class, key(row), now).isEmpty()) {
                 return null;
             }
-            String physical = WorkspaceExecutionStore.storageKey(jdbc, com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.storageBinding(row.plan()));
+            String physical = JdbcWorkspaceExecutionStore.storageKey(jdbc, SessionWorktreeStore.storageBinding(row.plan()));
             if (!jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND maintenance_id = ?"
                     + " AND holder_key IS NOT NULL FOR UPDATE", Integer.class, physical, row.operationId()).isEmpty()) {
                 jdbc.update("UPDATE ma_session_worktree SET state = 'BLOCKED', failure_code = 'maintenance_stop_unverified',"
@@ -293,7 +295,7 @@ public class SessionWorktreeStore
 
     public void resumeStopped() {
         List<Row> candidates = jdbc.query(SELECT + " WHERE w.state = 'BLOCKED' AND w.failure_code = 'maintenance_stop_unverified'"
-                + " AND w.worktree_id > ? ORDER BY w.worktree_id LIMIT 20", SessionWorktreeStore::row, resumeAfter);
+                + " AND w.worktree_id > ? ORDER BY w.worktree_id LIMIT 20", JdbcSessionWorktreeStore::row, resumeAfter);
         resumeAfter = candidates.isEmpty() ? "" : candidates.getLast().worktreeId();
         for (Row row : candidates) {
             transaction.executeWithoutResult(status -> {
@@ -303,7 +305,7 @@ public class SessionWorktreeStore
                         || current.generation() != row.generation()) {
                     return;
                 }
-                var binding = com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.storageBinding(row.plan());
+                var binding = SessionWorktreeStore.storageBinding(row.plan());
                 if (maintenanceHeld(row) || !WorkspaceMaintenanceRecovery.stopped(jdbc, binding, row.operationId(), row.generation())) {
                     return;
                 }
@@ -318,13 +320,13 @@ public class SessionWorktreeStore
 
     public boolean maintenanceHeld(Row row) {
         return !jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ? AND maintenance_id = ?"
-                        + " AND holder_key IS NOT NULL", Integer.class, WorkspaceExecutionStore.storageKey(jdbc, com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.storageBinding(row.plan())),
+                        + " AND holder_key IS NOT NULL", Integer.class, JdbcWorkspaceExecutionStore.storageKey(jdbc, SessionWorktreeStore.storageBinding(row.plan())),
                 row.operationId()).isEmpty();
     }
 
     public Row cleanup(String tenant, String actor, String workspace, String id, String idempotencyKey) {
         if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 512) {
-            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("invalid_idempotency_key");
+            throw SessionWorktreeStore.error("invalid_idempotency_key");
         }
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
@@ -340,7 +342,7 @@ public class SessionWorktreeStore
             }
             String blocker = cleanupBlocker(row);
             if (!List.of("READY", "FAILED").contains(row.state()) || blocker != null) {
-                throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error(blocker == null ? "worktree_not_ready" : blocker);
+                throw SessionWorktreeStore.error(blocker == null ? "worktree_not_ready" : blocker);
             }
             createOperation(tenant, row.sessionId(), row.plan(), operation, "REMOVING",
                     json(Map.of("worktreeId", id, "actor", actor, "idempotencyKey", idempotencyKey)));
@@ -403,7 +405,7 @@ public class SessionWorktreeStore
                 com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId()));
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id"
                         + " FROM ma_storage_owner WHERE storage_key = ?" + (lock ? " FOR UPDATE" : ""),
-                lock ? WorkspaceExecutionStore.storageKey(jdbc, binding)
+                lock ? JdbcWorkspaceExecutionStore.storageKey(jdbc, binding)
                         : LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId(), false));
         return org.apache.commons.codec.digest.DigestUtils.sha256Hex(json(List.of(alias, owner)));
     }
