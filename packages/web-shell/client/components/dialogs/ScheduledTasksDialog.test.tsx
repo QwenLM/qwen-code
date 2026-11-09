@@ -1860,9 +1860,118 @@ describe('ScheduledTasksDialog multi-workspace', () => {
   }
 
   const findWorkspaceSelect = () =>
-    Array.from(document.querySelectorAll('select')).find((s) =>
-      s.querySelector('option[value="id-other"]'),
+    Array.from(document.querySelectorAll('label'))
+      .find((label) =>
+        Array.from(label.querySelectorAll('span')).some(
+          (span) => span.textContent?.trim() === 'Workspace',
+        ),
+      )
+      ?.querySelector('select');
+
+  it.each(['create', 'edit'])(
+    'shows the single workspace on cards and in the read-only %s form',
+    async (mode) => {
+      await mountMulti({ primary: [baseTask({})] }, [WORKSPACES[0]!]);
+      expect(
+        document.querySelector('[title="/repo/main"]')?.textContent?.trim(),
+      ).toBe('Main Workspace');
+
+      click(
+        mode === 'create'
+          ? findButton('New scheduled task')
+          : document.querySelector('[aria-label="Edit"]'),
+      );
+      expect(findWorkspaceSelect()).toBeUndefined();
+      const field = document.querySelector(
+        '[role="group"][aria-label="Workspace"]',
+      );
+      expect(
+        field?.querySelector('[title="/repo/main"]')?.textContent?.trim(),
+      ).toBe('Main Workspace');
+      expect(field?.textContent).not.toContain('Fixed by host');
+
+      if (mode === 'create') {
+        const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+        act(() => {
+          prompt.textContent = 'primary work';
+          prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        });
+      }
+      click(findButton(mode === 'create' ? 'Create' : 'Save'));
+      await flush();
+      if (mode === 'create') {
+        expect(actions.createScheduledTask).toHaveBeenCalledWith(
+          expect.objectContaining({ prompt: 'primary work' }),
+          undefined,
+        );
+      } else {
+        expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+          't1',
+          expect.objectContaining({ prompt: 'summarize the day' }),
+          undefined,
+        );
+      }
+    },
+  );
+
+  it.each([
+    { context: 'without a workspace catalog', catalog: [] },
+    {
+      context: 'over a conflicting catalog name',
+      catalog: [{ ...WORKSPACES[1]!, displayName: 'Catalog name' }],
+    },
+  ])('shows the host-locked workspace name $context', async ({ catalog }) => {
+    const secondary = WORKSPACES[1]!;
+    await mountMulti({ 'id-other': [baseTask({})] }, catalog, secondary);
+    expect(
+      document.querySelector('[title="/repo/other"]')?.textContent?.trim(),
+    ).toBe('Payments API');
+    click(findButton('New scheduled task'));
+    const field = document.querySelector(
+      '[role="group"][aria-label="Workspace"]',
     );
+    expect(
+      field?.querySelector('[title="/repo/other"]')?.textContent?.trim(),
+    ).toBe('Payments API');
+    expect(field?.textContent).toContain('Fixed by host');
+    expect(findWorkspaceSelect()).toBeUndefined();
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith('id-other');
+    expect(actions.listScheduledTasks).not.toHaveBeenCalledWith(undefined);
+  });
+
+  it('displays the legacy primary path without changing session navigation', async () => {
+    const onOpenSession = vi.fn();
+    await mount([baseTask({ sessionId: 'sess-42' })], {
+      primaryWorkspaceCwd: '/legacy/project',
+      onOpenSession,
+    });
+    expect(
+      document.querySelector('[title="/legacy/project"]')?.textContent?.trim(),
+    ).toBe('project');
+    click(findButtonContaining('View conversation'));
+    await flush();
+    expect(onOpenSession).toHaveBeenCalledWith('sess-42');
+    click(findButton('New scheduled task'));
+    const field = document.querySelector(
+      '[role="group"][aria-label="Workspace"]',
+    );
+    expect(
+      field?.querySelector('[title="/legacy/project"]')?.textContent?.trim(),
+    ).toBe('project');
+    expect(findWorkspaceSelect()).toBeUndefined();
+  });
+
+  it('does not infer a missing workspace from the current conversation', async () => {
+    await mount([baseTask({})], {
+      currentSession: { sessionId: 'unrelated', workspaceCwd: '/unrelated' },
+    });
+    click(findButton('New scheduled task'));
+    expect(
+      document.querySelector('[role="group"][aria-label="Workspace"]'),
+    ).toBeNull();
+    expect(document.querySelector('[title="/unrelated"]')).toBeNull();
+    expect(findWorkspaceSelect()).toBeUndefined();
+  });
 
   it('aggregates trusted workspaces and badges each card by workspace', async () => {
     await mountMulti({
@@ -1903,6 +2012,10 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     // The picker offers the two trusted workspaces (untrusted excluded).
     const wsSelect = findWorkspaceSelect();
     expect(wsSelect).toBeDefined();
+    const decoration = document.createElement('span');
+    decoration.setAttribute('aria-hidden', 'true');
+    wsSelect!.labels![0]!.prepend(decoration);
+    expect(findWorkspaceSelect()).toBe(wsSelect);
     expect(wsSelect!.querySelectorAll('option')).toHaveLength(2);
     // Options show each workspace label with no "(primary)" tag on the primary
     // entry (the label this PR removed). Guards the visible dropdown

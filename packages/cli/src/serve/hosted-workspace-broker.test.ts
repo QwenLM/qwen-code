@@ -60,6 +60,73 @@ it('resolves and pins Harness capability once without acquiring or warming a Run
   expect(broker.runtime).toBeUndefined();
 });
 
+it('reads a fresh saved Workspace context after capabilities were cached', async () => {
+  let generation = 0;
+  const broker = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      scope: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        workspaceGeneration: '1',
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+        isolationClass: 'session',
+      },
+      workspaceContext: {
+        cwdRelative: `project-${++generation}`,
+        contextRevision: String(generation),
+      },
+    },
+  }));
+  await broker.resolveCapabilities();
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-2',
+    contextRevision: '2',
+  });
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-3',
+    contextRevision: '3',
+  });
+  expect(broker.acquired).toBe(false);
+});
+
+it.each([
+  { cwdRelative: '.', contextRevision: 1 },
+  { cwdRelative: '.', contextRevision: '0' },
+  { cwdRelative: '.', contextRevision: '01' },
+  { cwdRelative: '.', contextRevision: '1.5' },
+  { cwdRelative: '.', contextRevision: '9'.repeat(20) },
+  { cwdRelative: '/absolute', contextRevision: '1' },
+  { cwdRelative: '../escape', contextRevision: '1' },
+  { cwdRelative: 'a\\b', contextRevision: '1' },
+  { cwdRelative: 'https://other', contextRevision: '1' },
+  { cwdRelative: 'a//b', contextRevision: '1' },
+  { cwdRelative: 'a\u0000b', contextRevision: '1' },
+])(
+  'rejects an invalid saved Workspace context %j without acquiring a Runtime',
+  async (workspaceContext) => {
+    const broker = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'session',
+        },
+        workspaceContext,
+      },
+    }));
+    await expect(broker.readWorkspaceContext()).rejects.toThrow(
+      'Invalid saved Workspace context.',
+    );
+    expect(broker.acquired).toBe(false);
+  },
+);
+
 it.each(['http503', 'connection-drop', 'scope-mismatch'])(
   'retries capability resolution after %s while sharing concurrent reads',
   async (failure) => {
