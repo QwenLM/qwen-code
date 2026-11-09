@@ -57,6 +57,7 @@ export function command(
         );
         error.status = status;
         error.exitCode = code;
+        error.stderr = stderr.slice(0, 8192);
         reject(error);
       }
     });
@@ -241,6 +242,12 @@ export function createManager(config, dependencies = {}) {
       // unique suffix; accept that legacy shape so a deploy over a running
       // host loads (and then cleans up) its existing slots. The next start()
       // writes the suffixed name.
+      //
+      // This naming scheme is spelled out in three places: here, the
+      // identity-less sweep's `owned` filter, and the label-recovery matcher
+      // below. They must agree — a registration one of them accepts and
+      // another rejects is either leaked or deleted by guesswork — so change
+      // all three together (or lift them into one predicate) rather than one.
       const validRunnerName = (value) =>
         value === runnerName(slot) ||
         (value.startsWith(`${runnerName(slot)}-`) &&
@@ -323,7 +330,7 @@ export function createManager(config, dependencies = {}) {
 
   // A killed `docker create` CLI can still leave a container behind after the
   // slot state is gone, so the instance label is the surviving identity.
-  function recoverIdentity(slot, names) {
+  async function recoverIdentity(slot, names) {
     const prefix = `qwen-${config.poolId}-${slot}-`;
     const identified = [...new Set(names)].filter((name) => {
       const bare = name.replace(/^ecs-/, '');
@@ -401,23 +408,8 @@ export function createManager(config, dependencies = {}) {
     let orphanLabels = null;
     if ((containers.length || networks.length) && !state?.name) {
       orphanLabels = await collectIdentities(containers, networks);
-      // A foreign or missing instance label means the pile may belong to
-      // another pool sharing the host. Refuse BEFORE deleting anything:
-      // removing our slot's resources (or registrations) would then be
-      // guesswork, so stay blocked until manual reconciliation.
-      const slotPrefix = `qwen-${config.poolId}-${slot}-`;
-      if (
-        !orphanLabels.every(
-          (name) =>
-            typeof name === 'string' &&
-            name.replace(/^ecs-/, '').startsWith(slotPrefix),
-        )
-      )
-        throw new Error(
-          'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
-        );
       try {
-        state = recoverIdentity(slot, orphanLabels);
+        state = await recoverIdentity(slot, orphanLabels);
       } catch (error) {
         // No slot state means no cycle of this manager is live for the
         // slot (cycles are serial per slot), so EVERY leftover resource
@@ -434,7 +426,77 @@ export function createManager(config, dependencies = {}) {
         state = null;
       }
     }
+    let orphanSweepBlocked = false;
+    if (!state?.name && orphanLabels) {
+      // Sweep the registrations BEFORE removing the resources: a rejected
+      // DELETE must stay reachable on the next cycle, and the leftover
+      // pile is what keeps cleanup() running. After removal the slot has
+      // neither state nor leftovers, so a post-removal sweep would never
+      // retry a rejected deletion and would leak the registration.
+      const prefix = `qwen-${config.poolId}-${slot}-`;
+      const identifiable = (name) =>
+        typeof name === 'string' &&
+        name.replace(/^ecs-/, '').startsWith(prefix);
+      // Only sweep when every leftover carried this slot's identity
+      // prefix (the scheme assumes poolId is unique per host). A foreign
+      // or missing instance label means the pile may belong to another
+      // pool sharing the host; deleting our slot's registrations by name
+      // would then be guesswork, so stay blocked until the pile is gone.
+      if (!orphanLabels.every(identifiable)) orphanSweepBlocked = true;
+      else {
+        // A registration not reported offline may belong to a live runner
+        // outside this host's view; only sweep ones GitHub already reports
+        // offline. The name test is the same naming scheme as
+        // `validRunnerName` in the slot-state validation above (bare legacy
+        // display name, or that name plus a `-<8 hex>` suffix); the three
+        // copies change together.
+        const owned = (await listRunners()).filter(
+          (runner) =>
+            typeof runner.name === 'string' &&
+            runner.status === 'offline' &&
+            (runner.name === runnerName(slot) ||
+              (runner.name.startsWith(`${runnerName(slot)}-`) &&
+                /^[0-9a-f]{8}$/.test(
+                  runner.name.slice(runnerName(slot).length + 1),
+                ))),
+        );
+        for (const runner of owned) {
+          if (!Number.isSafeInteger(runner.id) || runner.id < 1)
+            throw new Error(
+              'Ambiguous runner identity; manual reconciliation required',
+            );
+          try {
+            await gh([
+              '-X',
+              'DELETE',
+              `/repos/${config.repo}/actions/runners/${runner.id}`,
+            ]);
+          } catch (error) {
+            if (error.status === 404) continue;
+            // Carry the status through the rewrap so a rate-limited sweep
+            // picks the same backoff ladder as any other 403/429.
+            const rejected = new Error(
+              `Runner ${runner.id} deletion was rejected${
+                error.status ? ` (HTTP ${error.status})` : ''
+              }; retrying on the next cycle`,
+              { cause: error },
+            );
+            rejected.status = error.status;
+            throw rejected;
+          }
+        }
+      }
+    }
+    // A container whose storage layer is gone (dockerd restart left
+    // `RWLayer ... is unexpectedly nil`) can never yield logs or a `_diag`
+    // archive, and it may vanish from under us mid-cleanup. Detect that
+    // from stderr instead of retrying every diagnostic call each cycle.
+    const layerless = (error) =>
+      /RWLayer of container .* is unexpectedly nil/.test(error?.stderr || '');
+    const alreadyGone = (error) =>
+      /No such container/i.test(error?.stderr || '');
     for (const id of containers) {
+      let diagnosticsPossible = true;
       try {
         const logs = await run('docker', ['logs', '--tail', '10000', id]);
         await writeFile(
@@ -446,56 +508,80 @@ export function createManager(config, dependencies = {}) {
           { mode: 0o600 },
         );
         await pruneLogs();
-      } catch {
-        log(`slot ${slot}: container logs unavailable`);
+      } catch (error) {
+        if (layerless(error) || alreadyGone(error)) {
+          diagnosticsPossible = false;
+          log(
+            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+          );
+        } else log(`slot ${slot}: container logs unavailable`);
+      }
+      if (diagnosticsPossible) {
+        try {
+          const archive = await run(
+            'docker',
+            ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
+            { binary: true },
+          );
+          await writeFile(
+            join(
+              logDir,
+              `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
+            ),
+            archive,
+            { mode: 0o600 },
+          );
+          await pruneLogs();
+        } catch (error) {
+          if (layerless(error) || alreadyGone(error))
+            log(
+              `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+            );
+          else
+            log(
+              `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
+            );
+        }
       }
       try {
-        const archive = await run(
-          'docker',
-          ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
-          { binary: true },
-        );
-        await writeFile(
-          join(
-            logDir,
-            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
-          ),
-          archive,
-          { mode: 0o600 },
-        );
-        await pruneLogs();
-      } catch {
-        log(
-          `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
-        );
+        await run('docker', ['rm', '-f', '-v', id]);
+      } catch (error) {
+        if (alreadyGone(error)) continue;
+        if (layerless(error))
+          throw new Error(
+            `container ${id.slice(0, 12)} has no storage layer; removal deferred until Docker drops the record`,
+            { cause: error },
+          );
+        throw error;
       }
-      await run('docker', ['rm', '-f', '-v', id]);
     }
     if ((await listContainers(slot)).length)
       throw new Error('Container cleanup failed');
     for (const id of networks) await run('docker', ['network', 'rm', id]);
     if ((await listNetworks(slot)).length)
       throw new Error('Network cleanup failed');
+    if (orphanSweepBlocked)
+      throw new Error(
+        'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
+      );
     if (state?.name) {
       const all = await listRunners();
       // A recorded runnerName is exact. A label-recovered identity carries
       // only the instance name: main registered under the bare display name,
       // this version under a suffixed one, so match either form and let the
-      // runnerId checks below reject anything ambiguous. A registration
-      // GitHub still reports online may belong to a live runner outside
-      // this host's view, so a label-recovered (not state-recorded)
-      // identity only ever sweeps offline matches.
+      // runnerId checks below reject anything ambiguous. This is the third
+      // copy of the naming scheme (`validRunnerName` in the slot-state
+      // validation is the reference); the three change together.
       const matches = state.runnerName
         ? (runner) => runner.name === state.runnerName
         : (runner) =>
-            runner.status !== 'online' &&
-            (runner.name === state.name ||
-              runner.name === runnerName(slot) ||
-              (typeof runner.name === 'string' &&
-                runner.name.startsWith(`${runnerName(slot)}-`) &&
-                /^[0-9a-f]{8}$/.test(
-                  runner.name.slice(runnerName(slot).length + 1),
-                )));
+            runner.name === state.name ||
+            runner.name === runnerName(slot) ||
+            (typeof runner.name === 'string' &&
+              runner.name.startsWith(`${runnerName(slot)}-`) &&
+              /^[0-9a-f]{8}$/.test(
+                runner.name.slice(runnerName(slot).length + 1),
+              ));
       const runners = all.filter(matches);
       if (
         state.runnerId &&
@@ -539,47 +625,6 @@ export function createManager(config, dependencies = {}) {
             `Runner ${runner.id} deletion was rejected${
               error.status ? ` (HTTP ${error.status})` : ''
             }; retaining slot state to retry`,
-            { cause: error },
-          );
-          rejected.status = error.status;
-          throw rejected;
-        }
-      }
-    }
-    if (!state?.name && orphanLabels) {
-      // The identity-less sweep above removed the resources but could not
-      // target their registrations. Sweep every registration this slot's
-      // naming scheme owns so an orphan cannot block its replacement.
-      // Slot ownership of the pile was verified before any deletion above.
-      // A registration still online may belong to a live runner outside
-      // this host's view; only sweep ones GitHub already reports offline.
-      const owned = (await listRunners()).filter(
-        (runner) =>
-          typeof runner.name === 'string' &&
-          runner.status !== 'online' &&
-          (runner.name === runnerName(slot) ||
-            (runner.name.startsWith(`${runnerName(slot)}-`) &&
-              /^[0-9a-f]{8}$/.test(
-                runner.name.slice(runnerName(slot).length + 1),
-              ))),
-      );
-      for (const runner of owned) {
-        if (!Number.isSafeInteger(runner.id) || runner.id < 1)
-          throw new Error(
-            'Ambiguous runner identity; manual reconciliation required',
-          );
-        try {
-          await gh([
-            '-X',
-            'DELETE',
-            `/repos/${config.repo}/actions/runners/${runner.id}`,
-          ]);
-        } catch (error) {
-          if (error.status === 404) continue;
-          const rejected = new Error(
-            `Runner ${runner.id} deletion was rejected${
-              error.status ? ` (HTTP ${error.status})` : ''
-            }; retrying on the next cycle`,
             { cause: error },
           );
           rejected.status = error.status;

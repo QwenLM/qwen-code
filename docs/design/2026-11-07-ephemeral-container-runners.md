@@ -122,19 +122,16 @@ now closed. First, killing the `docker create` client on its command timeout
 does not stop the daemon, so a container could appear after cleanup had already
 deleted the slot state; cleanup then refused to touch an unidentifiable
 container, and the only code that could delete it sat behind that refusal. Such
-resources are now identified by their `qwen.instance` label, which must match
-this pool and slot and be unambiguous; anything else still blocks the slot.
-A later incident the same day showed the single-identity rule was itself a
-stall: a wedged Docker piled several never-started containers with different
-identities onto one slot, and refusing to pick one stalled 15 of 30 slots for
-960 identical retries each. Because cycles are serial per slot, every leftover
-resource in a state-less slot is an orphan, so a multi-identity pile is now
-deleted as a whole and the slot's registrations are swept by name afterwards.
-The sweep requires every leftover resource to carry this slot's identity
-prefix and only deletes registrations GitHub already reports offline, since an
-online registration may belong to a live runner outside this host's view; a
-foreign or missing label still blocks the slot.
-Second, a rejected JIT request deleted the local slot state while a leftover
+resources are now identified by their `qwen.instance` label. A single
+unambiguous identity for this pool and slot drives targeted cleanup. With no
+slot state and disagreeing labels, every leftover is provably an orphan, so the
+whole pile is swept without a GitHub identity and registrations are swept by
+the slot's naming scheme — gated on every leftover carrying this slot's
+identity prefix and on GitHub reporting each registration offline, which
+relies on `poolId` being unique per host. A foreign or missing identity label
+still blocks registration sweeping for manual reconciliation. The sweep
+deletes registrations before removing the resources so a rejected deletion
+stays reachable on the next cycle. Second, a rejected JIT request deleted the local slot state while a leftover
 registration kept owning the display name, so every retry was rejected and the
 record needed to delete that registration was gone. A definitive rejection now
 reconciles the name instead of discarding the state, and a runner deletion

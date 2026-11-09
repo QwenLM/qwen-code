@@ -2159,6 +2159,14 @@ export class HostedWorkspaceToolTurn {
     return this.publicChildren;
   }
 
+  diagnosticMcpToolNames(): ReadonlySet<string> {
+    return new Set(
+      (this.mcp?.tools() ?? [])
+        .map((tool) => tool.name)
+        .filter((name): name is string => Boolean(name)),
+    );
+  }
+
   setChildModelRoute(modelId: string, route: PublicChildModelRoute): void {
     this.childModelRoute = { modelId, route };
   }

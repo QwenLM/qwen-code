@@ -1,7 +1,9 @@
 import { expect, test } from '@playwright/test';
 import type { JavaAgentSession } from '../components/managed/java-managed-agent-client';
 import {
+  diagnosticContext,
   diagnosticResources,
+  diagnosticStats,
   diagnosticTrace,
 } from '../components/managed/managed-diagnostics.test-fixtures';
 
@@ -55,6 +57,8 @@ for (const width of [1280, 390]) {
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
       const snapshots = {
+        'session-context-usage': { ...diagnosticContext, stale: true },
+        'session-stats': diagnosticStats,
         'session-resources': diagnosticResources,
         'session-agent-trace': {
           ...diagnosticTrace,
@@ -116,6 +120,14 @@ for (const width of [1280, 390]) {
         )
         .toBe(true);
     };
+    await expect(dialog).toContainText('System prompt');
+    await expect(dialog).toContainText('predates a context change');
+    await expectLayout();
+    await dialog.getByRole('tab', { name: 'Model statistics' }).click();
+    await expect(dialog).toContainText('Counts belong to this Session');
+    await expect(dialog).toContainText('Total tokens');
+    await expectLayout();
+    await dialog.getByRole('tab', { name: 'Resources', exact: true }).click();
     await expect(dialog).toContainText('manual-skill');
     await dialog.getByText('docs', { exact: false }).first().click();
     await expect(dialog).toContainText('Historical discovery');
@@ -139,6 +151,8 @@ for (const width of [1280, 390]) {
     await expect(dialog).toHaveCount(0);
     await expect(trigger).toBeFocused();
     expect(diagnosticRequests).toEqual([
+      'session-context-usage',
+      'session-stats',
       'session-resources',
       'session-agent-trace',
     ]);
