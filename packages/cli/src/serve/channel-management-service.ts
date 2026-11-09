@@ -493,7 +493,12 @@ export function createChannelManagementService(
     return new PairingStore(name, opts.workspaceCwd);
   };
 
-  const service: ChannelManagementService = {
+  // The QR-login members are added by the wrapper below, which owns the
+  // session registry; this inner object implements the rest of the contract.
+  const service: Omit<
+    ChannelManagementService,
+    'startQrLogin' | 'qrLoginState' | 'cancelQrLogin'
+  > = {
     async list() {
       return listFrom(opts.store.snapshot());
     },
@@ -760,17 +765,25 @@ export function createChannelManagementService(
       const type = String(existing['type']);
       const plugin = await getPlugin(type);
       const fields = plugin?.management?.fields ?? [];
+      const secretKeys = new Set(
+        fields
+          .filter((field) => field.kind === 'secret')
+          .map((field) => field.key),
+      );
       const config: Record<string, unknown> & { type: string } = {
         ...existing,
         type,
       };
+      // The stored snapshot resolves secret references to literals. Leaving
+      // them in config would submit the same secret twice and the store
+      // rejects any secret-kind config key, so a channel that already holds a
+      // credential could never be re-bound.
+      for (const key of secretKeys) delete config[key];
       const secrets: Record<string, ChannelSecretUpdate> = {};
       for (const [key, value] of Object.entries(values)) {
         // Secret-kind values go through the managed secret path so they are
         // stored and redacted exactly like a hand-entered credential.
-        if (
-          fields.some((field) => field.key === key && field.kind === 'secret')
-        ) {
+        if (secretKeys.has(key)) {
           secrets[key] = { operation: 'replace', value };
         } else {
           config[key] = value;

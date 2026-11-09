@@ -12,6 +12,12 @@ export const CHANNEL_QR_LOGIN_TTL_MS = 5 * 60_000;
 export const CHANNEL_QR_LOGIN_SWEEP_INTERVAL_MS = 30_000;
 /** Per-workspace ceiling; a login is interactive so a handful is plenty. */
 export const CHANNEL_QR_LOGIN_MAX_ACTIVE = 4;
+/**
+ * How long a terminal view stays readable so a client can collect the outcome.
+ * After this the entry is dropped, so start/cancel cycles cannot grow the map
+ * without bound.
+ */
+export const CHANNEL_QR_LOGIN_RETENTION_MS = 60_000;
 
 export type ChannelQrLoginStatus =
   | 'pending'
@@ -40,6 +46,7 @@ interface ChannelQrLoginEntry {
   abort: AbortController;
   dispose?: () => void;
   initiatorClientId?: string;
+  terminalAt?: number;
 }
 
 export class TooManyChannelQrLoginsError extends Error {
@@ -139,6 +146,7 @@ export class ChannelQrLoginRegistry {
     const terminal = (status: ChannelQrLoginStatus, error?: string): void => {
       if (entry.view.status !== 'pending') return;
       entry.view.status = status;
+      entry.terminalAt = this.now();
       if (error !== undefined) entry.view.error = error;
       // A terminal login must not keep a scannable code on screen.
       delete entry.view.qrCodeDataUrl;
@@ -217,6 +225,7 @@ export class ChannelQrLoginRegistry {
     }
     if (entry.view.status === 'pending') {
       entry.view.status = 'cancelled';
+      entry.terminalAt = this.now();
       delete entry.view.qrCodeDataUrl;
       this.stop(entry);
     }
@@ -250,12 +259,21 @@ export class ChannelQrLoginRegistry {
       return;
     }
     entry.view.status = 'expired';
+    entry.terminalAt = this.now();
     delete entry.view.qrCodeDataUrl;
     this.stop(entry);
   }
 
   private sweep(): void {
-    for (const entry of this.entries.values()) this.expireIfDue(entry);
+    for (const [loginId, entry] of this.entries) {
+      this.expireIfDue(entry);
+      if (
+        entry.terminalAt !== undefined &&
+        this.now() - entry.terminalAt >= CHANNEL_QR_LOGIN_RETENTION_MS
+      ) {
+        this.entries.delete(loginId);
+      }
+    }
   }
 }
 

@@ -597,6 +597,7 @@ describe('channel registry', () => {
     ['null', null],
     ['a non-object', 'qr'],
     ['an object without start', {}],
+    ['a non-function start', { start: 42 }],
   ])(
     'strips management when qrLogin is %s instead of throwing',
     async (_label, qrLogin) => {

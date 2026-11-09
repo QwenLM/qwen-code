@@ -11,6 +11,7 @@ import type {
 } from '@qwen-code/channel-base';
 import {
   CHANNEL_QR_LOGIN_MAX_ACTIVE,
+  CHANNEL_QR_LOGIN_RETENTION_MS,
   CHANNEL_QR_LOGIN_TTL_MS,
   ChannelQrLoginRegistry,
   TooManyChannelQrLoginsError,
@@ -221,6 +222,57 @@ describe('ChannelQrLoginRegistry', () => {
     const done = h.registry.get(view.loginId)!;
     expect(done.status).toBe('cancelled');
     expect(done.qrCodeDataUrl).toBeUndefined();
+  });
+
+  it('keeps a terminal view readable, then reclaims the entry', () => {
+    const h = harness();
+    const { view } = h.start();
+    h.registry.cancel(view.loginId);
+    h.advance(CHANNEL_QR_LOGIN_RETENTION_MS - 1);
+    h.runSweep();
+    expect(h.registry.get(view.loginId)?.status).toBe('cancelled');
+    h.advance(2);
+    h.runSweep();
+    expect(h.registry.get(view.loginId)).toBeUndefined();
+  });
+
+  it('does not grow without bound across start/cancel cycles', () => {
+    const h = harness();
+    for (let i = 0; i < CHANNEL_QR_LOGIN_MAX_ACTIVE * 3; i++) {
+      const { view } = h.start(`cycle-${i}`);
+      h.registry.cancel(view.loginId);
+      h.advance(CHANNEL_QR_LOGIN_RETENTION_MS + 1);
+      h.runSweep();
+    }
+    // Every entry has been reclaimed, so a fresh login still fits the cap.
+    expect(() => h.start('after-cycles')).not.toThrow();
+    expect(h.registry.get('missing')).toBeUndefined();
+  });
+
+  it('stays cancelled when cancel lands during an in-flight persist', async () => {
+    const h = harness();
+    let release: (() => void) | undefined;
+    h.persist.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { view } = h.start();
+    h.emit().onSuccess({ appID: 'a', appSecret: 's' });
+    await flush();
+    h.registry.cancel(view.loginId);
+    release!();
+    await flush();
+    expect(h.registry.get(view.loginId)!.status).toBe('cancelled');
+  });
+
+  it('gives different clients separate logins for the same channel', () => {
+    const h = harness();
+    const a = h.start('shared-qq', 'client-a');
+    const b = h.start('shared-qq', 'client-b');
+    expect(b.attached).toBe(false);
+    expect(b.view.loginId).not.toBe(a.view.loginId);
   });
 
   it('dispose stops every session and clears the sweeper', () => {

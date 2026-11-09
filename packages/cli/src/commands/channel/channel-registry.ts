@@ -10,7 +10,7 @@ export interface ChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
-  supportsQrLogin: boolean;
+  supportsQrLogin?: boolean;
   fields: readonly ChannelConfigFieldDescriptor[];
 }
 
