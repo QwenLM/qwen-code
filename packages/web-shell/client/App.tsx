@@ -3983,12 +3983,14 @@ export function App({
   );
 
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
+  const hostOwnsArtifactPreview = Boolean(onRightPanelOpen);
   const customization = useMemo(
     () => ({
       onRefreshModels,
       allowedApprovalModes,
       artifact,
       filterArtifact,
+      hostOwnsArtifactPreview,
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,
@@ -4026,6 +4028,7 @@ export function App({
       allowedApprovalModes,
       artifact,
       filterArtifact,
+      hostOwnsArtifactPreview,
       askUserFreeTextLabel,
       composerTagIcons,
       composerVariant,

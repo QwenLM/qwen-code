@@ -183,6 +183,9 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 `true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
 未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
 该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+提供该回调时，managed 存储产物（仅有 managedId、无 workspace 路径或 URL）的
+卡片动作会标为 Preview，因为宿主可能自行渲染其内容；未提供回调时，这类产物
+在默认面板只有元信息，卡片保持 Open。
 
 `filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
 产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。
