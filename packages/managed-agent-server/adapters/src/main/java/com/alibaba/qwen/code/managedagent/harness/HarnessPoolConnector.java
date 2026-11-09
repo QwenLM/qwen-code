@@ -68,6 +68,7 @@ public class HarnessPoolConnector implements HarnessConnector {
         private final QwenHostedHarnessConnector connector;
         private volatile boolean reachable;
         private volatile boolean quiescing;
+        private final AtomicInteger sideQueries = new AtomicInteger();
         Member(HarnessDiscovery.Endpoint endpoint, HostedHarnessClient client, QwenHostedHarnessConnector connector) {
             this.endpoint = endpoint;
             this.client = client;
@@ -225,7 +226,7 @@ public class HarnessPoolConnector implements HarnessConnector {
             }
             Member member = entry.getValue();
             boolean owns = placements.hasUnreleasedOwnership(member.owner().instanceId(), member.owner().bootId());
-            if (!owns) {
+            if (!owns && member.sideQueries.get() == 0) {
                 member.connector.close();
                 return true;
             }
@@ -374,6 +375,37 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsUserMessageQueue() { return feature(HarnessFeature.USER_MESSAGE_QUEUE); }
+
+    @Override
+    public boolean supportsSideQueries() {
+        return feature("side-query/1") && !accepting.isEmpty();
+    }
+
+    @Override
+    public synchronized SideQueryTarget prepareSideQuery() {
+        if (closed || !supportsSideQueries()) {
+            throw new ManagedAgentException(503, "harness_unavailable", "No side-query Harness is available.");
+        }
+        var candidates = accepting;
+        var member = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
+        var selected = member.connector.prepareSideQuery();
+        member.sideQueries.incrementAndGet();
+        return new SideQueryTarget() {
+            private boolean released;
+            @Override public String instanceId() { return member.owner().instanceId(); }
+            @Override public String bootId() { return member.owner().bootId(); }
+            @Override public Map<String, Object> submit(Map<String, Object> body) { return selected.submit(body); }
+            @Override public Map<String, Object> status(String id, Map<String, Object> claim) { return selected.status(id, claim); }
+            @Override public void cancel(String id, Map<String, Object> claim) { selected.cancel(id, claim); }
+            @Override public synchronized void close() {
+                if (!released) {
+                    released = true;
+                    selected.close();
+                    member.sideQueries.decrementAndGet();
+                }
+            }
+        };
+    }
 
     @Override
     public boolean supportsContextCompression() {

@@ -199,6 +199,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static void retire(JdbcTemplate jdbc, String tenant, String session, String operation) {
+        ManagedSideQueryStore.cancelSession(jdbc, tenant, session);
         var existing =
                 jdbc.query(
                         "SELECT retirement_operation_id AS operation_id FROM ma_session WHERE"
@@ -444,6 +445,10 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             this.tenant = tenant;
             this.session = session;
             this.generation = generation;
+        }
+
+        String leaseId() {
+            return id;
         }
 
         public void requireScope(JsonNode key) {

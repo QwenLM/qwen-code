@@ -542,6 +542,7 @@ final class AgentLifecycleOperations {
                         + " tenant_id = ? AND session_id = ?",
                 archive ? "ARCHIVED" : pendingStatus(kind), now, tenantId,
                 sessionId);
+        ManagedSideQueryStore.cancelSession(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null,
                 archive ? completedEvent(kind) : requestedEvent(kind), data,
                 false, AgentEventJournal.operationSource(operationId,

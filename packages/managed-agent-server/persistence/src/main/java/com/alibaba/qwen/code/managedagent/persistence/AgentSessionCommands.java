@@ -152,6 +152,9 @@ final class AgentSessionCommands {
         String turnId = AgentStoreRows.publicId("turn");
         insertTurn(tenantId, sessionId, turnId,
                 UUID.randomUUID().toString(), input, payloadDigest, now);
+        if (queuedInputs.isEmpty()) {
+            SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
+        }
         byte[] actorKey = commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
