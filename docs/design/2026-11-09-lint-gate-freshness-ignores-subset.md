@@ -76,32 +76,46 @@ are scoped to individual config objects.
 In scope: `.github/scripts/check-lint-gate-freshness.mjs` and its collocated
 suite.
 
+`.prettierignore` joined the scope during review. It is gate file #7, it decides
+what `prettier --check` covers (`scripts/lint.js` names it in
+`PRETTIER_CONFIG_FILE`), and its last three commits — `e7fe14ee83` (+4/-0),
+`9ebd2de171` (+3/-0), `f3af3dd857` (+1/-0) — were pure additions. The same
+treadmill ran on it, so the narrowing is a per-file dispatch table rather than
+one hardcoded filename.
+
 Explicitly out of scope:
 
-- The other eight gate files, including `ci.yml`. A `ci.yml` lint-slice approach
-  was prototyped and rejected on evidence: for the two branches it was measured
-  against, the entire base-to-head delta fell inside the lint slice (the
+- The remaining seven gate files, including `ci.yml`. A `ci.yml` lint-slice
+  approach was prototyped and rejected on evidence: for the two branches it was
+  measured against, the entire base-to-head delta fell inside the lint slice (the
   `HELPER_TESTS` lines), so the slice verdict stayed stale. It would have fixed
   0 of the 9 observed reds.
 - The two config-scoped `ignores` arrays. They stay in the byte-compared
   remainder, so any change to them still fails the branch.
-- `GATE_FILES` is unchanged; `eslint.config.js` stays on the list.
+- `GATE_FILES` is unchanged; both narrowed files stay on the list.
 - The fail-open policy of `main()` is unchanged.
 
 ## Proposed solution
 
-Add a **post-filter** on the stale verdict, applied only to the
-`eslint.config.js` entry.
+Add a **post-filter** on the stale verdict, dispatched per file through a
+`NARROWINGS` table with entries for `eslint.config.js` and `.prettierignore`.
+A file absent from the table keeps whole-file containment.
 
 1. Run the existing containment logic unchanged.
-2. For an `eslint.config.js` entry that came back stale, fetch the file's text at
+2. For a stale entry whose file is in the table, fetch that file's text at
    `candidate.sha` (base side) and at `headSha` (branch side).
-3. From each version extract the first `ignores: [...]` block, yielding its entry
-   list and the **remainder** — the file with that whole block removed.
-4. Drop the entry from the stale list when both hold:
-   - the two remainders are byte-identical, and
-   - every branch ignore entry is present in the base entry list.
-5. On any failure — fetch error, missing anchor, or an entry line of unexpected
+3. Extract its scope list. For `eslint.config.js` that is the first
+   `ignores: [...]` block, yielding its entry list and the **remainder** — the
+   file with that whole block removed. For `.prettierignore` the whole file is
+   scope: every non-blank line not starting with `#` at column zero is a pattern,
+   and there is no remainder. Only **trailing** whitespace is stripped —
+   measured against prettier, `foo.js` and ` foo.js` ignore different files, so
+   trimming both ends would merge distinct patterns and could certify a branch
+   whose scope is narrower than the base's; `  # foo` likewise stays a pattern.
+4. Refuse to narrow if either side has a re-including pattern (see below).
+5. Drop the entry when the branch's pattern set is a subset of the base's and,
+   for `eslint.config.js`, the two remainders are byte-identical.
+6. On any failure — fetch error, missing anchor, or an entry line of unexpected
    shape — keep the entry.
 
 ### Why the subset direction is the safe one
@@ -147,6 +161,17 @@ has an entry starting with `!`.
 Scanning the base side alone would already suffice — if the head is a subset and
 contains a negated entry, the base contains it too — so the head-side case is
 subsumed rather than separately tested.
+
+The guard also refuses **any entry containing a backslash**, not just a leading
+bang. The extractor reads source text while the consumer evaluates the decoded
+pattern, so `'\x21**/keep.gen.ts'` is captured verbatim, fails `startsWith('!')`,
+and still decodes to a negation. Measured against the extractor: with that entry
+on the base side the remainders match, the subset test passes, and the
+bang-only guard does not fire — the branch would be certified fresh. Decoding
+here is not an option: it would mean evaluating branch-controlled text, which
+the dep-free lane has no parser for. Refusing on any backslash is the cheap
+fail-closed form, and it covers gitignore's `\!` escape on the `.prettierignore`
+path too.
 
 No negated entry exists in `eslint.config.js` today, so the guard costs nothing on
 current traffic.
@@ -266,8 +291,13 @@ Post-implementation:
   `eslint.config.js` as stale.
 - A base-side change to any other part of `eslint.config.js`, including the two
   config-scoped ignores arrays, still reports it as stale.
-- A negated (`!`) entry on either side blocks the narrowing, even when the head
-  list is a subset of the base list.
+- A negated (`!`) or backslash-escaped entry on either side blocks the narrowing,
+  even when the head list is a subset of the base list.
+- The same three verdicts hold for `.prettierignore`: base-side addition passes,
+  base-side removal stays stale, a negated line blocks the narrowing.
+- The raw media type and `main()`'s `fetchText` wiring are each pinned, so
+  flipping the media type or deleting the wiring reddens a named case rather
+  than silently disabling the refinement behind the fail-closed catch.
 - A fetch failure or an extraction failure leaves the stale verdict intact.
 - Other gate files behave exactly as before, with no extra API calls.
 - `GATE_FILES` is unchanged and the collocated suite passes.

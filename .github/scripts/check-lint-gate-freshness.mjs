@@ -31,14 +31,17 @@
  * below. Rare enough — lint.js saw five commits in the months before this
  * check — that an occasional "rebase, the gate moved" is cheap.
  *
- * Containment is a proxy, and for eslint.config.js's global `ignores` array it
+ * Containment is a proxy, and for a purely subtractive scope list it
  * over-rejects. Lint scope is `tree \ ignores`, so a branch's green covers what
  * the base gate checks exactly when the branch's ignores are a SUBSET of the
  * base's: adding an ignore on the base only shrinks what the base checks, and
  * the branch already validated the larger scope. All nine measured freshness
  * reds in one eight-hour window named one such addition (#16200 ignoring a
- * built host bundle). `narrowsToIgnoredScope` below drops that verdict; a
- * base-side REMOVAL fails the subset test and still reddens the branch. See
+ * built host bundle). The NARROWINGS table below applies that argument to
+ * eslint.config.js's global `ignores` and to `.prettierignore`, whose last three
+ * commits were pure additions too; a base-side REMOVAL fails the subset test
+ * and still reddens the branch. The argument needs entries to be purely
+ * subtractive, so `reincludesFiles` refuses negations and escapes. See
  * docs/design/2026-11-09-lint-gate-freshness-ignores-subset.md.
  *
  * Fail-open on API errors: with no required status checks this step is
@@ -117,16 +120,18 @@ async function curlJson(path, token) {
 }
 
 // Raw, not the JSON representation: the contents API returns an empty `content`
-// field above 1 MB, which would silently disable the narrowing as a file grows.
+// field above 1 MB, and the JSON envelope has no line-anchored `ignores: [` for
+// the extractor either. Exported so a test can pin it — flipping it to the JSON
+// media type turns the narrowing into a no-op that the fail-closed catch hides.
+export const TEXT_ACCEPT = 'application/vnd.github.raw';
+
 function curlText(path, token) {
-  return curlRaw(path, token, 'application/vnd.github.raw');
+  return curlRaw(path, token, TEXT_ACCEPT);
 }
 
 function firstLine(message) {
   return message.split('\n', 1)[0];
 }
-
-const ESLINT_CONFIG = 'eslint.config.js';
 
 /**
  * Split eslint.config.js into the entries of its FIRST `ignores: [...]` block
@@ -163,31 +168,61 @@ export function splitGlobalIgnores(text) {
   };
 }
 
+// Line comments, not a block: the glob examples below contain `*/`.
+//
+// A negated pattern RE-INCLUDES files, so the list stops being purely
+// subtractive and the subset argument does not hold. Measured on eslint 9.29.0
+// with lintFiles: base ['**/*.gen.ts', '!**/keep.gen.ts'] lints keep.gen.ts
+// while head ['**/*.gen.ts'] lints nothing, yet head is a subset of base.
+// (`isPathIgnored` is not a usable oracle — it reports both shapes as ignored.)
+//
+// Any backslash is refused too, not just a leading bang: the extractor sees
+// source text while the consumer sees the decoded pattern, so '\x21foo'
+// (or gitignore's '\!foo') hides a negation from a startsWith('!') test.
+// Decoding here would mean evaluating branch-controlled text, which the
+// dep-free lane has no parser for and this check must never do.
+function reincludesFiles(entries) {
+  return entries.some((entry) => entry.startsWith('!') || entry.includes('\\'));
+}
+
+/**
+ * gitignore-style scope list: every non-blank line that does not start with `#`
+ * is a pattern. Only TRAILING whitespace is stripped — measured against
+ * prettier, `foo.js` and ` foo.js` ignore different files, so trimming both ends
+ * would merge two distinct patterns into one and could certify a branch whose
+ * scope is narrower than the base's. For the same reason `  # foo` stays a
+ * pattern: `#` only opens a comment at column zero. Trailing spaces are
+ * insignificant unless backslash-quoted, and `reincludesFiles` refuses those.
+ */
+export function ignoreLines(text) {
+  return text
+    .split('\n')
+    .map((line) => line.replace(/\s+$/, ''))
+    .filter((line) => line !== '' && !line.startsWith('#'));
+}
+
+function fetchGateFilePair({ fetchText, repo, file, baseSha, headSha }) {
+  return Promise.all(
+    [baseSha, headSha].map((sha) =>
+      fetchText(
+        `/repos/${repo}/contents/${file}?ref=${encodeURIComponent(sha)}`,
+      ),
+    ),
+  );
+}
+
 /**
  * True when the base-side eslint.config.js change cannot invalidate this
  * branch: everything outside the global ignores array is byte-identical, and
  * the branch excludes no more than the base does. See the header for why the
  * subset runs in this direction.
  */
-async function narrowsToIgnoredScope({ fetchText, repo, baseSha, headSha }) {
-  const [baseText, headText] = await Promise.all(
-    [baseSha, headSha].map((sha) =>
-      fetchText(
-        `/repos/${repo}/contents/${ESLINT_CONFIG}?ref=${encodeURIComponent(sha)}`,
-      ),
-    ),
-  );
+async function narrowsToIgnoredScope(args) {
+  const [baseText, headText] = await fetchGateFilePair(args);
   const base = splitGlobalIgnores(baseText);
   const head = splitGlobalIgnores(headText);
   if (!base || !head) return false;
-  // A negated entry RE-INCLUDES files, so entries are not purely subtractive
-  // and the subset argument does not hold. Measured on eslint 9.29.0 with
-  // lintFiles: base ['**/*.gen.ts', '!**/keep.gen.ts'] lints keep.gen.ts while
-  // head ['**/*.gen.ts'] lints nothing, yet head is a subset of base. Refuse to
-  // narrow when either side has one. `isPathIgnored` is not a usable oracle
-  // here — it reports both shapes as ignored.
-  if ([...base.entries, ...head.entries].some((entry) => entry.startsWith('!')))
-    return false;
+  if (reincludesFiles([...base.entries, ...head.entries])) return false;
   return (
     base.rest === head.rest &&
     head.entries.every((entry) => base.entries.includes(entry))
@@ -195,10 +230,30 @@ async function narrowsToIgnoredScope({ fetchText, repo, baseSha, headSha }) {
 }
 
 /**
+ * Same argument for `.prettierignore`, which decides what `prettier --check`
+ * covers. The whole file is scope, so there is no remainder to compare — only
+ * the pattern set, in the same head-subset-of-base direction.
+ */
+async function narrowsToPrettierIgnore(args) {
+  const [baseText, headText] = await fetchGateFilePair(args);
+  const base = ignoreLines(baseText);
+  const head = ignoreLines(headText);
+  if (reincludesFiles([...base, ...head])) return false;
+  return head.every((entry) => base.includes(entry));
+}
+
+// Gate files whose stale verdict a purely subtractive scope argument can
+// narrow. Everything else keeps whole-file containment.
+const NARROWINGS = {
+  'eslint.config.js': narrowsToIgnoredScope,
+  '.prettierignore': narrowsToPrettierIgnore,
+};
+
+/**
  * Return the gate files whose latest base-side change this branch does not
  * contain. `fetchJson(path)` and `fetchText(path)` are injected so tests never
- * touch the network; `fetchText` is consulted only to narrow an
- * eslint.config.js verdict that already came back stale.
+ * touch the network; `fetchText` is consulted only for a NARROWINGS file whose
+ * verdict already came back stale.
  *
  * Containment uses the swapped three-dot compare `S...head`: its status is
  * "ahead"/"identical" exactly when S is an ancestor of (or equal to) head;
@@ -246,11 +301,13 @@ export async function findStaleGateFiles({
   const stale = verdicts.filter((verdict) => !verdict.contained);
   const narrowed = await Promise.all(
     stale.map(async (verdict) => {
-      if (verdict.file !== ESLINT_CONFIG) return verdict;
+      const narrow = NARROWINGS[verdict.file];
+      if (!narrow) return verdict;
       try {
-        const ignorable = await narrowsToIgnoredScope({
+        const ignorable = await narrow({
           fetchText,
           repo,
+          file: verdict.file,
           baseSha: verdict.sha,
           headSha,
         });
