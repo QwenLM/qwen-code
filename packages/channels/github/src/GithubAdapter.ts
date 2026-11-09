@@ -870,6 +870,22 @@ export function validateBoundSessionConfig(
   ) {
     return `prWatchBudgetReserve for channel ${channelName} requires deliverToBoundSessions: true.`;
   }
+  // The descriptor's only lower bound is exclusiveMinimum: -1 (so 0 can
+  // disable the gate), which also admits values in (-1, 0). The getter would
+  // silently fall back to the default for a negative, so reject it here
+  // instead of letting a saved value mean something other than it says.
+  // Positive fractions stay legal: the getter rounds them UP, which is the
+  // documented behaviour, not a silent fallback.
+  if (config.prWatchBudgetReserve !== undefined) {
+    const reserve = config.prWatchBudgetReserve;
+    if (
+      typeof reserve !== 'number' ||
+      !Number.isFinite(reserve) ||
+      reserve < 0
+    ) {
+      return `prWatchBudgetReserve for channel ${channelName} must be a non-negative number.`;
+    }
+  }
   try {
     normalizePrWatchEvents(config, channelName);
     normalizeBoundSessionActions(config, channelName);
@@ -1513,6 +1529,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * the useful rows out of the timeline. Cleared on the recovery edge.
    */
   private watchBudgetLow = false;
+  /**
+   * A `watch_budget_low` row has been journaled and its episode has not been
+   * closed by a recovery row yet. Tracked apart from watchBudgetLow because
+   * the two answer different questions: the skip latch is released when the
+   * watch stops being eligible (so a later starvation journals a fresh skip),
+   * but the episode stays open until the BUDGET recovers — otherwise a budget
+   * that recovers during an ineligible window would never get its recovery
+   * row. In-memory by design: a restart mid-episode leaves no recovery row,
+   * which the user guide states.
+   */
+  private watchBudgetEpisodeOpen = false;
   /**
    * Consecutive binding-refresh failures since the last success. While no
    * snapshot has ever succeeded, the cold-start gate defers the comment lane,
@@ -2578,25 +2605,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // Protect the interactive notification lane: the watch runs first and
       // is best-effort edge-triggered detection, so when the last known REST
       // budget is at or below the reserve, skip the pass this poll rather
-      // than spend the budget a human mention needs. Skipping only delays
-      // detection (baselines and pending queues are durable). The reactive
-      // isWatchFailFastError backstop still covers a wrong estimate.
+      // than spend the budget a human mention needs. Skipping delays
+      // detection of a state that persists (baselines and pending queues are
+      // durable); a transition that appears and reverts between passes is
+      // not observed. The reactive isWatchFailFastError backstop still
+      // covers a wrong estimate.
       if (this.watchBudgetExhausted()) {
-        if (!this.watchBudgetLow) {
-          this.watchBudgetLow = true;
-          this.recordPollDegraded('watch_budget_low', {
-            remaining: this.lastRateLimitRemaining ?? 0,
-            reserve: this.prWatchBudgetReserve,
-          });
-          process.stderr.write(
-            `[Channel:${this.name}] PR state watch skipped this poll: REST budget ${this.lastRateLimitRemaining} at or below reserve ${this.prWatchBudgetReserve}; preserving budget for the notification lane\n`,
-          );
-        }
+        this.noteWatchBudgetLow();
       } else {
-        if (this.watchBudgetLow) {
-          this.watchBudgetLow = false;
-          this.recordPollDegraded('watch_budget_recovered');
-        }
+        this.watchBudgetLow = false;
+        this.closeWatchBudgetEpisode();
         try {
           await this.runPrStateWatch();
         } catch (err) {
@@ -2604,19 +2622,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
           );
         }
+        // The pass itself may have spent down to the reserve and yielded
+        // mid-way; close nothing here, the next poll's gate sees the reading.
       }
-    } else if (this.watchBudgetLow) {
+    } else {
       // The watch stopped being eligible (subscriptions off, binding refresh
-      // failing) while a low-budget skip was latched. Release the latch, or
-      // the next genuine starvation after the watch returns is suppressed as
-      // a repeat of an episode that already ended. Only claim recovery when
-      // the budget really recovered: the watch being ineligible says nothing
-      // about the budget, and a still-low budget must not be reported as
-      // recovered — the next eligible low poll journals a fresh skip instead.
+      // failing). Release the skip latch so a later starvation journals a
+      // fresh skip rather than being suppressed as a repeat, but keep the
+      // EPISODE open until the budget itself recovers — a budget that
+      // recovers during this window still owes its recovery row.
       this.watchBudgetLow = false;
-      if (!this.watchBudgetExhausted()) {
-        this.recordPollDegraded('watch_budget_recovered');
-      }
+      this.closeWatchBudgetEpisode();
     }
 
     if (this.inboundRecoveryPending) {
@@ -5117,6 +5133,36 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Open a low-budget episode: latch the skip and journal its edge once.
+   * Shared by the poll-boundary gate and the in-pass yield so a mid-pass stop
+   * records the same row rather than a second vocabulary.
+   */
+  private noteWatchBudgetLow(): void {
+    this.watchBudgetEpisodeOpen = true;
+    if (this.watchBudgetLow) return;
+    this.watchBudgetLow = true;
+    this.recordPollDegraded('watch_budget_low', {
+      remaining: this.lastRateLimitRemaining ?? 0,
+      reserve: this.prWatchBudgetReserve,
+    });
+    process.stderr.write(
+      `[Channel:${this.name}] PR state watch skipped: REST budget ${this.lastRateLimitRemaining} at or below reserve ${this.prWatchBudgetReserve}; preserving budget for the notification lane\n`,
+    );
+  }
+
+  /**
+   * Close the episode once the budget is no longer exhausted. A still-low
+   * budget keeps it open: the watch being ineligible says nothing about the
+   * budget, and claiming recovery there would be a false report.
+   */
+  private closeWatchBudgetEpisode(): void {
+    if (!this.watchBudgetEpisodeOpen) return;
+    if (this.watchBudgetExhausted()) return;
+    this.watchBudgetEpisodeOpen = false;
+    this.recordPollDegraded('watch_budget_recovered');
+  }
+
+  /**
    * Journals a degraded dependency the poll loop itself survived: the poll
    * still reports `ok`, so without this row a binding scan that stalls every
    * notification is invisible in the timeline. Emitted only where the
@@ -6993,6 +7039,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     for (const [key, candidate] of watched) {
+      // Yield at the spend site, not only at the poll boundary: one pass can
+      // issue several requests per watched PR, so a pass entered just above
+      // the reserve would otherwise spend the whole reserve before the
+      // notification lane runs. Break (not return) so the baseline observed
+      // so far still reaches savePrWatchState below.
+      if (this.watchBudgetExhausted()) {
+        this.noteWatchBudgetLow();
+        break;
+      }
       try {
         await this.watchOnePr(key, candidate.chatId, candidate.number);
       } catch (err) {

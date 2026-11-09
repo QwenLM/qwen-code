@@ -4861,9 +4861,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.github.prWatchBudgetReserve':
     'PR Watch Budget Reserve',
   'channels.editor.field.github.prWatchBudgetReserve.description':
-    'REST requests held back for the interactive notification lane. When the last known remaining budget is at or below this, the PR state watch is skipped for that poll so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour token budget. Set 0 to disable the gate. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default.',
-  'channels.editor.field.github.prWatchBudgetReserve.disabledHint':
-    'Enable "Deliver To PR-Bound Sessions" above to set the budget reserve.',
+    'REST requests held back for the interactive notification lane. When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour token budget. Set 0 to disable the gate. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default.',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
   'channels.editor.field.github.boundSessionActions.description':
     'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
@@ -9635,9 +9633,7 @@ const ZH: Messages = {
     '开启上方「投递到 PR 绑定会话」后即可设置监视上限。',
   'channels.editor.field.github.prWatchBudgetReserve': 'PR 监视预算预留',
   'channels.editor.field.github.prWatchBudgetReserve.description':
-    '为交互式通知车道留回的 REST 请求数。当上次已知剩余预算处于或低于此值时，本轮跳过 PR 状态监视，以免后台轮询饿死人工 mention；预算回升或其窗口重置后检测恢复。默认值（200）约为 5000 次/小时 token 预算的 4%。设为 0 可禁用该门。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值。',
-  'channels.editor.field.github.prWatchBudgetReserve.disabledHint':
-    '开启上方「投递到 PR 绑定会话」后即可设置预算预留。',
+    '为交互式通知车道留回的 REST 请求数。当上次已知剩余预算处于或低于此值时，本轮跳过 PR 状态监视（若某轮 pass 花到该值则中途停止），以免后台轮询饿死人工 mention；预算回升或其窗口重置后检测恢复。默认值（200）约为 5000 次/小时 token 预算的 4%。设为 0 可禁用该门。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值。',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
   'channels.editor.field.github.boundSessionActions.description':
     '可选。投递给 PR 绑定会话的 operator 指令模板。在下方选择事件键；加角色前缀（review:、verify:、fix:）可只定向该绑定角色。需开启"投递到 PR 绑定会话"。有匹配键的角色各自投递，没有匹配键的角色跳过该事件。变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%；%% 表示字面 %。留空则使用默认通用 prompt。',

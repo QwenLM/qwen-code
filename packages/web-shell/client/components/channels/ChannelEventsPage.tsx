@@ -76,6 +76,17 @@ export const KNOWN_OUTCOMES = new Set([
   'cancelled',
 ]);
 
+/**
+ * Recovery edges keep `degraded` on the wire (the outcome vocabulary is
+ * unchanged); labeling them "Degraded" would read as an ongoing failure, so
+ * the reason names the label instead. Module-level like KNOWN_OUTCOMES — it
+ * is a constant, not per-render state.
+ */
+const RECOVERY_REASONS = new Set([
+  'watch_reconcile_recovered',
+  'watch_budget_recovered',
+]);
+
 export function ChannelEventsPage({
   onClose,
   initialFocusRef,
@@ -151,13 +162,6 @@ export function ChannelEventsPage({
     [language],
   );
 
-  // Recovery edges keep `degraded` on the wire (the outcome vocabulary is
-  // unchanged); labeling them "Degraded" would read as an ongoing failure, so
-  // the reason names the label instead.
-  const RECOVERY_REASONS = new Set([
-    'watch_reconcile_recovered',
-    'watch_budget_recovered',
-  ]);
   const outcomeLabel = (outcome: string, reason?: string) =>
     RECOVERY_REASONS.has(reason ?? '')
       ? t('channelEvents.outcome.recovered')
@@ -437,6 +441,16 @@ export function ChannelEventsPage({
                             <span className={styles.duration}>
                               {t('channelEvents.moreFiltered', {
                                 count: event.detail['filtered'] as number,
+                              })}
+                            </span>
+                          ) : null}
+                          {event.type === 'poll' &&
+                          typeof event.detail?.['remaining'] === 'number' &&
+                          typeof event.detail?.['reserve'] === 'number' ? (
+                            <span className={styles.duration}>
+                              {t('channelEvents.budget', {
+                                remaining: event.detail['remaining'] as number,
+                                reserve: event.detail['reserve'] as number,
                               })}
                             </span>
                           ) : null}

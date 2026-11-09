@@ -891,6 +891,32 @@ describe('ChannelEventsPage', () => {
     expect(rows[0]?.textContent).toContain('watch_budget_recovered');
   });
 
+  it('renders the low-budget numbers so a near-boundary trip is distinguishable', async () => {
+    // 199/200 (another consumer on a shared token) and 12/200 (mentions about
+    // to starve) must not look identical, and the reserve shown confirms what
+    // is actually in force after an operator edits it.
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_budget_low',
+          detail: { remaining: 12, reserve: 200 },
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows[0]?.textContent).toContain('watch_budget_low');
+    expect(rows[0]?.textContent).toContain('12');
+    expect(rows[0]?.textContent).toContain('200');
+  });
+
   it('shows which session a private delivery reached', async () => {
     eventsState.current.data = {
       truncated: false,
