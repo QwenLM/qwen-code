@@ -126,7 +126,24 @@ class JdbcTenantGuardLocksMySqlIT {
                 real.commit();
                 assertThatThrownBy(scope::close).isInstanceOf(SQLException.class);
                 assertThat(aborted).isTrue();
-                assertThat(real.isClosed()).isTrue();
+                // DruidPooledConnection.abort() forwards to the physical
+                // connection but never marks the pooled wrapper closed, so
+                // the wrapper's flag certifies nothing (R3-31). What the
+                // guard guarantees is that the aborted physical connection
+                // released its session locks: the tenant bootstrap mutex is
+                // free and the next acquisition succeeds.
+                try (var fresh = source.getConnection();
+                        var statement = fresh.prepareStatement("SELECT IS_FREE_LOCK(?)")) {
+                    statement.setString(1, mutex(fresh, "abort", GuardDomain.RUNTIME_PLACEMENT));
+                    try (var row = statement.executeQuery()) {
+                        assertThat(row.next()).isTrue();
+                        assertThat(row.getInt(1)).isEqualTo(1);
+                    }
+                }
+                JdbcRepositorySupport.transaction(source, connection -> {
+                    JdbcTenantGuardLocks.lock(connection, "abort", GuardDomain.RUNTIME_PLACEMENT, 5);
+                    return null;
+                });
             }
         });
     }

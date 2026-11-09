@@ -256,6 +256,11 @@ class SessionPrincipalOwnershipTest {
             assertThat(tasks.listPublicTasks("tenant", "user", id, null, 10).data()).isEmpty();
             assertThat(tasks.queryWebShellTasks("tenant", "user", id, null, 10).data()).isEmpty();
             denied(() -> tasks.listPublicTasks("other-tenant", "user", id, null, 10));
+            // The null-actor mirror: the principal-less internal read keeps
+            // the CALLER's tenant too — a foreign tenant answers the uniform
+            // 404, never the recorded tenant's page (R2-4).
+            denied(() -> tasks.listPublicTasks("other-tenant", null, id, null, 10));
+            denied(() -> tasks.queryWebShellTasks("other-tenant", null, id, null, 10));
             // A named non-owner still meets the ownership gate's 404.
             assertThatThrownBy(() -> tasks.listPublicTasks("tenant", "intruder", id, null, 10))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {

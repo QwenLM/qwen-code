@@ -88,17 +88,18 @@ public class ManagedMcpManagementService {
         }
         Map<String, Object> request = new LinkedHashMap<>();
         try {
-            // The identity digest tolerates an absent business actor
-            // subject: List.of refuses null elements, and an unbound
-            // principal legitimately carries none.
-            Map<String, Object> identity = new LinkedHashMap<>();
-            identity.put("tenantId", principal.tenantId());
-            identity.put("userId", principal.userId());
-            identity.put("actorSubjectId", principal.actorSubjectId());
-            identity.put("sessionId", sessionId);
-            identity.put("idempotencyKey", idempotencyKey);
+            // The identity digest keeps the persisted six-element layout:
+            // the operationId is the replay key of receipts already in
+            // ma_session_journal_tx, so changing the JSON shape would make
+            // every pre-existing receipt miss on retry (R3-8). Arrays.asList
+            // tolerates the null actor subject an unbound principal carries,
+            // where List.of threw — a null subject keeps hashing as the same
+            // JSON null it always serialised to.
             request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
-                    List.of("managed-mcp-command", identity))).toString());
+                    java.util.Arrays.asList("managed-mcp-command",
+                            principal.tenantId(), principal.userId(),
+                            principal.actorSubjectId(), sessionId,
+                            idempotencyKey))).toString());
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }

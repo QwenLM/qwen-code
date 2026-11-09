@@ -50,15 +50,15 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
      */
     @Test
     void settlesInTwoSessionsDoNotLockEachOthersPendingCancels() throws Exception {
-        String other = store.insertSessionCommand(TENANT, "CREATE_SESSION",
-                "create-other", "digest-other", "qwen-code", null, null,
-                List.of(), null).sessionId();
+        String other = store.insertSessionCommand(TENANT, "owner",
+                "CREATE_SESSION", "create-other", "digest-other", "qwen-code",
+                null, null, List.of(), null).sessionId();
         Map<String, Admission> ended = new HashMap<>();
         Map<String, Admission> running = new HashMap<>();
         for (String session : List.of(sessionId, other)) {
             Admission turn = store.insertTurnCommandAsActor(TENANT, "SUBMIT_TURN",
                     session + "-ended", "digest-ended", session, INPUT,
-                    "sha256:" + "c".repeat(64), "actor");
+                    "sha256:" + "c".repeat(64), "owner");
             assertThat(store.claimTurn(TENANT, session, turn.turnId(), OWNER,
                     Duration.ofMinutes(1))).isPresent();
             store.failTurn(TENANT, session, turn.turnId(), OWNER,
@@ -67,7 +67,7 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
             ended.put(session, turn);
             running.put(session, store.insertTurnCommandAsActor(TENANT,
                     "SUBMIT_TURN", session + "-running", "digest-running",
-                    session, INPUT, "sha256:" + "c".repeat(64), "actor"));
+                    session, INPUT, "sha256:" + "c".repeat(64), "owner"));
         }
         jdbc.execute("ANALYZE TABLE ma_operation");
         var transactions = transactions();
@@ -81,12 +81,12 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
                         assertThat(store.insertCancelCommandAsActor(TENANT,
                                 "CANCEL_TURN", session + "-cancel-running",
                                 "cancel-digest", session,
-                                running.get(session).turnId(), "actor")
+                                running.get(session).turnId(), "owner")
                                 .commandEffect()).isTrue();
                         await(pending);
                         return store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN",
                                 session + "-cancel-ended", "cancel-digest",
-                                session, ended.get(session).turnId(), "actor");
+                                session, ended.get(session).turnId(), "owner");
                     })));
         }
         for (var cancel : late) {

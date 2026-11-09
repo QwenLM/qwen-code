@@ -335,11 +335,36 @@ class ManagedSchemaMySqlIT {
         try {
             // The baseline carries no CHECK constraints: the domain rule
             // lives in ManagedSchemaIntegrity, so an out-of-domain boolean
-            // is refused there, not by the engine.
+            // is refused there, not by the engine. The candidate must carry
+            // every column in FIELDS or the completeness gate fires before
+            // any rule runs (R2-2); only the boolean under test is invalid.
             IllegalArgumentException rejected = assertThrows(
                     IllegalArgumentException.class,
                     () -> ManagedSchemaIntegrity.validate("ma_session",
-                            ManagedSchemaIntegrity.row("is_resource_gc_completed", 2)));
+                            ManagedSchemaIntegrity.row(
+                                    "agent_id", null,
+                                    "approval_revision", 0L,
+                                    "context_config_ref", null,
+                                    "context_revision", null,
+                                    "cwd_relative", null,
+                                    "harness_instance_id", null,
+                                    "harness_owner_boot_id", null,
+                                    "harness_placement_epoch", 0L,
+                                    "harness_placement_state", "UNASSIGNED",
+                                    "is_plan_enabled", 0L,
+                                    "is_recovery_protected", 0L,
+                                    "is_resource_gc_completed", 2,
+                                    "model_id", null,
+                                    "model_revision", 0L,
+                                    "permission_rules_json", null,
+                                    "public_child_agents_version", 0L,
+                                    "selected_approval_mode", null,
+                                    "session_kind", "CONTROL",
+                                    "workspace_config_ref", null,
+                                    "workspace_generation", null,
+                                    "workspace_id", null,
+                                    "workspace_policy_ref", null,
+                                    "workspace_storage_id", null)));
             assertTrue(rejected.getMessage().contains("ck_ma_session_resource_gc"));
             try (var insert =
                     connection.prepareStatement(

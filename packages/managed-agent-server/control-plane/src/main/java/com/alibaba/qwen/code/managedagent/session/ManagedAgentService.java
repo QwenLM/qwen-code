@@ -2235,8 +2235,24 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public SessionRecord requireReadableSession(String tenantId,
             String actorId, String sessionId) {
-        return requireReadableSession(
+        return requireReadableSession(tenantId,
                 principalOf(tenantId, actorId, true), sessionId);
+    }
+
+    /** The legacy read keeps the CALLER's tenant even without a principal:
+     * the principal-only global-id lookup has no tenant predicate, so a
+     * null-principal read through it would hand another tenant's PUBLIC
+     * Session to an internal caller (R2-4). A foreign or missing Session
+     * answers the uniform 404. */
+    public SessionRecord requireReadableSession(String tenantId,
+            SessionPrincipal principal, String sessionId) {
+        if (principal == null) {
+            SessionRecord session = inputPolicy.requireVisibleSession(
+                    tenantId, sessionId);
+            requireReadGrant(session, (SessionPrincipal) null);
+            return session;
+        }
+        return requireReadableSession(principal, sessionId);
     }
 
     public SessionRecord requireReadableSession(SessionPrincipal principal,

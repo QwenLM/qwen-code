@@ -684,12 +684,12 @@ class ManagedActionsTest {
                 });
         // The unbound arm hides the Session from a non-owner behind the
         // visibility gate (404); only the Workspace-operator arm reaches
-        // the answer refusal (403).
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
-                        auth(post(path(session, journal.id) + "/responses"), tenant, "other")
-                                .header("Idempotency-Key", "answer")
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content(response("allow")), "owner"))
+        // the answer refusal (403). The builder runs as "other" directly —
+        // the fixture wrapper is authoritative and would install "owner".
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "other")
+                        .header("Idempotency-Key", "answer")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(response("allow")))
                 .andExpect(status().is(shell ? 403 : 404))
                 .andExpect(jsonPath("$.error.code")
                         .value(shell ? "action_forbidden" : "session_not_found"));
@@ -1214,41 +1214,28 @@ class ManagedActionsTest {
     @Test
     void hostedSessionsAnswerThroughTheirRecordedCreator() throws Exception {
         String tenant = tenant();
-        // Create authenticated, then erase the recorded creator and the
-        // ownership row: the readAccepted helper would otherwise install
-        // "owner" as the caller and record a creator this test exists to
-        // leave absent. A legacy Session without an ownership row stays
-        // invisible at the boundary, so even a tenant-scoped answer is
-        // refused with the visibility 404.
-        String anonymous = hostedSession(tenant, "owner");
-        jdbc.update("UPDATE ma_session SET creator_actor_key = NULL,"
-                + " owner_actor_key = NULL"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, anonymous);
-        jdbc.update("DELETE FROM ma_session_principal"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, anonymous);
-        ActionJournal open = action(tenant, anonymous,
+        // The hosted Session keeps its recorded creator and answers 202
+        // through it — the behaviour this case exists to certify (R2-5).
+        String hosted = hostedSession(tenant, "owner");
+        ActionJournal open = action(tenant, hosted,
                 System.currentTimeMillis(), 9007199254740991L);
-        // Principal-less on purpose for this arm: the fixture wrapper
-        // would install the recorded creator and the refusal would never
-        // run.
-        mvc.perform(auth(post(path(anonymous, open.id) + "/responses"),
-                        tenant, "anyone")
-                        .header("Idempotency-Key", "open-answer")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(response("allow")))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.error.code").value("session_not_found"));
+        readAccepted(auth(post(path(hosted, open.id) + "/responses"),
+                tenant, "owner")
+                .header("Idempotency-Key", "creator-answer")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(response("allow")));
 
         String owned = hostedSession(tenant, "owner");
         ActionJournal journal = action(tenant, owned,
                 System.currentTimeMillis(), 9007199254740991L);
         // A non-owner never reaches the answer refusal: the ownership
-        // visibility gate hides the unbound Session behind a 404 first.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(post(path(owned, journal.id) + "/responses"),
+        // visibility gate hides the unbound Session behind a 404 first. The
+        // builder really runs as "other" — auth() installs that principal.
+        mvc.perform(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "other")
                         .header("Idempotency-Key", "foreign-answer")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(response("allow")), "owner"))
+                        .content(response("allow")))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("session_not_found"));
         // Principal-less on purpose: the fixture wrapper would install the

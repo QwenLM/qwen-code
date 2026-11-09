@@ -50,8 +50,13 @@ public class ManagedTaskService {
 
     public PublicList<PublicTask> listPublicTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        return listPublicTasks(legacyPrincipal(tenantId, actorId), sessionId,
+        Viewed<TaskPage> viewed = legacyPage(tenantId, actorId, sessionId,
                 cursor, limit);
+        TaskPage page = viewed.value();
+        return new PublicList<>("list", page.tasks().stream()
+                .map(task -> publicTask(viewed.tenantId(), sessionId, task,
+                        viewed.sessionActive())).toList(),
+                page.hasMore(), nextCursor(page));
     }
 
     public PublicList<PublicTask> listPublicTasks(
@@ -67,8 +72,10 @@ public class ManagedTaskService {
 
     public PublicTask getPublicTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return getPublicTask(legacyPrincipal(tenantId, actorId), sessionId,
+        Viewed<TaskRow> viewed = legacyTask(tenantId, actorId, sessionId,
                 taskId);
+        return publicTask(viewed.tenantId(), sessionId, viewed.value(),
+                viewed.sessionActive());
     }
 
     public PublicTask getPublicTask(SessionPrincipal principal,
@@ -80,8 +87,15 @@ public class ManagedTaskService {
 
     public WebShellTaskPage queryWebShellTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        return queryWebShellTasks(legacyPrincipal(tenantId, actorId), sessionId,
+        Viewed<TaskPage> viewed = legacyPage(tenantId, actorId, sessionId,
                 cursor, limit);
+        TaskPage page = viewed.value();
+        return new WebShellTaskPage(page.tasks().stream()
+                .map(task -> webShellTask(viewed.tenantId(), sessionId,
+                        task,
+                        viewed.sessionActive()))
+                .toList(), nextCursor(page), page.hasMore(),
+                records.activeChildCount(viewed.tenantId(), sessionId));
     }
 
     public WebShellTaskPage queryWebShellTasks(
@@ -99,8 +113,10 @@ public class ManagedTaskService {
 
     public WebShellTask getWebShellTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return getWebShellTask(legacyPrincipal(tenantId, actorId), sessionId,
+        Viewed<TaskRow> viewed = legacyTask(tenantId, actorId, sessionId,
                 taskId);
+        return webShellTask(viewed.tenantId(), sessionId, viewed.value(),
+                viewed.sessionActive());
     }
 
     public WebShellTask getWebShellTask(SessionPrincipal principal,
@@ -113,8 +129,12 @@ public class ManagedTaskService {
     public PublicList<PublicTaskEvent> listPublicTaskEvents(String tenantId,
             String actorId, String sessionId, String taskId, String after,
             int limit) {
-        return listPublicTaskEvents(legacyPrincipal(tenantId, actorId), sessionId,
+        ResolvedPage page = legacyEventPage(tenantId, actorId, sessionId,
                 taskId, after, limit);
+        return new PublicList<>("list", page.page().events().stream()
+                .map(event -> publicEvent(page.tenantId(), sessionId,
+                        taskId, event)).toList(),
+                page.page().hasMore(), page.nextCursor());
     }
 
     public PublicList<PublicTaskEvent> listPublicTaskEvents(
@@ -131,8 +151,12 @@ public class ManagedTaskService {
     public WebShellPage<WebShellTaskEvent> queryWebShellTaskEvents(
             String tenantId, String actorId, String sessionId, String taskId,
             String after, int limit) {
-        return queryWebShellTaskEvents(legacyPrincipal(tenantId, actorId), sessionId,
+        ResolvedPage page = legacyEventPage(tenantId, actorId, sessionId,
                 taskId, after, limit);
+        return new WebShellPage<>(page.page().events().stream()
+                .map(event -> webShellEvent(page.tenantId(), sessionId,
+                        taskId, event))
+                .toList(), page.nextCursor(), page.page().hasMore());
     }
 
     public WebShellPage<WebShellTaskEvent> queryWebShellTaskEvents(
@@ -144,6 +168,41 @@ public class ManagedTaskService {
                 .map(event -> webShellEvent(page.tenantId(), sessionId,
                         taskId, event))
                 .toList(), page.nextCursor(), page.page().hasMore());
+    }
+
+    // The legacy overloads read at the CALLER's tenant even when the actor
+    // is absent: resolving through the principal-only overload would drop
+    // the tenant and let the global-id lookup answer across tenants (R2-4).
+    private SessionRecord legacyReadable(String tenantId, String actorId,
+            String sessionId) {
+        return sessions.requireReadableSession(tenantId,
+                legacyPrincipal(tenantId, actorId), sessionId);
+    }
+
+    private Viewed<TaskPage> legacyPage(String tenantId, String actorId,
+            String sessionId, String cursor, int limit) {
+        SessionRecord session = legacyReadable(tenantId, actorId, sessionId);
+        return new Viewed<>(pageOf(session.tenantId(), sessionId, cursor,
+                        limit),
+                "ACTIVE".equals(session.status()), session.tenantId());
+    }
+
+    private Viewed<TaskRow> legacyTask(String tenantId, String actorId,
+            String sessionId, String taskId) {
+        SessionRecord session = legacyReadable(tenantId, actorId, sessionId);
+        return new Viewed<>(records.findTask(session.tenantId(), sessionId,
+                        taskId)
+                .orElseThrow(() -> new ManagedAgentException(404,
+                        "task_not_found", "The task was not found.")),
+                "ACTIVE".equals(session.status()), session.tenantId());
+    }
+
+    private ResolvedPage legacyEventPage(String tenantId, String actorId,
+            String sessionId, String taskId, String after, int limit) {
+        String resolvedTenant = legacyTask(tenantId, actorId, sessionId,
+                taskId).tenantId();
+        return resolvedEventPage(resolvedTenant, sessionId, taskId, after,
+                limit);
     }
 
     private static SessionPrincipal legacyPrincipal(String tenantId, String actorId) {
@@ -224,7 +283,12 @@ public class ManagedTaskService {
      */
     private ResolvedPage eventPage(SessionPrincipal principal,
             String sessionId, String taskId, String after, int limit) {
-        String tenantId = task(principal, sessionId, taskId).tenantId();
+        return resolvedEventPage(task(principal, sessionId, taskId).tenantId(),
+                sessionId, taskId, after, limit);
+    }
+
+    private ResolvedPage resolvedEventPage(String tenantId,
+            String sessionId, String taskId, String after, int limit) {
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "invalid_limit",
                     "Limit must be between 1 and 100.");

@@ -67,6 +67,25 @@ class ManagedMcpManagementServiceTest {
     }
 
     @Test
+    void identityDigestKeepsThePersistedSixElementLayout() throws Exception {
+        // The operationId is the replay key of receipts already persisted in
+        // ma_session_journal_tx: the digest must stay the historical
+        // six-element JSON array, and an absent actor subject keeps hashing
+        // as JSON null instead of throwing (R3-8).
+        var command = new ManagedMcpManagementCommand("add", "docs", 0L,
+                new ManagedMcpServerPin("docs", 2, "a".repeat(64)));
+        service.submit("tenant", "actor", "session", "key", command);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> requests = ArgumentCaptor.forClass(Map.class);
+        verify(harness).manageMcp(eq("tenant"), eq("session"), requests.capture());
+        var json = new ObjectMapper();
+        String expected = java.util.UUID.nameUUIDFromBytes(json.writeValueAsBytes(
+                java.util.Arrays.asList("managed-mcp-command", "tenant", "actor",
+                        null, "session", "key"))).toString();
+        assertThat(requests.getValue().get("operationId")).isEqualTo(expected);
+    }
+
+    @Test
     void oldHarnessAnswersUnsupportedWithoutCreatingOrLoadingASession() {
         when(harness.supportsMcpManagement()).thenReturn(false);
         assertThat(service.get("tenant", "actor", "session").path("supported").asBoolean()).isFalse();
