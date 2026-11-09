@@ -6,6 +6,8 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  computeGenerationRates,
+  outputTokensPerSecond,
   calculateAverageLatency,
   calculateCacheHitRate,
   calculateErrorRate,
@@ -285,5 +287,47 @@ describe('computeSessionStats', () => {
 
     expect(result.totalLinesAdded).toBe(42);
     expect(result.totalLinesRemoved).toBe(18);
+  });
+});
+
+describe('outputTokensPerSecond', () => {
+  it('divides output tokens by TTFT plus generation time', () => {
+    expect(outputTokensPerSecond(200, 8_000, 2_000)).toBe(20);
+  });
+
+  it('measures a single-chunk response over its TTFT', () => {
+    expect(outputTokensPerSecond(30, 500, 0)).toBe(60);
+  });
+
+  it('is undefined without output tokens or time', () => {
+    expect(outputTokensPerSecond(0, 500, 500)).toBeUndefined();
+    expect(outputTokensPerSecond(10, 0, 0)).toBeUndefined();
+  });
+});
+
+describe('computeGenerationRates', () => {
+  it('is empty without generation metrics', () => {
+    expect(computeGenerationRates(undefined)).toEqual({
+      lastTps: undefined,
+      averageTtft: undefined,
+      sessionTps: undefined,
+    });
+  });
+
+  it('weights the session rate by tokens over request time', () => {
+    expect(
+      computeGenerationRates({
+        timedRequests: 2,
+        totalTtftMs: 1_000,
+        totalGenerationDurationMs: 4_000,
+        totalThroughputOutputTokens: 600,
+        last: {
+          model: 'qwen3-coder',
+          ttftMs: 500,
+          generationDurationMs: 1_500,
+          outputTokens: 100,
+        },
+      }),
+    ).toEqual({ lastTps: 50, averageTtft: 500, sessionTps: 120 });
   });
 });

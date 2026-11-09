@@ -74,11 +74,18 @@ export interface SkillMetrics {
 
 export interface GenerationTimingSample {
   model: string;
+  /** From sending the request to its first visible output. */
   ttftMs: number;
+  /** From the first to the last visible output. */
   generationDurationMs: number;
   outputTokens: number;
 }
 
+/**
+ * The totals cover the same timed requests. Output speed divides the output
+ * tokens by TTFT plus generation time, i.e. each request's time from sending
+ * it to its last visible output.
+ */
 export interface GenerationMetrics {
   timedRequests: number;
   totalTtftMs: number;
@@ -295,9 +302,6 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   totalFail: 0,
   byName: {},
 });
-
-/** Shortest generation window that counts toward output speed. */
-const MIN_THROUGHPUT_WINDOW_MS = 100;
 
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
@@ -801,12 +805,10 @@ export class UiTelemetryService extends EventEmitter {
     const accumulateGeneration = (generation: GenerationMetrics) => {
       generation.timedRequests++;
       generation.totalTtftMs += ttftMs;
-      // A window this short means the output arrived in a burst, so dividing
-      // the whole response's tokens by it reads as thousands of tokens/s.
-      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
-        generation.totalGenerationDurationMs += generationDurationMs;
-        generation.totalThroughputOutputTokens += event.output_token_count;
-      }
+      // Every timed request counts towards output speed. Its denominator
+      // includes TTFT, so a burst of visible output cannot shrink it to zero.
+      generation.totalGenerationDurationMs += generationDurationMs;
+      generation.totalThroughputOutputTokens += event.output_token_count;
     };
 
     const generation = (metrics.generation ??=

@@ -3825,12 +3825,13 @@ export interface DaemonSessionStatsModelMetrics {
     /** Streamed requests with a recorded time to first token. */
     timedRequests: number;
     totalTtftMs: number;
-    /**
-     * Time from the first to the last visible output, summed over requests
-     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
-     */
+    /** Time from the first to the last visible output, summed. */
     totalGenerationDurationMs: number;
-    /** Output tokens of the requests in `totalGenerationDurationMs`. */
+    /**
+     * Output tokens of the timed requests. Output speed divides them by
+     * `totalTtftMs + totalGenerationDurationMs`. Older daemons summed this
+     * and `totalGenerationDurationMs` only over windows of at least 100 ms.
+     */
     totalThroughputOutputTokens: number;
   };
   /**
@@ -3842,7 +3843,10 @@ export interface DaemonSessionStatsModelMetrics {
     /** Event time, epoch ms. */
     at: number;
     ttftMs: number;
-    /** Generation window; below 100 ms it measures no output rate. */
+    /**
+     * From the first to the last visible output. Output speed divides
+     * `outputTokens` by `ttftMs + generationMs`.
+     */
     generationMs: number;
     outputTokens: number;
     /** Subagent that issued the request; absent for the main conversation. */

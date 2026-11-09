@@ -690,7 +690,7 @@ describe('TokenUsagePanel', () => {
     const models = container.querySelectorAll('[data-color]');
     expect(modelStats(models[0]!)).toEqual([
       ['First token', '1.2s'],
-      ['Output speed', '85.0 tok/s'],
+      ['Output speed', '25.0 tok/s'],
       ['Generation', '500ms'],
       ['Requests', '4'],
       ['Success rate', '75.0%'],
@@ -719,7 +719,7 @@ describe('TokenUsagePanel', () => {
       await act(async () => {});
 
       const timing = container.querySelector('[data-color] > dl')!;
-      expect(timing.textContent).toContain('449.0 tok/s');
+      expect(timing.textContent).toContain('132.1 tok/s');
       for (const text of timing.querySelectorAll('dt, dd')) {
         expect(text.getAttribute('title')).toBe(text.textContent);
       }
@@ -739,7 +739,7 @@ describe('TokenUsagePanel', () => {
 
     expect(modelStats(container.querySelector('[data-color]')!)).toEqual([
       ['首 token', '500ms'],
-      ['输出速度', '75.0 tok/s'],
+      ['输出速度', '60.0 tok/s'],
       ['生成', '2.0s'],
       ['请求', '4'],
       ['成功率', '75.0%'],
@@ -1377,9 +1377,10 @@ describe('TokenUsagePanel', () => {
         (label) => label.textContent,
       ),
     ).toEqual(['输入', '总输出', '成功率', '输出速度']);
-    // 600 tokens over 4 s of generation; TTFT averaged over 4 requests.
+    // 600 tokens over 4 s of TTFT plus 4 s of generation; TTFT averaged
+    // over 4 requests.
     expect(overview.lastElementChild?.textContent).toBe(
-      '输出速度150.0 tok/s首 token 平均 1.0s',
+      '输出速度75.0 tok/s首 token 平均 1.0s',
     );
   });
 
@@ -1468,7 +1469,7 @@ describe('TokenUsagePanel', () => {
     stats.models['qwen-plus::hybrid'].timingSamples = [
       { at: at(0), ttftMs: 1_000, generationMs: 2_000, outputTokens: 100 },
       { at: at(1), ttftMs: 1_200, generationMs: 1_000, outputTokens: 80 },
-      // Too short to measure a rate: plotted for first token only.
+      // A short generation window still has a rate: TTFT is in the time.
       { at: at(2), ttftMs: 900, generationMs: 50, outputTokens: 10 },
       {
         at: at(3),
@@ -1506,8 +1507,9 @@ describe('TokenUsagePanel', () => {
     const trend = container.querySelector('[data-testid="token-usage-trend"]')!;
 
     expect(trend.querySelector('h3')?.textContent).toBe('Speed over time');
-    // Output speed skips the 50 ms window; colors follow the model cards.
-    expect(seriesDots(container)).toEqual(['0', '0', '0', '1', '1']);
+    // Every sample has a speed, the 50 ms window included; colors follow
+    // the model cards.
+    expect(seriesDots(container)).toEqual(['0', '0', '0', '0', '1', '1']);
     expect(trend.querySelectorAll('path[data-share-color]')).toHaveLength(2);
     expect(trend.textContent).toContain('Failed');
     expect(
@@ -1516,7 +1518,7 @@ describe('TokenUsagePanel', () => {
       ),
     ).toHaveLength(3);
     expect(trend.querySelector('svg')?.getAttribute('aria-label')).toBe(
-      'Output speed per request over time. Median: qwen-plus::hybrid 50, qwen-max::auto 140',
+      'Output speed per request over time. Median: qwen-plus::hybrid 28, qwen-max::auto 97',
     );
 
     const [speedButton, ttftButton] = Array.from(
@@ -1570,8 +1572,8 @@ describe('TokenUsagePanel', () => {
     );
     const tooltip = trend.querySelector('[role="tooltip"]');
     expect(tooltip?.textContent).toMatch(/^qwen-plus::hybrid/);
-    expect(tooltip?.textContent).toContain('50.0 tok/s · first token 1.0s');
-    expect(tooltip?.textContent).toContain('100 output tokens in 2.0s');
+    expect(tooltip?.textContent).toContain('33.3 tok/s · first token 1.0s');
+    expect(tooltip?.textContent).toContain('100 output tokens in 3.0s');
 
     const failure = Array.from(svg.querySelectorAll('svg > path')).find(
       (path) => !path.hasAttribute('data-share-color'),
@@ -1597,16 +1599,16 @@ describe('TokenUsagePanel', () => {
     await act(async () => {});
     const [plus, max] = Array.from(container.querySelectorAll('[data-color]'));
 
-    // Speeds 50, 80 and 30 tok/s; the 50 ms window has no rate.
+    // Speeds over TTFT plus generation: 33.3, 36.4, 10.5 and 21.8 tok/s.
     expect(
       plus?.querySelector('[data-testid="token-usage-speed-spread"]')
         ?.textContent,
-    ).toBe('p50 50 · p10–p90 34–74 tok/s');
+    ).toBe('p50 28 · p10–p90 14–35 tok/s');
     expect(plus?.textContent).toContain('失败：429 ×2 · timeout ×1');
     expect(
       max?.querySelector('[data-testid="token-usage-speed-spread"]')
         ?.textContent,
-    ).toBe('p50 140 · p10–p90 132–148 tok/s');
+    ).toBe('p50 97 · p10–p90 89–105 tok/s');
     expect(max?.textContent).not.toContain('失败：');
     expect(
       container.querySelector('[data-testid="token-usage-trend"] h3')

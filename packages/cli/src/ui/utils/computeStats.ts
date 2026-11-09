@@ -4,11 +4,59 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { GenerationMetrics } from '@qwen-code/qwen-code-core';
 import type {
   SessionMetrics,
   ComputedSessionStats,
   ModelMetricsCore,
 } from '../contexts/SessionContext.js';
+
+/**
+ * Output tokens per second over the time from sending a request to its last
+ * visible output, TTFT included. Summed timings give a token-weighted rate.
+ * Undefined without output tokens (no usage reported) or time.
+ */
+export function outputTokensPerSecond(
+  outputTokens: number,
+  ttftMs: number,
+  generationMs: number,
+): number | undefined {
+  const durationMs = ttftMs + generationMs;
+  return outputTokens > 0 && durationMs > 0
+    ? outputTokens / (durationMs / 1000)
+    : undefined;
+}
+
+/** Latest-request TPS, average TTFT and session TPS for `/stats`. */
+export function computeGenerationRates(
+  generation: GenerationMetrics | undefined,
+): {
+  lastTps: number | undefined;
+  averageTtft: number | undefined;
+  sessionTps: number | undefined;
+} {
+  const last = generation?.last;
+  return {
+    lastTps: last
+      ? outputTokensPerSecond(
+          last.outputTokens,
+          last.ttftMs,
+          last.generationDurationMs,
+        )
+      : undefined,
+    averageTtft:
+      generation && generation.timedRequests > 0
+        ? generation.totalTtftMs / generation.timedRequests
+        : undefined,
+    sessionTps: generation
+      ? outputTokensPerSecond(
+          generation.totalThroughputOutputTokens,
+          generation.totalTtftMs,
+          generation.totalGenerationDurationMs,
+        )
+      : undefined,
+  };
+}
 
 export function calculateErrorRate(metrics: ModelMetricsCore): number {
   if (metrics.api.totalRequests === 0) {

@@ -131,13 +131,18 @@ const OUTCOME_ICONS = {
   error: CircleAlertIcon,
 } as const;
 
-/** Output tokens per second over every timed generation window. */
+/**
+ * Token-weighted output tokens per second over the timed requests' time from
+ * sending each request to its last visible output, TTFT included.
+ */
 function outputSpeed(
   generation: DaemonSessionStatsModelMetrics['generation'],
 ): number | undefined {
-  return generation && generation.totalGenerationDurationMs > 0
-    ? generation.totalThroughputOutputTokens /
-        (generation.totalGenerationDurationMs / 1000)
+  if (!generation) return undefined;
+  const durationMs =
+    generation.totalTtftMs + generation.totalGenerationDurationMs;
+  return generation.totalThroughputOutputTokens > 0 && durationMs > 0
+    ? generation.totalThroughputOutputTokens / (durationMs / 1000)
     : undefined;
 }
 

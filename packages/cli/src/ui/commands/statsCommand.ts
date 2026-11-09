@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MessageType } from '../types.js';
 import { formatDuration } from '../utils/formatters.js';
+import { computeGenerationRates } from '../utils/computeStats.js';
 import {
   type CommandContext,
   type SlashCommand,
@@ -49,19 +50,7 @@ function formatGenerationMetrics(metrics: GenerationMetrics | undefined) {
     return [];
   }
 
-  const lastTps =
-    last.generationDurationMs > 0
-      ? last.outputTokens / (last.generationDurationMs / 1000)
-      : undefined;
-  const averageTtft =
-    metrics.timedRequests > 0
-      ? metrics.totalTtftMs / metrics.timedRequests
-      : undefined;
-  const sessionTps =
-    metrics.totalGenerationDurationMs > 0
-      ? metrics.totalThroughputOutputTokens /
-        (metrics.totalGenerationDurationMs / 1000)
-      : undefined;
+  const { lastTps, averageTtft, sessionTps } = computeGenerationRates(metrics);
 
   return [
     '',

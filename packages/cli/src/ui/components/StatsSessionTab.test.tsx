@@ -81,22 +81,23 @@ describe('<SessionTab /> generation metrics', () => {
     expect(output).toContain('qwen3-coder');
     expect(output).toContain('342ms');
     expect(output).toContain('4.2s');
-    expect(output).toContain('44.4 tok/s');
+    // 187 tokens over 342 ms + 4210 ms; 300 tokens over 800 ms + 7000 ms.
+    expect(output).toContain('41.1 tok/s');
     expect(output).toContain('400ms');
-    expect(output).toContain('42.9 tok/s');
+    expect(output).toContain('38.5 tok/s');
   });
 
   it('hides the section until a timed response exists', () => {
     expect(renderSessionTab(baseMetrics())).not.toContain('Generation Metrics');
   });
 
-  it('renders unavailable TPS for a zero generation duration', () => {
+  it('measures a single-chunk response from the request start', () => {
     const metrics = baseMetrics();
     metrics.generation = {
       timedRequests: 1,
       totalTtftMs: 100,
       totalGenerationDurationMs: 0,
-      totalThroughputOutputTokens: 0,
+      totalThroughputOutputTokens: 3,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,
@@ -105,6 +106,26 @@ describe('<SessionTab /> generation metrics', () => {
       },
     };
 
-    expect(renderSessionTab(metrics)).toContain('—');
+    expect(renderSessionTab(metrics)).toContain('30.0 tok/s');
+  });
+
+  it('renders unavailable TPS without reported output tokens', () => {
+    const metrics = baseMetrics();
+    metrics.generation = {
+      timedRequests: 1,
+      totalTtftMs: 100,
+      totalGenerationDurationMs: 400,
+      totalThroughputOutputTokens: 0,
+      last: {
+        model: 'qwen3-coder',
+        ttftMs: 100,
+        generationDurationMs: 400,
+        outputTokens: 0,
+      },
+    };
+
+    const output = renderSessionTab(metrics);
+    expect(output).not.toContain('tok/s');
+    expect(output).toContain('—');
   });
 });

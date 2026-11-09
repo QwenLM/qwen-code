@@ -35,18 +35,25 @@ export interface TrendSeries {
 
 export type TrendMetric = 'speed' | 'ttft';
 
-/** Shortest generation window that measures an output rate. */
-const MIN_RATE_WINDOW_MS = 100;
 const CHART_HEIGHT = 168;
 const FAILURE_STRIP = 18;
 const PAD = { left: 48, right: 8, top: 16, bottom: 22 } as const;
 const HIT_RADIUS = 28;
 const MEDIAN_WINDOW = 5;
 
-/** Output tokens per second, or undefined when the window is too short. */
+/** Time from sending the request to its last visible output. */
+function sampleDurationMs(sample: TimingSample): number {
+  return sample.ttftMs + sample.generationMs;
+}
+
+/**
+ * Output tokens per second over the time from sending the request to its last
+ * visible output, TTFT included; undefined without output tokens or time.
+ */
 export function sampleSpeed(sample: TimingSample): number | undefined {
-  return sample.generationMs >= MIN_RATE_WINDOW_MS
-    ? sample.outputTokens / (sample.generationMs / 1000)
+  const durationMs = sampleDurationMs(sample);
+  return sample.outputTokens > 0 && durationMs > 0
+    ? sample.outputTokens / (durationMs / 1000)
     : undefined;
 }
 
@@ -460,7 +467,7 @@ function TrendTooltip({
           <div>
             {t('tokenUsage.trendOutput', {
               count: sample!.outputTokens.toLocaleString('en-US'),
-              duration: formatDuration(sample!.generationMs),
+              duration: formatDuration(sampleDurationMs(sample!)),
             })}
           </div>
         </>

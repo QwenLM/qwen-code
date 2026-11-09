@@ -431,7 +431,7 @@ describe('UiTelemetryService', () => {
         timedRequests: 2,
         totalTtftMs: 200,
         totalGenerationDurationMs: 300,
-        totalThroughputOutputTokens: 20,
+        totalThroughputOutputTokens: 40,
         last: {
           model: 'qwen3-coder',
           ttftMs: 100,
@@ -460,7 +460,7 @@ describe('UiTelemetryService', () => {
         timedRequests: 1,
         totalTtftMs: 300,
         totalGenerationDurationMs: 0,
-        totalThroughputOutputTokens: 0,
+        totalThroughputOutputTokens: 20,
       });
       expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
     });
@@ -591,20 +591,23 @@ describe('UiTelemetryService', () => {
       );
     });
 
-    it('keeps sub-100ms generation windows out of output speed', () => {
+    it('counts every timed request towards output speed, short windows included', () => {
       service.addEvent(
-        timedResponse({ generation_ms: 99, output_token_count: 95 }),
+        timedResponse({ generation_ms: 0, output_token_count: 95 }),
       );
       service.addEvent(
-        timedResponse({ generation_ms: 100, output_token_count: 10 }),
+        timedResponse({ generation_ms: 99, output_token_count: 10 }),
       );
 
+      // Output speed is totalThroughputOutputTokens over
+      // totalTtftMs + totalGenerationDurationMs, so every sum covers the
+      // same requests.
       expect(service.getMetrics().generation).toMatchObject({
         timedRequests: 2,
         totalTtftMs: 200,
-        totalGenerationDurationMs: 100,
-        totalThroughputOutputTokens: 10,
-        last: { generationDurationMs: 100, outputTokens: 10 },
+        totalGenerationDurationMs: 99,
+        totalThroughputOutputTokens: 105,
+        last: { generationDurationMs: 99, outputTokens: 10 },
       });
     });
 
