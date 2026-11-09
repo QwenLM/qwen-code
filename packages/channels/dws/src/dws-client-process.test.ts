@@ -194,6 +194,36 @@ describe('DWS command process', () => {
     expect(message.length).toBeLessThan(300);
   });
 
+  it('keeps the cut marker inside the narrowest caller budget', () => {
+    const message = describeDwsCommandFailure(
+      ['chat', 'message', 'remove-emoji', '--group', 'cid-1'],
+      1,
+      `error: ${'x'.repeat(400)}`,
+    );
+
+    // logReactionFailure sanitizes at 200 code points and keeps the head, so a
+    // reason that fits 150 there pushes the `…` past the cut and the operator
+    // sees a full-looking line that was actually truncated.
+    const logged = sanitizeLogText(message, 200);
+    expect(logged.endsWith('…')).toBe(true);
+    expect(logged.length).toBeLessThanOrEqual(200);
+  });
+
+  it('never cuts a surrogate pair in half', () => {
+    // 148 BMP characters put the 149th code unit on the high half of the next
+    // astral character, so a 150-CODE-UNIT cap splits that pair and leaves a
+    // lone surrogate, which sanitizeLogText blanks to a space where the
+    // reason was cut.
+    const message = describeDwsCommandFailure(
+      ['chat', 'message', 'send'],
+      1,
+      `${'a'.repeat(148)}${'\u{1f389}'.repeat(20)}`,
+    );
+
+    expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(message).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+  });
+
   it.each([
     [['version'], 'dws version'],
     [['profile', 'list'], 'dws profile list'],

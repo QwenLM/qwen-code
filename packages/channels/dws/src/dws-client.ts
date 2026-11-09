@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { truncateCodePoints } from '@qwen-code/channel-base';
 import { dwsProcessEnvironment } from './dws-environment.js';
 import {
   startDwsEventProcess,
@@ -137,9 +138,16 @@ export type DwsCommandRunner = (
 
 export type DwsCommandOutcome = 'not_sent' | 'unknown';
 
-// Callers keep the head of the composed message within 200 code points, and
-// the subcommand plus exit detail already spends about 30 of them.
-const DWS_ERROR_DETAIL_MAX_CHARS = 150;
+// The narrowest caller cap (`logReactionFailure`) is 200 code points and keeps
+// the head, so the composed message — prefix, exit detail, reason and the `…`
+// that says the reason was cut — has to fit inside it. The prefix is measured
+// from the argv rather than assumed: the longest subcommand in this client is
+// 33 code points (`chat message remove-emoji`), and the old fixed 150 bound
+// assumed ~30, so a full-length reason composed to 212 and the head cut landed
+// on a line that looked complete.
+const DWS_CALLER_HEAD_BUDGET = 200;
+const DWS_ERROR_DETAIL_ELLIPSIS = '…';
+const DWS_ERROR_PREFIX = 'DWS command failed: ';
 
 /**
  * Compose the text a `DwsCommandError` carries. The exit code alone
@@ -148,7 +156,8 @@ const DWS_ERROR_DETAIL_MAX_CHARS = 150;
  * channel log — which only repeats this message — has nothing to act on.
  * Callers log through `sanitizeLogText`, which keeps the HEAD of this message
  * within a 200–300 code-point budget, so the bound below has to leave the
- * reason inside that window instead of past it.
+ * reason — including its ellipsis, which is what tells the operator the line
+ * was cut — inside that window instead of past it.
  */
 export function describeDwsCommandFailure(
   args: readonly string[],
@@ -191,11 +200,22 @@ export function describeDwsCommandFailure(
   if (!reason) {
     return `DWS command failed: ${detail}.`;
   }
+  // Counted in code points, because that is the unit the caller's cap uses: an
+  // astral character in the profile name would otherwise over-reserve two
+  // units for one.
+  const reserved = Array.from(
+    `${DWS_ERROR_PREFIX}${detail}: ${DWS_ERROR_DETAIL_ELLIPSIS}`,
+  ).length;
+  const maxReason = DWS_CALLER_HEAD_BUDGET - reserved;
+  const reasonLength = Array.from(reason).length;
   const bounded =
-    reason.length > DWS_ERROR_DETAIL_MAX_CHARS
-      ? `${reason.slice(0, DWS_ERROR_DETAIL_MAX_CHARS - 1)}…`
+    reasonLength > maxReason
+      ? `${truncateCodePoints(
+          reason,
+          maxReason - DWS_ERROR_DETAIL_ELLIPSIS.length,
+        )}${DWS_ERROR_DETAIL_ELLIPSIS}`
       : reason;
-  return `DWS command failed: ${detail}: ${bounded}`;
+  return `${DWS_ERROR_PREFIX}${detail}: ${bounded}`;
 }
 
 export class DwsCommandError extends Error {
