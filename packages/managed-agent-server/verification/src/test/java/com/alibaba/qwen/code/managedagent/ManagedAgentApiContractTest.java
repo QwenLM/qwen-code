@@ -151,6 +151,10 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.Store.class,
+                            List.of("MemoryStore")),
+                    entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.StoreList.class,
+                            List.of("MemoryStoreList")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.OptionsRequest.class, List.of("WebShellSessionWorktreeOptionsRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.QueryRequest.class, List.of("WebShellSessionWorktreeQueryRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.InspectRequest.class, List.of("WebShellSessionWorktreeInspectRequest")),
@@ -263,6 +267,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.WebShellActivityQueryRequest.class,
+                            List.of("WebShellActivityQueryRequest")),
                     entry(ApiModels.ManagedMcpServerPin.class,
                             List.of("ManagedMcpServerPin")),
                     entry(ApiModels.ManagedMcpManagementCommand.class,
@@ -530,7 +536,7 @@ class ManagedAgentApiContractTest {
             }
         });
         assertThat(uncovered)
-                .as("every public controller route must satisfy PublicSurface.covers")
+                .as("every public route must satisfy PublicSurface.covers")
                 .isEmpty();
     }
 
@@ -1742,6 +1748,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "sessionWorktreeCleanup", 404,
                 post("/v1/agents/workspaces/ws-default/worktrees/missing/cleanup").header(TENANT, workspaceTenant).principal(actor)
                         .header(IDEMPOTENCY_KEY, "cleanup"), null);
+        exchange(drift, "createPersonalMemoryStore", 503,
+                post("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), "{}");
+        exchange(drift, "listPersonalMemoryStores", 503,
+                get("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), null);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1753,6 +1763,8 @@ class ManagedAgentApiContractTest {
     private void exchangeDiagnostics(Map<String, String> drift, String tenant, String otherTenant,
             java.security.Principal principal, String session) throws Exception {
         String[][] routes = {
+                {"context-usage", "session-context-usage", "ContextUsage"},
+                {"stats", "session-stats", "ModelStatistics"},
                 {"resources", "session-resources", "Resources"},
                 {"agent-trace", "session-agent-trace", "AgentTrace"}
         };
@@ -1780,6 +1792,26 @@ class ManagedAgentApiContractTest {
                             body.substring(0, body.length() - 1) + "," + extra + "}");
                 }
             }
+        }
+        for (String suffix : List.of("activity-stats", "activity")) {
+            boolean statistics = "activity-stats".equals(suffix);
+            String operation = statistics ? "SessionActivityStatistics" : "SessionActivity";
+            String path = "/v1/agents/sessions/{id}/" + suffix;
+            var read = get(path, session).header(TENANT, tenant).principal(principal);
+            if (!statistics) {
+                read.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 200, read, null);
+            var unauthorized = get(path, session).header(TENANT, tenant);
+            if (!statistics) {
+                unauthorized.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 401, unauthorized, null);
+            String body = "{\"sessionId\":\"" + session + "\"" + (statistics ? "}" : ",\"kind\":\"tools\"}");
+            String web = WEB_SHELL + "/session-" + suffix + "/query";
+            exchange(drift, "query" + operation, 200, post(web).header(TENANT, tenant).principal(principal), body);
+            exchange(drift, "query" + operation, 401, post(web).header(TENANT, tenant), body);
+            exchange(drift, "query" + operation, 400, post(web).header(TENANT, tenant).principal(principal), "{}");
         }
     }
 
@@ -3455,6 +3487,35 @@ class ManagedAgentApiContractTest {
                 query + ",\"idempotencyKey\":\"extension-apply-web\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}");
         exchange(drift, "webShellSessionExtensionsContinue", 409, post(WEB_SHELL + "/session-extensions/continue").header(TENANT, tenant).principal(actor), control);
         exchange(drift, "webShellSessionExtensionsRecoverPrevious", 409, post(WEB_SHELL + "/session-extensions/recover-previous").header(TENANT, tenant).principal(actor), control);
+        String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest + "\",\"compilerVersion\":1,"
+                        + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}")
+                        .getBytes(StandardCharsets.UTF_8));
+        exchange(drift, "importWorkspaceExtensionPackage", 401, post(base + "/imports")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "import").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "previewWorkspaceExtensionImport", 401, post(base + "/imports/preview")
+                .header(TENANT, tenant).param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "importWebShellExtensionPackage", 401, post(web + "/imports")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "web-import")
+                .param("workspaceId", "ws-default").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "previewWebShellExtensionImport", 401, post(web + "/imports/preview")
+                .header(TENANT, tenant).param("workspaceId", "ws-default").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "inspectWorkspaceExtensionPackage", 401, get(base + "/" + id + "/packages/1/inspection")
+                .header(TENANT, tenant).param("packageDigest", digest), null);
+        exchange(drift, "inspectWebShellExtensionPackage", 401, post(web + "/inspection/query").header(TENANT, tenant),
+                workspace + ",\"pin\":{\"extensionId\":\"" + id + "\",\"packageRevision\":1,\"packageDigest\":\"" + digest + "\"}}");
+        exchange(drift, "lookupWorkspaceExtensionOperation", 401, post(base + "/operations/lookup").header(TENANT, tenant),
+                "{\"kind\":\"publish\",\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupWebShellExtensionOperation", 401, post(web + "/operations/lookup").header(TENANT, tenant),
+                workspace + ",\"kind\":\"publish\",\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupSessionExtensionOperation", 401, post(session + "/operations/lookup").header(TENANT, tenant),
+                "{\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupWebShellSessionExtensionOperation", 401, post(WEB_SHELL + "/session-extensions/operations/lookup").header(TENANT, tenant),
+                query + ",\"idempotencyKey\":\"lookup\"}");
     }
 
     private String exchange(Map<String, String> drift, String operationId,

@@ -368,6 +368,11 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMemory() {
+        return feature("session-memory/1");
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
 
     @Override
@@ -393,6 +398,36 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public boolean supportsSessionExtensions() {
         return feature("session-extension-packages/1");
+    }
+
+    @Override
+    public boolean supportsPackagePreparation() { return feature("managed-package-preparation/1"); }
+
+    private Member packagePreparationMember() {
+        List<Member> candidates = accepting;
+        if (closed || !supportsPackagePreparation() || candidates.isEmpty()) {
+            throw new ManagedAgentException(503, "package_preparation_unavailable", "Package preparation is unavailable.");
+        }
+        Member member = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
+        if (!member.reachable || member.quiescing) {
+            throw new ManagedAgentException(503, "package_preparation_unavailable", "Package preparation is unavailable.");
+        }
+        return member;
+    }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return packagePreparationMember().connector.preparePackage(metadata, source);
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return packagePreparationMember().connector.inspectPackage(metadata, source);
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return packagePreparationMember().connector.previewPackage(metadata, source);
     }
 
     @Override

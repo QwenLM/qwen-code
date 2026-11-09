@@ -84,15 +84,8 @@ final class AgentExecutionOperations {
             String actorId, String actorDigest, String key, String digest,
             long expectedCompactionRevision, boolean supported) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        WorkspaceAccess access = AgentSessionAccess.requireContextCompressionRead(session, actorId, workspaces);
         ContextBinding binding = session.workspace();
-        if (binding == null) {
-            throw new ManagedAgentException(400, "unsupported_feature",
-                    "Context compression requires a Workspace Session.");
-        }
-        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, binding.getWorkspaceId());
-        if (!access.canRead()) {
-            throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
-        }
         Optional<OperationRecord> replay = lifecycleOperations.replayOperation(tenantId, sessionId,
                 OperationKind.CONTEXT_COMPRESSION, actorDigest, key);
         if (replay.isPresent()) {
@@ -504,8 +497,8 @@ final class AgentExecutionOperations {
                         + " context_revision = ?, gmt_modified = ?, version ="
                         + " version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ?",
-                operation.targetCwdRelative(), result, now, tenantId,
-                sessionId);
+                operation.targetCwdRelative(), result, now, tenantId, sessionId);
+        ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         jdbc.update(
                 "UPDATE ma_operation SET phase = 'COMPLETED', state = 'COMPLETED', delivery_state ="
                     + " 'CONFIRMED', receipt_id = ?, result_context_revision = ?, claim_owner ="

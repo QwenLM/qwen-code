@@ -52,6 +52,10 @@
       "en": "Running the processes of selected extension packages inside Workspace Runtime workers under the managed extension execution profile.",
       "zh": "在 Workspace Runtime worker 中按托管扩展执行配置运行所选扩展包的进程。"
     },
+    "qwen.managed-agent.memory": {
+      "en": "Opt-in personal MemoryStores: server-side Mem0 access for explicitly bound, owner-only Sessions.",
+      "zh": "显式启用的个人 MemoryStore：由服务端访问 Mem0，供明确绑定且仅所属用户可见的 Session 使用。"
+    },
     "qwen.managed-agent.runtime-broker": {
       "en": "The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.",
       "zh": "内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。"
@@ -309,6 +313,10 @@
       "en": "Whether extension packages can be published and managed for Workspaces through the public extensions API. Management also needs `qwen.managed-agent.extensions.artifact-directory`, an actor in `qwen.managed-agent.extensions.allowed-actors` and Workspace OPERATOR access. With `qwen.managed-agent.runtime-broker.enabled`, startup refuses `qwen.managed-agent.managed-extensions.enabled` without it; otherwise extension execution simply stays off.",
       "zh": "是否允许通过公开扩展 API 为 Workspace 发布和管理扩展包。管理操作还需要设置 `qwen.managed-agent.extensions.artifact-directory`、actor 位于 `qwen.managed-agent.extensions.allowed-actors` 中，并具备 Workspace OPERATOR 权限。开启 `qwen.managed-agent.runtime-broker.enabled` 时，开启 `qwen.managed-agent.managed-extensions.enabled` 而未开启本项会在启动时拒绝；否则扩展执行只是保持关闭。"
     },
+    "qwen.managed-agent.extensions.self-service-enabled": {
+      "en": "Whether Skill/extension archive uploads and authored MCP configurations can be prepared and imported without a daemon. Requires extension management, its configured artifact directory, an allowed actor with Workspace OPERATOR access, and the Hosted `managed-package-preparation/1` capability. Disabling this entry point preserves published content and existing package apply/recovery.",
+      "zh": "是否允许在没有 daemon 时准备和导入上传的 Skill/扩展归档及用户编写的 MCP 配置。需要启用扩展管理、配置归档目录、actor 位于 allowlist 且具备 Workspace OPERATOR 权限，并要求 Hosted 支持 `managed-package-preparation/1`。关闭此入口保留已发布内容及现有包应用/恢复能力。"
+    },
     "qwen.managed-agent.harness.approval-mode": {
       "en": "The approval mode Hosted Sessions start with, case-insensitive: `yolo`, `default` or `auto-edit`, plus `plan` and `auto` while Workspace files are off. Unbound built-in Sessions follow the current value; Workspace-bound Sessions pin it at creation. While `qwen.managed-agent.harness.workspace-files-enabled` is true, startup refuses any mode but the first three, and with `qwen.managed-agent.harness.workspace-shell-enabled` it refuses `yolo` too. Any other value fails the Harness connector, at startup for a single Harness.",
       "zh": "新建 Hosted Session 的初始审批模式，不区分大小写：`yolo`、`default` 或 `auto-edit`；Workspace 文件关闭时还可用 `plan` 与 `auto`。未绑定 Workspace 的内置 Session 始终使用当前值，绑定 Workspace 的 Session 在创建时固定该值。`qwen.managed-agent.harness.workspace-files-enabled` 为 true 时，前三者以外的取值启动时拒绝；`qwen.managed-agent.harness.workspace-shell-enabled` 为 true 时，`yolo` 也会启动时拒绝。其他取值会使 Harness 连接器创建失败，单个 Harness 时在启动时失败。"
@@ -449,6 +457,18 @@
     "qwen.managed-agent.managed-extensions.mode": {
       "en": "The extension execution mode: `linux-cgroup` contains extension processes in a delegated cgroup v2 subtree, and `developer-process-group` is a weaker process-group mode for native macOS development. Linux workers always use `linux-cgroup`; a macOS worker is refused unless this is `developer-process-group`.",
       "zh": "扩展执行模式：`linux-cgroup` 将扩展进程限制在已委派的 cgroup v2 子树中；`developer-process-group` 是面向原生 macOS 开发、隔离较弱的进程组模式。Linux worker 始终使用 `linux-cgroup`；macOS worker 只有在该值为 `developer-process-group` 时才被接受。"
+    },
+    "qwen.managed-agent.memory.api-key": {
+      "en": "Service credential used by the control plane for Mem0 requests when memory is enabled. Required, nonblank and without CR or LF. Keep it in server-side secret configuration; it is not forwarded to the model, Hosted Harness, sandbox or MCP configuration.",
+      "zh": "开启记忆时，Control Plane 调用 Mem0 使用的服务凭据。必填、非空且不能含 CR 或 LF。应保存在服务端密钥配置中，不传入模型、Hosted Harness、沙箱或 MCP 配置。"
+    },
+    "qwen.managed-agent.memory.enabled": {
+      "en": "Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation.",
+      "zh": "是否提供个人记忆，默认为 false。仅在验证专用 Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。"
+    },
+    "qwen.managed-agent.memory.endpoint": {
+      "en": "Base URL of the dedicated Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane.",
+      "zh": "专用 Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。"
     },
     "qwen.managed-agent.message-relay.scan-delay": {
       "en": "How long the Session message relay waits between passes; each pass moves pending messages between Sessions (handover, receipt, acceptance) and settles those that cannot be delivered. Skipped on a node without an available Hosted Harness. Accepts a duration such as `2s`; a plain number is milliseconds.",
