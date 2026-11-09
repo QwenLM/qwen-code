@@ -881,6 +881,9 @@ export class MCPOAuthProvider {
 
     // Start callback server
     const callbackPromise = this.startCallbackServer(pkceParams.state);
+    // A superseding authorization can reject this before the browser launch
+    // finishes. Observe the early rejection; the await below still propagates it.
+    callbackPromise.catch(() => {});
 
     // Open browser securely
     try {
