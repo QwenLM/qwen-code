@@ -19,6 +19,7 @@ import {
   _setParserFailedForTesting,
 } from './shellAstParser.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
+import { normalizeMonitorCommand } from './shell-utils.js';
 
 // One expect per command, in order.
 async function expectRules(command: string, rules: string[]) {
@@ -485,6 +486,35 @@ describe('classifyShellCommandSafety', () => {
       'git remote get-url origin',
     ])('keeps %j read-only', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('read-only');
+    });
+
+    // Monitor and plan mode classify the text `normalizeMonitorCommand`
+    // rebuilds from a shell wrapper. The words after the script are its $0,
+    // $1, ...: git never gets them (R10-1).
+    it.each([
+      `bash -c 'git remote show origin' -n`,
+      `sh -c 'git remote show https://evil.example/leak' -n`,
+      `bash -c 'git remote show origin' 2>/dev/null -n`,
+    ])('asks about the wrapped %j', async (command) => {
+      const { safetyCommand } = normalizeMonitorCommand(command);
+      expect(await classifyShellCommandSafety(safetyCommand)).not.toBe(
+        'read-only',
+      );
+      expect(await isShellCommandReadOnlyAST(safetyCommand)).toBe(false);
+      expect(isShellCommandReadOnly(safetyCommand)).toBe(false);
+    });
+
+    it.each([
+      [`bash -c 'git remote show -n origin'`, 'read-only'],
+      [`bash -c 'git remote show -n origin' | head`, 'read-only'],
+      // The argv's operators still classify as written: plan mode blocks
+      // these writes rather than asking about them.
+      [`bash -c 'ls' ; rm target`, 'write'],
+      [`bash -c 'ls' && rm target`, 'write'],
+      [`bash -c 'ls' $0 ; rm target`, 'write'],
+    ])('classifies the wrapped %j as %s', async (command, expected) => {
+      const { safetyCommand } = normalizeMonitorCommand(command);
+      expect(await classifyShellCommandSafety(safetyCommand)).toBe(expected);
     });
 
     it('still classifies a write holding a carriage return as a write', async () => {

@@ -867,7 +867,7 @@ describe('normalizeMonitorCommand', () => {
     expectNormalized(
       `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
       'echo $(cat secret.txt)',
-      'echo $(cat secret.txt) ignored',
+      'echo $(cat secret.txt); ignored',
     );
   });
 
@@ -875,7 +875,7 @@ describe('normalizeMonitorCommand', () => {
     expectNormalized(
       `/bin/bash -c 'tail -f /tmp/app.log &' ignored`,
       'tail -f /tmp/app.log',
-      'tail -f /tmp/app.log ignored',
+      'tail -f /tmp/app.log; ignored',
       `/bin/bash -c 'tail -f /tmp/app.log' ignored`,
       true,
     );
@@ -885,8 +885,37 @@ describe('normalizeMonitorCommand', () => {
     expectNormalized(
       `/bin/bash -c 'echo ok' $(cat secret.txt)`,
       'echo ok',
-      'echo ok $(cat secret.txt)',
+      'echo ok; $(cat secret.txt)',
     );
+  });
+
+  // The words after the script are its $0, $1, ...: bash never hands them to
+  // the script's last command, so they must not read as its arguments.
+  it.each([
+    [`bash -c 'git remote show origin' -n`, 'git remote show origin; -n'],
+    [
+      `sh -c 'git remote show origin' -n origin`,
+      'git remote show origin; -n origin',
+    ],
+    // A redirection can come before them.
+    [
+      `bash -c 'git remote show origin' 2>/dev/null -n`,
+      'git remote show origin; 2>/dev/null -n',
+    ],
+    [`bash -c 'ls' &>/dev/null -n`, 'ls; &>/dev/null -n'],
+  ])('keeps the argv after %j out of the script', (command, safetyCommand) => {
+    expect(normalizeMonitorCommand(command).safetyCommand).toBe(safetyCommand);
+  });
+
+  // A control operator already starts a new command; a `;` in front of it
+  // would not parse.
+  it.each([
+    [`bash -c 'tail -f app.log' | grep ERROR`, 'tail -f app.log | grep ERROR'],
+    [`bash -c 'ls' && echo hi`, 'ls && echo hi'],
+    [`bash -c 'ls' || echo hi`, 'ls || echo hi'],
+    [`bash -c 'ls' ; rm target`, 'ls ; rm target'],
+  ])('joins %j at its control operator', (command, safetyCommand) => {
+    expect(normalizeMonitorCommand(command).safetyCommand).toBe(safetyCommand);
   });
 
   it('handles escaped whitespace in env-prefixed wrappers', () => {

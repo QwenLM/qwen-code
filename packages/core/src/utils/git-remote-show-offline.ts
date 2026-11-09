@@ -5,11 +5,11 @@
  */
 
 /**
- * Words bash hands a command exactly as written, separated by spaces or
- * tabs. None of these characters quotes, escapes, expands, globs, redirects,
- * comments or separates in bash, so any splitter reads the same words here.
+ * A word bash hands a command exactly as written. None of these characters
+ * quotes, escapes, expands, globs, redirects, comments or separates in bash,
+ * so any splitter reads the same words from text made of them.
  */
-const PLAIN_WORDS = /^[A-Za-z0-9._/:@%+=,-]+(?:[ \t]+[A-Za-z0-9._/:@%+=,-]+)*$/;
+const PLAIN_WORD = /^[A-Za-z0-9._/:@%+=,-]+$/;
 
 /** git stops reading options at either of these. */
 const OPTION_TERMINATORS = new Set(['--', '--end-of-options']);
@@ -28,9 +28,10 @@ const OPTION_TERMINATORS = new Set(['--', '--end-of-options']);
  * a positional, not the flag.
  */
 export function isOfflineRemoteShow(commandText: string): boolean {
-  const text = commandText.replace(/^[ \t]+|[ \t]+$/g, '');
-  if (!PLAIN_WORDS.test(text)) return false;
-  const words = text.split(/[ \t]+/);
+  // Split, then test each word: an end-anchored trim of blanks takes
+  // quadratic time on a long run of them.
+  const words = commandText.split(/[ \t]+/).filter((word) => word !== '');
+  if (!words.every((word) => PLAIN_WORD.test(word))) return false;
   const remote = words.indexOf('remote');
   const show = remote < 0 ? -1 : words.indexOf('show', remote + 1);
   if (show < 0) return false;

@@ -16,6 +16,7 @@ describe('isOfflineRemoteShow', () => {
     'git remote -v show -n origin',
     'git\tremote\tshow\t-n\torigin',
     '  git remote show -n origin  ',
+    '\t git remote show -n origin \t',
     'GIT_TRACE=1 git remote show -n origin',
     'git remote show -n --end-of-options origin',
   ])('proves -n in %j', (command) => {
@@ -29,6 +30,8 @@ describe('isOfflineRemoteShow', () => {
     ['no show', 'git remote -n'],
     ['no remote', 'git show -n'],
     ['show before remote', 'git show remote -n'],
+    ['blanks only', ' \t '],
+    ['empty text', ''],
   ])('finds no -n with %s', (_label, command) => {
     expect(isOfflineRemoteShow(command)).toBe(false);
   });

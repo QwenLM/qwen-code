@@ -124,7 +124,7 @@ describe('plan-mode shell policy', () => {
 
   it('classifies monitor safetyCommand rather than the wrapper', async () => {
     await expect(
-      evaluate("/bin/bash -c 'git status &' ignored", {
+      evaluate("/bin/bash -c 'git status &'", {
         toolName: ToolNames.MONITOR,
       }),
     ).resolves.toMatchObject({ classification: 'read-only' });
@@ -133,6 +133,20 @@ describe('plan-mode shell policy', () => {
         toolName: ToolNames.MONITOR,
       }),
     ).resolves.toMatchObject({ classification: 'unknown' });
+  });
+
+  it('asks about words after a monitor wrapper script', async () => {
+    // They are the script's $0, $1, ..., not arguments of its last command,
+    // so they classify as a command of their own: a `-n` there does not
+    // keep `git remote show` offline (R10-1).
+    for (const command of [
+      "/bin/bash -c 'git status &' ignored",
+      "bash -c 'git remote show origin' -n",
+    ]) {
+      await expect(
+        evaluate(command, { toolName: ToolNames.MONITOR }),
+      ).resolves.toMatchObject({ classification: 'unknown' });
+    }
   });
 
   it('does not apply outside Plan mode or to non-shell tools', async () => {

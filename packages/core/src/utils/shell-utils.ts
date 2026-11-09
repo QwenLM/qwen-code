@@ -1599,6 +1599,26 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
   }
 }
 
+/**
+ * The safety text for a shell wrapper's script and the argv after it, as
+ * `spawnCommand` runs them: the argv follows the script on the same line.
+ * Words there are the script's `$0`, `$1`, …, never arguments of its last
+ * command, so they join behind a `;`: `bash -c 'git remote show origin' -n`
+ * must not read as `git remote show origin -n`, which proves an offline
+ * `git remote show` the shell never runs (#14359). Their expansions still
+ * run, and still classify. An argv that opens with a control operator
+ * (`| grep x`, `&& echo hi`, `; rm x`) already starts a new command and
+ * joins with a blank, so it classifies as written. A `;` in front would not
+ * parse, and `bash -c 'ls' ; rm x` would turn from a write, which plan mode
+ * blocks, into an unknown, which it only asks about.
+ */
+function joinScriptAndArgsSuffix(script: string, argsSuffix: string): string {
+  if (!argsSuffix) return script;
+  if (!script) return argsSuffix.trim();
+  const separator = /^(?:[|;]|&(?!>))/.test(argsSuffix) ? ' ' : '; ';
+  return `${script}${separator}${argsSuffix}`.trim();
+}
+
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
@@ -1614,15 +1634,12 @@ export function normalizeMonitorCommand(
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
   // flags are preserved in spawnCommand, but are not converted into Bash(...)
   // command-rule surface.
-  const safetyParts = [
-    ...(wrapperTokens ? leadingEnvTokens : []),
-    analysisCommand,
-    ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
-  ];
-  const safetyCommand =
-    wrapperTokens && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
-      : analysisCommand;
+  const safetyCommand = wrapperTokens
+    ? joinScriptAndArgsSuffix(
+        [...leadingEnvTokens, analysisCommand].join(' ').trim(),
+        normalizedInnerArgsSuffix,
+      )
+    : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
