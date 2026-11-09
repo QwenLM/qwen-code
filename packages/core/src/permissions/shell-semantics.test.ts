@@ -612,9 +612,11 @@ describe('extractShellOperations', () => {
     },
   );
 
-  // A quoted word before a descriptor duplication leaves no file behind.
-  it("keeps '>'>&1 as fd duplication", () => {
+  // A quoted word before a descriptor operation keeps its fd semantics.
+  it('keeps fd redirects after a quoted word', () => {
     expect(ops("echo hi '>'>&1")).toEqual([]);
+    expect(ops("echo hi '>'>&-")).toEqual([]);
+    expect(ops("echo hi '>'>&out2.txt")).toEqual([write(`${CWD}/out2.txt`)]);
   });
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
