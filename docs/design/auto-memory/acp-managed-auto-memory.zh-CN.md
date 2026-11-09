@@ -274,7 +274,7 @@ this.config.getLlmClient().recordCompletedToolCall(toolName, args);
 
 这让召回的最近工具噪声过滤与交互式会话保持一致。由重复历史提供结果的调用不会进入 `runTool()`，因此不计数；已取消的调用仍被排除。成功终止与以错误终止的工具都计数，与交互式路径一致。不新增 ACP 专用的最近工具收集。
 
-这也会更新该方法现有的工具调用计数与 skill 写入标记。ACP 不会调用交互式的 auto-skill 调度器，因此本 PR 不为 ACP 增加任何 auto-skill 行为。
+这也会更新该方法现有的工具调用计数与 skill 写入标记。共享模型轮次把 auto-skill 评审交给 `LlmClient`，由它在自己的工具轮次里执行；legacy 轮次不经过那条路径，因此由持有轮后工作的 ACP 分支自行调用 `runManagedAutoSkillReview()`，并取走它入队的 promise。
 
 ## 端到端流程
 

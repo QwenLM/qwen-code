@@ -414,8 +414,10 @@ are both counted, matching the interactive path. No ACP-specific recent-tool
 collection is added.
 
 This also updates the method's existing tool-call count and skill-write marker.
-ACP does not invoke the interactive auto-skill scheduler, so this PR adds no ACP
-auto-skill behavior.
+The shared model round leaves auto-skill review to `LlmClient`, which runs it on
+its own tool turns; the legacy round never reaches that path, so the ACP branch
+that owns post-turn work calls `runManagedAutoSkillReview()` itself and drains
+the promise it queues.
 
 ## End-to-end flow
 
