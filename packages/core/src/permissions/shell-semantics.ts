@@ -136,6 +136,26 @@ function tokenize(
   // once, when its quote closes, exactly like `decodeAnsiCWord`
   // (#16540 review, R1-4 second round).
   let ansiCBytes: number[] | null = null;
+  // A word can be empty and still be a word: `cd $''` and `cd ''` hand bash an
+  // empty argument, which fails the cd, and the merge base tokenized it that way.
+  // Dropping it made the target slot undefined, so the `?? process.env['HOME']`
+  // fallback resolved the cwd to $HOME with no `cwdUnknown` flag while bash never
+  // left the directory (#16540 review, R4-2).
+  let wordStarted = false;
+  // `pushToken` drops an empty token, so an empty word is pushed here directly:
+  // it carries no redirect syntax and no braces, only the fact that bash saw an
+  // argument (#16540 review, R4-2).
+  const endWord = () => {
+    if (current) {
+      pushToken(tokens, bares, current, bare, fdRedirects, fdCloses);
+    } else {
+      tokens.push('');
+      bares?.push('');
+    }
+    current = '';
+    bare = '';
+    wordStarted = false;
+  };
   const pushAnsiCBytes = (bytes: Iterable<number>) => {
     if (ansiCBytes === null) ansiCBytes = [];
     for (const byte of bytes) ansiCBytes.push(byte);
@@ -244,6 +264,14 @@ function tokenize(
       // word it interrupts — so `git commit \<newline>--amend` is the plain
       // two-word invocation, not a token containing a newline.
       if (command[i + 1] === '\n') {
+        // bash removes the continuation before reading the next character, so a
+        // pending `$$` lookahead survives it: in `echo x $\<newline>$'a\' >
+        // /etc/passwd` the second `$` is the PID and the quote after it is an
+        // ordinary quote. Clearing the flag here let that `$` open an ANSI-C word
+        // which `\'` never closes, so the redirect was never flushed and the
+        // write vanished (#16540 review, R4-1). rule-parser.ts:1095-1099 restores
+        // the same flag across a segment boundary.
+        dollarPending = dollarIntroducer;
         i++;
         continue;
       }
@@ -261,11 +289,13 @@ function tokenize(
       if (command[next] === "'" && !dollarIntroducer) {
         inAnsiC = true;
         ansiCBytes = [];
+        wordStarted = true;
         i = next;
         continue;
       }
       if (command[next] === '"' && !dollarIntroducer) {
         inDouble = true;
+        wordStarted = true;
         i = next;
         continue;
       }
@@ -273,24 +303,24 @@ function tokenize(
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
+      wordStarted = true;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      wordStarted = true;
       continue;
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      if (current) {
-        pushToken(tokens, bares, current, bare, fdRedirects, fdCloses);
-        current = '';
-        bare = '';
+      if (current || wordStarted) {
+        endWord();
       }
       continue;
     }
     current += ch;
     bare += inSingle || inDouble ? '0' : '1';
   }
-  if (current) pushToken(tokens, bares, current, bare, fdRedirects, fdCloses);
+  if (current || wordStarted) endWord();
   return tokens;
 }
 
@@ -485,7 +515,7 @@ function extractRedirects(
   cwd: string,
   fdRedirects: ReadonlySet<number>,
   fdCloses: ReadonlySet<number> = new Set(),
-  bares?: readonly string[],
+  bares?: string[],
 ): RedirectResult {
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
@@ -613,10 +643,18 @@ function extractRedirects(
     }
   }
 
-  // Remove redirect tokens from the array in-place
+  // Remove redirect tokens from the array in-place, compacting the index-parallel
+  // marking with the SAME index set. Callers read a token's marking by position,
+  // so filtering one array without the other desyncs every later index
+  // (#16540 review, R3-2).
   const filtered = tokens.filter((_, idx) => !toRemove.has(idx));
   tokens.length = 0;
   tokens.push(...filtered);
+  if (bares !== undefined) {
+    const filteredBares = bares.filter((_, idx) => !toRemove.has(idx));
+    bares.length = 0;
+    bares.push(...filteredBares);
+  }
 
   return { readFiles, writeFiles };
 }
@@ -2355,11 +2393,10 @@ function resolveCdTargetCwd(
   const fdCloses = new Set<number>();
   const bares: string[] = [];
   const words = tokenize(command, fdRedirects, fdCloses, bares);
-  // `bares` is index-parallel to the tokens as tokenized, and extractRedirects
-  // filters `words` in place, so read the cd target and its marking from a
-  // snapshot taken first (#16540 review, R3-2).
-  const shellWords = words.slice();
-  const shellBares = bares.slice();
+  // extractRedirects compacts `words` and `bares` together, so the target and its
+  // marking are read from the filtered arrays: a redirect written BEFORE the
+  // directory (`cd 2>/dev/null /etc`) is gone by then, and reading a pre-filter
+  // snapshot made that redirect the cwd (#16540 review, R3-2 fix-induced).
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
 
   if (words[0] === 'popd') return { kind: 'dynamic', redirects };
@@ -2375,30 +2412,34 @@ function resolveCdTargetCwd(
   // `cd -` (previous directory) which is non-static and should bail out.
   let targetIndex = 1;
   while (
-    targetIndex < shellWords.length &&
-    shellWords[targetIndex]!.startsWith('-') &&
-    shellWords[targetIndex] !== '-' &&
-    shellWords[targetIndex] !== '--'
+    targetIndex < words.length &&
+    words[targetIndex]!.startsWith('-') &&
+    words[targetIndex] !== '-' &&
+    words[targetIndex] !== '--'
   ) {
     targetIndex++;
   }
-  if (shellWords[targetIndex] === '--') {
+  if (words[targetIndex] === '--') {
     targetIndex++;
   }
 
-  const target = shellWords[targetIndex] ?? process.env['HOME'];
+  const target = words[targetIndex] ?? process.env['HOME'];
   if (!target || target === '-' || isDynamicShellPath(target)) {
     return { kind: 'dynamic', redirects };
   }
-  const targetBare = shellBares[targetIndex];
+  const targetBare = bares[targetIndex];
   // A target the shell had to decode (`cd $'\x7e'` is the literal directory
   // `~`, never $HOME) may not exist at all — bash then fails the cd and the
   // rest of the segment runs where it already was — so resolve it without
-  // tilde expansion and keep the fail-closed marking.
+  // tilde expansion and keep the fail-closed marking. An ABSOLUTE target does
+  // not depend on the cwd whichever way the cd goes, exactly like an unquoted
+  // absolute path, so quoting alone must not escalate every later write in the
+  // segment (#16540 review, R4-7).
   const targetIsDecoded =
     targetBare !== undefined &&
     targetBare.length === target.length &&
-    !targetBare.includes('1');
+    !targetBare.includes('1') &&
+    !isShellAbsolutePath(target);
 
   return {
     kind: 'static',

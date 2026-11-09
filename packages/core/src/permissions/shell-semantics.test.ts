@@ -1025,3 +1025,57 @@ describe('fully quoted wrapper payload stays visible to op extraction', () => {
 // R12-1 (#16075): an expanded program word is an amend only when its assigned
 // value can yield `git commit --amend` (or is genuinely unresolvable), not for
 // every assigned name.
+
+describe('round-4 lexing regressions', () => {
+  // R4-1 (#16540 review): bash removes a `\`+newline before reading the next
+  // character, so the `$$` PID lookahead survives it. Clearing the pending flag
+  // on the continuation made the second `$` open an ANSI-C word that `\'` never
+  // closes, and the redirect was never flushed (witnessed with bash 5.3.20: both
+  // spellings exit 0 and write identical bytes).
+  it('keeps the $$ lookahead across a continuation', () => {
+    expect(across("echo x $\\\n$'a\\' > /etc/motd")).toEqual(
+      across("echo x $$'a\\' > /etc/motd"),
+    );
+    expect(across("echo x $\\\n$'a\\' > /etc/motd")).toEqual([
+      write('/etc/motd'),
+    ]);
+  });
+
+  // R4-2: `cd $''` and `cd ''` hand bash an empty argument, the cd fails ("null
+  // directory") and the write lands in the original cwd. Dropping the empty word
+  // left the target slot undefined, so the `$HOME` fallback invented a phantom
+  // path and flagged nothing. A bare `cd` really does go to $HOME and is
+  // untouched here.
+  it.each(["cd $''; echo x > settings.json", "cd ''; echo x > settings.json"])(
+    'fails closed on an empty cd target: %s',
+    (command) => {
+      expect(across(command)).toEqual([uncertainWrite('/repo/settings.json')]);
+    },
+  );
+
+  // R3-2 (fix-induced): a redirect written BEFORE the directory is filtered out
+  // of the token list, so the target and its marking must be read from the
+  // filtered arrays. A pre-filter snapshot made the redirect itself the cwd.
+  it('reads the cd target after redirects are filtered out', () => {
+    expect(across('cd 2>/dev/null /etc && echo x > passwd')).toEqual([
+      write('/etc/passwd'),
+    ]);
+    expect(across('cd >/dev/null /tmp ; cat > f')).toEqual([write('/tmp/f')]);
+    // The marking array must stay index-parallel with the tokens: a quoted
+    // target standing behind a redirect is still a literal directory, and an
+    // off-by-N marking would read it as typed and expand `~` to $HOME.
+    expect(across("cd 2>/dev/null '~'; echo x > settings.json")).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  // R4-7: quoting alone does not make a statically known absolute target
+  // uncertain, while `cd '~'` stays uncertain because `~` is then a literal
+  // directory that may not exist at all.
+  it('does not escalate a quoted absolute cd target', () => {
+    expect(across('cd "/tmp" ; cat > f')).toEqual([write('/tmp/f')]);
+    expect(across("cd '~'; echo x > settings.json")).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+});
