@@ -4670,6 +4670,33 @@ describe('ManagedSessionsPage', () => {
     ).toContain('Processing. New messages will be queued.');
   });
 
+  it('resolves the host override as processing for a running turn without the queue API', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { phase: 'running' }),
+    );
+    // No userMessages provider: supported stays false while the turn runs.
+    // The override must classify the state exactly like the fallback does.
+    provider.userMessages = undefined as never;
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+        composerPlaceholders: {
+          idle: 'Ask about this repo',
+          processing: 'Working on it…',
+        },
+      },
+    );
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Working on it…');
+  });
+
   it('hides the managed session header when the host already shows identity', async () => {
     const target = document.createElement('div');
     // Default: the header row carries the session identity.
@@ -4903,6 +4930,9 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.placeholderText).toBe(
       'Type a message or @ file path',
     );
+    // submit() drops every send in this state, so the composer must read
+    // disabled instead of silently discarding input.
+    expect(mocks.editorProps?.disabled).toBe(true);
   });
 
   it('renders the host composer footer instead of managed fixed-model hints', async () => {

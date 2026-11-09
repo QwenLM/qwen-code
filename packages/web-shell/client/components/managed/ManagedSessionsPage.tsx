@@ -42,7 +42,10 @@ import {
   getManagedClientId,
   managedRequestId,
 } from './managed-session-storage';
-import { getComposerPlaceholderKey } from '../../utils/composerInputState';
+import {
+  getComposerPlaceholderKey,
+  getComposerPlaceholderState,
+} from '../../utils/composerInputState';
 import { useManagedFileReferences } from './use-managed-file-references';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
@@ -1717,6 +1720,7 @@ function ManagedSessionsContent({
     !interactive ||
     busy ||
     restoreBusy ||
+    pendingRestoreFailed ||
     Boolean(pending) ||
     lifecycle.blocked(sessionId) ||
     modelChange.blocked ||
@@ -2737,23 +2741,21 @@ function ManagedSessionsContent({
                     ? (() => {
                         // Resolve exactly like the ordinary composer in App:
                         // the host override map wins per state, otherwise the
-                        // localized default for that state. A running turn is
-                        // "processing", and a non-managed queue needs the same
-                        // userMessages.supported operand the ordinary path
-                        // checks before promising to queue.
-                        const state =
-                          (Boolean(active) && userMessages.supported) || busy
-                            ? 'processing'
-                            : 'idle';
-                        const custom = composerPlaceholders?.[state];
+                        // localized default for that state. Both halves read
+                        // the same classifier, so a running turn without the
+                        // user-messages API and the mount restore window are
+                        // "processing" for the override too.
+                        const input = {
+                          isPreparingPrompt: busy || restoreBusy,
+                          isStreaming: Boolean(active),
+                        };
+                        const custom =
+                          composerPlaceholders?.[
+                            getComposerPlaceholderState(input)
+                          ];
                         return custom?.trim()
                           ? custom
-                          : t(
-                              getComposerPlaceholderKey({
-                                isPreparingPrompt: busy || restoreBusy,
-                                isStreaming: Boolean(active),
-                              }),
-                            );
+                          : t(getComposerPlaceholderKey(input));
                       })()
                     : active && userMessages.supported
                       ? 'managed.queue.placeholder'

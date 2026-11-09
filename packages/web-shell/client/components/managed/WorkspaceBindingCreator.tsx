@@ -25,7 +25,10 @@ import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
 import { WelcomeHeader, type WelcomeHeaderProps } from '../WelcomeHeader';
-import { getComposerPlaceholderKey } from '../../utils/composerInputState';
+import {
+  getComposerPlaceholderKey,
+  getComposerPlaceholderState,
+} from '../../utils/composerInputState';
 import {
   useWebShellCustomization,
   type ComposerFooterRenderer,
@@ -417,7 +420,6 @@ export function WorkspaceBindingCreator({
   );
   const agentId = selectedPreset?.agentId ?? binding.agentId;
   const modelId = selectedPreset?.modelId;
-  const welcomeModel = modelId ?? agentId;
 
   const [nextCursor, setNextCursor] = useState<string>();
   const [supported, setSupported] = useState(false);
@@ -742,6 +744,20 @@ export function WorkspaceBindingCreator({
       : undefined;
   const composerFooterModel =
     pending?.modelId ?? pending?.agentId ?? selectedModel;
+  // One predicate for the editor, the host footer and the placeholder: the
+  // creation screen has no turn, so every preparing/blocked window disables
+  // the composer and reads as "processing" for the host override map.
+  const composerPreparing =
+    busy || loading || optionsLoading || fileReferences.busy;
+  const composerBlocked =
+    !interactive ||
+    composerPreparing ||
+    workspaceSelectionBlocked ||
+    workspaceCreating ||
+    Boolean(pending) ||
+    !approvalReady ||
+    !worktreeReady ||
+    worktreePopoverOpen;
 
   async function loadMore() {
     const abort = lifetime.current;
@@ -1763,9 +1779,9 @@ export function WorkspaceBindingCreator({
             {(() => {
               const welcomeProps = {
                 version: '',
-                cwd: '',
-                currentModel: welcomeModel,
-                currentMode: '',
+                cwd: cwdRelative,
+                currentModel: composerFooterModel,
+                currentMode: displayedApprovalMode ?? '',
               };
               return (
                 <>
@@ -2008,16 +2024,7 @@ export function WorkspaceBindingCreator({
                   : undefined
               }
               composerInputVersion={0}
-              disabled={
-                !interactive ||
-                busy ||
-                workspaceSelectionBlocked ||
-                workspaceCreating ||
-                Boolean(pending) ||
-                !approvalReady ||
-                !worktreeReady ||
-                worktreePopoverOpen
-              }
+              disabled={composerBlocked}
               dialogOpen={
                 !interactive ||
                 workspaceDialogOpen ||
@@ -2027,20 +2034,21 @@ export function WorkspaceBindingCreator({
                 worktreesOpen ||
                 worktreePopoverOpen
               }
-              isPreparing={
-                busy || fileReferences.busy || loading || optionsLoading
-              }
+              isPreparing={composerPreparing}
               placeholderText={
                 alignManagedChatWithHost
                   ? // The host override map wins per state, otherwise the
-                    // ordinary composer's localized default — the same
-                    // resolution App applies.
+                    // ordinary composer's localized default — both halves
+                    // read the same classifier App applies.
                     composerPlaceholders?.[
-                      busy ? 'processing' : 'idle'
+                      getComposerPlaceholderState({
+                        isPreparingPrompt: composerPreparing,
+                        isStreaming: false,
+                      })
                     ]?.trim() ||
                     t(
                       getComposerPlaceholderKey({
-                        isPreparingPrompt: busy,
+                        isPreparingPrompt: composerPreparing,
                         isStreaming: false,
                       }),
                     )
@@ -2055,8 +2063,10 @@ export function WorkspaceBindingCreator({
               const Footer = renderComposerFooter;
               return Footer ? (
                 <Footer
-                  disabled={busy || workspaceCreating || Boolean(pending)}
-                  isRunning={busy}
+                  disabled={composerBlocked}
+                  // The creation screen never runs a turn: only the creation
+                  // request itself is running work, not the restore window.
+                  isRunning={workspaceCreating}
                   currentMode={displayedApprovalMode ?? ''}
                   currentModel={composerFooterModel}
                 />

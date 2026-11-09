@@ -530,8 +530,28 @@ function StandaloneSessionGate({
       STANDALONE_SESSIONS_CAPABILITY,
     ) === true;
 
+  // Same selection rule as the render below: a managed view never resolves a
+  // daemon standalone session, even on a daemon that advertises the
+  // capability — otherwise the discarded resolution still issues lookup
+  // ladders in the background.
+  const managedProvided =
+    appProps.managedAgentProvider !== undefined &&
+    managedSelectionFromRoute(
+      navigation?.route,
+      hasManagedLocalTarget({
+        ...workspaceProviderProps,
+        sessionId,
+        sessionContext,
+      }),
+    ).open;
+
   useEffect(() => {
-    if (sessionContext?.kind !== 'standalone' || !standaloneSupported) return;
+    if (
+      sessionContext?.kind !== 'standalone' ||
+      !standaloneSupported ||
+      managedProvided
+    )
+      return;
     const generation = resolutionGenerationRef.current + 1;
     resolutionGenerationRef.current = generation;
     setResolutionSessionId(sessionId);
@@ -601,6 +621,7 @@ function StandaloneSessionGate({
     sessionId,
     sessionContext?.kind,
     standaloneSupported,
+    managedProvided,
     workspace.client,
   ]);
 
@@ -618,16 +639,6 @@ function StandaloneSessionGate({
 
   const capabilities = workspace.capabilities;
   // 与 workspace 分支同口径：只有 managed 视图才豁免 daemon 门禁，本地会话目标始终保留。
-  const managedProvided =
-    appProps.managedAgentProvider !== undefined &&
-    managedSelectionFromRoute(
-      navigation?.route,
-      hasManagedLocalTarget({
-        ...workspaceProviderProps,
-        sessionId,
-        sessionContext,
-      }),
-    ).open;
   if (!managedProvided && workspace.status === 'error') {
     return (
       <WorkspaceUnavailableState
@@ -673,10 +684,11 @@ function StandaloneSessionGate({
   // A managed view carrying a standalone context (a bookmarked
   // `?context=standalone&managed=1` on a host that does not mount
   // ManagedStandaloneApp, or the managed→standalone transition window) never
-  // resolves a daemon standalone session — the resolver effect early-returns
-  // on `!standaloneSupported`, which is exactly what the exemption above
-  // removed. Return before the resolution ladder so the view renders the
-  // managed page instead of stranding on "Resolving session…".
+  // resolves a daemon standalone session: the resolver effect above carries
+  // the same `managedProvided` guard, so no lookup ladder runs even on a
+  // daemon that advertises the capability. Return before the resolution
+  // states so the view renders the managed page instead of stranding on
+  // "Resolving session…".
   if (managedProvided) {
     return <WorkspaceSessionProviderWorkspace {...routedProps} />;
   }

@@ -42,9 +42,15 @@ export function managedSelectionFromUrl(defaultOpen = false): {
  * `managed=0` and every explicit local session target keep the daemon view.
  *
  * Keep this rule in one place: `WorkspaceSessionProvider` sits above `App` and
- * wraps both branches, so it must classify the view exactly like App does. Both
- * call sites pass the host's local target (`hasLocalTarget`) — App derives it
- * from its own props — so a route-less host can never split the classification.
+ * wraps both branches, so it must classify the view like App does. The two
+ * call sites deliberately pass different local-target operands: the provider
+ * passes the props-derived `hasManagedLocalTarget`, while App passes its
+ * `StandaloneContext` flag (the standalone embedding gates App in only for
+ * local targets, and the managed-only shell defaults to the managed home).
+ * Every in-tree entry point supplies `urlNavigation`, so the route arm wins
+ * and the operands agree; a route-less host that mounts App directly with a
+ * session id but no standalone context can still split the classification,
+ * which is a known limitation of that embedding shape, not a parity claim.
  */
 export function managedSelectionFromRoute(
   route: { page: string; sessionId?: string } | undefined,

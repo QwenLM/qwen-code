@@ -644,6 +644,26 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(container.textContent).not.toContain('Resolving session');
   });
 
+  it('skips the resolution ladder for a managed view even when the daemon advertises standalone sessions', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    // The capability alone must not start lookups the managed early return
+    // would discard: the resolver effect carries the same managed guard.
+    (mocks.workspace.capabilities as { features: string[] }).features.push(
+      'standalone_sessions_v1',
+    );
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ managedAgentProvider: { canCancel: true } }}
+        />,
+      );
+    });
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+  });
+
   it.each([
     '/session/old-runtime?workspace=missing',
     '/app/session/old-runtime?workspace=missing',
