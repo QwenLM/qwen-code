@@ -539,6 +539,17 @@ export function startSessionPrRefreshTimer(deps: {
   // watch seam while the switch is off (switch-off parity).
   let activeWatchDir: string | undefined;
   let running = false;
+  // The observation holds the owner record for the whole tick, and the drain
+  // state cannot see that phase, so shutdown waits on the tick itself too.
+  const tickWaiters = new Set<() => void>();
+  const tickIdle = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      if (!running) {
+        resolve();
+        return;
+      }
+      tickWaiters.add(resolve);
+    });
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
@@ -656,6 +667,8 @@ export function startSessionPrRefreshTimer(deps: {
       }
     } finally {
       running = false;
+      for (const resolve of tickWaiters) resolve();
+      tickWaiters.clear();
     }
   };
   const first = setTimeout(() => void tick(), FIRST_RUN_DELAY_MS);
@@ -670,9 +683,9 @@ export function startSessionPrRefreshTimer(deps: {
     dispose,
     /**
      * Stop the PR watch in the order master §2 requires: stop the timer, let
-     * in-flight restores and admissions settle, then release the owner record.
-     * A daemon that never ran the gated block has nothing to stop and reads no
-     * seam, so the off state stays inert through shutdown too.
+     * the in-flight observation, restores and admissions settle, then release
+     * the owner record. A daemon that never ran the gated block has nothing to
+     * stop and reads no seam, so the off state stays inert through shutdown too.
      */
     async stopWatch(): Promise<void> {
       if (activeWatchDir === undefined) {
@@ -683,6 +696,7 @@ export function startSessionPrRefreshTimer(deps: {
         state: prDrainState,
         watchDir: activeWatchDir,
         stopTimer: dispose,
+        waitForTick: tickIdle,
         log: (message) => process.stderr.write(`[serve] ${message}\n`),
       });
     },

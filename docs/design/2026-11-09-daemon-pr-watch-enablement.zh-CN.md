@@ -8,7 +8,7 @@
 
 drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。由此有三个后果，每一个在 PR B 打开开关的那一刻就是缺陷：
 
-- 休眠接收者永远无法被唤醒。真实 restore 位于 `restoreSessionHandler`——`registerSessionRoutes` 内约 650 行的闭包（`packages/cli/src/serve/routes/session.ts:4270-4922`），只能经 HTTP 到达。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1065-1071`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
+- 休眠接收者永远无法被唤醒。真实 restore 位于 `restoreSessionHandler`——`registerSessionRoutes` 内约 650 行的闭包（`packages/cli/src/serve/routes/session.ts:4273-4922`），只能经 HTTP 到达。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1057-1063`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
 - `wakeDormant: false` 会永久搁浅条目。drain 把它们留到会话下一次 live turn，但没有 resume 后 drain 的钩子，因此无人消费。
 - 关停会与后继者重叠。没有任何东西停止 watch 或释放 owner 记录，因此后继 daemon 可能在前任的 restore 与准入仍在途时就 claim（主 §2）。
 
@@ -16,14 +16,14 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 ## 现状
 
-- **restore 是路由局部的。** handler 形如 `(action: 'load' | 'resume') => async (req, res) => …`。可复用核心是从 archive coordinator 共享锁（`session.ts:4494`）起，经 bridge 的 `loadSession`/`resumeSession`、`cleanupRestoredSession`（`4800-4815`）、worktree 复挂（`reconcileRestoredSessionWorktree`，已是 `927` 处模块级、全参数注入的函数）到 deferred question 点火。该核心不碰 `req`/`res`。HTTP 耦合集中在五处：把 400 写进 `res` 的输入解析 helper；`resolveRuntimeForSessionRestore`（`2177-2296`，把六种失败写进 `res` 并返回 `undefined`）；`setDaemonTelemetryWorkspace(res, …)`；三处 `!res.writable` 断连清理；以及响应 shaping（`withPromptTerminals` / `redactSdkSurfaceReplay` / 200 JSON）。
-- **typed error 已经是纯的。** `SessionNotFoundError`、`WorktreeSessionSupersededError`、restore 冲突与 session 限额错误都以类的形式存在，之后才由 `sendBridgeError` 翻译成 wire 形状（`server/error-response.ts`）。进程内调用方可直接按类分拣，无需任何 HTTP 参与。429 限流是全局中间件（`rate-limit.ts:277-290`），进程内调用者天然不会遇到。
-- **两把锁与 detach 都幂等。** `RequestedSessionIdReservation.release()` 由 `released` 布尔门守卫（`server/session-id-admission.ts:212-229`）；worktree ownership op 的 release 同理（`server/worktree-ownership-op.ts:52-61`）；`bridge.detachClient` 对未知 client no-op，否则递减引用计数。最后一个 client 离开会触发 idle close——这正是 drain 必须释放它所铸造 registration 的原因。
-- **channel 的 wake 生命周期是范本。** `createBoundSessionsAccessor` 的 `wake` 调 SDK resume 并返回 `restored.detach`；`deliverPrompt` 在 prompt 落定后于 `finally` 中释放，绝不在重试之前（`daemon-worker.ts:534-690`）。其 Gone 集是 404 加 409 的 `session_archived`、`worktree_session_superseded`、`worktree_marker_missing`、`worktree_reset_interrupted`；其余皆临时。
+- **restore 是路由局部的。** handler 形如 `(action: 'load' | 'resume') => async (req, res) => …`。可复用核心是从 archive coordinator 共享锁（`session.ts:4498`）起，经 bridge 的 `loadSession`/`resumeSession`、`cleanupRestoredSession`（`4803-4819`）、worktree 复挂（`reconcileRestoredSessionWorktree`，已是 `930` 处模块级、全参数注入的函数）到 deferred question 点火。该核心不碰 `req`/`res`。HTTP 耦合集中在五处：把 400 写进 `res` 的输入解析 helper；`resolveRuntimeForSessionRestore`（`2180-2299`，把六种失败写进 `res` 并返回 `undefined`）；`setDaemonTelemetryWorkspace(res, …)`；三处 `!res.writable` 断连清理；以及响应 shaping（`withPromptTerminals` / `redactSdkSurfaceReplay` / 200 JSON）。
+- **typed error 已经是纯的。** `SessionNotFoundError`、`WorktreeSessionSupersededError`、restore 冲突与 session 限额错误都以类的形式存在，之后才由 `sendBridgeError` 翻译成 wire 形状（`server/error-response.ts`）。进程内调用方可直接按类分拣，无需任何 HTTP 参与。429 限流是全局中间件（`rate-limit.ts:277-289`），进程内调用者天然不会遇到。
+- **两把锁与 detach 都幂等。** `RequestedSessionIdReservation.release()` 由 `released` 布尔门守卫（`session-id-admission.ts:212-229`）；worktree ownership op 的 release 同理（`server/worktree-ownership-op.ts:52-60`）；`bridge.detachClient` 对未知 client no-op，否则递减引用计数。最后一个 client 离开会触发 idle close——这正是 drain 必须释放它所铸造 registration 的原因。
+- **channel 的 wake 生命周期是范本。** `createBoundSessionsAccessor` 的 `wake` 调 SDK resume 并返回 `restored.detach`；`deliverPrompt` 在 prompt 落定后于 `finally` 中释放，绝不在重试之前（`daemon-worker.ts:1127-1134` and `692-703`）。其 Gone 集是 404 加 409 的 `session_archived`、`worktree_session_superseded`、`worktree_marker_missing`、`worktree_reset_interrupted`；其余皆临时。
 - **drain 的接缝已就绪。** `PrWatchDrainDeps` 已声明 `wakeSession`、`admitPrompt`、`readPushedHeads`、`resolveRuntime`、`isSessionLive`、`scanBindings`、`actions`、`wakeDormant`；`runPrWatchDrainTick` 已接受调用方的 `coveragePartial`。`admitSessionPrompt` 已抽取且可进程内调用（#16543）。
 - **timer 填充有先例。** `run-qwen-serve.ts:7611` 在 app 存在之前启动 refresh timer，并经 late-bound getter 取得 archive coordinator。watch deps 必须沿用同一形状。
-- **lifecycle 有 drain 注册表。** `ServeAppLifecycleController.addAppDrain`（`serve-app-lifecycle.ts:118`）汇入 `closeOnce`（`198`），后者在关闭 listener 之前跑完 drains；`server.ts:4421` 是既有注册例。
-- **host 发现有积木但无枚举器。** `resolveGithubWebOrigin(baseUrl)`（`packages/channels/github/src/web-origin.ts:14`）把 channel 的 `baseUrl` 映射为其 web origin；`resolveChannelWorkspaceGroups`（`serve/channel-workspace-grouping.ts:128`）已施加 channel 托管所用的信任门控。`gh` 自己配置的 hosts 在任何地方都没有被枚举——adapter 只经 `gh auth token --hostname` 一次查一个主机，并在 `GithubAdapter.ts:133-141` 记录了 go-gh 的 ConfigDir 优先级。
+- **lifecycle 有 drain 注册表。** `ServeAppLifecycleController.addAppDrain`（`serve-app-lifecycle.ts:118`）汇入 `closeOnce`（`198`），后者先封准入，再并发启动每个 drain 与 listener 关闭，并用 `Promise.allSettled` 一并等待——任一 drain reject 都会让 `close()` 抛错。`server.ts:4440` 是既有注册例。
+- **host 发现有积木但无枚举器。** `resolveGithubWebOrigin(baseUrl)`（`packages/channels/github/src/web-origin.ts:14`）把 channel 的 `baseUrl` 映射为其 web origin；`resolveChannelWorkspaceGroups`（`serve/channel-workspace-grouping.ts:128`）已施加 channel 托管所用的信任门控。`gh` 自己配置的 hosts 在任何地方都没有被枚举——adapter 只经 `gh auth token --hostname` 一次查一个主机，并在 `GithubAdapter.ts:136-147` 记录了 go-gh 的 ConfigDir 优先级。
 
 ## 目标
 
@@ -64,9 +64,13 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 ### 3. lifecycle close 重排
 
-注册一个 app drain，依次：停止 refresh timer；等待 drain 的在途 restore 与准入落定；然后经 `releasePrWatchOwnershipSync` 释放 owner 记录。经 `addAppDrain` 注册使它进入 `closeOnce` 的 drain 集合，该集合在关闭 listener 之前完成。
+注册一个 app drain，依次：停止 refresh timer；等待持有 claim 的 refresh tick 与 drain 的在途 restore 与准入落定；然后经 `releaseOwnedPrWatchSync` 释放 owner 记录。经 `addAppDrain` 注册使它进入 `closeOnce` 的 drain 集合，`close()` 会把它与 listener 关闭一并等待。lifecycle 不在两者之间施加任何顺序，因此「停止 → 落定 → 释放」的次序必须在 drain 内部自己成立。
 
-等待需要 drain 今天未暴露的落定信号。给 drain state 加一个 `idle()` promise，在无 tick 且无 restore 在途时 resolve。写失败留下的 admitted 标记不是在途工作——它是下一任 owner 要做的重试——因此绝不把等待卡住。`idle()` 本身无界：由 `stopPrWatch` 用超时与之赛跑，因为只有调用方知道自己的关停 deadline。owner 记录**只在等待成功之后**释放，因此后继者绝不与在途工作重叠（主 §2）。超时则刻意**保留**记录——在 restore 仍在准入时释放会让后继者把同一转换投递两次，而留着是安全的，因为 claim 会清扫进程已确证消失的记录。从未 claim 的 daemon 不释放任何东西，本进程不拥有的记录也原样留下。
+等待需要 drain 今天未暴露的落定信号。给 drain state 加一个 `idle()` promise，在无 drain tick 且无 restore 在途时 resolve。写失败留下的 admitted 标记不是在途工作——它是下一任 owner 要做的重试——因此绝不把等待卡住。
+
+仅有这个信号**并不够**：observation 在整个 refresh tick 期间持有 owner 记录，却从不进入 drain tick，因此落在 view 中途的关停会看到一个空闲的 drain，并在本 daemon 仍在 view、随后就要 drain 时释放记录。所以等待有两条臂——`stopPrWatch` 还接受一个由 refresh timer 提供的 `waitForTick` 落定 promise，在其在途 tick 结束时 resolve。两条臂一起与超时赛跑。
+
+`idle()` 本身无界：由 `stopPrWatch` 用超时与之赛跑，因为只有调用方知道自己的关停 deadline。owner 记录**只在等待成功之后**释放，因此后继者绝不与在途工作重叠（主 §2）。超时则刻意**保留**记录——在 restore 仍在准入时释放会让后继者把同一转换投递两次，而留着是安全的，因为 claim 会清扫进程已确证消失的记录。从未 claim 的 daemon 不释放任何东西，本进程不拥有的记录也原样留下。
 
 ### 4. deps 填充
 
@@ -97,7 +101,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | `packages/cli/src/serve/server/pr-watch-deps.ts`（新）           | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本                       |
 | `packages/cli/src/serve/run-qwen-serve.ts`                       | 经 late-bound getter 填充两个接缝；注册关停 drain                               |
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                  | 形状不变；新 drain 经既有 `addAppDrain` 注册                                    |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入、`listedKeys`、`partial` 透传                                |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入、`listedKeys`、`partial` 透传；`stopWatch` 与 tick 落定信号  |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN） | 本设计                                                                          |
 
 ## 关键设计决策
@@ -105,7 +109,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 1. **抽取核心，而非 handler。** res 耦合部分是 drain 不共享的路由与 wire 关注点。抽取它们会为进程内调用者到不了的失败发明 typed 变体，并让约 70 条 HTTP 响应形状测试承担无谓风险。
 2. **restore 边界用 typed error，而非结果联合。** 类已存在，`sendBridgeError` 已映射它们。drain 的适配器按类分拣，因此 Gone/临时划分只存在于一处，不会与路由的 wire 映射漂移。
 3. **钩子不等待，且在锁释放之后运行。** 这是死锁避免而非优化：per-PR 锁不可重入，而 drain 的 restore 路径会重新取它。
-4. **owner 记录最后释放。** 停 timer 不够；在途 restore 与准入必须先落定，否则后继者与它们重叠。
+4. **owner 记录最后释放，且两条臂都要等。** 停 timer 不够；持有 claim 的 observation tick 与在途 restore 与准入都必须先落定，否则后继者与它们重叠。只等 drain 空闲会漏掉 observation——它从不进入 drain tick。
 5. **host 发现向已知安全集失败开放，绝不向空集。** 空的 allowed-host 集会静默禁用所有 view，却看起来健康。
 6. **仍然关闭。** 每条新路径都在既有开关与「PR B 前不填充」的设置之后，因此本增量不改变任何生产行为。
 

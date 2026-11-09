@@ -276,12 +276,56 @@ describe('stopPrWatch', () => {
       stopTimer: () => {},
       timeoutMs: 5_000,
     });
-    await Promise.resolve();
+    // A macrotask, not a microtask: one microtask turn is too early to observe
+    // a release that must not happen, which would make the assertion vacuous.
+    await new Promise((resolve) => setImmediate(resolve));
     // Still in flight: releasing now would let a successor overlap.
     expect(existsSync(prWatchOwnerPath(dir))).toBe(true);
     wake.open();
     await stopped;
     expect(existsSync(prWatchOwnerPath(dir))).toBe(false);
+  });
+
+  it('keeps the record until the claim-holding tick settles', async () => {
+    // Drain-idle alone is not enough: the observation holds the claim without
+    // ever entering a drain tick.
+    claimPrWatchOwnershipSync(dir, () => {});
+    let openTick: () => void = () => {};
+    const tickGate = new Promise<void>((resolve) => {
+      openTick = resolve;
+    });
+    const stopped = stopPrWatch({
+      state,
+      watchDir: dir,
+      stopTimer: () => {},
+      waitForTick: () => tickGate,
+      timeoutMs: 5_000,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(existsSync(prWatchOwnerPath(dir))).toBe(true);
+    openTick();
+    await stopped;
+    expect(existsSync(prWatchOwnerPath(dir))).toBe(false);
+  });
+
+  it('keeps the record when the tick outlasts the shutdown wait', async () => {
+    claimPrWatchOwnershipSync(dir, () => {});
+    const logs: string[] = [];
+    let openTick: () => void = () => {};
+    const tickGate = new Promise<void>((resolve) => {
+      openTick = resolve;
+    });
+    await stopPrWatch({
+      state,
+      watchDir: dir,
+      stopTimer: () => {},
+      waitForTick: () => tickGate,
+      timeoutMs: 20,
+      log: (m) => logs.push(m),
+    });
+    expect(existsSync(prWatchOwnerPath(dir))).toBe(true);
+    expect(logs.some((l) => l.includes('keeping the owner record'))).toBe(true);
+    openTick();
   });
 
   it('keeps the record on timeout rather than letting a successor overlap', async () => {

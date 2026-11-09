@@ -2130,6 +2130,80 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('stopWatch keeps the owner record while an observation is in flight', async () => {
+    // The observation holds the claim for the whole tick, but it is not drain
+    // work: the drain state cannot see it. Releasing on drain-idle alone would
+    // let a successor claim and deliver while this daemon is still viewing.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-stop-inflight-'),
+    );
+    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+    let openView: () => void = () => {};
+    const viewGate = new Promise<void>((resolve) => {
+      openView = resolve;
+    });
+    let viewStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      viewStarted = resolve;
+    });
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: async (url: string) => {
+          viewStarted();
+          await viewGate;
+          return {
+            kind: 'ok' as const,
+            view: {
+              url,
+              title: 'PR 42',
+              headSha: 'a'.repeat(40),
+              state: 'open' as const,
+              checks: 'passing' as const,
+              failingChecks: [] as string[],
+            },
+          };
+        },
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      // Parked mid-view: the claim is held, no drain tick has started.
+      await started;
+      let stopped = false;
+      const stopping = handle?.stopWatch().then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      await expect(
+        fsp.access(prWatchOwnerPath(watchDir)),
+      ).resolves.toBeUndefined();
+      openView();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await stopping;
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
   it('never reads the PR-drain deps while the observation switch is off', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

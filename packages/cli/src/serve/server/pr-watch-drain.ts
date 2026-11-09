@@ -178,14 +178,21 @@ export interface PrWatchShutdownOptions {
   watchDir: string;
   /** Stops the refresh timer so no new tick can start. */
   stopTimer: () => void;
+  /**
+   * Settles the refresh tick that holds the owner record. The observation
+   * claims it for the whole tick but is not drain work, so `state.idle()`
+   * cannot see it — releasing without this would let a successor claim and
+   * deliver while this daemon is still viewing.
+   */
+  waitForTick?: () => Promise<void>;
   timeoutMs?: number;
   log?: (message: string) => void;
 }
 
 /**
  * Stop the watch, let in-flight work settle, then release the owner record —
- * in that order, so a successor never overlaps this daemon's restores and
- * admissions (master §2).
+ * in that order, so a successor never overlaps this daemon's observation,
+ * restores and admissions (master §2).
  *
  * On timeout the record is deliberately KEPT. Releasing it while a restore is
  * still admitting would let a successor claim and deliver the same transition
@@ -202,7 +209,7 @@ export async function stopPrWatch(
   let timedOut = false;
   try {
     await Promise.race([
-      options.state.idle(),
+      Promise.all([options.state.idle(), options.waitForTick?.()]),
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           timedOut = true;
