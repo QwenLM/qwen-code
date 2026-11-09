@@ -530,6 +530,61 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
+  it('attributes a creation after set -e (silent operand form)', () => {
+    const entry = shellResult(
+      'set -e\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not attribute when a pipe downstream reads a FILE instead of stdin', () => {
+    // `cat url.txt` ignores stdin and prints the file's old comment, so leading
+    // the pipeline does not prove the visible output is the creation's.
+    const entry = shellResult(
+      'gh pr comment 42 --body hi | cat url.txt',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('attributes a creation piped into a bare cat (stdin passthrough)', () => {
+    const entry = shellResult(
+      'gh pr comment 42 --body hi | cat',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not exempt export -p, which prints the variables', () => {
+    // No creation runs (`false && …`); the only comment URL is printed by
+    // `export -p`, so the first word alone must not exempt it.
+    const entry = shellResult(
+      'export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; false && gh pr comment 42 --body hi; export -p',
+      'export REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-111"',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt a bare export, which prints the variables', () => {
+    // The creation is NOT redirected here, so a blanket exemption would leave
+    // it as the sole producer and attribute; the bare `export` must count as a
+    // second stdout producer instead.
+    const entry = shellResult(
+      'export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; gh pr comment 42 --body hi; export',
+      'export REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-111"',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt a bare set, which prints the variables', () => {
+    const entry = shellResult(
+      'REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; gh pr comment 42 --body hi; set',
+      'REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
   it('does not treat a stderr-only redirect as silencing stdout (R2-1)', () => {
     // `cat url.txt 2>/dev/null` redirects only stderr; its stdout (the comment
     // URL) is still visible, and the creation's own stdout is redirected away,

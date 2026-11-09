@@ -501,18 +501,41 @@ function hasStdoutRedirect(probe: string): boolean {
 
 /**
  * Whether the command writes nothing to stdout, so it cannot be the source of
- * the visible comment-shaped output. State-changing builtins (`cd`, `export`,
- * `unset`, `set`, `shift`, `wait`, `read`, …) produce no stdout, and a bare
- * shell closer such as `)` is not a command at all. Counting these as stdout
- * writers would veto legitimate `cd … && create` chains. A leading `(`/`)` and
- * whitespace are stripped first so a subshell's `(cd …` is recognised too.
+ * the visible comment-shaped output. State-changing builtins (`cd`, `unset`,
+ * `shift`, `wait`, `read`, …) produce no stdout, and a bare shell closer such as
+ * `)` is not a command at all. Counting these as stdout writers would veto
+ * legitimate `cd … && create` chains. A leading `(`/`)` and whitespace are
+ * stripped first so a subshell's `(cd …` is recognised too.
+ *
+ * `export` and `set` are only silent in their OPERAND forms (`export NAME=…`,
+ * `set -e`): bare or with `-p` they print the variables, so the first word alone
+ * cannot exempt them — `export -p` can print a comment URL nothing created.
  */
 const NO_STDOUT_FIRST_WORD =
-  /^(?:cd|export|unset|set|shift|wait|read|return|exit|break|continue|true|false|:)(?:\s|$)/;
+  /^(?:cd|unset|shift|wait|read|return|exit|break|continue|true|false|:)(?:\s|$)/;
 function writesNoStdout(probe: string): boolean {
   const trimmed = probe.replace(/^[()\s]+/, '');
   if (trimmed === '') return true;
-  return NO_STDOUT_FIRST_WORD.test(trimmed);
+  if (NO_STDOUT_FIRST_WORD.test(trimmed)) return true;
+  const stateBuiltin = /^(?:export|set)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  if (stateBuiltin !== null) {
+    const operands = (stateBuiltin[1] ?? '').trim();
+    if (operands === '') return false;
+    return !/(?:^|\s)-[A-Za-z]*p[A-Za-z]*(?:\s|$)/.test(operands);
+  }
+  return false;
+}
+
+/**
+ * Whether a pipeline's downstream stage provably passes the creation's stdout
+ * through. `tee` copies stdin to stdout (its operands are output FILES) and a
+ * bare `cat` reads stdin. Any other stage may ignore stdin and print its own
+ * output — `create | cat url.txt` prints the FILE, not the creation's result —
+ * so the origin is no longer provable and nothing is attributed.
+ */
+function passesStdinThrough(rawStage: string): boolean {
+  const stage = stripQuotedSpans(stripShellComment(rawStage)).trim();
+  return /^tee(?:\s|$)/.test(stage) || stage === 'cat';
 }
 
 /**
@@ -522,13 +545,15 @@ function writesNoStdout(probe: string): boolean {
  * creation. Any other stdout-producing command — before OR after the creation,
  * API or not (`cat url.txt` prints a comment URL just as a read does) — makes
  * the origin unprovable. A command whose stdout is redirected (`> file`,
- * `>/dev/null`, `&>`), a pure assignment, or a no-stdout builtin (`cd`,
- * `export`, `unset`, `set`, `shift`, `wait`, …) / bare shell closer contributes
- * no visible output and does not block: the heredoc that writes the body to a
- * file still lets the creation that follows it attribute, and `cd … && create`
- * is not vetoed. A stderr-only redirect (`2>`) does NOT silence stdout. A pipe
- * keeps a pipeline together (`create | tee` passes the creation's output
- * through). A shell conditional/loop is ambiguous (static
+ * `>/dev/null`, `&>`), a pure assignment, or a no-stdout builtin (`cd`, `unset`,
+ * `shift`, `wait`, …; `export`/`set` only in their operand forms) / bare shell
+ * closer contributes no visible output and does not block: the heredoc that
+ * writes the body to a file still lets the creation that follows it attribute,
+ * and `cd … && create` is not vetoed. A stderr-only redirect (`2>`) does NOT
+ * silence stdout. A pipe keeps a pipeline together only while every downstream
+ * stage provably passes that stdout through (`create | tee`, `create | cat`);
+ * `create | cat url.txt` prints a FILE and attributes nothing. A shell
+ * conditional/loop is ambiguous (static
  * analysis cannot prove which branch executed). When the source cannot be
  * proven, attribute nothing (fail-open: the author may self-echo once, but a
  * mere reader is never credited with comments it only read).
@@ -574,7 +599,9 @@ function creationOutputIsAmbiguous(command: string): boolean {
     (stage) => stage.trim() !== '',
   );
   if (stages.length === 0 || !segmentIsCreation(stages[0]!)) return true;
-  return false;
+  // Leading the pipeline is not enough: every downstream stage must provably
+  // pass that stdout through, or it may print its own output instead.
+  return stages.slice(1).some((stage) => !passesStdinThrough(stage));
 }
 
 /**

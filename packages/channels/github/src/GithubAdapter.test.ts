@@ -24725,6 +24725,100 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(deliveredTo).not.toContain('author-A');
       });
 
+      it('a reconstructed fan-out sibling inherits authorExclude (R2-3)', async () => {
+        // A crash between the two claims leaves only the carrier, holding
+        // fanout=[B,V] and authorExclude=[A]. Recovery rebuilds V's task; once A
+        // becomes the newest verify session that sibling must still exclude A.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: {
+              'fix:comment': 'Address the findings.',
+              'verify:comment': 'Re-verify the findings.',
+            },
+          },
+          { boundSessions },
+        );
+        const prFor = (role: string) => ({
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role,
+        });
+        const bindingsWith = (authorNewest: boolean) => ({
+          bindings: [
+            makeBinding({
+              sessionId: 'fix-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prFor('fix')],
+            }),
+            makeBinding({
+              sessionId: 'verify-V',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prFor('verify')],
+            }),
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: authorNewest
+                ? '2026-07-03T00:00:00.000Z'
+                : '2026-06-30T00:00:00.000Z',
+              prs: [prFor('verify')],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.listPrBindings.mockResolvedValue(bindingsWith(false));
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'fanout-carrier',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'fix-B',
+              role: 'fix',
+            },
+            fanout: [
+              { sessionId: 'fix-B', role: 'fix', completed: true },
+              { sessionId: 'verify-V', role: 'verify' },
+            ],
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // A becomes the newest verify session before recovery rebuilds V.
+        boundSessions.listPrBindings.mockResolvedValue(bindingsWith(true));
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
       it('delivers a same-account comment under a sender allowlist that excludes the channel account', async () => {
         // The recommended senders:allowlist policy excludes the channel's own
         // login; the private comment watch must still deliver (sender gate

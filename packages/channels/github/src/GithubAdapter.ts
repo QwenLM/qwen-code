@@ -4433,6 +4433,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           },
           undefined,
           task.privateOnly === true,
+          // The reconstructed sibling must inherit the authorship exclusion:
+          // it is the same event, so the same sessions authored it. Without
+          // this the reselection filter receives an empty set and can route
+          // the comment to its author once that session becomes the newest.
+          task.authorExclude ? new Set(task.authorExclude) : undefined,
         );
       }
     }
