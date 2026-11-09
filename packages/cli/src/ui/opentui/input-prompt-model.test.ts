@@ -34,6 +34,7 @@ import {
   largePastePlaceholder,
   nextCategory,
   nextLargePastePlaceholder,
+  normalizeSingleLinePaste,
   normalizePastedText,
   parsePastePlaceholder,
   parseSlashCommandQuery,
@@ -648,6 +649,10 @@ describe('applyCompletion', () => {
 describe('large-paste collapsing', () => {
   it('normalizes CRLF and CR onto LF', () => {
     expect(normalizePastedText('a\r\nb\rc')).toBe('a\nb\nc');
+  });
+
+  it('flattens line breaks only for single-line fields', () => {
+    expect(normalizeSingleLinePaste('a\r\nb\rc')).toBe('a b c');
   });
 
   it('collapses pastes over the char threshold', () => {

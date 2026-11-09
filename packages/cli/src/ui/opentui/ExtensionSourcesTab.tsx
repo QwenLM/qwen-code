@@ -32,7 +32,7 @@ import {
   type UseDialogSelectResult,
 } from './dialogs-shared.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
-import { normalizePastedText } from './input-prompt-model.js';
+import { normalizeSingleLinePaste } from './input-prompt-model.js';
 import { toOriginalKey } from './key-map.js';
 import { windowLineAtCaret, useLineEdit } from './line-edit.js';
 import { C } from './theme.js';
@@ -560,10 +560,7 @@ export function OpenTuiExtensionSourcesTab({
       (viewRef.current !== 'add' && viewRef.current !== 'install-extension')
     )
       return;
-    const text = normalizePastedText(decodePasteBytes(event.bytes)).replace(
-      /[\r\n]+/g,
-      ' ',
-    );
+    const text = normalizeSingleLinePaste(decodePasteBytes(event.bytes));
     if (text) {
       event.preventDefault();
       line.insert(text);
