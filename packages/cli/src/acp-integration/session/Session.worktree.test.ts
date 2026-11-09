@@ -115,6 +115,8 @@ describe('Session.pendingWorktreeNotice', () => {
       commitManagedAutoMemoryRecallDelivery: vi.fn(),
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
+      runManagedAutoSkillReview: vi.fn(),
+      consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };

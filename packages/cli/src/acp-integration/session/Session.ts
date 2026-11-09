@@ -11474,6 +11474,25 @@ export class Session implements SessionContext {
     return true;
   }
 
+  /**
+   * Schedules the managed skill review on a legacy ACP turn.
+   *
+   * The review promise is queued on the client, so take it back the same way
+   * the shared round does: retaining every promise for the life of a
+   * long-running `qwen serve` process is a leak, and ACP has nothing to report
+   * them to.
+   */
+  async #runManagedAutoSkillReview(): Promise<void> {
+    const llmClient = this.config.getLlmClient();
+    if (typeof llmClient.runManagedAutoSkillReview !== 'function') {
+      return;
+    }
+    llmClient.runManagedAutoSkillReview();
+    for (const promise of llmClient.consumePendingMemoryTaskPromises()) {
+      await promise;
+    }
+  }
+
   #recordPromptCompletionEffects(
     result: {
       stopReason: PromptResponse['stopReason'];
@@ -11524,7 +11543,7 @@ export class Session implements SessionContext {
     // tool turns too. The legacy round only reaches this ACP-side branch, so
     // without this call `toolCallCount` would accumulate unread and `qwen
     // serve` would never produce an auto-skill candidate.
-    this.config.getLlmClient().runManagedAutoSkillReview();
+    void this.#runManagedAutoSkillReview();
     if (!this.config.getManagedAutoMemoryEnabled()) {
       return;
     }

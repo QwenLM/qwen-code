@@ -6667,6 +6667,9 @@ describe('Session', () => {
       expect(
         mockLlmClient.runManagedAutoMemoryBackgroundTasks,
       ).not.toHaveBeenCalled();
+      // The queued promise belongs to this branch, so this branch has to take
+      // it back; nothing on the ACP path would ever drain it otherwise.
+      expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
     });
 
     it("schedules no extraction or Dream after a channel's turn", async () => {
