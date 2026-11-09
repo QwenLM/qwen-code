@@ -402,6 +402,38 @@ The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
 not maintain a separate public-to-Harness Session mapping.
 
+## Personal memory (opt-in)
+
+Personal memory is disabled by default. Enable it only after qualifying a
+dedicated Mem0 service with cross-service sharing disabled. Configure the
+control plane with `qwen.managed-agent.memory.enabled=true`,
+`qwen.managed-agent.memory.endpoint` and `qwen.managed-agent.memory.api-key`.
+Session Store must also be enabled, and the Hosted Harness must advertise
+`session-memory/1`. The endpoint and service key stay in the control plane;
+do not put them in Harness, sandbox or MCP configuration.
+
+An authenticated actor calls `POST /v1/agents/memory-stores` with an empty body
+or `{}` to create or retrieve their single personal Store. `GET` on the same
+route returns zero or one Store. Add the returned `id` as `memory_store_id` to
+the public Session creation request, or `memoryStoreId` to the WebShell request.
+Omitting the field leaves memory disabled. The binding cannot change after
+creation and participates in creation idempotency. The same user can explicitly
+reuse their Store across authorized Workspaces.
+
+Bound Sessions recall relevant memories for new user inputs and expose
+`context_search`, `context_remember`, `context_get` and `context_forget` through
+the existing tool UI. Remembering and forgetting require explicit user intent
+and follow tool approval and Plan Mode. An uncertain write returns `unknown`;
+it is never automatically resubmitted or reported as successful.
+
+These Sessions and their children are visible only to the owner, in addition to
+the existing Workspace grants. Children do not inherit Store access. Workspace
+file sharing remains unchanged. Deleting a memory affects future retrieval,
+while prior Session history follows the existing retention policy. Existing
+development databases must be recreated after this V1 schema baseline change.
+See the [personal memory design](../../docs/design/2026-11-07-managed-user-memory.md)
+for isolation and recovery requirements.
+
 ## Public Session lifecycle
 
 Close, archive and delete are durable `ma_operation` execution units. Each answers
