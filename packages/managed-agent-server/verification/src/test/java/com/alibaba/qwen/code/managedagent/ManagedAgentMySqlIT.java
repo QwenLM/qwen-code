@@ -1087,7 +1087,7 @@ class ManagedAgentMySqlIT {
                                 scopeKey,
                                 sha256("command-7")))
                 .extracting(row -> row.get("key"))
-                .containsExactly("idx_ma_record_operation");
+                .containsExactly("ix_ma_record_operation");
     }
 
     @Test
@@ -1391,7 +1391,7 @@ class ManagedAgentMySqlIT {
                     "SELECT COUNT(*) FROM"
                             + " information_schema.PROCESSLIST WHERE DB = DATABASE()"
                             + " AND COMMAND = 'Query' AND TIME >= 1 AND INFO LIKE"
-                            + " 'SELECT tenant_id FROM ma_tenant_guard WHERE id = %'";
+                            + " 'INSERT INTO ma_tenant_guard%'";
             while (jdbc.queryForObject(admissionBlocked, Integer.class) == 0) {
                 assertThat(deletion)
                         .as(
@@ -1932,19 +1932,19 @@ class ManagedAgentMySqlIT {
         for (Object[] lookup :
                 List.of(
                         new Object[] {
-                            "uk_ma_hook_once", "hook_once_key_hash = ?", sha256("once-7")
+                            "uq_ma_hook_once", "hook_once_key_hash = ?", sha256("once-7")
                         },
                         new Object[] {
-                            "uk_ma_hook_occurrence",
+                            "uq_ma_hook_occurrence",
                             "hook_occurrence_hash = ? AND hook_ordinal = ?",
                             sha256("occurrence-7"),
                             1
                         },
                         new Object[] {
-                            "uk_ma_hook_occurrence", "hook_occurrence_hash = ?", sha256("occurrence-7")
+                            "uq_ma_hook_occurrence", "hook_occurrence_hash = ?", sha256("occurrence-7")
                         },
                         new Object[] {
-                            "idx_ma_hook_definition",
+                            "ix_ma_hook_definition",
                             "hook_definition_hash = ?",
                             sha256("catalog-1\u00001")
                         })) {

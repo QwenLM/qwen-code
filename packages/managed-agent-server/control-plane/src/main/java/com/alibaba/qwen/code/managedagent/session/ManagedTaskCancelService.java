@@ -66,17 +66,6 @@ public class ManagedTaskCancelService {
                 admission.replayed());
     }
 
-    // The tenant stays explicit so an anonymous caller keeps its legacy
-    // path while a verified subject is never downgraded (R5-3).
-    public PublicCommandOperation cancelPublicAs(String tenantId,
-            SessionPrincipal principal, String idempotencyKey,
-            String sessionId, String taskId) {
-        OperationAdmission admission = admit(tenantId, principal,
-                idempotencyKey, sessionId, taskId);
-        return operations.publicOperation(admission.operation(),
-                admission.replayed());
-    }
-
     public PublicCommandOperation cancelPublic(SessionPrincipal principal,
             String idempotencyKey, String sessionId, String taskId) {
         OperationAdmission admission = admit(
@@ -103,8 +92,8 @@ public class ManagedTaskCancelService {
         // Access is current, never replayed: a caller who lost the Session,
         // the task or the role since admission gets 404 or 403 even while
         // its operation is retained.
-        SessionRecord session = sessions.requireReadableSession(tenantId,
-                principal, sessionId);
+        SessionRecord session = sessions.requireReadableSession(principal,
+                sessionId);
         if (records.findTask(tenantId, sessionId, taskId).isEmpty()) {
             throw new ManagedAgentException(404, "task_not_found",
                     "The task was not found.");
@@ -114,21 +103,12 @@ public class ManagedTaskCancelService {
         // carrying another request id still replays.
         String requestDigest = digests.digest(Map.of("sessionId", sessionId,
                 "operation", "TASK_CANCEL", "taskId", taskId));
-        String actorDigest;
-        if (session.workspace() != null) {
-            actorDigest = digests.digest(Map.of("actorId",
-                    principal == null ? "" : principal.userId()));
-        } else if (principal == null) {
-            // An anonymous caller admitted to a legacy no-row Session has no
-            // principal identity; the cancel is scoped to the tenant-wide
-            // anonymous actor. A bound Session never reaches here anonymously.
-            actorDigest = digests.digest(Map.of("anonymous", "legacy"));
-        } else {
-            actorDigest = digests.digest(Map.of("userId", principal.userId(),
+        String actorDigest = session.workspace() != null
+                ? digests.digest(Map.of("actorId", principal.userId()))
+                : digests.digest(Map.of("userId", principal.userId(),
                         "actorPresent", principal.actorPresent(),
                         "actorSubjectId", principal.actorSubjectId() == null
                                 ? "" : principal.actorSubjectId()));
-        }
         OperationAdmission admission = store.beginTaskCancelOperation(
                 tenantId, sessionId, taskId, actorDigest, idempotencyKey,
                 requestDigest);

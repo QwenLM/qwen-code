@@ -43,21 +43,13 @@ public class SessionRecoveryService {
     }
 
     public SessionRecovery query(String tenantId, String actorId, String sessionId) {
-        return queryAs(tenantId, principal(tenantId, actorId), sessionId);
+        return query(principal(tenantId, actorId), sessionId);
     }
 
     public SessionRecovery query(SessionPrincipal principal,
             String sessionId) {
-        return queryAs(principal == null ? null : principal.tenantId(),
-                principal, sessionId);
-    }
-
-    // The tenant stays explicit so an anonymous caller still reads inside its
-    // own tenant; the read grant admits a legacy no-row Session tenant-wide.
-    public SessionRecovery queryAs(String tenantId, SessionPrincipal principal,
-            String sessionId) {
-        SessionRecord session = sessions.requireReadableSession(tenantId,
-                principal, sessionId);
+        SessionRecord session = sessions.requireReadableSession(principal,
+                sessionId);
         return inspect(session, principal);
     }
 
@@ -73,20 +65,14 @@ public class SessionRecoveryService {
 
     public SessionRecovery recheck(String tenantId, String actorId,
             String sessionId, String turnId) {
-        return recheckAs(tenantId, principal(tenantId, actorId), sessionId, turnId);
+        return recheck(principal(tenantId, actorId), sessionId, turnId);
     }
 
     public SessionRecovery recheck(SessionPrincipal principal,
             String sessionId, String turnId) {
-        return recheckAs(principal == null ? null : principal.tenantId(),
-                principal, sessionId, turnId);
-    }
-
-    public SessionRecovery recheckAs(String tenantId, SessionPrincipal principal,
-            String sessionId, String turnId) {
-        SessionRecord session = sessions.requireReadableSession(tenantId,
-                principal, sessionId);
-        tenantId = session.tenantId();
+        SessionRecord session = sessions.requireReadableSession(principal,
+                sessionId);
+        String tenantId = session.tenantId();
         sessions.requireRecoveryOperator(session, principal);
         TurnRecord turn = latest(session);
         if (turn == null || !turn.turnId().equals(turnId)) {

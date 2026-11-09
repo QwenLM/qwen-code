@@ -175,23 +175,23 @@ class ManagedWebShellRenameTest {
 
     private String create(String tenant, boolean activeTurn) throws Exception {
         List<Map<String, String>> input = activeTurn ? List.of(Map.of("type", "text", "text", "hold")) : List.of();
-        JsonNode response = mapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/create")
+        JsonNode response = mapper.readTree(mvc.perform(post(WEB_SHELL + "/sessions/create")
                         .header(TENANT, tenant).contentType(MediaType.APPLICATION_JSON)
                         .content(mapper.writeValueAsString(Map.of("idempotencyKey", UUID.randomUUID().toString(),
-                                "agentId", "qwen-code", "title", "original", "input", input))), "owner"))
+                                "agentId", "qwen-code", "title", "original", "input", input))))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
         return response.get("sessionId").asText();
     }
 
     private ResultActions get(String tenant, String session) throws Exception {
-        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
-                .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("sessionId", session))), "owner"));
+        return mvc.perform(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("sessionId", session))));
     }
 
     private ResultActions rename(String tenant, String session, String key, String title) throws Exception {
-        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant)
+        return mvc.perform(post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("requestId", "rename-trace",
-                        "sessionId", session, "idempotencyKey", key, "title", title))), "owner"));
+                        "sessionId", session, "idempotencyKey", key, "title", title))));
     }
 
     private static String tenant() {

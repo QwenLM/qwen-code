@@ -171,16 +171,14 @@ class JdbcRuntimeBrokerMySqlIT {
             probe.setAccessible(true);
             try (var admission = source.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
                 admission.setAutoCommit(false);
-                try (var guardScope = JdbcTenantGuardLocks.openTransactionScope(admission)) {
-                    try {
-                        JdbcRuntimeBindingRepository.lockPlacementDomain(admission, "tenant-a");
-                        assertFalse((Boolean) probe.invoke(null, admission, "tenant-a", "harness"));
-                        Future<?> fence = pool.submit(() -> bindings.requestHarnessDrain("tenant-b", "harness"));
-                        fence.get(5, TimeUnit.SECONDS);
-                        assertTrue(bindings.isHarnessDraining("tenant-b", "harness"));
-                    } finally {
-                        admission.rollback();
-                    }
+                try {
+                    JdbcRuntimeBindingRepository.lockPlacementDomain(admission, "tenant-a");
+                    assertFalse((Boolean) probe.invoke(null, admission, "tenant-a", "harness"));
+                    Future<?> fence = pool.submit(() -> bindings.requestHarnessDrain("tenant-b", "harness"));
+                    fence.get(5, TimeUnit.SECONDS);
+                    assertTrue(bindings.isHarnessDraining("tenant-b", "harness"));
+                } finally {
+                    admission.rollback();
                 }
             }
         } finally {

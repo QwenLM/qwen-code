@@ -208,9 +208,6 @@ public class WorkspaceCreationStore {
                     tenant, completed.workspaceId(), completed.storageId(), completed.displayName(),
                     source == null ? WorkspaceExecutionProfile.CONFIG_REF : source.configRef(),
                     source == null ? WorkspaceExecutionProfile.POLICY_REF : source.policyRef(), now, now);
-            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                    "ma_workspace_access",
-                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row("role", "OWNER"));
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                             + " VALUES (?, ?, ?, 'OWNER')", tenant, completed.workspaceId(), actorKey);
             jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"

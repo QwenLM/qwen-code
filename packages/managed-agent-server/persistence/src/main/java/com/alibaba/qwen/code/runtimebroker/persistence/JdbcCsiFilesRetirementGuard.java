@@ -61,7 +61,7 @@ public final class JdbcCsiFilesRetirementGuard {
                     throw unavailable();
                 }
                 var original = new Original(request(row), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "binding_id"), row.getLong("runtime_generation"),
-                        RuntimeBindingRecord.State.valueOf(row.getString("binding_state")), row.getBoolean("is_drain_requested"),
+                        RuntimeBindingRecord.State.valueOf(row.getString("binding_state")), row.getBoolean("drain_requested"),
                         row.getLong("record_version"), row.getObject("first_activation_journal_revision", Long.class));
                 if (!binding.getBindingId().equals(original.bindingId()) || !binding.getRequest().equals(original.request())
                         || binding.getGeneration() != original.generation() || binding.getState() != original.state()
@@ -93,6 +93,9 @@ public final class JdbcCsiFilesRetirementGuard {
         String session = request.getIsolationKey();
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, 10);
         boolean retained = lockRetentionRoot(connection, tenant);
+        if (!retained) {
+            initializeRetentionRoot(connection, tenant);
+        }
         List<Slot> slots = new ArrayList<>();
         List<Binding> bindings = new ArrayList<>();
         readRuntimeRows(connection, tenant, session, true, slots, bindings);
@@ -108,9 +111,6 @@ public final class JdbcCsiFilesRetirementGuard {
         }
         if (!bindings.isEmpty()) {
             requireOriginal(slots, bindings);
-        }
-        if (!retained) {
-            initializeRetentionRoot(connection, tenant);
         }
         return true;
     }
@@ -181,21 +181,42 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     private static boolean lockRetentionRoot(Connection connection, String tenantId) throws SQLException {
-        try {
-            return JdbcTenantGuardLocks.lockExisting(connection, tenantId,
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.OUTPUT_PUBLICATION, 10);
-        } catch (JdbcTenantGuardLocks.IdentityCollision collision) {
-            // The retention root belongs to another tenant: the documented refusal, never a
-            // generic store failure and never a silent overwrite.
-            throw unavailable();
+        try (PreparedStatement statement = statement(connection,
+                        "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
+                                + " 'output_publication' AND tenant_key = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setStringParameter(
+                    statement,
+                    1,
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                            tenantId));
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    return false;
+                }
+                if (!tenantId.equals(
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
+                                        .identity(row, "tenant_id")) || row.next()) {
+                    throw unavailable();
+                }
+                return true;
+            }
         }
     }
 
     private static void initializeRetentionRoot(Connection connection, String tenantId) throws SQLException {
-        try {
-            JdbcTenantGuardLocks.lock(connection, tenantId,
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.OUTPUT_PUBLICATION, 10);
-        } catch (JdbcTenantGuardLocks.IdentityCollision collision) {
+        try (PreparedStatement statement = statement(connection,
+                        "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES"
+                            + " (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE tenant_key ="
+                            + " tenant_key")) {
+            JdbcRepositorySupport.setStringParameter(
+                    statement,
+                    1,
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                            tenantId));
+            JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+            statement.executeUpdate();
+        }
+        if (!lockRetentionRoot(connection, tenantId)) {
             throw unavailable();
         }
     }
@@ -318,7 +339,7 @@ public final class JdbcCsiFilesRetirementGuard {
                                         .identity(rows, "binding_id"),
                                 rows.getLong("runtime_generation"),
                                 RuntimeBindingRecord.State.valueOf(rows.getString("binding_state")),
-                                rows.getBoolean("is_drain_requested"), rows.getLong("record_version"),
+                                rows.getBoolean("drain_requested"), rows.getLong("record_version"),
                                 rows.getObject("first_activation_journal_revision", Long.class));
                         if (bindings.size() < 2 || isProfile(original.request().getScope())
                                 && bindings.stream().noneMatch(binding ->
@@ -401,11 +422,11 @@ public final class JdbcCsiFilesRetirementGuard {
 
     private static Pin readPin(Connection connection, String tenantId, String sessionId) throws SQLException {
         // By primary key: on an existing root this locks that record alone.
-        // Through idx_ma_session_csi_guard, an unpinned root left a gap lock
+        // Through ma_session_csi_guard_idx, an unpinned root left a gap lock
         // that spans other tenants' keys, so their first writers could not
         // insert their own roots (#13996).
         try (PreparedStatement statement = statement(connection,
-                        "SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR"
+                        "SELECT csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR"
                                 + " UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);

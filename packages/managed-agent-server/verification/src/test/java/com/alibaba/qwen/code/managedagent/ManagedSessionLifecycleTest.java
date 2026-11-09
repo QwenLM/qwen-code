@@ -174,7 +174,7 @@ class ManagedSessionLifecycleTest {
                     .asText()).isEqualTo("running");
             assertThat(sessionStatus(tenant, sessionId)).isEqualTo("closing");
             // The Harness is up, so only the sealed Session rejects input.
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/events", sessionId)
+            mvc.perform(post("/v1/agents/sessions/{id}/events", sessionId)
                             .header(TENANT, tenant)
                             .header("Idempotency-Key", "sealed")
                             .contentType(MediaType.APPLICATION_JSON)
@@ -182,7 +182,7 @@ class ManagedSessionLifecycleTest {
                                     {"type":"agent.session.input.message",
                                      "input":[{"type":"input_text",
                                                "text":"late"}]}
-                                    """), "owner"))
+                                    """))
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code")
                             .value("session_not_active"));
@@ -402,14 +402,14 @@ class ManagedSessionLifecycleTest {
         String tenant = tenant();
         String ambiguous = attachedSession(tenant);
         harness.failNextRename();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", ambiguous)
+        mvc.perform(patch("/v1/agents/sessions/{id}", ambiguous)
                         .header(TENANT, tenant).header("Idempotency-Key", "rename")
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"), "owner"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
                 .andExpect(status().isServiceUnavailable());
         int sends = harness.renameCount();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", ambiguous)
+        mvc.perform(patch("/v1/agents/sessions/{id}", ambiguous)
                         .header(TENANT, tenant).header("Idempotency-Key", "rename")
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"), "owner"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("operation_outcome_unknown"));
         assertThat(harness.renameCount()).isEqualTo(sends);
         // The parked title waits for the reconciler and holds no lifecycle
@@ -1101,11 +1101,11 @@ class ManagedSessionLifecycleTest {
                 .get("admission_stage").asText())
                 .isEqualTo("harness_confirmed");
         assertThat(runtime.drained()).contains(deleted).doesNotContain(kept);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/events", deleted)
+        mvc.perform(get("/v1/agents/sessions/{id}/events", deleted)
                         .header(TENANT, tenant)
-                        .accept(MediaType.APPLICATION_JSON), "owner"))
+                        .accept(MediaType.APPLICATION_JSON))
                 .andExpect(status().isNotFound());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/events", kept)
+        mvc.perform(post("/v1/agents/sessions/{id}/events", kept)
                         .header(TENANT, tenant)
                         .header("Idempotency-Key", "still-open")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1113,7 +1113,7 @@ class ManagedSessionLifecycleTest {
                                 {"type":"agent.session.input.message",
                                  "input":[{"type":"input_text",
                                            "text":"hello"}]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted());
         await().atMost(Duration.ofSeconds(5)).until(() ->
                 !store.findActiveTurns(tenant, List.of(kept))
@@ -1197,7 +1197,7 @@ class ManagedSessionLifecycleTest {
     }
 
     private String emptySession(String tenant) throws Exception {
-        String id = objectMapper.readTree(mvc.perform(post("/v1/agents/sessions").principal(actor(tenant, "actor-a"))
+        return objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
                         .header(TENANT, tenant)
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1205,15 +1205,12 @@ class ManagedSessionLifecycleTest {
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
-        legacyState(tenant, id);
-        return id;
     }
 
     // A Session whose completed Turn attached it to the Harness.
     private String attachedSession(String tenant) throws Exception {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/v1/agents/sessions").header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-a"))
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -1228,7 +1225,6 @@ class ManagedSessionLifecycleTest {
                         .containsKey(sessionId)
                         && store.requireSession(tenant, sessionId)
                                 .harnessBootId() != null);
-        legacyState(tenant, sessionId);
         return sessionId;
     }
 
@@ -1247,9 +1243,9 @@ class ManagedSessionLifecycleTest {
 
     private JsonNode operation(String tenant, String sessionId,
             String operationId) throws Exception {
-        return objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get(
+        return objectMapper.readTree(mvc.perform(get(
                         "/v1/agents/sessions/{id}/operations/{op}", sessionId,
-                        operationId).header(TENANT, tenant), "owner"))
+                        operationId).header(TENANT, tenant))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
     }
@@ -1277,9 +1273,9 @@ class ManagedSessionLifecycleTest {
 
     private String sessionStatus(String tenant, String sessionId)
             throws Exception {
-        return objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get(
+        return objectMapper.readTree(mvc.perform(get(
                         "/v1/agents/sessions/{id}", sessionId)
-                        .header(TENANT, tenant), "owner"))
+                        .header(TENANT, tenant))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString())
                 .get("status").asText();
@@ -1358,14 +1354,5 @@ class ManagedSessionLifecycleTest {
         void failDrains(int count) {
             drainFailures.set(count);
         }
-    }
-
-    // Creation requires a trusted actor, but these probes mutate anonymously
-    // afterwards: restore the genuine legacy row-less state (ownership row
-    // deleted, structured receipt mark cleared) right after the create.
-    private void legacyState(String tenant, String sessionId) {
-        jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
-        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id = ? AND session_id = ?"
-                + " AND namespace = 'SESSION_COMMAND' AND operation = 'CREATE_SESSION'", tenant, sessionId);
     }
 }

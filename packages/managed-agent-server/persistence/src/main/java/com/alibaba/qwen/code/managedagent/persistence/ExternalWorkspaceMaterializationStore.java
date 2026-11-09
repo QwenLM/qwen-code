@@ -108,9 +108,6 @@ public final class ExternalWorkspaceMaterializationStore {
                     + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE', 'ROOT', FALSE, ?, ?)", tenant,
                     registeredAliasId, registeredAliasId, displayName, WorkspaceExecutionProfile.CONFIG_REF,
                     WorkspaceExecutionProfile.POLICY_REF, now, now);
-            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                    "ma_workspace_access",
-                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row("role", "OWNER"));
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, ?, ?, 'OWNER')", tenant, registeredAliasId, owner);
             ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant, idempotencyKey,

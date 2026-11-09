@@ -368,7 +368,7 @@ public class ToolPublicationAsyncVerificationTest {
 
             @Override
             public void commit(TransactionStatus transaction) {
-                var values = fixture.jdbc.queryForList("SELECT is_verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
+                var values = fixture.jdbc.queryForList("SELECT verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
                         + " AND operation_id = X'636f6d6d6974'", Boolean.class);
                 if (values.size() == 1 && values.getFirst()) {
                     ready.countDown();
@@ -392,13 +392,13 @@ public class ToolPublicationAsyncVerificationTest {
                 assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
                 assertThat(request.isDone()).isFalse();
                 assertThat(bucket.puts).hasValue(1);
-                assertThat(fixture.jdbc.queryForObject("SELECT is_verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
+                assertThat(fixture.jdbc.queryForObject("SELECT verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                         Boolean.class)).isFalse();
             } finally {
                 release.countDown();
             }
             assertThat(request.get(5, TimeUnit.SECONDS).path("state").asText()).isEqualTo("PENDING");
-            assertThat(fixture.jdbc.queryForObject("SELECT is_verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
+            assertThat(fixture.jdbc.queryForObject("SELECT verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
                     Boolean.class)).isTrue();
         }
     }
@@ -734,7 +734,7 @@ public class ToolPublicationAsyncVerificationTest {
                     assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
                     assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                             .isEqualTo("CANDIDATE");
-                    assertThat(fixture.jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture", Boolean.class)).isFalse();
+                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class)).isFalse();
                 } finally {
                     bucket.successorRelease.countDown();
                 }
@@ -781,7 +781,7 @@ public class ToolPublicationAsyncVerificationTest {
                     bucket.readRelease.countDown();
                     assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
                     assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
-                    assertThat(fixture.jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture", Boolean.class)).isFalse();
+                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class)).isFalse();
                     assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'", String.class))
                             .isEqualTo("VERIFIED");
                 } finally {

@@ -177,11 +177,6 @@ public class SshWorkspaceStore
         });
     }
 
-    /** The role literal the OWNER grant validates before it persists. */
-    protected String ownerRole() {
-        return "OWNER";
-    }
-
     /** Turns the reserved storage into the registered Workspace. */
     private void publish(Intent intent) {
         String alias = JdbcRuntimeBindingRepository.storageAliasKey(intent.tenantId(), intent.storageId());
@@ -196,9 +191,6 @@ public class SshWorkspaceStore
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')", intent.tenantId(), intent.workspaceId(), intent.storageId(),
                 intent.displayName(), WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                "ma_workspace_access",
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row("role", ownerRole()));
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
                 intent.tenantId(), intent.workspaceId(), com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(intent.tenantId(), intent.actorId()));
     }

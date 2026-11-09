@@ -92,7 +92,7 @@ class Issue13181QueryBudgetTest {
     void materializationReadsOnlyTheCurrentBatchAndNeverWritesSnapshots() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = fixture.store.insertSessionCommand(tenant, "owner",
+        String sessionId = fixture.store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "mat-" + UUID.randomUUID(), "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         int events = 80;
@@ -164,7 +164,7 @@ class Issue13181QueryBudgetTest {
     void emptyBatchReadsOnlyProgressAndDoesNotScheduleCaughtUpSessions() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = fixture.store.insertSessionCommand(tenant, "owner",
+        String sessionId = fixture.store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "empty-" + UUID.randomUUID(), "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         fixture.tx.executeWithoutResult(status -> fixture.store
@@ -184,7 +184,7 @@ class Issue13181QueryBudgetTest {
     void replayFloorStaysClampedToTheLaggingMessageProjection() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = fixture.store.insertSessionCommand(tenant, "owner",
+        String sessionId = fixture.store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "floor-" + UUID.randomUUID(), "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         for (int index = 0; index < 5; index++) {
@@ -286,7 +286,7 @@ class Issue13181QueryBudgetTest {
     void plainSessionStreamRunsNoGrantQueries() throws Exception {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = fixture.store.insertSessionCommand(tenant, "owner",
+        String sessionId = fixture.store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "plain-" + UUID.randomUUID(), "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         long after = fixture.store.requireSession(tenant, sessionId)
@@ -298,7 +298,7 @@ class Issue13181QueryBudgetTest {
         try {
             ManagedEventStreamService streams = EventStreams.streams(
                     fixture.service, fixture.hub, executor, emitter);
-            streams.publicStream(tenant, "owner", sessionId, after);
+            streams.publicStream(tenant, null, sessionId, after);
             for (int index = 0; index < events; index++) {
                 fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
                         "turn-1", "test.progress", Map.of("index", index),
@@ -326,16 +326,16 @@ class Issue13181QueryBudgetTest {
         List<String> plainIds = new ArrayList<>();
         List<String> plainTurnIds = new ArrayList<>();
         for (int index = 0; index < 20; index++) {
-            String sessionId = fixture.store.insertSessionCommand(plain, "owner",
+            String sessionId = fixture.store.insertSessionCommand(plain,
                     "CREATE_SESSION", "plain-" + index + "-" + UUID.randomUUID(),
                     "digest", "qwen-code", null, "s-" + index, List.of(), null)
                     .sessionId();
             plainIds.add(sessionId);
-            String turnId = fixture.store.insertTurnCommandAsActor(plain,
+            String turnId = fixture.store.insertTurnCommand(plain,
                     "SUBMIT_TURN", "turn-" + index + "-" + UUID.randomUUID(),
                     "digest",
                     sessionId, List.of(Map.of("type", "text", "text", "hi")),
-                    "digest", "owner").turnId();
+                    "digest").turnId();
             plainTurnIds.add(turnId);
         }
         // Sessions 2 and 5 carry distinct environment events on their latest
@@ -357,7 +357,7 @@ class Issue13181QueryBudgetTest {
                 + " 'COMPLETED' WHERE tenant_id = ? AND session_id = ?",
                 plain, plainIds.get(7));
         fixture.ledger.reset();
-        var publicPage = fixture.service.listPublicSessions(plain, "owner", null,
+        var publicPage = fixture.service.listPublicSessions(plain, null, null,
                 20).data();
         assertThat(publicPage).hasSize(20);
         System.out.println("[issue-13181] listPublicSessions(20 rows): "
@@ -390,7 +390,7 @@ class Issue13181QueryBudgetTest {
         }
 
         fixture.ledger.reset();
-        var webShellPage = fixture.service.listWebShellSessions(plain, "owner",
+        var webShellPage = fixture.service.listWebShellSessions(plain, null,
                 null, 20).data();
         assertThat(webShellPage).hasSize(20);
         System.out.println("[issue-13181] listWebShellSessions(20 rows): "
@@ -425,12 +425,10 @@ class Issue13181QueryBudgetTest {
 
         // The single-session WebShell detail shares the batched assembly.
         fixture.ledger.reset();
-        assertThat(fixture.service.getWebShellSession(plain, "owner",
+        assertThat(fixture.service.getWebShellSession(plain, null,
                 plainIds.get(0)).sessionId()).isEqualTo(plainIds.get(0));
-        // Session read + latest turns + environment events + lifecycle
-        // summary, one each, plus the named actor's ownership round trip
-        // (ma_session_principal) the read grant runs for a non-null actor.
-        assertThat(fixture.ledger.total()).isEqualTo(5);
+        // Session read + latest turns + environment events + lifecycle summary, one each.
+        assertThat(fixture.ledger.total()).isEqualTo(4);
 
         String bound = "tenant-" + UUID.randomUUID();
         fixture.jdbc.update("INSERT INTO ma_workspace"
@@ -720,7 +718,7 @@ class Issue13181QueryBudgetTest {
         assertThat(view.capabilities().workspaceTurns()).isFalse();
         assertThat(JSON.valueToTree(view).path("capabilities").path("modelChange").asBoolean()).isTrue();
         // Busy admission remains separate from support and authorization.
-        fixture.store.insertTurnCommandAsActor(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest", "owner");
+        fixture.store.insertTurnCommand(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest");
         assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isTrue();
     }
 
@@ -845,7 +843,7 @@ class Issue13181QueryBudgetTest {
                 assertThat(event.sequence()).isLessThanOrEqualTo(covered));
         assertThat(fixture.ledger.count("from ma_public_event", "sequence_id >")).isZero();
         assertThat(fixture.ledger.rows("from ma_message m", "limit")).isEqualTo(11);
-        var tail = fixture.service.publicEvents(tenant, "owner", sessionId,
+        var tail = fixture.service.publicEvents(tenant, null, sessionId,
                 transcript.lastSequence(), 100).data();
         assertThat(tail).hasSize((int) (lastSequence - covered));
         assertThat(tail.getFirst().sequence()).isEqualTo(covered + 1);
@@ -913,22 +911,22 @@ class Issue13181QueryBudgetTest {
     void batchTurnReadsFollowAdmissionOrderNotCreatedAt() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = fixture.store.insertSessionCommand(tenant, "owner",
+        String sessionId = fixture.store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "order-" + UUID.randomUUID(), "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         // Two Turns admitted out of gmt_create order: the turn.accepted
         // sequence makes turn-b the latest even though turn-a's gmt_create
         // is later.
-        String turnA = fixture.store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        String turnA = fixture.store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "order-a-" + UUID.randomUUID(), "digest", sessionId,
-                List.of(Map.of("type", "text", "text", "a")), "digest", "owner")
+                List.of(Map.of("type", "text", "text", "a")), "digest")
                 .turnId();
         fixture.jdbc.update("UPDATE ma_turn SET status ="
                         + " 'COMPLETED' WHERE tenant_id = ? AND turn_id = ?",
                 tenant, turnA);
-        String turnB = fixture.store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        String turnB = fixture.store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "order-b-" + UUID.randomUUID(), "digest", sessionId,
-                List.of(Map.of("type", "text", "text", "b")), "digest", "owner")
+                List.of(Map.of("type", "text", "text", "b")), "digest")
                 .turnId();
         fixture.jdbc.update("UPDATE ma_turn SET gmt_create ="
                         + " gmt_create + 10000 WHERE tenant_id = ? AND"
@@ -944,7 +942,7 @@ class Issue13181QueryBudgetTest {
         // The batch reads behind the page must report the latest Turn by
         // admission order and that Turn's own environment, not the newest
         // environment event of the Session.
-        var page = fixture.service.listWebShellSessions(tenant, "owner", null,
+        var page = fixture.service.listWebShellSessions(tenant, null, null,
                 20).data();
         assertThat(page).hasSize(1);
         var row = page.getFirst();

@@ -243,7 +243,7 @@ public class WakeRecoveryStoreTest {
 
     @Test
     void hintedWorkPrecedesLazyBackfillEvenWhenItsKeySortsLast() {
-        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        jdbc.update("UPDATE ma_session_head SET wake_pending = TRUE");
         for (int index = 0; index < 12; index++) {
             String id = "idle-" + index;
             jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
@@ -402,7 +402,7 @@ public class WakeRecoveryStoreTest {
             jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE session_id <> ?", waiting.sessionId());
             assertThat(store.hasPendingInput(waiting)).isEmpty();
             assertThat(store.hasPendingInput(waiting)).contains(true);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE is_wake_scan_pending = TRUE",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE wake_scan_pending = TRUE",
                     Long.class)).isEqualTo(129L);
         });
     }

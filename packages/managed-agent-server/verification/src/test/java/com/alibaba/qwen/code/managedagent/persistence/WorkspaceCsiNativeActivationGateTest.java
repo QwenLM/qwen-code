@@ -294,7 +294,7 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(40);
+        assertThat(rows).hasSize(39);
         return rows;
     }
 
@@ -804,10 +804,8 @@ class WorkspaceCsiNativeActivationGateTest {
             var cell = field.getValue();
             String value = cell.kind().integral() ? Long.toString(cell.isNull() ? 1 : cell.number() + 1)
                     : cell.kind() == WorkspaceCsiApplicationInventory.Kind.CHAR ? "f".repeat(64) : "foreign";
-            assertThatThrownBy(() -> {
-                var changed = changedRow("ma_session_record", projected.getFirst(), field.getKey(), value);
-                modelContextReference(baseline, List.of(changed), references);
-            })
+            var changed = changedRow("ma_session_record", projected.getFirst(), field.getKey(), value);
+            assertThatThrownBy(() -> modelContextReference(baseline, List.of(changed), references))
                     .as("record.%s", field.getKey()).isInstanceOf(IllegalArgumentException.class);
         }
         for (var field : derived.fields().entrySet()) {
@@ -817,11 +815,9 @@ class WorkspaceCsiNativeActivationGateTest {
             var cell = field.getValue();
             String value = cell.kind().integral() ? Long.toString(cell.isNull() ? 1 : cell.number() + 1)
                     : cell.kind() == WorkspaceCsiApplicationInventory.Kind.CHAR ? "f".repeat(64) : "foreign";
-            assertThatThrownBy(() -> {
-                var changed = changedRow("ma_resource_ref", derived, field.getKey(), value);
-                var crossed = references.stream().map(row -> row == derived ? changed : row).toList();
-                modelContextReference(baseline, projected, crossed);
-            })
+            var changed = changedRow("ma_resource_ref", derived, field.getKey(), value);
+            var crossed = references.stream().map(row -> row == derived ? changed : row).toList();
+            assertThatThrownBy(() -> modelContextReference(baseline, projected, crossed))
                     .as("reference.%s", field.getKey()).isInstanceOf(IllegalArgumentException.class);
         }
         var staleRecord = changedRow("ma_session_record", projected.getFirst(), "revision",

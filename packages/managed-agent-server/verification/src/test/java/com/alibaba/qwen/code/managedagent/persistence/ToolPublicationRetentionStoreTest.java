@@ -60,11 +60,11 @@ public class ToolPublicationRetentionStoreTest {
         scope = ToolPublicationRetentionStore.hash(tenant + session);
         key = new ObjectMapper().createObjectNode().put("tenantId", tenant)
                 .put("workspaceId", "workspace-1").put("sessionId", session);
-        jdbc.update("INSERT INTO ma_output_capture (gmt_create, gmt_modified, scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
                 + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                + " VALUES (" + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'workspace-1', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
+                + " VALUES (?, ?, ?, 'workspace-1', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, scope, scope, scope);
     }
@@ -300,15 +300,15 @@ public class ToolPublicationRetentionStoreTest {
     void incompleteQuarantinedAndLegacyEvidenceRemainProtected() {
         retire();
         assertThat(blocker()).isNull();
-        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET write_evidence = FALSE WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("legacy_write_evidence_missing");
-        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = TRUE, is_quarantined = TRUE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET write_evidence = TRUE, quarantined = TRUE WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("quarantined");
-        jdbc.update("UPDATE ma_output_capture SET is_quarantined = FALSE, is_accepted_complete = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET quarantined = FALSE, accepted_complete = FALSE WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("not_accepted_complete");
-        jdbc.update("UPDATE ma_output_capture SET is_accepted_complete = TRUE, producer_phase = 'FINISHING' WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET accepted_complete = TRUE, producer_phase = 'FINISHING' WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("not_accepted_complete");
-        jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE tenant_id = ?", tenant);
         assertThat(blocker()).isEqualTo("recovery_protected");
     }
 
@@ -361,7 +361,7 @@ public class ToolPublicationRetentionStoreTest {
         var publicStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), events -> {},
                 org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String original = session;
-        session = tx.execute(status -> publicStore.insertSessionCommand(tenant, "owner", "CREATE_SESSION", "create", "digest",
+        session = tx.execute(status -> publicStore.insertSessionCommand(tenant, "CREATE_SESSION", "create", "digest",
                 "qwen-code", null, null, java.util.List.of(), null).sessionId());
         key.put("sessionId", session);
         jdbc.update("UPDATE ma_output_capture SET session_id = ? WHERE tenant_id = ? AND session_id = ?",

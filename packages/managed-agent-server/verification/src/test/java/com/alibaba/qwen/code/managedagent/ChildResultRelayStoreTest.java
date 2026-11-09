@@ -688,7 +688,7 @@ class ChildResultRelayStoreTest {
                 TENANT, session);
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, is_submission_attempted, gmt_create,"
+                        + " status, submission_attempted, gmt_create,"
                         + " gmt_modified, completed_at, version)"
                         + " VALUES (?, ?, 'turn-1', 'prompt-1', '[]', 'd',"
                         + " 'COMPLETED', TRUE, 1, 2, 2, 1)", TENANT, session);
@@ -702,7 +702,7 @@ class ChildResultRelayStoreTest {
         // never dispatch proof (R23's cascade producer).
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, is_submission_attempted, gmt_create,"
+                        + " status, submission_attempted, gmt_create,"
                         + " gmt_modified, completed_at, version)"
                         + " VALUES (?, ?, 'turn-pre', 'prompt-2', '[]', 'd',"
                         + " 'FAILED', FALSE, 3, 4, 4, 1)",

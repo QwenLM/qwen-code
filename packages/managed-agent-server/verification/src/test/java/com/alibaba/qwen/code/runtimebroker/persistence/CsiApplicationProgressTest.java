@@ -198,7 +198,7 @@ class CsiApplicationProgressTest {
                     + " 1, '" + RESERVATION + "', '" + ALIAS + "', 1, '" + BINDING + "', 1, 'provision')");
             sql(connection, "INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
                     + " workspace_generation, canonical_cwd, capability_digest, isolation_class, isolation_key, storage_id,"
-                    + " runtime_generation, binding_state, is_drain_requested, operation_generation, record_version, last_active_at,"
+                    + " runtime_generation, binding_state, drain_requested, operation_generation, record_version, last_active_at,"
                     + " provisioner_kind, provision_request_id, resource_handle_version, resource_handle_json, runtime_instance_id,"
                     + " runtime_lease_id, runtime_epoch, attestation_generation) VALUES ('" + BINDING + "', '"
                     + original(false).request().requestKey() + "', '" + JdbcRepositorySupport.scopeKey(original(false).request().getScope())

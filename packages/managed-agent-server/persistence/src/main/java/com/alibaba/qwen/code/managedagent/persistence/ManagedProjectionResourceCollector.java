@@ -36,7 +36,7 @@ final class ManagedProjectionResourceCollector {
     boolean runOnce() {
         boolean changed = false;
         var candidates = jdbc.queryForList(
-                        "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.is_csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
+                        "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
                                 + BATCH);
         for (var candidate : candidates) {
             changed |= Boolean.TRUE.equals(ManagedSessionStore.skipContended(transactions,
@@ -88,7 +88,7 @@ final class ManagedProjectionResourceCollector {
                 ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session), tenant, session).isEmpty();
         protectedBody |= !jdbc.queryForList(
                                 "SELECT session_id FROM ma_session WHERE tenant_id = ? AND"
-                                        + " session_id = ? AND is_recovery_protected = TRUE",
+                                        + " session_id = ? AND recovery_protected = TRUE",
                 tenant, session).isEmpty();
         protectedBody |= !jdbc.queryForList(
                                 "SELECT lease_id FROM ma_read_lease WHERE tenant_key = ? AND"

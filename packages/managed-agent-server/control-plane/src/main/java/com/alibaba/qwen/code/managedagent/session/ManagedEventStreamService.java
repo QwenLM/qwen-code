@@ -52,22 +52,15 @@ public class ManagedEventStreamService {
 
     public SseEmitter publicStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
-        return publicStreamAs(tenantId,
-                actorId == null || actorId.isBlank() ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId),
-                sessionId, afterSequence);
+        return publicStream(actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+                afterSequence);
     }
 
     public SseEmitter publicStream(SessionPrincipal principal,
             String sessionId, long afterSequence) {
-        return publicStreamAs(principal == null ? null : principal.tenantId(),
-                principal, sessionId, afterSequence);
-    }
-
-    public SseEmitter publicStreamAs(String tenantId, SessionPrincipal principal,
-            String sessionId, long afterSequence) {
         SessionRecord session = agentService.requireReadableSession(
-                tenantId, principal, sessionId);
+                principal, sessionId);
         SseEmitter emitter = emitter();
         executor.execute(() -> stream(emitter, principal, session,
                 afterSequence,
@@ -79,22 +72,15 @@ public class ManagedEventStreamService {
 
     public SseEmitter webShellStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
-        return webShellStream(tenantId,
-                actorId == null || actorId.isBlank() ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId),
-                sessionId, afterSequence);
+        return webShellStream(actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+                afterSequence);
     }
 
     public SseEmitter webShellStream(SessionPrincipal principal,
             String sessionId, long afterSequence) {
-        return webShellStream(principal == null ? null : principal.tenantId(),
-                principal, sessionId, afterSequence);
-    }
-
-    private SseEmitter webShellStream(String tenantId, SessionPrincipal principal,
-            String sessionId, long afterSequence) {
         SessionRecord session = agentService.requireReadableSession(
-                tenantId, principal, sessionId);
+                principal, sessionId);
         SseEmitter emitter = emitter();
         executor.execute(() -> stream(emitter, principal, session,
                 afterSequence,

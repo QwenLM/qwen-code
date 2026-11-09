@@ -198,7 +198,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                         + " binding_state, runtime_generation,"
                         + " loss_evidence_json IS NOT NULL AS loss_evidence,"
                         + " stop_evidence_json IS NOT NULL AS stop_evidence,"
-                        + " is_drain_requested FROM ma_runtime_binding WHERE"
+                        + " drain_requested FROM ma_runtime_binding WHERE"
                         + " tenant_id = ? AND isolation_key = ? ORDER BY"
                         + " runtime_generation", tenant, sessionId);
         var slots = new java.util.ArrayList<Map<String, Object>>();

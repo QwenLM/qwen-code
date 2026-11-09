@@ -111,11 +111,11 @@ class ManagedAgentDefinitionAdmissionTest {
         assertThatThrownBy(() -> transactions.execute(status -> selected.requireMcpManagement(tenant, "stranger", id, null)))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
-        jdbc.update("UPDATE ma_session SET is_plan_enabled=TRUE, selected_approval_mode='default', approval_revision=1 WHERE tenant_id=? AND session_id=?", tenant, id);
+        jdbc.update("UPDATE ma_session SET plan_enabled=TRUE, selected_approval_mode='default', approval_revision=1 WHERE tenant_id=? AND session_id=?", tenant, id);
         assertThatThrownBy(() -> transactions.execute(status -> selected.requireMcpManagement(tenant, "actor", id, "operation")))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("unsupported_feature"));
-        jdbc.update("UPDATE ma_session SET is_plan_enabled=FALSE WHERE tenant_id=? AND session_id=?", tenant, id);
+        jdbc.update("UPDATE ma_session SET plan_enabled=FALSE WHERE tenant_id=? AND session_id=?", tenant, id);
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'turn', 'prompt', '[]', 'digest', 'RUNNING', 1, 1)", tenant, id);
         var readable = transactions.execute(status -> selected.requireMcpManagement(tenant, "actor", id, null));

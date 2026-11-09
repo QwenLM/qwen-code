@@ -36,12 +36,12 @@ class ManagedAgentTurnDeferralTest {
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         String tenant = "tenant-defer";
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "create-key", "digest-create", "qwen-code",
                 "1", null, List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT",
                 "submit-key", "digest-submit", session.sessionId(),
-                List.of(Map.of("type", "text", "text", "hi")), "payload", "owner");
+                List.of(Map.of("type", "text", "text", "hi")), "payload");
         long now = System.currentTimeMillis();
         assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
                 "owner-a", Duration.ofSeconds(30))).isPresent();

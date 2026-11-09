@@ -89,7 +89,7 @@ public class WebShellAgentController {
     @PostMapping("/tasks/query")
     public WebShellTaskPage tasks(TenantContext tenant,
             @Valid @RequestBody WebShellTaskQueryRequest request) {
-        return tasks.queryWebShellTasks(tenant.tenantId(), tenant.actorId(),
+        return tasks.queryWebShellTasks(tenant.requirePrincipal(),
                 request.sessionId(), request.cursor(),
                 request.limit() == null ? 20 : request.limit());
     }
@@ -97,15 +97,15 @@ public class WebShellAgentController {
     @PostMapping("/tasks/get")
     public WebShellTask task(TenantContext tenant,
             @Valid @RequestBody WebShellTaskGetRequest request) {
-        return tasks.getWebShellTask(tenant.tenantId(), tenant.actorId(),
+        return tasks.getWebShellTask(tenant.requirePrincipal(),
                 request.sessionId(), request.taskId());
     }
 
     @PostMapping("/tasks/events/query")
     public WebShellPage<WebShellTaskEvent> taskEvents(TenantContext tenant,
             @Valid @RequestBody WebShellTaskEventQueryRequest request) {
-        return tasks.queryWebShellTaskEvents(tenant.tenantId(),
-                tenant.actorId(), request.sessionId(), request.taskId(),
+        return tasks.queryWebShellTaskEvents(tenant.requirePrincipal(),
+                request.sessionId(), request.taskId(),
                 request.after(),
                 request.limit() == null ? 20 : request.limit());
     }
@@ -118,30 +118,29 @@ public class WebShellAgentController {
         RequestIdFilter.useClientId(httpRequest, httpResponse,
                 request.requestId());
         return ResponseEntity.accepted().body(taskCancels.cancelWebShell(
-                tenant.tenantId(), tenant.actorId(), request.idempotencyKey(),
+                tenant.requirePrincipal(), request.idempotencyKey(),
                 request.sessionId(), request.taskId()));
     }
 
     @PostMapping("/sessions/query")
     public WebShellPage<WebShellSession> list(TenantContext tenant,
             @RequestBody WebShellListRequest request) {
-        return service.listWebShellSessions(tenant.tenantId(),
-                tenant.actorId(), request.cursor(), request.limit() == null ? 20
+        return service.listWebShellSessions(tenant.requirePrincipal(),
+                request.cursor(), request.limit() == null ? 20
                         : request.limit(), request.archiveState(), request.titleQuery());
     }
 
     @PostMapping("/sessions/export/query")
     public ApiModels.WebShellExportPage export(TenantContext tenant,
             @Valid @RequestBody ApiModels.WebShellExportRequest request) {
-        return service.exportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+        return service.exportPage(tenant.requirePrincipal(), request.sessionId(),
                 request.cursor(), request.limit() == null ? 100 : request.limit());
     }
 
     @PostMapping("/sessions/get")
     public WebShellSession get(TenantContext tenant,
             @Valid @RequestBody WebShellSessionRequest request) {
-        return service.getWebShellSession(tenant.tenantId(),
-                tenant.actorId(),
+        return service.getWebShellSession(tenant.requirePrincipal(),
                 request.sessionId());
     }
 
@@ -149,14 +148,14 @@ public class WebShellAgentController {
     public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
             @Valid @RequestBody WebShellSessionRequest request) {
         return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
-                .body(recovery.query(tenant.tenantId(), tenant.actorId(), request.sessionId()));
+                .body(recovery.query(tenant.requirePrincipal(), request.sessionId()));
     }
 
     @PostMapping("/session-recovery/recheck")
     public ResponseEntity<SessionRecovery> recheckRecovery(TenantContext tenant,
             @Valid @RequestBody WebShellRecoveryRecheckRequest request) {
-        return ResponseEntity.accepted().body(recovery.recheck(tenant.tenantId(),
-                tenant.actorId(), request.sessionId(), request.turnId()));
+        return ResponseEntity.accepted().body(recovery.recheck(
+                tenant.requirePrincipal(), request.sessionId(), request.turnId()));
     }
 
     @PostMapping("/sessions/rename")
@@ -164,7 +163,7 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellRenameRequest request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        var result = service.renameSession(tenant.tenantId(), tenant.actorId(),
+        var result = service.renameSession(tenant.requirePrincipal(),
                 request.idempotencyKey(), request.sessionId(), request.title());
         return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
                 .body(new WebShellRenameResult(result.body().id(),
@@ -174,7 +173,7 @@ public class WebShellAgentController {
     @PostMapping("/transcript/query")
     public WebShellTranscript transcript(TenantContext tenant,
             @Valid @RequestBody WebShellTranscriptRequest request) {
-        return service.transcript(tenant.tenantId(), tenant.actorId(),
+        return service.transcript(tenant.requirePrincipal(),
                 request.sessionId(),
                 request.cursor(),
                 request.limit() == null ? 100 : request.limit());
@@ -183,7 +182,8 @@ public class WebShellAgentController {
     @PostMapping("/transcript/items/query")
     public WebShellExportPage recentTranscriptItems(TenantContext tenant,
             @Valid @RequestBody WebShellExportRequest request) {
-        return service.recentTranscriptItems(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+        return service.recentTranscriptItems(tenant.requirePrincipal(),
+                request.sessionId(),
                 request.cursor(), request.limit() == null ? 100 : request.limit());
     }
 
@@ -193,7 +193,7 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellStreamRequest request) {
         long after = request.afterSequence() == null ? 0
                 : request.afterSequence();
-        return streams.webShellStream(tenant.tenantId(), tenant.actorId(),
+        return streams.webShellStream(tenant.requirePrincipal(),
                 request.sessionId(),
                 after);
     }
@@ -203,8 +203,9 @@ public class WebShellAgentController {
             @Valid @RequestBody ApiModels.WebShellContextCompressionRequest request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        return ResponseEntity.accepted().body(compressions.admitWebShell(tenant.tenantId(),
-                tenant.actorId(), request.sessionId(), request.idempotencyKey(), request.expectedCompactionRevision()));
+        return ResponseEntity.accepted().body(compressions.admitWebShell(
+                tenant.requirePrincipal(), request.sessionId(),
+                request.idempotencyKey(), request.expectedCompactionRevision()));
     }
 
     @PostMapping("/sessions/create")
@@ -275,7 +276,7 @@ public class WebShellAgentController {
         RequestIdFilter.useClientId(httpRequest, httpResponse,
                 request.requestId());
         WebShellAdmission admission = webShell(service.submitTurn(
-                tenant.tenantId(), tenant.actorId(),
+                tenant.requirePrincipal(),
                 request.idempotencyKey(), request.sessionId(),
                 request.input()));
         return ResponseEntity.accepted().body(admission);
@@ -288,7 +289,7 @@ public class WebShellAgentController {
         RequestIdFilter.useClientId(httpRequest, httpResponse,
                 request.requestId());
         WebShellAdmission admission = webShell(service.cancelTurn(
-                tenant.tenantId(), tenant.actorId(),
+                tenant.requirePrincipal(),
                 request.idempotencyKey(), request.sessionId(),
                 request.turnId()));
         return ResponseEntity.accepted().body(admission);
@@ -326,7 +327,7 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellLifecycleRequest request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        var result = service.unarchiveWebShellSession(tenant.tenantId(), tenant.actorId(),
+        var result = service.unarchiveWebShellSession(tenant.requirePrincipal(),
                 request.idempotencyKey(), request.sessionId());
         return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
                 .body(result.body());
@@ -335,14 +336,15 @@ public class WebShellAgentController {
     @PostMapping("/operations/query")
     public Object queryOperation(TenantContext tenant,
             @Valid @RequestBody WebShellOperationRequest request) {
-        return lifecycle.getWebShellOperation(tenant.tenantId(),
-                tenant.actorId(), request.sessionId(), request.operationId());
+        return lifecycle.getWebShellOperation(tenant.requirePrincipal(),
+                request.sessionId(), request.operationId());
     }
 
     @PostMapping("/session-approval/query")
     public ApiModels.WebShellSessionApproval querySessionApproval(TenantContext tenant,
             @Valid @RequestBody ApiModels.WebShellSessionApprovalRequest request) {
-        return service.queryWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId());
+        return service.queryWebShellSessionApproval(tenant.requirePrincipal(),
+                request.sessionId());
     }
 
     @PostMapping("/session-approval/change")
@@ -350,14 +352,16 @@ public class WebShellAgentController {
             @Valid @RequestBody ApiModels.WebShellChangeApprovalRequest request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        return service.changeWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+        return service.changeWebShellSessionApproval(tenant.requirePrincipal(),
+                request.sessionId(),
                 request.idempotencyKey(), request.approvalMode(), request.expectedRevision(), request.planMode(), request.permissionRules());
     }
 
     @PostMapping("/session-models/query")
     public WebShellSessionModels querySessionModels(TenantContext tenant,
             @Valid @RequestBody WebShellSessionModelsRequest request) {
-        return service.queryWebShellSessionModels(tenant.tenantId(), tenant.actorId(), request.sessionId());
+        return service.queryWebShellSessionModels(tenant.requirePrincipal(),
+                request.sessionId());
     }
 
     @PostMapping("/session-models/change")
@@ -365,7 +369,8 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellChangeModelRequest request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        return service.changeWebShellSessionModel(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+        return service.changeWebShellSessionModel(tenant.requirePrincipal(),
+                request.sessionId(),
                 request.idempotencyKey(), request.modelId(), request.expectedRevision());
     }
 
@@ -373,8 +378,8 @@ public class WebShellAgentController {
             TenantContext tenant, WebShellLifecycleRequest request,
             OperationKind kind) {
         return ResponseEntity.accepted().body(lifecycle.admitWebShell(
-                tenant.tenantId(), tenant.actorId(),
-                request.idempotencyKey(), request.sessionId(), kind));
+                tenant.requirePrincipal(), request.idempotencyKey(),
+                request.sessionId(), kind));
     }
 
     private static WebShellAdmission webShell(CommandAdmission admission) {

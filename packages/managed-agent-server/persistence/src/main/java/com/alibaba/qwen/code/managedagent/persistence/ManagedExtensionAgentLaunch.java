@@ -109,7 +109,7 @@ public final class ManagedExtensionAgentLaunch {
                 + " AND s.last_generation=b.runtime_generation WHERE b.binding_id=? AND b.runtime_generation=?"
                 + " AND b.tenant_id=? AND b.workspace_id=? AND b.workspace_generation=? AND b.storage_id=?"
                 + " AND b.isolation_class='session' AND b.isolation_key=? AND b.binding_state='READY'"
-                + " AND b.is_drain_requested=FALSE AND b.runtime_instance_id IS NOT NULL AND b.runtime_lease_id IS NOT NULL FOR UPDATE",
+                + " AND b.drain_requested=FALSE AND b.runtime_instance_id IS NOT NULL AND b.runtime_lease_id IS NOT NULL FOR UPDATE",
                 String.class, runtime.path("bindingId").asText(), selectedGeneration, parent.tenantId(),
                 parent.workspace().getWorkspaceId(), Long.toString(parent.workspace().getWorkspaceGeneration()),
                 parent.workspace().getStorageId(), parent.sessionId());

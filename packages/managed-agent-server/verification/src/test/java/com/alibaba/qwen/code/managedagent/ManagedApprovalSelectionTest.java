@@ -234,31 +234,31 @@ class ManagedApprovalSelectionTest {
                                 .content("{\"sessionId\":\"" + id + "\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.approvalMode").value("auto-edit"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         post(BASE + "/sessions/create")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(
-                                        "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"unbound\",\"approvalMode\":\"default\"}"), "owner"))
+                                        "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"unbound\",\"approvalMode\":\"default\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("unsupported_approval_mode"));
         String legacy =
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+                mvc.perform(
                                 post(BASE + "/sessions/create")
                                         .header(TenantContextFilter.HEADER, tenant)
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content(
-                                                "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"legacy\"}"), "owner"))
+                                                "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"legacy\"}"))
                         .andExpect(status().isAccepted())
                         .andReturn()
                         .getResponse()
                         .getContentAsString();
         String legacyId = json.readTree(legacy).path("sessionId").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         post(BASE + "/sessions/get")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"sessionId\":\"" + legacyId + "\"}"), "owner"))
+                                .content("{\"sessionId\":\"" + legacyId + "\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.approvalMode").doesNotExist());
     }

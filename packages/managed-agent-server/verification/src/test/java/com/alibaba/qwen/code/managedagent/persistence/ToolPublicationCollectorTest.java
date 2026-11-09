@@ -72,13 +72,13 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
     private String addPublication(String publication, String sessionId) {
         String publicationScope = ToolPublicationRetentionStore.hash(tenant + sessionId);
-        jdbc.update("INSERT INTO ma_output_capture (gmt_create, gmt_modified, scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                         + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                        + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
+                        + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
                         + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                        + " SELECT gmt_create, gmt_modified, ?, tenant_key, tenant_id, workspace_id, ?, ?, ?, ?, binding_json, binding_digest,"
+                        + " SELECT ?, tenant_key, tenant_id, workspace_id, ?, ?, ?, ?, binding_json, binding_digest,"
                         + " token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
-                        + " is_write_evidence, is_accepted_complete, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
+                        + " write_evidence, accepted_complete, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
                         + " capture_used_bytes FROM ma_output_capture WHERE scope_key = ? AND publication_id = X'7075622d31'",
                 publicationScope, sessionId, publication, ToolPublicationRetentionStore.hash(publicationScope + publication),
                 "capture-" + publication, scope);
@@ -104,13 +104,13 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             });
             switch (blocker) {
                 case "legacy_write_evidence_missing" -> jdbc.update("UPDATE ma_output_capture"
-                        + " SET is_write_evidence = FALSE WHERE session_id = ?", heldSession);
+                        + " SET write_evidence = FALSE WHERE session_id = ?", heldSession);
                 case "quarantined" -> jdbc.update("UPDATE ma_output_capture"
-                        + " SET is_quarantined = TRUE WHERE session_id = ?", heldSession);
+                        + " SET quarantined = TRUE WHERE session_id = ?", heldSession);
                 case "not_accepted_complete" -> jdbc.update("UPDATE ma_output_capture"
-                        + " SET is_accepted_complete = FALSE WHERE session_id = ?", heldSession);
+                        + " SET accepted_complete = FALSE WHERE session_id = ?", heldSession);
                 case "recovery_protected" -> jdbc.update("UPDATE ma_session"
-                        + " SET is_recovery_protected = TRUE WHERE session_id = ?", heldSession);
+                        + " SET recovery_protected = TRUE WHERE session_id = ?", heldSession);
                 default -> throw new AssertionError(blocker);
             }
         }
@@ -209,7 +209,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @ValueSource(strings = {"VERIFIED", "CANDIDATE", "QUARANTINED"})
     void failedPrefixAllowsCollectionOnlyWithVerifiedObjects(String objectState) {
         String failed = addOperation(OperationKind.OUTPUT_VERIFY, scope, "pub-1", session, "failed-prefix", "FAILED");
-        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', execution_mode = 'ASYNC', is_verification_ready = TRUE,"
+        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', execution_mode = 'ASYNC', verification_ready = TRUE,"
                 + " failure_status = 403, failure_code = 'managed_tool_publication_storage_denied' WHERE operation_key = ?", failed);
         addObject("one", "failed-prefix/exact-key", null);
         addObject("inline", null, new byte[] {8});
@@ -248,7 +248,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         var objects = new DeletingObjects();
         objects.bytes.put("protected/exact-key", new byte[] {7});
         retire();
-        jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE WHERE scope_key = ?", scope);
         var gc = collector(objects);
         assertThat(gc.runOnce()).isFalse();
         assertThat(jdbc.queryForObject("SELECT failure_code FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
@@ -256,7 +256,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(held()).isEqualTo(3000);
         assertThat(objects.deleted).isEmpty();
         // Test-only evidence change; production has no supported post-retirement repair path.
-        jdbc.update("UPDATE ma_output_capture SET is_quarantined = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET quarantined = FALSE WHERE scope_key = ?", scope);
         retryNow();
         assertThat(gc.runOnce()).isTrue();
         assertThat(state()).isEqualTo("COLLECTED");
@@ -371,7 +371,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(blocker()).isEqualTo("resource_referenced");
         assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
                 Long.class, scope)).isBetween(before, after + 5_000);
-        jdbc.update("UPDATE ma_session SET is_resource_gc_completed = TRUE WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update("UPDATE ma_session SET resource_gc_completed = TRUE WHERE tenant_id = ? AND session_id = ?",
                 tenant, session);
         retryNow();
         assertThat(gc.runOnce()).isFalse();
@@ -520,11 +520,11 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
     @Test
     void aFailingPublicationDoesNotStarveTheNextPublication() {
-        jdbc.update("INSERT INTO ma_output_capture (gmt_create, gmt_modified, scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                         + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                        + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
+                        + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
                         + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                        + " VALUES (" + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'workspace-1', ?, 'pub-2', ?, 'capture-2', '{}', ?, ?, 'FENCED',"
+                        + " VALUES (?, ?, ?, 'workspace-1', ?, 'pub-2', ?, 'capture-2', '{}', ?, ?, 'FENCED',"
                         + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, ToolPublicationRetentionStore.hash(scope + "2"), scope, scope);
         addObject("one", "failing", null);
@@ -830,7 +830,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         retire();
         var objects = new DeletingObjects();
         assertThat(collector(jdbc, objects, false).runOnce()).isFalse();
-        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET write_evidence = FALSE WHERE scope_key = ?", scope);
         assertThat(collector(objects).runOnce()).isFalse();
         assertThat(objects.deleted).isEmpty();
         assertThat(held()).isEqualTo(3000);

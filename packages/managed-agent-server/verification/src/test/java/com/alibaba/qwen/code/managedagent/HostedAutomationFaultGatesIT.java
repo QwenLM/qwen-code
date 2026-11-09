@@ -1151,7 +1151,7 @@ class HostedAutomationFaultGatesIT {
         assertThat(taskView.stream().map(this::servedTaskEvent).toList())
                 .as("the cut prefix and the resumed suffix are the task journal").isEqualTo(taskLedger);
         assertThat(taskView).extracting(event -> event.path("state").asText())
-                .as("one is_terminal state, last").endsWith("completed")
+                .as("one terminal state, last").endsWith("completed")
                 .filteredOn(state -> List.of("completed", "failed", "cancelled").contains(state)).hasSize(1);
         List<JsonNode> again = new ArrayList<>();
         taskEvents(session, task, taskCut, again);

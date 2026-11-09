@@ -15,30 +15,12 @@ import java.util.Set;
 /** Reads raw SQL rows while decoding only declared UTF-8 identity columns. */
 public final class ManagedSchemaRows {
     private static final Set<String> BOOLEANS = Set.of(
-            "is_accepted_complete",
-            "is_actor_present",
-            "is_archived",
-            "is_cancel_requested",
-            "is_csi_guard",
-            "is_default",
-            "is_drain_requested",
-            "is_enabled",
-            "is_execution_exclusive",
-            "is_paused",
-            "is_plan_enabled",
-            "is_projection_pending",
-            "is_provision_seeded",
-            "is_quarantined",
-            "is_recovery_protected",
-            "is_resource_gc_completed",
-            "is_submission_attempted",
-            "is_terminal",
-            "is_truncated",
-            "is_verification_ready",
-            "is_wake_pending",
-            "is_wake_scan_pending",
-            "is_workspace_bound",
-            "is_write_evidence");
+            "recovery_protected", "resource_gc_completed", "submission_attempted",
+            "projection_pending", "terminal", "truncated",
+            "archived", "quarantined", "write_evidence", "accepted_complete",
+            "workspace_bound", "verification_ready", "is_default", "provision_seeded",
+            "drain_requested", "cancel_requested", "enabled", "csi_guard",
+            "execution_exclusive");
     private static final Set<String> IDENTITIES =
             Set.of(
                     "tenant_id",
@@ -162,7 +144,7 @@ public final class ManagedSchemaRows {
             } else if (value instanceof java.time.LocalDateTime timestamp) {
                 value = java.sql.Timestamp.valueOf(timestamp);
             }
-            if ("is_csi_guard".equals(label) && value instanceof Number number) {
+            if ("csi_guard".equals(label) && value instanceof Number number) {
                 value = number.longValue() != 0;
             }
             row.put(label, value);
@@ -179,11 +161,7 @@ public final class ManagedSchemaRows {
             throws SQLException {
         Object value;
         if (type == Types.TINYINT && BOOLEANS.contains(label)) {
-            int raw = result.getInt(index);
-            if (!result.wasNull() && raw != 0 && raw != 1) {
-                throw new SQLException("Invalid persisted boolean: " + label);
-            }
-            value = raw == 1;
+            value = result.getBoolean(index);
         } else {
             value = switch (type) {
                 case Types.BOOLEAN, Types.BIT -> result.getBoolean(index);

@@ -36,6 +36,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -1493,6 +1494,7 @@ class ManagedWorkspaceAdmissionTest {
                 .agentId("qwen-code")
                 .selection(new WorkspaceSelection("ws-a", "."))
                 .build());
+        jdbc.update("ALTER TABLE ma_workspace_access DROP CONSTRAINT ck_ma_access_role");
         try {
             jdbc.update("UPDATE ma_workspace_access SET role = 'BROKEN'"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
@@ -1513,6 +1515,10 @@ class ManagedWorkspaceAdmissionTest {
             jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, "ws-a", "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            String constraint = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.ddl()
+                    .lines().filter(line -> line.contains("CONSTRAINT ck_ma_access_role CHECK"))
+                    .findFirst().orElseThrow().trim().replaceFirst(",$", "");
+            jdbc.update("ALTER TABLE ma_workspace_access ADD " + constraint);
         }
     }
 
@@ -2102,7 +2108,7 @@ class ManagedWorkspaceAdmissionTest {
                                 .selection(new WorkspaceSelection("ws-a", "."))
                                 .build());
                     } else {
-                        store.insertSessionCommand(tenant, "actor-a", "CREATE_SESSION", "key",
+                        store.insertSessionCommand(tenant, "CREATE_SESSION", "key",
                                 "legacy-digest", "qwen-code", null, null, List.of(), null);
                     }
                     return "created";
@@ -2847,20 +2853,10 @@ class ManagedWorkspaceAdmissionTest {
                 .agentId("qwen-code")
                 .selection(new WorkspaceSelection("ws-a", "."))
                 .build()).sessionId();
-        // The baseline carries no CHECK constraints: an incomplete
-        // binding lands in the table. The admission boundary refuses it
-        // through the domain rule; the plain read maps the row without
-        // the per-row integrity tax (R1-15).
         for (String column : List.of("workspace_generation", "context_revision")) {
-            jdbc.update("UPDATE ma_session SET " + column
-                    + " = NULL WHERE session_id = ?", session);
-            assertThatThrownBy(() -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                    "ma_session", jdbc.queryForMap("SELECT * FROM ma_session"
-                            + " WHERE session_id = ?", session)))
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("ck_ma_session_binding");
-            jdbc.update("UPDATE ma_session SET " + column
-                    + " = 1 WHERE session_id = ?", session);
+            assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET "
+                    + column + " = NULL WHERE session_id = ?", session))
+                    .isInstanceOf(DataIntegrityViolationException.class);
         }
         jdbc.update("UPDATE ma_session SET workspace_config_ref = 'changed'"
                 + " WHERE session_id = ?", session);

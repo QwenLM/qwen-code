@@ -1490,7 +1490,7 @@ class HostedSessionRelayFaultGatesIT {
                         + " CAST(turn_id AS CHAR) AS turn_id,"
                         + " CAST(item_id AS CHAR) AS item_id,"
                         + " CAST(content_part_id AS CHAR) AS content_part_id,"
-                        + " event_type, gmt_create, data_json, is_terminal"
+                        + " event_type, gmt_create, data_json, terminal"
                         + " FROM ma_public_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND stream_kind = 'SESSION' AND"
                         + " stream_id = X'' ORDER BY sequence_id",
@@ -1516,7 +1516,7 @@ class HostedSessionRelayFaultGatesIT {
         fields.put("type", row.get("event_type"));
         fields.put("created_at", web ? created : created / 1000);
         fields.put("data", json.readTree(row.get("data_json").toString()));
-        Object terminal = row.get("is_terminal");
+        Object terminal = row.get("terminal");
         fields.put("terminal", terminal instanceof Boolean flag ? flag
                 : ((Number) terminal).intValue() != 0);
         ObjectNode node = json.createObjectNode();
@@ -1535,7 +1535,7 @@ class HostedSessionRelayFaultGatesIT {
                                 "SELECT COUNT(*) FROM ma_public_event"
                                         + " WHERE tenant_id = ? AND"
                                         + " session_id = ? AND turn_id = ?"
-                                        + " AND is_terminal",
+                                        + " AND terminal",
                                 Integer.class, tenant, session, turn))
                                 .isEqualTo(1));
     }

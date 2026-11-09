@@ -114,7 +114,7 @@ public class PublicAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
                         selection, null, null, request.skills(), null, request.extensionPins(), worktree);
-        PublicSession session = service.getPublicSessionAs(tenant.tenantId(), tenant.principal(),
+        PublicSession session = service.getPublicSession(tenant.requirePrincipal(),
                 admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .header("X-Qwen-Idempotent-Replay",
@@ -128,28 +128,29 @@ public class PublicAgentController {
             @RequestParam(defaultValue = "20") int limit,
             @RequestParam(name = "archive_state", required = false) String archiveState,
             @RequestParam(name = "title_query", required = false) String titleQuery) {
-        return service.listPublicSessionsAs(tenant.tenantId(), tenant.principal(),
+        return service.listPublicSessions(tenant.requirePrincipal(),
                 cursor, limit, archiveState, titleQuery);
     }
 
     @GetMapping("/{sessionId}")
     public PublicSession get(TenantContext tenant,
             @PathVariable String sessionId) {
-        return service.getPublicSessionAs(tenant.tenantId(), tenant.principal(), sessionId);
+        return service.getPublicSession(tenant.requirePrincipal(), sessionId);
     }
 
     @GetMapping("/{sessionId}/recovery")
     public ResponseEntity<SessionRecovery> recovery(TenantContext tenant,
             @PathVariable String sessionId) {
         return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
-                .body(recovery.queryAs(tenant.tenantId(), tenant.principal(), sessionId));
+                .body(recovery.query(tenant.requirePrincipal(), sessionId));
     }
 
     @PostMapping("/{sessionId}/recovery/recheck")
     public ResponseEntity<SessionRecovery> recheckRecovery(TenantContext tenant,
             @PathVariable String sessionId,
             @Valid @RequestBody RecoveryRecheckRequest request) {
-        return ResponseEntity.accepted().body(recovery.recheckAs(tenant.tenantId(), tenant.principal(), sessionId, request.turnId()));
+        return ResponseEntity.accepted().body(recovery.recheck(
+                tenant.requirePrincipal(), sessionId, request.turnId()));
     }
 
     @PatchMapping("/{sessionId}")
@@ -157,7 +158,7 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody UpdateSessionRequest request) {
-        return mutation(service.renameSessionAs(tenant.tenantId(), tenant.principal(),
+        return mutation(service.renameSession(tenant.requirePrincipal(),
                 idempotencyKey, sessionId, request.title()));
     }
 
@@ -181,7 +182,7 @@ public class PublicAgentController {
     public ResponseEntity<PublicSession> unarchive(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        return mutation(service.unarchiveSessionAs(tenant.tenantId(), tenant.principal(),
+        return mutation(service.unarchiveSession(tenant.requirePrincipal(),
                 idempotencyKey, sessionId));
     }
 
@@ -197,7 +198,8 @@ public class PublicAgentController {
     public Object getOperation(TenantContext tenant,
             @PathVariable String sessionId,
             @PathVariable String operationId) {
-        return lifecycle.getPublicOperationAs(tenant.tenantId(), tenant.principal(), sessionId, operationId);
+        return lifecycle.getPublicOperation(tenant.requirePrincipal(), sessionId,
+                operationId);
     }
 
     @PostMapping("/{sessionId}/compress")
@@ -205,8 +207,9 @@ public class PublicAgentController {
             TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody CompressSessionRequest request) {
-        return ResponseEntity.accepted().body(compressions.admitPublicAs(tenant.tenantId(), tenant.principal(),
-                sessionId, idempotencyKey, request.expectedCompactionRevision()));
+        return ResponseEntity.accepted().body(compressions.admitPublic(
+                tenant.requirePrincipal(), sessionId, idempotencyKey,
+                request.expectedCompactionRevision()));
     }
 
     @PostMapping("/{sessionId}/events")
@@ -216,7 +219,7 @@ public class PublicAgentController {
             @Valid @RequestBody SessionEventRequest request) {
         CommandAdmission admission;
         if ("agent.session.input.message".equals(request.type())) {
-            admission = service.submitTurnAs(tenant.tenantId(), tenant.principal(),
+            admission = service.submitTurn(tenant.requirePrincipal(),
                     idempotencyKey, sessionId, request.input());
         } else if ("agent.session.cancel".equals(request.type())) {
             if (request.turnId() == null || request.turnId().isBlank()) {
@@ -224,7 +227,7 @@ public class PublicAgentController {
                         "turn_id_required",
                         "Cancellation requires turn_id.");
             }
-            admission = service.cancelTurnAs(tenant.tenantId(), tenant.principal(),
+            admission = service.cancelTurn(tenant.requirePrincipal(),
                     idempotencyKey, sessionId, request.turnId());
         } else {
             throw new ManagedAgentException(400,
@@ -250,10 +253,10 @@ public class PublicAgentController {
         boolean wantsStream = stream || (accept != null
                 && accept.contains(MediaType.TEXT_EVENT_STREAM_VALUE));
         if (wantsStream) {
-            return streams.publicStreamAs(tenant.tenantId(), tenant.principal(),
+            return streams.publicStream(tenant.requirePrincipal(),
                     sessionId, cursor);
         }
-        return service.publicEventsAs(tenant.tenantId(), tenant.principal(),
+        return service.publicEvents(tenant.requirePrincipal(),
                 sessionId, cursor, limit);
     }
 
@@ -276,7 +279,8 @@ public class PublicAgentController {
         } else if (cursor == null) {
             cursor = after;
         }
-        return service.listPublicItemsAs(tenant.tenantId(), tenant.principal(), sessionId, cursor, sequence, limit);
+        return service.listPublicItems(tenant.requirePrincipal(), sessionId, cursor,
+                sequence, limit);
     }
 
     @GetMapping("/{sessionId}/turns")
@@ -284,14 +288,14 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return service.listPublicTurnsAs(tenant.tenantId(), tenant.principal(),
+        return service.listPublicTurns(tenant.requirePrincipal(),
                 sessionId, cursor, limit);
     }
 
     @GetMapping("/{sessionId}/turns/{turnId}")
     public PublicTurn turn(TenantContext tenant,
             @PathVariable String sessionId, @PathVariable String turnId) {
-        return service.getPublicTurnAs(tenant.tenantId(), tenant.principal(),
+        return service.getPublicTurn(tenant.requirePrincipal(),
                 sessionId, turnId);
     }
 
@@ -300,14 +304,14 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return tasks.listPublicTasksAs(tenant.tenantId(), tenant.principal(),
+        return tasks.listPublicTasks(tenant.requirePrincipal(),
                 sessionId, cursor, limit);
     }
 
     @GetMapping("/{sessionId}/tasks/{taskId}")
     public PublicTask task(TenantContext tenant,
             @PathVariable String sessionId, @PathVariable String taskId) {
-        return tasks.getPublicTaskAs(tenant.tenantId(), tenant.principal(),
+        return tasks.getPublicTask(tenant.requirePrincipal(),
                 sessionId, taskId);
     }
 
@@ -316,7 +320,7 @@ public class PublicAgentController {
             @PathVariable String sessionId, @PathVariable String taskId,
             @RequestParam(required = false) String after,
             @RequestParam(defaultValue = "20") int limit) {
-        return tasks.listPublicTaskEventsAs(tenant.tenantId(), tenant.principal(),
+        return tasks.listPublicTaskEvents(tenant.requirePrincipal(),
                 sessionId, taskId, after, limit);
     }
 
@@ -325,9 +329,8 @@ public class PublicAgentController {
             TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String taskId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        return ResponseEntity.accepted().body(taskCancels.cancelPublicAs(
-                tenant.tenantId(), tenant.principal(), idempotencyKey,
-                sessionId, taskId));
+        return ResponseEntity.accepted().body(taskCancels.cancelPublic(
+                tenant.requirePrincipal(), idempotencyKey, sessionId, taskId));
     }
 
     private static long parseSequence(String header, long fallback) {
@@ -349,9 +352,8 @@ public class PublicAgentController {
     private ResponseEntity<PublicCommandOperation> operation(
             TenantContext tenant, String idempotencyKey, String sessionId,
             OperationKind kind) {
-        return ResponseEntity.accepted().body(lifecycle.admitPublicAs(
-                tenant.tenantId(), tenant.principal(), idempotencyKey,
-                sessionId, kind));
+        return ResponseEntity.accepted().body(lifecycle.admitPublic(
+                tenant.requirePrincipal(), idempotencyKey, sessionId, kind));
     }
 
     private static ResponseEntity<PublicSession> mutation(

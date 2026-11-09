@@ -38,11 +38,6 @@ class ManagedMcpManagementServiceTest {
     @BeforeEach
     void setUp() {
         when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
-        when(session.workspace()).thenReturn(
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
-                        "tenant", "ws", 1, "storage", ".", "config", 1));
-        when(sessions.requireReadableSession(any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class), eq("session")))
-                .thenReturn(session);
         when(store.requireMcpManagement(eq("tenant"), anyString(), eq("session"), any())).thenReturn(session);
         when(harness.supportsMcpManagement()).thenReturn(true);
         when(harness.supportsLifecycle("hosted-workspace-shell/1")).thenReturn(true);
@@ -64,25 +59,6 @@ class ManagedMcpManagementServiceTest {
         assertThat(values.get(2).get("operationId")).isNotEqualTo(values.get(0).get("operationId"));
         assertThat(values.get(0)).containsOnlyKeys("operationId", "actorKey", "action", "serverId", "expectedRevision", "server");
         assertThat(((Map<?, ?>) values.get(0).get("server")).keySet()).isEqualTo(Set.of("serverId", "serverRevision", "definitionDigest"));
-    }
-
-    @Test
-    void identityDigestKeepsThePersistedSixElementLayout() throws Exception {
-        // The operationId is the replay key of receipts already persisted in
-        // ma_session_journal_tx: the digest must stay the historical
-        // six-element JSON array, and an absent actor subject keeps hashing
-        // as JSON null instead of throwing (R3-8).
-        var command = new ManagedMcpManagementCommand("add", "docs", 0L,
-                new ManagedMcpServerPin("docs", 2, "a".repeat(64)));
-        service.submit("tenant", "actor", "session", "key", command);
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<Map<String, Object>> requests = ArgumentCaptor.forClass(Map.class);
-        verify(harness).manageMcp(eq("tenant"), eq("session"), requests.capture());
-        var json = new ObjectMapper();
-        String expected = java.util.UUID.nameUUIDFromBytes(json.writeValueAsBytes(
-                java.util.Arrays.asList("managed-mcp-command", "tenant", "actor",
-                        null, "session", "key"))).toString();
-        assertThat(requests.getValue().get("operationId")).isEqualTo(expected);
     }
 
     @Test

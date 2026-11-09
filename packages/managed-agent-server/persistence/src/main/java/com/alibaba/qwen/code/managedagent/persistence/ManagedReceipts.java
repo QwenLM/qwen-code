@@ -37,7 +37,7 @@ final class ManagedReceipts {
         List<Receipt> rows =
                 jdbc.query(
                         "SELECT tenant_id, scope_id, idempotency_key, request_digest, session_id,"
-                            + " turn_id, state, session_status_before, actor_id, is_workspace_bound, gmt_create,"
+                            + " turn_id, state, session_status_before, actor_id, workspace_bound, gmt_create,"
                             + " gmt_modified, operation, result_json, result_operation_key FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
                             + " AND tenant_key = ? AND scope_key = ?"
                                 + (lock ? " FOR UPDATE" : ""),
@@ -51,7 +51,7 @@ final class ManagedReceipts {
                                 row.getString("state"),
                                 row.getString("session_status_before"),
                                 row.getBytes("actor_id"),
-                                row.getObject("is_workspace_bound", Boolean.class),
+                                row.getObject("workspace_bound", Boolean.class),
                                 row.getLong("gmt_create"), row.getLong("gmt_modified"),
                                 row.getString("operation"), row.getString("result_json"),
                                 row.getString("result_operation_key")),
@@ -92,7 +92,7 @@ final class ManagedReceipts {
                 "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key, tenant_id,"
                     + " scope_kind, scope_key, scope_id, idempotency_key, idempotency_digest,"
                     + " request_digest, operation, actor_id, session_id, turn_id, state,"
-                    + " session_status_before, is_workspace_bound, gmt_create, gmt_modified) VALUES (?,"
+                    + " session_status_before, workspace_bound, gmt_create, gmt_modified) VALUES (?,"
                     + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ManagedSchemaKeys.receiptKey(namespace, tenant, scopeKind, scopeId, key),
                 namespace.name(),

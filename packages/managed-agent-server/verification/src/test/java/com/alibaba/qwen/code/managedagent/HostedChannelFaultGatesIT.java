@@ -1013,7 +1013,7 @@ class HostedChannelFaultGatesIT {
                             deliveryId);
                     assertThat(record.path("run").path("delivery")
                             .path("state").asText())
-                            .as("the is_terminal is the physical unknown,"
+                            .as("the terminal is the physical unknown,"
                                     + " never a fabricated cancelled")
                             .isEqualTo("unknown");
                     assertThat(record.path("cancelRequested").asBoolean())

@@ -282,7 +282,7 @@ class ManagedSnapshotNumericPagingTest {
                             String.class,
                             jdbc.directoryArguments);
             assertThat(plan)
-                    .contains("idx_ma_message_history")
+                    .contains("ix_ma_message_history")
                     .doesNotContain("Table scan", "Sort:");
             var counts =
                     java.util.regex.Pattern.compile(

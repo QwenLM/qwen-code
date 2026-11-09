@@ -227,7 +227,7 @@ class ManagedMessagePagingTest {
     void includesOnlyLatestControlStatesOfTheSelectedTurns() {
         seed(3, false);
         jdbc.update("INSERT INTO ma_public_event(tenant_id,session_id,sequence_id,event_id,turn_id,event_type,data_json,"
-                + "is_terminal,gmt_create) VALUES(?,?,3,'terminal','turn','turn.completed','{}',TRUE,0)", "tenant", "session");
+                + "terminal,gmt_create) VALUES(?,?,3,'terminal','turn','turn.completed','{}',TRUE,0)", "tenant", "session");
         var page = read(null, 1, true);
         assertThat(page.events()).extracting(StoreModels.EventRecord::type).containsExactly("turn.completed");
         assertThat(page.events().getFirst().sequence()).isEqualTo(3);

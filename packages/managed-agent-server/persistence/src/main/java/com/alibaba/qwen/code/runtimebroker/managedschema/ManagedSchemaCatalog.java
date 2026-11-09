@@ -22,15 +22,16 @@ final class ManagedSchemaCatalog {
     private static final Pattern COLUMN =
             Pattern.compile(
                     "(?m)^    ([a-z0-9_]+)"
-                        + " (VARBINARY|VARCHAR|CHAR|BIGINT|INT|TINYINT|BOOLEAN|DATETIME|LONGTEXT|MEDIUMTEXT|MEDIUMBLOB|LONGBLOB)(?:\\((\\d+)\\))?([^\\n"
+                        + " (VARBINARY|VARCHAR|CHAR|BIGINT|INT|BOOLEAN|DATETIME|LONGTEXT|MEDIUMTEXT|MEDIUMBLOB|LONGBLOB)(?:\\((\\d+)\\))?([^\\n"
                         + "]*)");
     private static final Pattern PRIMARY = Pattern.compile("PRIMARY KEY \\(([^)]+)\\)");
     private static final Pattern UNIQUE = Pattern.compile("UNIQUE(?: KEY [a-z_]+)? \\(([^)]+)\\)");
+    private static final Pattern CHECK = Pattern.compile("CONSTRAINT ([a-z_]+) CHECK");
     private static final Pattern INDEX =
-            Pattern.compile("CREATE (UNIQUE )?INDEX ([a-z_]+) ON (ma_[a-z_]+) \\(([^;]+)\\);");
+            Pattern.compile("CREATE (UNIQUE )?INDEX ([a-z_]+) ON (ma_[a-z_]+) \\(([^)]+)\\)");
     private static final Pattern INLINE_INDEX = Pattern.compile("INDEX ([a-z_]+)\\s*\\(([^)]+)\\)");
-    private static final Pattern INDEX_PREFIX =
-            Pattern.compile(" /\\*!50000 \\((\\d+)\\) \\*/");
+    private static final Pattern FOREIGN =
+            Pattern.compile("FOREIGN KEY \\(([^)]+)\\)\\s*REFERENCES (ma_[a-z_]+) \\(([^)]+)\\)");
 
     private ManagedSchemaCatalog() {}
 
@@ -44,14 +45,6 @@ final class ManagedSchemaCatalog {
                 throw new SQLException("Managed schema requires a dedicated application catalog;"
                         + " system or missing catalog refused before DDL: " + name);
             }
-            try (var statement = connection.prepareStatement("SELECT @@GLOBAL.sql_mode, @@SESSION.sql_mode");
-                    var result = statement.executeQuery()) {
-                if (!result.next() || !strictSqlMode(result.getString(1)) || !strictSqlMode(result.getString(2))) {
-                    throw new SQLException("Managed schema requires strict SQL mode"
-                            + " (STRICT_TRANS_TABLES or STRICT_ALL_TABLES) globally and for the current session;"
-                            + " refused before DDL");
-                }
-            }
             if (isMariaDb(connection)) {
                 try (var statement = connection.prepareStatement(
                         "SELECT @@GLOBAL.check_constraint_checks, @@SESSION.check_constraint_checks");
@@ -63,16 +56,6 @@ final class ManagedSchemaCatalog {
                 }
             }
         }
-    }
-
-    private static boolean strictSqlMode(String modes) {
-        for (String mode : modes.split(",")) {
-            if ("STRICT_TRANS_TABLES".equalsIgnoreCase(mode.trim())
-                    || "STRICT_ALL_TABLES".equalsIgnoreCase(mode.trim())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static boolean isMariaDb(Connection connection) throws SQLException {
@@ -128,7 +111,6 @@ final class ManagedSchemaCatalog {
     private static void validate(Connection connection, String ddl, boolean sharedCatalog) throws SQLException {
         Map<String, String> actual = tables(connection);
         if (sharedCatalog) {
-            // 元数据保持真实；只有显式共享校验在当前步骤选取本组件拥有的命名空间。
             actual.entrySet().removeIf(entry -> !entry.getKey().startsWith("ma_")
                     && !entry.getKey().startsWith("managed_agent_"));
         }
@@ -166,8 +148,8 @@ final class ManagedSchemaCatalog {
             validateColumns(connection, name, body);
             validateGeneratedColumns(connection, name, body);
             validateKeys(connection, name, body, ddl);
-            validateChecks(connection, name);
-            validateForeignKeys(connection, name);
+            validateChecks(connection, name, body);
+            validateForeignKeys(connection, name, body, ddl);
         }
         if (!declared.equals(ManagedSchemaContract.TABLES)) {
             throw new SQLException(
@@ -182,7 +164,6 @@ final class ManagedSchemaCatalog {
         Map<String, Boolean> unsigned = new HashMap<>();
         Map<String, String> names = new HashMap<>();
         Map<String, Boolean> required = new HashMap<>();
-        Map<String, Boolean> automatic = new HashMap<>();
         try (var result =
                 connection
                         .getMetaData()
@@ -198,8 +179,6 @@ final class ManagedSchemaCatalog {
                 required.put(
                         lower(result.getString("COLUMN_NAME")),
                         result.getInt("NULLABLE") == DatabaseMetaData.columnNoNulls);
-                automatic.put(lower(result.getString("COLUMN_NAME")),
-                        "YES".equals(result.getString("IS_AUTOINCREMENT")));
             }
         }
         boolean nativeDatabase = "MySQL".equals(connection.getMetaData().getDatabaseProductName())
@@ -236,12 +215,9 @@ final class ManagedSchemaCatalog {
             if (!compatibleType(column.group(2), types.get(key))) {
                 throw new SQLException("Managed schema column type differs: " + name + "." + key);
             }
-            if (nativeDatabase && Set.of("BIGINT", "INT", "TINYINT").contains(column.group(2))
+            if (nativeDatabase && "BIGINT".equals(column.group(2))
                     && column.group(4).contains("UNSIGNED") != Boolean.TRUE.equals(unsigned.get(key))) {
                 throw new SQLException("Managed schema integer signedness differs: " + name + "." + key);
-            }
-            if (column.group(4).contains("AUTO_INCREMENT") != automatic.get(key)) {
-                throw new SQLException("Managed schema identity generation differs: " + name + "." + key);
             }
             if (Set.of("LONGTEXT", "MEDIUMTEXT", "MEDIUMBLOB", "LONGBLOB").contains(column.group(2))
                     && actual.get(key) < 1_048_576) {
@@ -332,20 +308,15 @@ final class ManagedSchemaCatalog {
         var unique = UNIQUE.matcher(body);
         while (unique.find()) {
             List<String> required = columns(unique.group(1));
-            String matched =
+            boolean found =
                     uniqueIndexes.stream()
-                            .filter(
+                            .anyMatch(
                                     index ->
                                             new ArrayList<>(indexes.get(index).values())
-                                                    .equals(required))
-                            .findFirst()
-                            .orElse(null);
-            if (matched == null) {
+                                                    .equals(required));
+            if (!found) {
                 throw new SQLException("Managed schema unique key is missing: " + name + required);
             }
-            // Body-declared unique keys enforce uniqueness too: a prefix
-            // rebuilt out of band collides distinct business keys (R4-1).
-            validateIndexPrefix(connection, name, matched, unique.group(1));
         }
         var index = INDEX.matcher(ddl);
         while (index.find()) {
@@ -356,7 +327,6 @@ final class ManagedSchemaCatalog {
                         || index.group(1) != null && !uniqueIndexes.contains(index.group(2))) {
                     throw new SQLException("Managed schema index differs: " + index.group(2));
                 }
-                validateIndexPrefix(connection, name, index.group(2), index.group(4));
             }
         }
         var inline = INLINE_INDEX.matcher(body);
@@ -366,40 +336,47 @@ final class ManagedSchemaCatalog {
                     || !new ArrayList<>(actual.values()).equals(columns(inline.group(2)))) {
                 throw new SQLException("Managed schema index differs: " + inline.group(1));
             }
-            validateIndexPrefix(connection, name, inline.group(1), inline.group(2));
         }
     }
 
-    private static void validateIndexPrefix(Connection connection, String table,
-            String index, String declaration) throws SQLException {
-        if (!"MySQL".equals(connection.getMetaData().getDatabaseProductName())
-                && !isMariaDb(connection)) {
-            return;
-        }
-        String[] fields = declaration.split(",");
-        try (var statement = connection.prepareStatement(
-                "SELECT SEQ_IN_INDEX, SUB_PART FROM INFORMATION_SCHEMA.STATISTICS"
-                        + " WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?")) {
-            statement.setString(1, schema(connection));
-            statement.setString(2, table);
-            statement.setString(3, index);
-            try (var rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    var prefix = INDEX_PREFIX.matcher(fields[rows.getInt(1) - 1]);
-                    Integer expected = prefix.find() ? Integer.valueOf(prefix.group(1)) : null;
-                    if (!java.util.Objects.equals(expected, rows.getObject(2, Integer.class))) {
-                        throw new SQLException("Managed schema index prefix differs: " + index);
-                    }
-                }
+    private static void validateForeignKeys(
+            Connection connection, String name, String body, String ddl) throws SQLException {
+        Map<String, Map<Integer, String>> actual = new HashMap<>();
+        try (var result =
+                connection
+                        .getMetaData()
+                        .getImportedKeys(
+                                connection.getCatalog(),
+                                connection.getSchema(),
+                                storedName(connection, name))) {
+            while (result.next()) {
+                String key = lower(result.getString("FK_NAME"));
+                actual.computeIfAbsent(key, ignored -> new java.util.TreeMap<>())
+                        .put(
+                                result.getInt("KEY_SEQ"),
+                                lower(result.getString("FKCOLUMN_NAME"))
+                                        + ":"
+                                        + lower(result.getString("PKTABLE_NAME"))
+                                        + ":"
+                                        + lower(result.getString("PKCOLUMN_NAME")));
             }
         }
-    }
-
-    private static void validateForeignKeys(Connection connection, String name) throws SQLException {
-        try (var keys = connection.getMetaData().getImportedKeys(
-                connection.getCatalog(), connection.getSchema(), storedName(connection, name))) {
-            if (keys.next()) {
-                throw new SQLException("Managed schema must not contain foreign keys: " + name);
+        var alters = Pattern.compile("ALTER TABLE " + name + " ([^;]+);").matcher(ddl);
+        String declarations = body;
+        while (alters.find()) {
+            declarations += "\n" + alters.group(1);
+        }
+        var foreign = FOREIGN.matcher(declarations);
+        while (foreign.find()) {
+            List<String> local = columns(foreign.group(1));
+            List<String> remote = columns(foreign.group(3));
+            List<String> expected = new ArrayList<>();
+            for (int index = 0; index < local.size(); index++) {
+                expected.add(local.get(index) + ":" + foreign.group(2) + ":" + remote.get(index));
+            }
+            if (actual.values().stream()
+                    .noneMatch(key -> new ArrayList<>(key.values()).equals(expected))) {
+                throw new SQLException("Managed schema foreign key is missing: " + name + local);
             }
         }
     }
@@ -411,7 +388,6 @@ final class ManagedSchemaCatalog {
             case "CHAR" -> type == java.sql.Types.CHAR;
             case "BIGINT" -> type == java.sql.Types.BIGINT;
             case "INT" -> type == java.sql.Types.INTEGER;
-            case "TINYINT" -> type == java.sql.Types.TINYINT;
             case "BOOLEAN" ->
                     type == java.sql.Types.BOOLEAN
                             || type == java.sql.Types.BIT
@@ -463,12 +439,13 @@ final class ManagedSchemaCatalog {
         }
     }
 
-    static void validateChecks(Connection connection, String name)
+    static void validateChecks(Connection connection, String name, String body)
             throws SQLException {
         Map<String, String> actual = new HashMap<>();
+        String enforcement = isMariaDb(connection) ? "'YES'" : "t.ENFORCED";
         try (var statement =
                 connection.prepareStatement(
-                        "SELECT t.CONSTRAINT_NAME, c.CHECK_CLAUSE FROM"
+                        "SELECT t.CONSTRAINT_NAME, c.CHECK_CLAUSE, " + enforcement + " FROM"
                             + " INFORMATION_SCHEMA.TABLE_CONSTRAINTS t JOIN"
                             + " INFORMATION_SCHEMA.CHECK_CONSTRAINTS c ON c.CONSTRAINT_SCHEMA ="
                             + " t.CONSTRAINT_SCHEMA AND c.CONSTRAINT_NAME = t.CONSTRAINT_NAME WHERE"
@@ -478,20 +455,106 @@ final class ManagedSchemaCatalog {
             statement.setString(2, storedName(connection, name));
             try (var result = statement.executeQuery()) {
                 while (result.next()) {
-                    // Every declared CHECK is refused, enforced or not:
-                    // the migrated baseline carries none, and a NOT
-                    // ENFORCED declaration is drift the same way.
-                    actual.put(lower(result.getString(1)), result.getString(2));
+                    if ("YES".equalsIgnoreCase(result.getString(3))) {
+                        actual.put(lower(result.getString(1)), result.getString(2));
+                    }
                 }
             }
         }
-        if (!actual.isEmpty()) {
-            throw new SQLException("Managed schema contains unexpected database CHECK constraints: " + name);
+        var check = CHECK.matcher(body);
+        while (check.find()) {
+            String expression = body.substring(check.end()).split("\n", 2)[0];
+            String stored = actual.get(check.group(1));
+            List<String> expected = expressionTokens(expression);
+            boolean compareExpression =
+                    !"H2".equals(connection.getMetaData().getDatabaseProductName())
+                            || expected.contains("case");
+            if (stored == null
+                    || compareExpression && !checkShape(expression).equals(checkShape(stored))) {
+                throw new SQLException(
+                        "Managed schema check differs: "
+                                + check.group(1)
+                                + " expected="
+                                + expressionTokens(expression)
+                                + " actual="
+                                + (stored == null ? null : expressionTokens(stored)));
+            }
         }
     }
 
     private static String schema(Connection connection) throws SQLException {
         return connection.getSchema() == null ? connection.getCatalog() : connection.getSchema();
+    }
+
+    private static List<String> checkShape(String expression) {
+        List<String> flat = expressionTokens(expression);
+        if (flat.contains("case")) {
+            return flat;
+        }
+        String portable = portableExpression(expression);
+        var matcher =
+                Pattern.compile(
+                                "'(?:[^']|'')*'|[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+|>=|<=|<>|!=|[()=+*/<>-]")
+                        .matcher(portable);
+        List<String> tokens = new ArrayList<>();
+        while (matcher.find()) {
+            String token = matcher.group();
+            String normalized = token.startsWith("'") ? token : lower(token);
+            tokens.add("octet_length".equals(normalized) ? "length" : normalized);
+        }
+        return booleanShape(numericBooleans(tokens));
+    }
+
+    private static List<String> booleanShape(List<String> tokens) {
+        while (!tokens.isEmpty() && "(".equals(tokens.getFirst())) {
+            int depth = 0;
+            int closing = -1;
+            for (int index = 0; index < tokens.size(); index++) {
+                if ("(".equals(tokens.get(index))) {
+                    depth++;
+                } else if (")".equals(tokens.get(index)) && --depth == 0) {
+                    closing = index;
+                    break;
+                }
+            }
+            if (closing != tokens.size() - 1) {
+                break;
+            }
+            tokens = tokens.subList(1, closing);
+        }
+        for (String operator : List.of("or", "and")) {
+            int depth = 0;
+            int start = 0;
+            List<List<String>> operands = new ArrayList<>();
+            for (int index = 0; index < tokens.size(); index++) {
+                String token = tokens.get(index);
+                if ("(".equals(token)) {
+                    depth++;
+                } else if (")".equals(token)) {
+                    depth--;
+                } else if (depth == 0 && operator.equals(token)) {
+                    operands.add(booleanShape(tokens.subList(start, index)));
+                    start = index + 1;
+                }
+            }
+            if (!operands.isEmpty()) {
+                operands.add(booleanShape(tokens.subList(start, tokens.size())));
+                List<String> result = new ArrayList<>(List.of("(", operator));
+                for (List<String> operand : operands) {
+                    if (operand.size() > 3
+                            && "(".equals(operand.getFirst())
+                            && operator.equals(operand.get(1))) {
+                        result.addAll(operand.subList(2, operand.size() - 1));
+                    } else {
+                        result.addAll(operand);
+                        result.add(",");
+                    }
+                }
+                result.add(")");
+                return result;
+            }
+        }
+        return tokens.stream().filter(token -> !List.of("(", ")").contains(token)).toList();
     }
 
     private static String portableExpression(String expression) {
@@ -543,7 +606,7 @@ final class ManagedSchemaCatalog {
     }
 
     private static List<String> columns(String value) {
-        return java.util.Arrays.stream(INDEX_PREFIX.matcher(value).replaceAll("").split(","))
+        return java.util.Arrays.stream(value.split(","))
                 .map(String::trim)
                 .map(ManagedSchemaCatalog::lower)
                 .toList();

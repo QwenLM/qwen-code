@@ -179,15 +179,15 @@ class ManagedActionsTest {
         assertThat(second.path("data").get(0).path("id").asText()).isEqualTo(own.id);
         JsonNode legacy = read(auth(get("/v1/agents/sessions/" + root + "/actions"), tenant, "owner"));
         assertThat(legacy.path("data").size()).isEqualTo(1);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(get("/v1/agents/sessions/" + other + "/actions")
-                        .param("include_children", "true").param("cursor", cursor), tenant, "owner"), "owner"))
+        mvc.perform(auth(get("/v1/agents/sessions/" + other + "/actions")
+                        .param("include_children", "true").param("cursor", cursor), tenant, "owner"))
                 .andExpect(status().isBadRequest());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(get("/v1/agents/sessions/" + root + "/actions")
-                        .param("cursor", cursor), tenant, "owner"), "owner"))
+        mvc.perform(auth(get("/v1/agents/sessions/" + root + "/actions")
+                        .param("cursor", cursor), tenant, "owner"))
                 .andExpect(status().isBadRequest());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(post(path(root, nested.id) + "/responses"), tenant, "owner")
+        mvc.perform(auth(post(path(root, nested.id) + "/responses"), tenant, "owner")
                         .header("Idempotency-Key", "wrong-owner").contentType(MediaType.APPLICATION_JSON)
-                        .content(response("allow")), "owner"))
+                        .content(response("allow")))
                 .andExpect(status().isNotFound());
     }
 
@@ -228,7 +228,7 @@ class ManagedActionsTest {
             assertThat(preview.path(web ? "byteLength" : "byte_length").asLong())
                     .isEqualTo(payload.getBytes(StandardCharsets.UTF_8).length);
         }
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(get(path(session, journal.id)), tenant(), "owner"), "owner"))
+        mvc.perform(auth(get(path(session, journal.id)), tenant(), "owner"))
                 .andExpect(status().isNotFound());
     }
 
@@ -475,9 +475,9 @@ class ManagedActionsTest {
                 WorkspaceExecutionProfile.POLICY_REF, tenant, session);
         new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new AesGcmSecretProtector("test", new byte[32]))
                 .requestStorageFence(tenant, storage, UUID.randomUUID().toString());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
                 .header("Idempotency-Key", "fenced-answer").contentType(MediaType.APPLICATION_JSON)
-                .content(response("allow")), "owner"))
+                .content(response("allow")))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"))
                 .andExpect(jsonPath("$.error.retryable").value(false));
@@ -485,9 +485,9 @@ class ManagedActionsTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
                 Long.class, tenant, session)).isZero();
         jdbc.update("DELETE FROM ma_storage WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
                 .header("Idempotency-Key", "fenced-answer").contentType(MediaType.APPLICATION_JSON)
-                .content(response("allow")), "owner")).andExpect(status().isAccepted());
+                .content(response("allow"))).andExpect(status().isAccepted());
     }
 
     @Test
@@ -605,7 +605,7 @@ class ManagedActionsTest {
                 .isEmpty();
         assertThat(web.path("inputRevision").asLong()).isEqualTo(1);
         assertThat(web.has("inputPreview")).isFalse();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(get("/v1/agents/sessions/{session}/actions", session), tenant, "owner"), "owner"))
+        mvc.perform(auth(get("/v1/agents/sessions/{session}/actions", session), tenant, "owner"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(1));
         ActionJournal third = new ActionJournal(second, 200, 9007199254740991L);
@@ -633,18 +633,18 @@ class ManagedActionsTest {
                                                         1))));
         assertThat(nextPage.path("data").get(0).path("actionId").asText()).isEqualTo(smallest);
         assertThat(nextPage.path("hasMore").asBoolean()).isFalse();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(get(path(session, first.id)), tenant, "owner"), "owner"))
+        mvc.perform(auth(get(path(session, first.id)), tenant, "owner"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.state").value("expired"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(get(path(session, first.id)), tenant(), "owner"), "owner"))
+        mvc.perform(auth(get(path(session, first.id)), tenant(), "owner"))
                 .andExpect(status().isNotFound());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         auth(get("/v1/agents/sessions/{session}/actions", session), tenant, "owner")
-                                .param("cursor", "garbage"), "owner"))
+                                .param("cursor", "garbage"))
                 .andExpect(status().isBadRequest());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         auth(get("/v1/agents/sessions/{session}/actions", session), tenant, "owner")
-                                .param("limit", "101"), "owner"))
+                                .param("limit", "101"))
                 .andExpect(status().isBadRequest());
     }
 
@@ -682,10 +682,11 @@ class ManagedActionsTest {
                     journal.change("decided", call.getArgument(3));
                     throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
                 });
-        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "other")
-                        .header("Idempotency-Key", "answer")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(response("allow")))
+        mvc.perform(
+                        auth(post(path(session, journal.id) + "/responses"), tenant, "other")
+                                .header("Idempotency-Key", "answer")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(response("allow")))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("action_forbidden"));
         JsonNode admitted =
@@ -735,18 +736,18 @@ class ManagedActionsTest {
         assertThat(replay.path("operationId").asText()).isEqualTo(op);
         assertThat(replay.path("replayed").asBoolean()).isTrue();
         assertThat(delivered.get()).isEqualTo(1);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
                                 .header("Idempotency-Key", "answer")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(response("deny")), "owner"))
+                                .content(response("deny")))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
                                 .header("Idempotency-Key", "new-answer")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(response("deny")), "owner"))
+                                .content(response("deny")))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("action_already_resolved"));
         assertThat(sessions.requireSession(tenant, session).status()).isEqualTo("ACTIVE");
@@ -769,7 +770,7 @@ class ManagedActionsTest {
                     return null;
                 });
         var result =
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+                mvc.perform(
                                 auth(
                                                 post("/api/agent/web-shell/v1/actions/respond"),
                                                 tenant,
@@ -777,7 +778,7 @@ class ManagedActionsTest {
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content(
                                                 webResponse(
-                                                        session, journal.id, "web-answer", "deny")), "owner"))
+                                                        session, journal.id, "web-answer", "deny")))
                         .andExpect(status().isAccepted())
                         .andExpect(
                                 org.springframework.test.web.servlet.result.MockMvcResultMatchers
@@ -801,18 +802,18 @@ class ManagedActionsTest {
                 .isEqualTo("decided");
         String another = session(tenant);
         ActionJournal expired = action(tenant, another, 1, 2);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         auth(post(path(another, expired.id) + "/responses"), tenant, "owner")
                                 .header("Idempotency-Key", "late")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(response("allow")), "owner"))
+                                .content(response("allow")))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("action_expired"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         auth(post(path(another, expired.id) + "/responses"), tenant, "owner")
                                 .header("Idempotency-Key", "wrong")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(response("other")), "owner"))
+                                .content(response("other")))
                 .andExpect(status().isBadRequest());
     }
 
@@ -1116,8 +1117,8 @@ class ManagedActionsTest {
                                 .header("Idempotency-Key", "allow-answer")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(response("allow")));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
-                        .header("Idempotency-Key", "deny-answer").contentType(MediaType.APPLICATION_JSON).content(response("deny")), "owner"))
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "deny-answer").contentType(MediaType.APPLICATION_JSON).content(response("deny")))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("action_already_resolved"));
         journal.change("decided", json.createObjectNode().put("optionId", "allow").put("inputRevision", 1)
                 .put("policyRevision", "hosted-tool-approval/1"));
@@ -1141,14 +1142,14 @@ class ManagedActionsTest {
                         response("allow")
                                 .replace("hosted-tool-approval/1", "hosted-tool-approval/2"),
                         response("allow").replace("}", ",\"extra\":true}"))) {
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+            mvc.perform(
                             auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
                                     .header("Idempotency-Key", "invalid")
                                     .contentType(MediaType.APPLICATION_JSON)
-                                    .content(invalid), "owner"))
+                                    .content(invalid))
                     .andExpect(status().isBadRequest());
         }
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(auth(get(path(session, journal.id + " ")), tenant, "owner"), "owner"))
+        mvc.perform(auth(get(path(session, journal.id + " ")), tenant, "owner"))
                 .andExpect(status().isNotFound());
         assertThat(
                         jdbc.queryForObject(
@@ -1209,27 +1210,16 @@ class ManagedActionsTest {
     @Test
     void hostedSessionsAnswerThroughTheirRecordedCreator() throws Exception {
         String tenant = tenant();
-        // Creation now requires a trusted actor; the legacy row-less state
-        // is a historical one, so the fixture drops the ownership row.
-        String anonymous = hostedSession(tenant, "creator");
-        jdbc.update("DELETE FROM ma_session_principal"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, anonymous);
-        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
-                + " WHERE tenant_id = ? AND session_id = ?"
-                + " AND namespace = 'SESSION_COMMAND'"
-                + " AND operation = 'CREATE_SESSION'", tenant, anonymous);
-        jdbc.update("UPDATE ma_session SET creator_actor_key = NULL,"
-                + " owner_actor_key = NULL WHERE tenant_id = ?"
-                + " AND session_id = ?", tenant, anonymous);
+        String anonymous = hostedSession(tenant, null);
         ActionJournal open = action(tenant, anonymous,
                 System.currentTimeMillis(), 9007199254740991L);
         // No recorded creator: the tenant-scoped caller answers, matching
         // the read semantics of a non-Workspace Session.
         readAccepted(auth(post(path(anonymous, open.id) + "/responses"),
                 tenant, "anyone")
-                .header("Idempotency-Key", "open-answer")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(response("allow")));
+                        .header("Idempotency-Key", "open-answer")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(response("allow")));
 
         String owned = hostedSession(tenant, "owner");
         ActionJournal journal = action(tenant, owned,
@@ -1258,7 +1248,7 @@ class ManagedActionsTest {
     @Test
     void webShellHostedCreateRecordsTheCreator() throws Exception {
         String tenant = tenant();
-        String session = json.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String session = json.readTree(mvc.perform(
                         auth(post("/api/agent/web-shell/v1/sessions/create"),
                                 tenant, "owner")
                                 .contentType(MediaType.APPLICATION_JSON)
@@ -1266,7 +1256,7 @@ class ManagedActionsTest {
                                         "idempotencyKey",
                                         UUID.randomUUID().toString(),
                                         "agentId", "qwen-code", "input",
-                                        java.util.List.of()))), "owner"))
+                                        java.util.List.of()))))
                 .andExpect(status().isAccepted()).andReturn().getResponse()
                 .getContentAsString()).path("sessionId").asText();
         assertThat(jdbc.queryForObject(
@@ -1285,10 +1275,10 @@ class ManagedActionsTest {
                 .header("Idempotency-Key", UUID.randomUUID().toString())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"agent_id\":\"qwen-code\",\"input\":[]}");
-        // auth() carries the real principal; readAccepted would additionally
-        // install "owner" on a principal-less builder, so a null actor must
-        // not travel through it.
-        return readAccepted(auth(create, tenant, actor)).path("id").asText();
+        if (actor != null) {
+            create = auth(create, tenant, actor);
+        }
+        return readAccepted(create).path("id").asText();
     }
 
     private ActionJournal action(String tenant, String session, long created, long expiry)
@@ -1301,34 +1291,13 @@ class ManagedActionsTest {
     private String session(String tenant) throws Exception {
         String session =
                 readAccepted(
-                                post("/v1/agents/sessions").principal(new AuthenticatedTenantActor() {
-                                    public String tenantId() {
-                                        return tenant;
-                                    }
-
-                                    public String actorId() {
-                                        return "actor-a";
-                                    }
-
-                                    public String getName() {
-                                        return "actor-a";
-                                    }
-                                })
+                                post("/v1/agents/sessions")
                                         .header(TenantContextFilter.HEADER, tenant)
                                         .header("Idempotency-Key", UUID.randomUUID().toString())
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                         .path("id")
                         .asText();
-        // The fixture's recorded creator is the SQL "owner" below; drop the
-        // create-time ownership row so the action surface reads it as the
-        // historical creator-recorded state it models.
-        jdbc.update("DELETE FROM ma_session_principal"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
-        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
-                + " WHERE tenant_id = ? AND session_id = ?"
-                + " AND namespace = 'SESSION_COMMAND'"
-                + " AND operation = 'CREATE_SESSION'", tenant, session);
         String key = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
                         + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,gmt_create,gmt_modified)"
@@ -1338,8 +1307,7 @@ class ManagedActionsTest {
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("owner"), "owner", key,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(key), "sha256:test",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), session, System.currentTimeMillis(), System.currentTimeMillis());
-        jdbc.update("UPDATE ma_session SET creator_actor_key=?, owner_actor_key=NULL"
-                + " WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), tenant, session);
         return session;
     }

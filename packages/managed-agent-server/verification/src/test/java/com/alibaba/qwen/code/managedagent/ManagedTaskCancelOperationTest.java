@@ -93,7 +93,7 @@ class ManagedTaskCancelOperationTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        sessionId = store.insertSessionCommand(TENANT, "owner", "CREATE_SESSION", "create", "digest", "qwen-code",
+        sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
         task(RUNNING_CHILD, "child_run", "child_agent", "running");
         task(SETTLED_CHILD, "child_run", "child_agent", "completed");
@@ -487,11 +487,11 @@ class ManagedTaskCancelOperationTest {
         ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
         String liveKey = "child-stop sha256:" + "1".repeat(64);
         String endedKey = "child-stop sha256:" + "2".repeat(64);
-        assertThat(store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN", liveKey,
-                "digest-live", sessionId, "turn-live", "owner").commandEffect())
+        assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN", liveKey,
+                "digest-live", sessionId, "turn-live").commandEffect())
                 .isTrue();
-        assertThat(store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN",
-                endedKey, "digest-ended", sessionId, "turn-ended", "owner")
+        assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN",
+                endedKey, "digest-ended", sessionId, "turn-ended")
                 .commandEffect()).isFalse();
         assertThat(relay.turnCancelRequested(TENANT, sessionId, "turn-live"))
                 .isTrue();

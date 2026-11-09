@@ -168,7 +168,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void allowsRepeatingLifecycleOperationsWithNewCommandKeys() {
         String tenant = "tenant-repeat-" + UUID.randomUUID();
-        String sessionId = store.insertSessionCommand(tenant, "owner",
+        String sessionId = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "create", "digest-create", "qwen-code", null,
                 null, List.of(), null).sessionId();
         store.beginOperation(tenant, sessionId, OperationKind.CLOSE, "",
@@ -186,13 +186,13 @@ class ManagedAgentServerIntegrationTest {
             String unarchive = "unarchive" + cycle;
             store.beginSessionMutation(tenant, "UNARCHIVE_SESSION", unarchive,
                     "digest-unarchive", sessionId,
-                    SessionMutationKind.UNARCHIVE, "owner");
+                    SessionMutationKind.UNARCHIVE);
             store.completeSessionMutation(tenant, "UNARCHIVE_SESSION",
                     unarchive, sessionId, SessionMutationKind.UNARCHIVE, null,
                     null);
             assertThat(store.beginSessionMutation(tenant, "UNARCHIVE_SESSION",
                     unarchive, "digest-unarchive", sessionId,
-                    SessionMutationKind.UNARCHIVE, "owner").replayed()).isTrue();
+                    SessionMutationKind.UNARCHIVE).replayed()).isTrue();
         }
         assertThat(store.requireSession(tenant, sessionId).status())
                 .isEqualTo("CLOSED");
@@ -205,7 +205,7 @@ class ManagedAgentServerIntegrationTest {
     void retriesReplayTheRevisionTheyWereAdmittedWith() {
         String tenant = "tenant-revision-" + UUID.randomUUID();
         CommandAdmission first = applicationContext
-                .getBean(ManagedAgentService.class).createSession(tenant, "owner",
+                .getBean(ManagedAgentService.class).createSession(tenant,
                         "revision-create", "qwen-code", "1", null, null,
                         List.of());
         ManagedAgentProperties changed = new ManagedAgentProperties();
@@ -219,36 +219,36 @@ class ManagedAgentServerIntegrationTest {
                 applicationContext.getBean(HarnessCoordinator.class),
                 harness, workspaces, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
-        CommandAdmission retry = upgraded.createSession(tenant, "owner",
+        CommandAdmission retry = upgraded.createSession(tenant,
                 "revision-create", "qwen-code", "1", null, null, List.of());
         assertThat(retry.sessionId()).isEqualTo(first.sessionId());
         assertThat(retry.replayed()).isTrue();
-        assertThatThrownBy(() -> upgraded.createSession(tenant, "owner",
+        assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-create", "qwen-code", "2", null, null, List.of()))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("idempotency_conflict"));
-        assertThatThrownBy(() -> upgraded.createSession(tenant, "owner",
+        assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-new", "qwen-code", "1", null, null, List.of()))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("unsupported_feature"));
-        CommandAdmission omitted = upgraded.createSession(tenant, "owner",
+        CommandAdmission omitted = upgraded.createSession(tenant,
                 "revision-omitted", "qwen-code", null, null, null,
                 List.of());
         assertThat(store.requireSession(tenant, omitted.sessionId())
                 .agentRevision()).isEqualTo("2");
         assertThat(store.requireSession(tenant, first.sessionId())
                 .agentRevision()).isEqualTo("1");
-        assertThat(upgraded.getPublicSession(tenant, "owner", first.sessionId())
+        assertThat(upgraded.getPublicSession(tenant, null, first.sessionId())
                 .agentRevision()).isEqualTo("1");
     }
 
     @Test
     void answersUnacceptableMediaTypesWithNotAcceptable() throws Exception {
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions")
+        mvc.perform(get("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, "tenant-xml")
-                        .accept(MediaType.APPLICATION_XML), "owner"))
+                        .accept(MediaType.APPLICATION_XML))
                 .andExpect(status().isNotAcceptable());
     }
 
@@ -272,8 +272,8 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void missingSessionIdReturnsNotFound() throws Exception {
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/")
-                        .header(TenantContextFilter.HEADER, "tenant-empty-id"), "owner"))
+        mvc.perform(get("/v1/agents/sessions/")
+                        .header(TenantContextFilter.HEADER, "tenant-empty-id"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("not_found"));
     }
@@ -283,13 +283,13 @@ class ManagedAgentServerIntegrationTest {
         // A NBSP-only title must coerce to untitled on create, matching the
         // rename route's blankness predicate; otherwise the server stores a
         // value it later refuses to accept back on PATCH (validRenameTitle).
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, "tenant-nbsp-create")
                         .header("Authorization", "Bearer ignored-by-design")
                         .header("Idempotency-Key", "create-key-nbsp")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\","
-                                + "\"metadata\":{\"title\":\"\\u00a0\"}}"), "owner"))
+                                + "\"metadata\":{\"title\":\"\\u00a0\"}}"))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
@@ -298,14 +298,14 @@ class ManagedAgentServerIntegrationTest {
     void metadataTitleLongerThan256AnswersInvalidTitle() throws Exception {
         // The metadata-wide 512 value cap must not preempt the unified
         // title policy: an over-long title entry answers the title code.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, "tenant-meta-long-title")
                         .header("Authorization", "Bearer ignored-by-design")
                         .header("Idempotency-Key", "create-key-meta-long-title")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\","
                                 + "\"metadata\":{\"title\":\"" + "a".repeat(513)
-                                + "\"}}"), "owner"))
+                                + "\"}}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"))
                 .andExpect(jsonPath("$.error.message")
@@ -319,12 +319,12 @@ class ManagedAgentServerIntegrationTest {
                 {"agent_id":"qwen-code","metadata":{"title":"demo"},
                  "input":[{"type":"text","text":"hello"}]}
                 """;
-        MvcResult first = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        MvcResult first = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Authorization", "Bearer ignored-by-design")
                         .header("Idempotency-Key", "create-key")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body), "owner"))
+                        .content(body))
                 .andExpect(status().isAccepted())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
                         "false"))
@@ -354,11 +354,11 @@ class ManagedAgentServerIntegrationTest {
         JsonNode allEvents = objectMapper.readTree(events(tenant, sessionId)
                 .getResponse().getContentAsString()).get("data");
         long firstSequence = allEvents.get(0).get("sequence").asLong();
-        MvcResult resumed = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get(
+        MvcResult resumed = mvc.perform(get(
                         "/v1/agents/sessions/{id}/events", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Last-Event-ID", firstSequence)
-                        .accept(MediaType.APPLICATION_JSON), "owner"))
+                        .accept(MediaType.APPLICATION_JSON))
                 .andExpect(status().isOk()).andReturn();
         assertThat(objectMapper.readTree(
                         resumed.getResponse().getContentAsString())
@@ -366,11 +366,11 @@ class ManagedAgentServerIntegrationTest {
                         event.get("sequence").asLong() > firstSequence);
 
         int submitsBeforeReplay = harness.submitCount();
-        MvcResult replay = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        MvcResult replay = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "create-key")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body), "owner"))
+                        .content(body))
                 .andExpect(status().isAccepted())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
                         "true"))
@@ -380,17 +380,17 @@ class ManagedAgentServerIntegrationTest {
                 .isEqualTo(sessionId);
         assertThat(harness.submitCount()).isEqualTo(submitsBeforeReplay);
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "create-key")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body.replace("hello", "changed")), "owner"))
+                        .content(body.replace("hello", "changed")))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("idempotency_conflict"));
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}", sessionId)
-                        .header(TenantContextFilter.HEADER, "tenant-other"), "owner"))
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, "tenant-other"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_found"));
@@ -405,23 +405,23 @@ class ManagedAgentServerIntegrationTest {
         harness.returnRuntimeRecovery(tenant, recovery);
         int submissions = harness.submitCount();
 
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "runtime-recovery-create")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\","
                                 + "\"input\":[{\"type\":\"text\","
-                                + "\"text\":\"do not replay\"}]}"), "owner"))
+                                + "\"text\":\"do not replay\"}]}"))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id")
                 .asText();
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/events",
+                mvc.perform(get("/v1/agents/sessions/{id}/events",
                                 sessionId)
                                 .header(TenantContextFilter.HEADER, tenant)
-                                .accept(MediaType.APPLICATION_JSON), "owner"))
+                                .accept(MediaType.APPLICATION_JSON))
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.data[?(@.type =="
                                 + " 'turn.failed')].data.code")
@@ -432,31 +432,31 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void managesThePublicSessionLifecycle() throws Exception {
         String tenant = "tenant-lifecycle-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "lifecycle-create")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
 
         int renames = harness.renameCount();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant + "-other")
                         .header("Idempotency-Key", "lifecycle-other-tenant")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"not allowed\"}"), "owner"))
+                        .content("{\"title\":\"not allowed\"}"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_found"));
         assertThat(harness.renameCount()).isEqualTo(renames);
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "lifecycle-rename")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"managed title\"}"), "owner"))
+                        .content("{\"title\":\"managed title\"}"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
                         "false"))
@@ -467,21 +467,21 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.requireSession(tenant, sessionId).harnessBootId())
                 .isNotNull();
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "lifecycle-rename")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"managed title\"}"), "owner"))
+                        .content("{\"title\":\"managed title\"}"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
                         "true"));
         assertThat(harness.renameCount()).isEqualTo(renames + 1);
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "lifecycle-rename")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"different\"}"), "owner"))
+                        .content("{\"title\":\"different\"}"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("idempotency_conflict"));
@@ -511,13 +511,13 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.replayed").value(false))
                 .andReturn().getResponse().getContentAsString());
         String closeId = admitted.get("id").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/events", sessionId)
+        mvc.perform(post("/v1/agents/sessions/{id}/events", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "closed-turn")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"agent.session.input.message\","
                                 + "\"input\":[{\"type\":\"text\","
-                                + "\"text\":\"blocked\"}]}"), "owner"))
+                                + "\"text\":\"blocked\"}]}"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_active"));
@@ -529,8 +529,8 @@ class ManagedAgentServerIntegrationTest {
         assertThat(closed.get("receipt_id").asText()).startsWith("rcpt_");
         assertThat(closed.get("replayed").asBoolean()).isFalse();
         assertThat(harness.closeCount(sessionId)).isEqualTo(closes + 1);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("closed"))
                 .andExpect(jsonPath("$.capabilities.session_lifecycle")
@@ -543,11 +543,11 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.receipt_id")
                         .value(closed.get("receipt_id").asText()))
                 .andExpect(jsonPath("$.replayed").value(true));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "closed-rename")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"too late\"}"), "owner"))
+                        .content("{\"title\":\"too late\"}"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_state_conflict"));
@@ -563,8 +563,8 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.receipt_id").isNotEmpty())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("archived"));
         lifecycle(post("/v1/agents/sessions/{id}/archive", sessionId), tenant,
@@ -572,9 +572,9 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_state_conflict"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/unarchive", sessionId)
+        mvc.perform(post("/v1/agents/sessions/{id}/unarchive", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "lifecycle-unarchive"), "owner"))
+                        .header("Idempotency-Key", "lifecycle-unarchive"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("closed"));
 
@@ -589,17 +589,17 @@ class ManagedAgentServerIntegrationTest {
         assertThat(deleted.get("admission_stage").asText())
                 .isEqualTo("java_durable");
         assertThat(harness.closeCount(sessionId)).isEqualTo(closes + 1);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isNotFound());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions")
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+        mvc.perform(get("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[?(@.id == '%s')]"
                         .formatted(sessionId)).isEmpty());
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/operations/{op}",
+        mvc.perform(get("/v1/agents/sessions/{id}/operations/{op}",
                         sessionId, closeId)
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("completed"));
         lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
@@ -629,12 +629,12 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void rejectsCloseUntilTheActiveTurnSettles() throws Exception {
         String tenant = "tenant-close-active-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "close-active-create")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":["
-                                + "{\"type\":\"text\",\"text\":\"hold\"}]}"), "owner"))
+                                + "{\"type\":\"text\",\"text\":\"hold\"}]}"))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
@@ -676,12 +676,12 @@ class ManagedAgentServerIntegrationTest {
     void deletesAClosedSessionWhileTheHarnessIsUnavailable()
             throws Exception {
         String tenant = "tenant-closed-delete-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "closed-delete-create")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":["
-                                + "{\"type\":\"text\",\"text\":\"hello\"}]}"), "owner"))
+                                + "{\"type\":\"text\",\"text\":\"hello\"}]}"))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
@@ -720,40 +720,40 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
         String tenant = "tenant-rename-retry-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry-create")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
         harness.failNextRename();
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"retry title\"}"), "owner"))
+                        .content("{\"title\":\"retry title\"}"))
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.error.code")
                         .value("hosted_harness_unavailable"));
 
         // The answered failure retired its command row, so a different key
         // is admitted instead of wedging on session_operation_active.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "another-rename")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"blocked\"}"), "owner"))
+                        .content("{\"title\":\"blocked\"}"))
                 .andExpect(status().isOk());
 
         // An already submitted, superseded identity cannot become a new title revision.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(patch("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"retry title\"}"), "owner"))
+                        .content("{\"title\":\"retry title\"}"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("session_mutation_superseded"));
         JsonNode events = objectMapper.readTree(events(tenant, sessionId).getResponse().getContentAsString()).get("data");
@@ -763,7 +763,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void webShellAdapterUsesTheSameDurableCore() throws Exception {
         String tenant = "tenant-web";
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -774,7 +774,7 @@ class ManagedAgentServerIntegrationTest {
                                  "title":"web",
                                  "metadata":{"clientId":"browser-1"},
                                  "input":[]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.status").value("accepted"))
                 .andReturn();
@@ -782,7 +782,7 @@ class ManagedAgentServerIntegrationTest {
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
 
-        MvcResult submitted = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        MvcResult submitted = mvc.perform(post(
                                 "/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -791,7 +791,7 @@ class ManagedAgentServerIntegrationTest {
                                  "idempotencyKey":"web-turn",
                                  "sessionId":"%s",
                                  "input":[{"type":"text","text":"hi"}]}
-                                """.formatted(sessionId)), "owner"))
+                                """.formatted(sessionId)))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.sessionId").value(sessionId))
                 .andExpect(jsonPath("$.turnId").isNotEmpty())
@@ -801,12 +801,12 @@ class ManagedAgentServerIntegrationTest {
                 .get("turnId").asText();
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+                mvc.perform(post(
                                 "/api/agent/web-shell/v1/transcript/query")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"sessionId\":\"" + sessionId
-                                        + "\",\"limit\":100}"), "owner"))
+                                        + "\",\"limit\":100}"))
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.events[?(@.type =="
                                 + " 'turn.completed')]").isNotEmpty()));
@@ -816,10 +816,10 @@ class ManagedAgentServerIntegrationTest {
                         "code", "runtime_warm_failed",
                         "environmentId", "local-runtime"), false,
                 "test:environment:failed");
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/get")
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionId\":\"" + sessionId + "\"}"), "owner"))
+                        .content("{\"sessionId\":\"" + sessionId + "\"}"))
                 .andExpect(status().isOk())
                 // The sibling title field, not metadata.title, is the
                 // Session's title surface: pinned positively here because
@@ -835,12 +835,12 @@ class ManagedAgentServerIntegrationTest {
                         .value("runtime_warm_failed"));
 
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
-            MvcResult transcript = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+            MvcResult transcript = mvc.perform(post(
                             "/api/agent/web-shell/v1/transcript/query")
                             .header(TenantContextFilter.HEADER, tenant)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"sessionId\":\"" + sessionId
-                                    + "\",\"limit\":2}"), "owner"))
+                                    + "\",\"limit\":2}"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.hasMore").value(false))
                     .andReturn();
@@ -855,10 +855,10 @@ class ManagedAgentServerIntegrationTest {
                     .get("text").asText()).isEqualTo("hello");
         });
 
-        MvcResult firstItems = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get(
+        MvcResult firstItems = mvc.perform(get(
                         "/v1/agents/sessions/{id}/items", sessionId)
                         .param("limit", "1")
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(1))
                 .andExpect(jsonPath("$.has_more").value(true))
@@ -867,9 +867,9 @@ class ManagedAgentServerIntegrationTest {
                         .isNumber()).andReturn();
         String after = objectMapper.readTree(firstItems.getResponse()
                 .getContentAsString()).get("next_cursor").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/items", sessionId)
+        mvc.perform(get("/v1/agents/sessions/{id}/items", sessionId)
                         .param("after", after).param("limit", "1")
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(1))
                 .andExpect(jsonPath("$.has_more").value(false));
@@ -878,14 +878,14 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void replaysASubmitWhileTheOriginalTurnIsStillActive() throws Exception {
         String tenant = "tenant-active-replay";
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"active-create",
                                  "agentId":"qwen-code","input":[]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
@@ -895,11 +895,11 @@ class ManagedAgentServerIntegrationTest {
                  "input":[{"type":"text","text":"hold"}]}
                 """.formatted(sessionId);
 
-        MvcResult first = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        MvcResult first = mvc.perform(post(
                         "/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(submit), "owner"))
+                        .content(submit))
                 .andExpect(status().isAccepted()).andReturn();
         String turnId = objectMapper.readTree(
                 first.getResponse().getContentAsString())
@@ -908,10 +908,10 @@ class ManagedAgentServerIntegrationTest {
                 assertThat(harness.hasHeldTurn()).isTrue());
         int submitsBeforeReplay = harness.submitCount();
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/submit")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(submit), "owner"))
+                        .content(submit))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.turnId").value(turnId))
                 .andExpect(jsonPath("$.replayed").value(true));
@@ -922,38 +922,38 @@ class ManagedAgentServerIntegrationTest {
                  "turnId":"%s"}
                 """.formatted(sessionId, turnId);
         int cancellations = harness.cancelCount();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/cancel")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/cancel")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(cancel), "owner"))
+                        .content(cancel))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.replayed").value(false));
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
                 assertThat(harness.cancelCount())
                         .isEqualTo(cancellations + 1));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/cancel")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/cancel")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(cancel), "owner"))
+                        .content(cancel))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.replayed").value(true));
         assertThat(harness.cancelCount()).isEqualTo(cancellations + 1);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/cancel")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/cancel")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(cancel.replace("active-cancel",
-                                "active-cancel-other")), "owner"))
+                                "active-cancel-other")))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.replayed").value(false));
         assertThat(harness.cancelCount()).isEqualTo(cancellations + 1);
         harness.releaseHeldTurns();
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+                mvc.perform(post(
                                 "/api/agent/web-shell/v1/transcript/query")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"sessionId\":\"" + sessionId
-                                        + "\",\"limit\":100}"), "owner"))
+                                        + "\",\"limit\":100}"))
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.events[?(@.type =="
                                 + " 'turn.cancelled')]").isNotEmpty()));
@@ -962,14 +962,14 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void concurrentSameKeySubmitsCreateOneTurn() throws Exception {
         String tenant = "tenant-concurrent-replay";
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"concurrent-create",
                                  "agentId":"qwen-code","input":[]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
@@ -979,9 +979,9 @@ class ManagedAgentServerIntegrationTest {
         CyclicBarrier gate = new CyclicBarrier(2);
         Callable<Admission> submit = () -> {
             gate.await();
-            return store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+            return store.insertTurnCommand(tenant, "SUBMIT_TURN",
                     "concurrent-turn", "sha256:" + "a".repeat(64),
-                    sessionId, input, "sha256:" + "b".repeat(64), "owner");
+                    sessionId, input, "sha256:" + "b".repeat(64));
         };
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
@@ -999,7 +999,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void commitsHarnessEventsAsOneReplayableBatch() throws Exception {
         String tenant = "tenant-batch-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "batch-create",
                 "sha256:" + "a".repeat(64), "qwen-code", null, null,
                 List.of(), null);
@@ -1007,9 +1007,9 @@ class ManagedAgentServerIntegrationTest {
                 "type", "text", "text", "batch"));
         String owner = "batch-owner";
         Admission turn = new TransactionTemplate(transactionManager).execute(status -> {
-            Admission admitted = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+            Admission admitted = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                     "batch-turn", "sha256:" + "b".repeat(64),
-                    session.sessionId(), input, "sha256:" + "c".repeat(64), "owner");
+                    session.sessionId(), input, "sha256:" + "c".repeat(64));
             assertThat(store.claimTurn(tenant, session.sessionId(),
                     admitted.turnId(), owner, Duration.ofMinutes(1))).isPresent();
             return admitted;
@@ -1080,7 +1080,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void preservesTextOrderAcrossToolsAndReasoningInMessages() {
         String tenant = "tenant-order-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "order-create", "digest-create",
                 "qwen-code", null, null, List.of(), null);
         String turnId = "turn-order";
@@ -1117,7 +1117,7 @@ class ManagedAgentServerIntegrationTest {
         // message names its pin exactly as the daemon journal does
         // (`workflowLaunchSummaryText`), never an empty parts list.
         String tenant = "tenant-workflow-input-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "workflow-input-create", "digest-create",
                 "qwen-code", null, null, List.of(), null);
         String turnId = "turn-workflow-input";
@@ -1155,17 +1155,17 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void eventsNameTheProjectedItemsAndPartsTheyChange() {
         String tenant = "tenant-identity-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "identity-create",
                 "sha256:" + "d".repeat(64), "qwen-code", null, null,
                 List.of(), null);
         String sessionId = session.sessionId();
         String owner = "identity-owner";
         Admission turn = new TransactionTemplate(transactionManager).execute(status -> {
-            Admission admitted = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+            Admission admitted = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                     "identity-turn", "sha256:" + "e".repeat(64), sessionId,
                     List.of(Map.of("type", "text", "text", "hi")),
-                    "sha256:" + "f".repeat(64), "owner");
+                    "sha256:" + "f".repeat(64));
             assertThat(store.claimTurn(tenant, sessionId, admitted.turnId(),
                     owner, Duration.ofMinutes(1))).isPresent();
             return admitted;
@@ -1214,7 +1214,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void singleAppendsContinueTheTextPartBeforeThem() {
         String tenant = "tenant-single-identity-" + UUID.randomUUID();
-        String sessionId = store.insertSessionCommand(tenant, "owner",
+        String sessionId = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "single-identity-create", "digest-create",
                 "qwen-code", null, null, List.of(), null).sessionId();
         for (String text : List.of("a", "b")) {
@@ -1244,14 +1244,14 @@ class ManagedAgentServerIntegrationTest {
     void retractionRenamesTheDeltaThatContinuedTheRetractedOne() {
         pauseRecoveryScanning();
         String tenant = "tenant-retract-identity-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-identity-create",
                 "sha256:" + "7".repeat(64), "qwen-code", null, null,
                 List.of(), null);
         String sessionId = session.sessionId();
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "retract-identity-turn", "sha256:" + "8".repeat(64),
-                sessionId, List.of(), "sha256:" + "9".repeat(64), "owner");
+                sessionId, List.of(), "sha256:" + "9".repeat(64));
         String owner = "retract-identity-owner";
         assertThat(store.claimTurn(tenant, sessionId, turn.turnId(), owner,
                 Duration.ofMinutes(1))).isPresent();
@@ -1342,23 +1342,23 @@ class ManagedAgentServerIntegrationTest {
     void ignoresLateEnvironmentResultFromAnOlderTurn() {
         pauseRecoveryScanning();
         String tenant = "tenant-environment-order-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "environment-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission first = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission first = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "environment-turn-1", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(),
-                "sha256:" + "3".repeat(64), "owner");
+                "sha256:" + "3".repeat(64));
         String owner = "environment-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(), first.turnId(),
                 owner, Duration.ofMinutes(1))).isPresent();
         store.cancelBeforeAdmission(tenant, session.sessionId(),
                 first.turnId(), owner);
-        Admission second = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission second = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "environment-turn-2", "sha256:" + "4".repeat(64),
                 session.sessionId(), List.of(),
-                "sha256:" + "5".repeat(64), "owner");
+                "sha256:" + "5".repeat(64));
 
         store.appendPublicEventIfAbsent(tenant, session.sessionId(),
                 second.turnId(), "environment.ready", Map.of(), false,
@@ -1381,14 +1381,14 @@ class ManagedAgentServerIntegrationTest {
     void persistsRetryBackoffAcrossClaims() {
         pauseRecoveryScanning();
         String tenant = "tenant-retry-backoff-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retry-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "retry-turn", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(),
-                "sha256:" + "3".repeat(64), "owner");
+                "sha256:" + "3".repeat(64));
         String firstOwner = "retry-owner-1";
         assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
                 firstOwner, Duration.ofMinutes(1))).isPresent();
@@ -1421,14 +1421,14 @@ class ManagedAgentServerIntegrationTest {
     void marksATurnRecoveryBlockedWithoutSettlingIt(String recoveryCode) throws Exception {
         pauseRecoveryScanning();
         String tenant = "tenant-turn-blocked-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "blocked-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "blocked-turn", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(),
-                "sha256:" + "3".repeat(64), "owner");
+                "sha256:" + "3".repeat(64));
         String owner = "blocked-owner";
         var claimed = store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1)).orElseThrow();
@@ -1456,10 +1456,10 @@ class ManagedAgentServerIntegrationTest {
                 "the Harness generation was lost")).isFalse();
 
         if ("hosted_harness_recovery_blocked".equals(recoveryCode)) {
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/get")
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                     .header(TenantContextFilter.HEADER, tenant)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"sessionId\":\"" + session.sessionId() + "\"}"), "owner"))
+                    .content("{\"sessionId\":\"" + session.sessionId() + "\"}"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.activeTurn.status").value("recovery_blocked"))
                     .andExpect(jsonPath("$.activeTurn.errorCode").value(recoveryCode));
@@ -1480,9 +1480,9 @@ class ManagedAgentServerIntegrationTest {
         } else {
             assertThat(store.findDispatchable(Long.MAX_VALUE, 100)).doesNotContain(target);
         }
-        store.insertCancelCommandAsActor(tenant, "CANCEL_TURN", "blocked-cancel",
+        store.insertCancelCommand(tenant, "CANCEL_TURN", "blocked-cancel",
                 "sha256:" + "4".repeat(64), session.sessionId(),
-                turn.turnId(), "owner");
+                turn.turnId());
         assertThat(store.findDispatchable(Long.MAX_VALUE, 100))
                 .contains(target);
         assertThat(store.findTurn(tenant, session.sessionId(),
@@ -1499,14 +1499,14 @@ class ManagedAgentServerIntegrationTest {
 
         // The mark is lease-fenced: an owner whose lease already expired
         // parks nothing — the CAS misses and the row stays unmarked.
-        Admission session2 = store.insertSessionCommand(tenant, "owner",
+        Admission session2 = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "blocked-create-2",
                 "sha256:" + "5".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn2 = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn2 = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "blocked-turn-2", "sha256:" + "6".repeat(64),
                 session2.sessionId(), List.of(),
-                "sha256:" + "7".repeat(64), "owner");
+                "sha256:" + "7".repeat(64));
         assertThat(store.claimTurn(tenant, session2.sessionId(),
                 turn2.turnId(), owner, Duration.ofMillis(-1))).isPresent();
         assertThat(store.markTurnRecoveryBlocked(tenant,
@@ -1521,10 +1521,10 @@ class ManagedAgentServerIntegrationTest {
     void aHarnessParkSettlesOnlyFromItsOriginalLeasedJournal() {
         pauseRecoveryScanning();
         String tenant = "tenant-harness-recheck-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner", "CREATE_SESSION", "create",
+        Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null, List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
-                session.sessionId(), List.of(), "sha256:" + "3".repeat(64), "owner");
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(), "sha256:" + "3".repeat(64));
         store.claimTurn(tenant, session.sessionId(), turn.turnId(), "first", Duration.ofMinutes(1)).orElseThrow();
         assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), "first", "boot")).isTrue();
         store.recordAdmission(tenant, session.sessionId(), turn.turnId(), "first", "epoch", 1);
@@ -1562,12 +1562,12 @@ class ManagedAgentServerIntegrationTest {
     void journaledProgressRestartsTheRetryBudget() {
         pauseRecoveryScanning();
         String tenant = "tenant-retry-reset-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "reset-create", "sha256:" + "4".repeat(64),
                 "qwen-code", null, null, List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "reset-turn", "sha256:" + "5".repeat(64),
-                session.sessionId(), List.of(), "sha256:" + "6".repeat(64), "owner");
+                session.sessionId(), List.of(), "sha256:" + "6".repeat(64));
         String owner = "reset-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
@@ -1664,16 +1664,16 @@ class ManagedAgentServerIntegrationTest {
     void exemptWaitsDoNotConsumeTheTurnRetryBudget() {
         pauseRecoveryScanning();
         String tenant = "tenant-exempt-budget-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "exempt-create", "sha256:" + "7".repeat(64),
                 "qwen-code", null, null, List.of(), null);
         // The recovery attach is what makes the 409 lease-bounded.
         jdbc.update("UPDATE ma_session SET harness_boot_id ="
                         + " 'boot-old' WHERE tenant_id = ? AND session_id = ?",
                 tenant, session.sessionId());
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "exempt-turn", "sha256:" + "8".repeat(64),
-                session.sessionId(), List.of(), "sha256:" + "9".repeat(64), "owner");
+                session.sessionId(), List.of(), "sha256:" + "9".repeat(64));
         HarnessHttpFailure writerConflict = mock(HarnessHttpFailure.class);
         when(writerConflict.getStatusCode()).thenReturn(409);
         when(writerConflict.getErrorCode())
@@ -1746,14 +1746,14 @@ class ManagedAgentServerIntegrationTest {
     void transfersHarnessGenerationOnlyBeforeAdmissionUnderDispatchLease() {
         pauseRecoveryScanning();
         String tenant = "tenant-harness-takeover-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "takeover-create",
                 "sha256:" + "d".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "takeover-turn", "sha256:" + "e".repeat(64),
                 session.sessionId(), List.of(),
-                "sha256:" + "f".repeat(64), "owner");
+                "sha256:" + "f".repeat(64));
         String owner = "takeover-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
@@ -1784,15 +1784,15 @@ class ManagedAgentServerIntegrationTest {
     void recoversAdmittedHarnessGenerationAndEventEpochUnderDispatchLease() {
         pauseRecoveryScanning();
         String tenant = "tenant-harness-recovery-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "recovery-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "recovery-turn", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(Map.of(
                         "type", "text", "text", "recover")),
-                "sha256:" + "3".repeat(64), "owner");
+                "sha256:" + "3".repeat(64));
         String owner = "recovery-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
@@ -1858,15 +1858,15 @@ class ManagedAgentServerIntegrationTest {
     void aFormerOwnerCannotRebindAfterItsClaimLapsed() {
         pauseRecoveryScanning();
         String tenant = "tenant-harness-stale-owner-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "stale-owner-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
                 List.of(), null);
         String sessionId = session.sessionId();
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "stale-owner-turn", "sha256:" + "5".repeat(64), sessionId,
                 List.of(Map.of("type", "text", "text", "stale")),
-                "sha256:" + "6".repeat(64), "owner");
+                "sha256:" + "6".repeat(64));
         String turnId = turn.turnId();
         String former = "stale-former-owner";
         String successor = "stale-successor-owner";
@@ -1949,15 +1949,15 @@ class ManagedAgentServerIntegrationTest {
     void adoptsRecoveryAdmissionOntoANullTurnEpoch() {
         pauseRecoveryScanning();
         String tenant = "tenant-harness-null-epoch-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "null-epoch-create",
                 "sha256:" + "1".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission first = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission first = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "null-epoch-first", "sha256:" + "2".repeat(64),
                 session.sessionId(), List.of(Map.of(
                         "type", "text", "text", "first")),
-                "sha256:" + "3".repeat(64), "owner");
+                "sha256:" + "3".repeat(64));
         String owner = "null-epoch-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 first.turnId(), owner, Duration.ofMinutes(1))).isPresent();
@@ -1972,11 +1972,11 @@ class ManagedAgentServerIntegrationTest {
                         "boot-old:epoch-0:5", new ProjectedEvent(
                                 "turn.completed", Map.of(), true,
                                 "COMPLETED", null, null))));
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "null-epoch-turn", "sha256:" + "4".repeat(64),
                 session.sessionId(), List.of(Map.of(
                         "type", "text", "text", "lost reply")),
-                "sha256:" + "5".repeat(64), "owner");
+                "sha256:" + "5".repeat(64));
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
         store.markSubmissionAttempted(tenant, session.sessionId(),
@@ -2005,14 +2005,14 @@ class ManagedAgentServerIntegrationTest {
     void retractsOnlyTheIncompleteContinuationEpoch() {
         pauseRecoveryScanning();
         String tenant = "tenant-retract-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "retract-turn", "sha256:" + "5".repeat(64),
                 session.sessionId(), List.of(),
-                "sha256:" + "6".repeat(64), "owner");
+                "sha256:" + "6".repeat(64));
         String owner = "retract-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
@@ -2088,14 +2088,14 @@ class ManagedAgentServerIntegrationTest {
     void retractsInBandRetryOutputFromItsFirstDelta() {
         pauseRecoveryScanning();
         String tenant = "tenant-inband-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "inband-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null,
                 List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "inband-turn", "sha256:" + "5".repeat(64),
                 session.sessionId(), List.of(),
-                "sha256:" + "6".repeat(64), "owner");
+                "sha256:" + "6".repeat(64));
         String owner = "inband-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
@@ -2200,10 +2200,10 @@ class ManagedAgentServerIntegrationTest {
     private void assertBoundedRetractionAcrossAttachment(int consumedThrough, String caseName) {
         pauseRecoveryScanning();
         String tenant = "tenant-bounded-" + caseName + "-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner", "CREATE_SESSION", "bounded-create",
+        Admission session = store.insertSessionCommand(tenant, "CREATE_SESSION", "bounded-create",
                 "sha256:" + "4".repeat(64), "qwen-code", null, null, List.of(), null);
-        Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN", "bounded-turn",
-                "sha256:" + "5".repeat(64), session.sessionId(), List.of(), "sha256:" + "6".repeat(64), "owner");
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN", "bounded-turn",
+                "sha256:" + "5".repeat(64), session.sessionId(), List.of(), "sha256:" + "6".repeat(64));
         String owner = "bounded-owner";
         assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
         assertThat(store.bindHarness(tenant, session.sessionId(), turn.turnId(), owner, "boot_old")).isTrue();
@@ -2280,7 +2280,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void doesNotPublishRolledBackEvents() throws Exception {
         String tenant = "tenant-rollback-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant, "owner",
+        Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "rollback-create",
                 "sha256:" + "d".repeat(64), "qwen-code", null, null,
                 List.of(), null);
@@ -2310,19 +2310,19 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void resolvesAnUncertainSubmitBeforeCancelling() throws Exception {
         String tenant = "tenant-uncertain-cancel";
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"uncertain-create",
                                  "agentId":"qwen-code","input":[]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
-        MvcResult submitted = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        MvcResult submitted = mvc.perform(post(
                         "/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -2331,7 +2331,7 @@ class ManagedAgentServerIntegrationTest {
                                  "sessionId":"%s",
                                  "input":[{"type":"text",
                                            "text":"uncertain"}]}
-                                """.formatted(sessionId)), "owner"))
+                                """.formatted(sessionId)))
                 .andExpect(status().isAccepted()).andReturn();
         String turnId = objectMapper.readTree(
                 submitted.getResponse().getContentAsString())
@@ -2340,13 +2340,13 @@ class ManagedAgentServerIntegrationTest {
                 assertThat(harness.hasUncertainRetry()).isTrue());
         int cancellations = harness.cancelCount();
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/cancel")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/cancel")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"uncertain-cancel",
                                  "sessionId":"%s","turnId":"%s"}
-                                """.formatted(sessionId, turnId)), "owner"))
+                                """.formatted(sessionId, turnId)))
                 .andExpect(status().isAccepted());
         // Nothing may cancel the Turn while its submit is unresolved.
         await().during(Duration.ofMillis(200)).atMost(Duration.ofSeconds(2))
@@ -2361,12 +2361,12 @@ class ManagedAgentServerIntegrationTest {
                 assertThat(harness.cancelCount())
                         .isGreaterThan(cancellations));
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+                mvc.perform(post(
                                 "/api/agent/web-shell/v1/transcript/query")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"sessionId\":\"" + sessionId
-                                        + "\",\"limit\":100}"), "owner"))
+                                        + "\",\"limit\":100}"))
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.events[?(@.type =="
                                 + " 'turn.cancelled')]").isNotEmpty()));
@@ -2378,19 +2378,19 @@ class ManagedAgentServerIntegrationTest {
         String tenant = "tenant-paging-" + UUID.randomUUID();
         List<String> ids = new ArrayList<>();
         for (String name : List.of("page-a", "page-b", "page-c")) {
-            ids.add(objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+            ids.add(objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
                             .header(TenantContextFilter.HEADER, tenant)
                             .header("Idempotency-Key", "paging-" + name)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                            .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                     .andExpect(status().isAccepted()).andReturn()
                     .getResponse().getContentAsString()).get("id").asText());
         }
 
-        JsonNode first = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        JsonNode first = objectMapper.readTree(mvc.perform(
                         get("/v1/agents/sessions")
                                 .param("limit", "2")
-                                .header(TenantContextFilter.HEADER, tenant), "owner"))
+                                .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.has_more").value(true))
                 .andExpect(jsonPath("$.data.length()").value(2))
@@ -2412,20 +2412,20 @@ class ManagedAgentServerIntegrationTest {
                 "paging-rename")
                 .andExpect(status().isOk());
 
-        JsonNode page1 = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        JsonNode page1 = objectMapper.readTree(mvc.perform(
                         get("/v1/agents/sessions")
                                 .param("limit", "2")
-                                .header(TenantContextFilter.HEADER, tenant), "owner"))
+                                .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.has_more").value(true))
                 .andExpect(jsonPath("$.data.length()").value(2))
                 .andReturn().getResponse().getContentAsString());
         String cursor = page1.get("next_cursor").asText();
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions")
+        mvc.perform(get("/v1/agents/sessions")
                         .param("limit", "2")
                         .param("cursor", cursor)
-                        .header(TenantContextFilter.HEADER, tenant), "owner"))
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.has_more").value(false))
                 .andExpect(jsonPath("$.data.length()").value(1))
@@ -2436,14 +2436,14 @@ class ManagedAgentServerIntegrationTest {
     void replaysASubmittedTurnWhileTheHarnessIsUnavailable()
             throws Exception {
         String tenant = "tenant-unavailable-submit-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"unavailable-create",
                                  "agentId":"qwen-code","input":[]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
@@ -2459,11 +2459,11 @@ class ManagedAgentServerIntegrationTest {
         try {
             List<Map<String, Object>> input =
                     List.of(Map.of("type", "text", "text", "hold"));
-            Admission turn = store.insertTurnCommandAsActor(tenant, "SUBMIT_TURN",
+            Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                     "unavailable-turn",
                     new RequestDigests().digest(Map.of("sessionId", sessionId,
                             "input", input)),
-                    sessionId, input, "payload", "owner");
+                    sessionId, input, "payload");
             turnId = turn.turnId();
             // More replays than the pre-admission retry budget: every one
             // must answer the recorded 202, and none may re-dispatch — each
@@ -2473,10 +2473,10 @@ class ManagedAgentServerIntegrationTest {
                     ManagedAgentProperties.class).getDispatch()
                     .getMaxPreAdmissionRetries() + 1;
             for (int attempt = 0; attempt < replays; attempt++) {
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/submit")
+                mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(submit), "owner"))
+                                .content(submit))
                         .andExpect(status().isAccepted())
                         .andExpect(jsonPath("$.replayed").value(true))
                         .andExpect(jsonPath("$.turnId").value(turnId));
@@ -2494,14 +2494,14 @@ class ManagedAgentServerIntegrationTest {
                                 .intValue()).isZero();
                     });
             // A genuinely new submission still fails fast while down.
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/submit")
+            mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                             .header(TenantContextFilter.HEADER, tenant)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("""
                                     {"idempotencyKey":"unavailable-fresh",
                                      "sessionId":"%s",
                                      "input":[{"type":"text","text":"new"}]}
-                                    """.formatted(sessionId)), "owner"))
+                                    """.formatted(sessionId)))
                     .andExpect(status().isServiceUnavailable())
                     .andExpect(jsonPath("$.error.code")
                             .value("hosted_harness_disabled"));
@@ -2529,21 +2529,21 @@ class ManagedAgentServerIntegrationTest {
                  "agentId":"qwen-code",
                  "input":[{"type":"text","text":"seed"}]}
                 """;
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(create), "owner"))
+                        .content(create))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
 
         harness.setAvailable(false);
         try {
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/create")
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
                             .header(TenantContextFilter.HEADER, tenant)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content(create), "owner"))
+                            .content(create))
                     .andExpect(status().isAccepted())
                     .andExpect(jsonPath("$.replayed").value(true))
                     .andExpect(jsonPath("$.sessionId").value(sessionId));
@@ -2555,12 +2555,12 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void replaysACompletedRenameAfterTheSessionWasDeleted() throws Exception {
         String tenant = "tenant-rename-replay-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "replay-create")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
@@ -2598,8 +2598,8 @@ class ManagedAgentServerIntegrationTest {
         // Driven through the real DispatcherServlet so the @ExceptionHandler
         // mappings are exercised reflectively — a deleted or mistyped
         // annotation would fall through to the 500 catch-all here.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}", "session-405")
-                        .header(TenantContextFilter.HEADER, "tenant-405"), "owner"))
+        mvc.perform(post("/v1/agents/sessions/{id}", "session-405")
+                        .header(TenantContextFilter.HEADER, "tenant-405"))
                 .andExpect(status().isMethodNotAllowed())
                 .andExpect(header().exists("Allow"))
                 .andExpect(jsonPath("$.error.code")
@@ -2607,20 +2607,20 @@ class ManagedAgentServerIntegrationTest {
         // Without the required Idempotency-Key header the request fails
         // binding before the body is read: the parameter advice answers 400
         // invalid_request.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, "tenant-415")
                         .contentType(MediaType.TEXT_PLAIN)
-                        .content("not json"), "owner"))
+                        .content("not json"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_request"));
         // With the header present, dispatch reaches the body read and the
         // text/plain payload raises HttpMediaTypeNotSupportedException: the
         // dedicated handler answers 415, never the 500 catch-all.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, "tenant-415")
                         .header("Idempotency-Key", "media-415")
                         .contentType(MediaType.TEXT_PLAIN)
-                        .content("not json"), "owner"))
+                        .content("not json"))
                 .andExpect(status().isUnsupportedMediaType())
                 .andExpect(jsonPath("$.error.code")
                         .value("unsupported_media_type"));
@@ -2630,31 +2630,31 @@ class ManagedAgentServerIntegrationTest {
     void replaysACompletedUnarchiveAfterTheSessionWasDeleted()
             throws Exception {
         String tenant = "tenant-unarchive-replay-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "replay-create")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
-        String closeId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String closeId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions/{id}/close", sessionId)
                                 .header(TenantContextFilter.HEADER, tenant)
-                                .header("Idempotency-Key", "replay-close"), "owner"))
+                                .header("Idempotency-Key", "replay-close"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
         awaitOperation(tenant, sessionId, closeId);
-        String archiveId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String archiveId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions/{id}/archive", sessionId)
                                 .header(TenantContextFilter.HEADER, tenant)
-                                .header("Idempotency-Key", "replay-archive"), "owner"))
+                                .header("Idempotency-Key", "replay-archive"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
         awaitOperation(tenant, sessionId, archiveId);
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/unarchive", sessionId)
+        mvc.perform(post("/v1/agents/sessions/{id}/unarchive", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "replay-unarchive"), "owner"))
+                        .header("Idempotency-Key", "replay-unarchive"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("closed"));
         String deleteId = objectMapper.readTree(lifecycle(
@@ -2665,9 +2665,9 @@ class ManagedAgentServerIntegrationTest {
                 .get("id").asText();
         awaitOperation(tenant, sessionId, deleteId);
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/unarchive", sessionId)
+        mvc.perform(post("/v1/agents/sessions/{id}/unarchive", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "replay-unarchive"), "owner"))
+                        .header("Idempotency-Key", "replay-unarchive"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
                         "true"))
@@ -2678,12 +2678,12 @@ class ManagedAgentServerIntegrationTest {
     void aCreateReplayAfterTheSessionWasDeletedAnswers404()
             throws Exception {
         String tenant = "tenant-create-replay-delete-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "replay-create")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
         String deleteId = objectMapper.readTree(lifecycle(
@@ -2698,11 +2698,11 @@ class ManagedAgentServerIntegrationTest {
         // re-reads the Session before responding, so a create replay after
         // delete answers 404 — the shared replay header scopes its
         // last-visible promise to those two routes.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "replay-create")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_found"));
@@ -2717,11 +2717,11 @@ class ManagedAgentServerIntegrationTest {
                  "agentId":"qwen-code",
                  "input":[]}
                 """;
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(create), "owner"))
+                        .content(create))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
@@ -2737,10 +2737,10 @@ class ManagedAgentServerIntegrationTest {
         // route re-reads the Session and answers 404, while the WebShell
         // route answers the recorded 202 admission carrying the tombstoned
         // sessionId.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/create")
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(create), "owner"))
+                        .content(create))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.replayed").value(true))
                 .andExpect(jsonPath("$.sessionId").value(sessionId));
@@ -2749,12 +2749,12 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void theTitleBoundIsEnforcedInUtf16CodeUnits() throws Exception {
         String tenant = "tenant-title-units-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "title-units")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
         // 128 astral characters are exactly 256 UTF-16 code units — the
@@ -2798,12 +2798,12 @@ class ManagedAgentServerIntegrationTest {
         assertThat(webShellTitle.get("maxLength").asInt()).isEqualTo(256);
         assertThat(webShellTitle.get("description").asText())
                 .contains("UTF-16");
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/create")
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"idempotencyKey\":\"title-webshell-over\","
                                 + "\"agentId\":\"qwen-code\",\"input\":[],"
-                                + "\"title\":\"" + "t".repeat(257) + "\"}"), "owner"))
+                                + "\"title\":\"" + "t".repeat(257) + "\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
     }
@@ -2814,14 +2814,14 @@ class ManagedAgentServerIntegrationTest {
         // 256 — the Harness client's own cap, so every accepted title stays
         // writable through every path end to end.
         String fullTitle = "t".repeat(256);
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "title-create")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
                                         + "\"metadata\":{\"title\":\"" + fullTitle
-                                        + "\"}}"), "owner"))
+                                        + "\"}}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
@@ -2830,13 +2830,13 @@ class ManagedAgentServerIntegrationTest {
                 "title-rewrite")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value(fullTitle));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "title-create-too-long")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
                                 + "\"metadata\":{\"title\":\"" + "t".repeat(257)
-                                + "\"}}"), "owner"))
+                                + "\"}}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
@@ -2853,12 +2853,12 @@ class ManagedAgentServerIntegrationTest {
                 "title-control")
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "title-create-control")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
-                                + "\"metadata\":{\"title\":\"bad\\ntitle\"}}"), "owner"))
+                                + "\"metadata\":{\"title\":\"bad\\ntitle\"}}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
         // Blank is the rename policy's own arm: the specific invalid_title
@@ -2875,12 +2875,12 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
         // On create a blank title normalizes to absent, never stored.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "title-create-blank")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
-                                + "\"metadata\":{\"title\":\"\"}}"), "owner"))
+                                + "\"metadata\":{\"title\":\"\"}}"))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
@@ -2889,13 +2889,13 @@ class ManagedAgentServerIntegrationTest {
     void foldsTurnStatusesAndConflictMessagesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
         String tenant = "tenant-locale-turn-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "locale-turn-create")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":["
-                                        + "{\"type\":\"text\",\"text\":\"hold\"}]}"), "owner"))
+                                        + "{\"type\":\"text\",\"text\":\"hold\"}]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
@@ -2906,20 +2906,20 @@ class ManagedAgentServerIntegrationTest {
         try {
             // "running" and "active" both carry ASCII I; the Turkish fold
             // would corrupt them into dotless-ı protocol tokens.
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
-                            .header(TenantContextFilter.HEADER, tenant), "owner"))
+            mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.data[0].status").value("running"));
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/get")
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                             .header(TenantContextFilter.HEADER, tenant)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"sessionId\":\"" + sessionId + "\"}"), "owner"))
+                            .content("{\"sessionId\":\"" + sessionId + "\"}"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.activeTurn.status")
                             .value("running"));
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/archive", sessionId)
+            mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
                             .header(TenantContextFilter.HEADER, tenant)
-                            .header("Idempotency-Key", "locale-archive"), "owner"))
+                            .header("Idempotency-Key", "locale-archive"))
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code")
                             .value("session_state_conflict"))
@@ -2935,12 +2935,12 @@ class ManagedAgentServerIntegrationTest {
     void foldsSessionStatusesWithTheRootLocaleUnderATurkishDefault()
             throws Exception {
         String tenant = "tenant-locale-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        String sessionId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "locale-create")
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
 
@@ -2949,14 +2949,14 @@ class ManagedAgentServerIntegrationTest {
         try {
             // The Turkish fold turns "ACTIVE" into "actıve"; protocol
             // tokens must stay ASCII-folded.
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}", sessionId)
-                            .header(TenantContextFilter.HEADER, tenant), "owner"))
+            mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                            .header(TenantContextFilter.HEADER, tenant))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.status").value("active"));
-            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/get")
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                             .header(TenantContextFilter.HEADER, tenant)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"sessionId\":\"" + sessionId + "\"}"), "owner"))
+                            .content("{\"sessionId\":\"" + sessionId + "\"}"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.status").value("active"));
         } finally {
@@ -2967,14 +2967,14 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void rejectsInputBeyondTheAggregateCharacterBudget() throws Exception {
         String tenant = "tenant-input-budget-" + UUID.randomUUID();
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"budget-create",
                                  "agentId":"qwen-code","input":[]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
@@ -2998,16 +2998,16 @@ class ManagedAgentServerIntegrationTest {
 
         // 5 × 1M chars passes the per-block caps yet must fail the
         // aggregate budget; 4 × 1M remains admitted.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/submit")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(oversized.toString()), "owner"))
+                        .content(oversized.toString()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_input"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/submit")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(okay.toString()), "owner"))
+                        .content(okay.toString()))
                 .andExpect(status().isAccepted());
     }
 
@@ -3019,7 +3019,7 @@ class ManagedAgentServerIntegrationTest {
         // passes null), so anything a client sends here is accepted and
         // ignored — neither validated and dropped, nor persisted: a
         // metadata title does not become the Session's title.
-        MvcResult created = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        MvcResult created = mvc.perform(
                 post("/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -3029,16 +3029,16 @@ class ManagedAgentServerIntegrationTest {
                                  "metadata":{"clientId":"client-1",
                                              "other":"trace",
                                              "title":"metadata-title"}}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted())
                 .andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/get")
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionId\":\"" + sessionId + "\"}"), "owner"))
+                        .content("{\"sessionId\":\"" + sessionId + "\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.title").doesNotExist());
         // Same widened acceptance on the submit handler: a non-clientId
@@ -3046,7 +3046,7 @@ class ManagedAgentServerIntegrationTest {
         // the request fails later, on the unknown Session lookup. The body
         // is otherwise exactly what the published WebShellSubmitRequest
         // schema allows — ManagedAgentApiContractTest pins that shape.
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/submit")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -3055,7 +3055,7 @@ class ManagedAgentServerIntegrationTest {
                                  "input":[{"type":"input_text","text":"hi"}],
                                  "metadata":{"clientId":"client-1",
                                              "other":"trace"}}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isNotFound());
     }
 
@@ -3082,30 +3082,30 @@ class ManagedAgentServerIntegrationTest {
 
     private void assertHarnessRejectsOversizedCommand(String tenant,
             String arm, String text) throws Exception {
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"idempotencyKey\":\"oversized-create-"
                                 + arm + "\",\"agentId\":\"qwen-code\","
-                                + "\"input\":[]}"), "owner"))
+                                + "\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/turns/submit")
+        mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"idempotencyKey\":\"oversized-submit-"
                                 + arm + "\",\"sessionId\":\"" + sessionId
                                 + "\",\"input\":[{\"type\":\"input_text\","
-                                + "\"text\":\"" + text + "\"}]}"), "owner"))
+                                + "\"text\":\"" + text + "\"}]}"))
                 .andExpect(status().isAccepted());
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/api/agent/web-shell/v1/sessions/get")
+                mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"sessionId\":\"" + sessionId
-                                        + "\"}"), "owner"))
+                                        + "\"}"))
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.activeTurn.status")
                                 .value("failed"))
@@ -3118,18 +3118,18 @@ class ManagedAgentServerIntegrationTest {
 
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,
             String tenant, String idempotencyKey) throws Exception {
-        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(request.header(TenantContextFilter.HEADER, tenant)
-                .header("Idempotency-Key", idempotencyKey), "owner"));
+        return mvc.perform(request.header(TenantContextFilter.HEADER, tenant)
+                .header("Idempotency-Key", idempotencyKey));
     }
 
     private JsonNode awaitOperation(String tenant, String sessionId,
             String operationId) {
         JsonNode[] operation = new JsonNode[1];
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
-            operation[0] = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get(
+            operation[0] = objectMapper.readTree(mvc.perform(get(
                             "/v1/agents/sessions/{id}/operations/{op}",
                             sessionId, operationId)
-                            .header(TenantContextFilter.HEADER, tenant), "owner"))
+                            .header(TenantContextFilter.HEADER, tenant))
                     .andExpect(status().isOk())
                     .andReturn().getResponse().getContentAsString());
             assertThat(operation[0].get("status").asText())
@@ -3140,9 +3140,9 @@ class ManagedAgentServerIntegrationTest {
 
     private MvcResult events(String tenant, String sessionId)
             throws Exception {
-        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/events", sessionId)
+        return mvc.perform(get("/v1/agents/sessions/{id}/events", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
-                        .accept(MediaType.APPLICATION_JSON), "owner"))
+                        .accept(MediaType.APPLICATION_JSON))
                 .andExpect(status().isOk())
                 .andReturn();
     }

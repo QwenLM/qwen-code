@@ -140,7 +140,7 @@ class SessionRecoveryInitialStateTest {
     @ValueSource(strings = {"missing-journal", "pristine-journal"})
     void aLaterUnsubmittedCancellationCannotHideAnEarlierPossibleSubmission(String nativeHistory) throws Exception {
         String earlier = cancelBeforeSubmission("earlier");
-        jdbc.update("UPDATE ma_turn SET status = 'FAILED', is_submission_attempted = TRUE, harness_event_epoch = 'earlier-epoch'"
+        jdbc.update("UPDATE ma_turn SET status = 'FAILED', submission_attempted = TRUE, harness_event_epoch = 'earlier-epoch'"
                 + " WHERE turn_id = ?", earlier);
         if ("pristine-journal".equals(nativeHistory)) {
             genesis();

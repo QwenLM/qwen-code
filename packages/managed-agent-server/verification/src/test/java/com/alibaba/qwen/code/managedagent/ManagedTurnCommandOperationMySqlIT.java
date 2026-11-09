@@ -50,24 +50,24 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
      */
     @Test
     void settlesInTwoSessionsDoNotLockEachOthersPendingCancels() throws Exception {
-        String other = store.insertSessionCommand(TENANT, "owner",
-                "CREATE_SESSION", "create-other", "digest-other", "qwen-code",
-                null, null, List.of(), null).sessionId();
+        String other = store.insertSessionCommand(TENANT, "CREATE_SESSION",
+                "create-other", "digest-other", "qwen-code", null, null,
+                List.of(), null).sessionId();
         Map<String, Admission> ended = new HashMap<>();
         Map<String, Admission> running = new HashMap<>();
         for (String session : List.of(sessionId, other)) {
-            Admission turn = store.insertTurnCommandAsActor(TENANT, "SUBMIT_TURN",
+            Admission turn = store.insertTurnCommand(TENANT, "SUBMIT_TURN",
                     session + "-ended", "digest-ended", session, INPUT,
-                    "sha256:" + "c".repeat(64), "owner");
+                    "sha256:" + "c".repeat(64), "actor");
             assertThat(store.claimTurn(TENANT, session, turn.turnId(), OWNER,
                     Duration.ofMinutes(1))).isPresent();
             store.failTurn(TENANT, session, turn.turnId(), OWNER,
                     "hosted_harness_unavailable", "gone");
             settledCancels(session, turn.turnId(), 1000);
             ended.put(session, turn);
-            running.put(session, store.insertTurnCommandAsActor(TENANT,
+            running.put(session, store.insertTurnCommand(TENANT,
                     "SUBMIT_TURN", session + "-running", "digest-running",
-                    session, INPUT, "sha256:" + "c".repeat(64), "owner"));
+                    session, INPUT, "sha256:" + "c".repeat(64), "actor"));
         }
         jdbc.execute("ANALYZE TABLE ma_operation");
         var transactions = transactions();
@@ -78,15 +78,15 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
                     status -> {
                         // A cancel of the running Turn stays pending and
                         // holds its new row until this transaction ends.
-                        assertThat(store.insertCancelCommandAsActor(TENANT,
+                        assertThat(store.insertCancelCommand(TENANT,
                                 "CANCEL_TURN", session + "-cancel-running",
                                 "cancel-digest", session,
-                                running.get(session).turnId(), "owner")
+                                running.get(session).turnId(), "actor")
                                 .commandEffect()).isTrue();
                         await(pending);
-                        return store.insertCancelCommandAsActor(TENANT, "CANCEL_TURN",
+                        return store.insertCancelCommand(TENANT, "CANCEL_TURN",
                                 session + "-cancel-ended", "cancel-digest",
-                                session, ended.get(session).turnId(), "owner");
+                                session, ended.get(session).turnId(), "actor");
                     })));
         }
         for (var cancel : late) {

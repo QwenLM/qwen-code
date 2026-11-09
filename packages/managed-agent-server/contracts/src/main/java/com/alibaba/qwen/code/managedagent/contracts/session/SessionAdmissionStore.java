@@ -62,41 +62,6 @@ public interface SessionAdmissionStore {
     }
 
     /**
-     * The unified write authority over an unbound Session; identical to
-     * {@link #requireSessionReadAuthority}. A present ownership row is the
-     * sole authority; a legacy Session without a row has no per-actor
-     * mutation gate and stays tenant-wide.
-     */
-    public default void requireSessionAuthority(String tenantId,
-            String sessionId, SessionPrincipal principal) {
-        throw new UnsupportedOperationException(
-                "Session ownership checks are unavailable");
-    }
-
-    /**
-     * The action-surface authority over an unbound Session: a same-user-id
-     * caller must match the whole ownership row, and a revoked
-     * principal-created Session stays invisible; foreign user ids and
-     * genuine legacy Sessions keep reaching the action gate (R5-7).
-     */
-    public default void requireActionRowAuthority(String tenantId,
-            String sessionId, SessionPrincipal principal) {
-        throw new UnsupportedOperationException(
-                "Session ownership checks are unavailable");
-    }
-
-    /**
-     * The unified read authority over an unbound Session: a present
-     * ownership row is the sole authority; a legacy Session without a row
-     * stays tenant-wide readable.
-     */
-    public default void requireSessionReadAuthority(String tenantId,
-            String sessionId, SessionPrincipal principal) {
-        throw new UnsupportedOperationException(
-                "Session ownership checks are unavailable");
-    }
-
-    /**
      * H4b: creates a child Session under its parent's exact binding,
      * stamping the lineage in the same transaction. The idempotency key
      * derives from the parent's committed launch, so a replay returns the
@@ -189,7 +154,7 @@ public interface SessionAdmissionStore {
      * OPERATOR's own retry of his own key — and not only the creator. The
      * default drops the actor for implementations that cannot record it.
      */
-    public default Admission insertTurnCommandAsActor(String tenantId, String operation,
+    public default Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
@@ -211,7 +176,7 @@ public interface SessionAdmissionStore {
             String turnId);
 
     /** The actor-carrying twin of {@link #insertTurnCommand}. */
-    public default Admission insertCancelCommandAsActor(String tenantId, String operation,
+    public default Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
         return insertCancelCommand(tenantId, operation, idempotencyKey,

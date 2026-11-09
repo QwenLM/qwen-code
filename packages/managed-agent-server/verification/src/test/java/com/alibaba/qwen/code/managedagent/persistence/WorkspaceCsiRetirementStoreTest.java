@@ -161,7 +161,7 @@ class WorkspaceCsiRetirementStoreTest {
         }
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
         transaction.executeWithoutResult(status -> {
-            jdbc.update("UPDATE ma_tool_execution SET is_cancel_requested = TRUE WHERE execution_call_id = X'726561646572'");
+            jdbc.update("UPDATE ma_tool_execution SET cancel_requested = TRUE WHERE execution_call_id = X'726561646572'");
             var locked = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<ToolExecutionRecord>) connection ->
                     executions.findByExecutionCallIdForUpdate(connection, "reader"));
             assertThat(locked.getExecutionCallId()).isEqualTo(execution.getExecutionCallId());
@@ -348,7 +348,7 @@ class WorkspaceCsiRetirementStoreTest {
             assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, operation));
         }
         updateRetirementIdentity(encoded);
-        jdbc.update("UPDATE ma_runtime_binding SET is_drain_requested = FALSE");
+        jdbc.update("UPDATE ma_runtime_binding SET drain_requested = FALSE");
         assertUnavailable(() -> store.inspectRetirement(registration, bindings, original));
         assertThat(store.inspect(registration).phase()).isEqualTo("DRAINING");
     }

@@ -108,7 +108,7 @@ class ManagedRenameReconciliationTest {
                 new DataSourceTransactionManager(dataSource),
                 new AnnotationTransactionAttributeSource()));
         transactional = (AgentStateStore) proxy.getProxy();
-        sessionId = store.insertSessionCommand(TENANT, "owner", "CREATE_SESSION",
+        sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
                 "create", "digest", "qwen-code", null, null, List.of(), null)
                 .sessionId();
     }
@@ -134,7 +134,7 @@ class ManagedRenameReconciliationTest {
         assertThat(store.claimRename(delivery, "other", Duration.ofMinutes(1)))
                 .isEmpty();
         refused(() -> store.beginSessionRename(TENANT, "title-1", "digest-title-1",
-                sessionId, TITLE, "owner"), "operation_outcome_unknown");
+                sessionId, TITLE), "operation_outcome_unknown");
         // It holds no lifecycle hostage.
         assertThat(store.beginOperation(TENANT, sessionId, OperationKind.CLOSE,
                 "actor", "close-1", "close-digest").operation().state())
@@ -150,7 +150,7 @@ class ManagedRenameReconciliationTest {
         RenameDelivery delivery = submitted("title-1", TITLE);
         expireClaims();
         refused(() -> store.beginSessionRename(TENANT, "title-2", "digest-title-2",
-                sessionId, "Later", "owner"), "session_operation_active");
+                sessionId, "Later"), "session_operation_active");
         assertThat(store.deliverableRenames(Long.MAX_VALUE)).isEmpty();
         assertThat(row(delivery.revision()))
                 .containsEntry("state", "RECOVERY_BLOCKED")
@@ -158,13 +158,13 @@ class ManagedRenameReconciliationTest {
                 .containsEntry("claim_owner", OWNER);
         assertThat(receipt("title-1")).isEqualTo("FAILED");
         SessionMutationCommand later = store.beginSessionRename(TENANT, "title-2",
-                "digest-title-2", sessionId, "Later", "owner");
+                "digest-title-2", sessionId, "Later");
         assertThat(later.renameRevision()).isGreaterThan(delivery.revision());
         // The later title wins whatever became of the parked one.
         assertThat(row(delivery.revision())).containsEntry("state", "SUPERSEDED");
         assertThat(store.findParkedOperations(50)).isEmpty();
         refused(() -> store.beginSessionRename(TENANT, "title-1", "digest-title-1",
-                sessionId, TITLE, "owner"), "session_mutation_superseded");
+                sessionId, TITLE), "session_mutation_superseded");
     }
 
     @Test
@@ -199,7 +199,7 @@ class ManagedRenameReconciliationTest {
         assertThat(store.settleParkedRename(due,
                 AcceptanceVerdict.notCommitted("session_title_undelivered"), 0)).isFalse();
         SessionMutationCommand replay = store.beginSessionRename(TENANT, "title-1",
-                "digest-title-1", sessionId, TITLE, "owner");
+                "digest-title-1", sessionId, TITLE);
         assertThat(replay.status()).isEqualTo("COMPLETED");
         assertThat(replay.replayed()).isTrue();
     }
@@ -257,7 +257,7 @@ class ManagedRenameReconciliationTest {
         // The key may try again, under a new revision; the proven failure
         // keeps its outcome rather than reading as superseded.
         SessionMutationCommand retry = store.beginSessionRename(TENANT, "title-1",
-                "digest-title-1", sessionId, TITLE, "owner");
+                "digest-title-1", sessionId, TITLE);
         assertThat(retry.status()).isEqualTo("PENDING");
         assertThat(retry.renameRevision()).isGreaterThan(delivery.revision());
         assertThat(row(delivery.revision())).containsEntry("state", "FAILED");
@@ -372,7 +372,7 @@ class ManagedRenameReconciliationTest {
 
     RenameDelivery claimed(String key, String title) {
         SessionMutationCommand command = store.beginSessionRename(TENANT, key,
-                "digest-" + key, sessionId, title, "owner");
+                "digest-" + key, sessionId, title);
         RenameDelivery candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
                 .filter(delivery -> delivery.revision() == command.renameRevision())
                 .findFirst().orElseThrow();

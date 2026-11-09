@@ -119,7 +119,7 @@ public class ManagedToolResultStore
                                                         + " (SELECT 1 FROM ma_session s WHERE"
                                                         + " s.tenant_id = ma_operation.tenant_id"
                                                         + " AND s.session_id ="
-                                                        + " ma_operation.session_id AND s.is_csi_guard"
+                                                        + " ma_operation.session_id AND s.csi_guard"
                                                         + " = TRUE) AND state = ? AND "
                                                         + due
                                                         + " <= "
@@ -472,7 +472,7 @@ public class ManagedToolResultStore
         var rows =
                 jdbc.query(
                         "SELECT state, producer_phase, binding_digest, admission_resource_id,"
-                            + " receipt_sequence, receipt_revision, CASE WHEN is_quarantined THEN 1"
+                            + " receipt_sequence, receipt_revision, CASE WHEN quarantined THEN 1"
                             + " ELSE 0 END AS quarantine_mark FROM ma_output_capture WHERE"
                             + " scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id"
                             + " = ? AND publication_id = ? FOR UPDATE",

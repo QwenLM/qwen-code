@@ -32,7 +32,7 @@ class ManagedSchemaRelayLoadMySqlIT {
                         .extracting(SessionMessageRelayStore.PendingMessage::messageId)
                         .containsExactly("pending-accepting", "pending-planned", "pending-unknown");
                 var plan = explain(database.source(), jdbc.recorded.getFirst());
-                assertThat(plan.usesIndex("idx_ma_record_delivery")).as(plan.text()).isTrue();
+                assertThat(plan.usesIndex("ix_ma_record_delivery")).as(plan.text()).isTrue();
                 long scanned = plan.scannedRows();
                 assertThat(scanned).as(plan.text()).isPositive().isLessThanOrEqualTo(30);
                 if (previousScan >= 0) {
@@ -59,7 +59,7 @@ class ManagedSchemaRelayLoadMySqlIT {
                 assertThat(channels.findPendingDeliveries("tenant", "sender", 50))
                         .extracting(ChannelInstanceStore.PendingDelivery::deliveryId).containsExactly("pending");
                 var plan = explain(database.source(), jdbc.recorded.getFirst());
-                assertThat(plan.usesIndex("idx_ma_record_session_delivery")).as(plan.text()).isTrue();
+                assertThat(plan.usesIndex("ix_ma_record_session_delivery")).as(plan.text()).isTrue();
                 long scanned = plan.scannedRows();
                 assertThat(scanned).as(plan.text()).isPositive().isLessThanOrEqualTo(10);
                 if (previousScan >= 0) {

@@ -9,13 +9,9 @@ import org.junit.jupiter.api.Test;
 import javax.sql.DataSource;
 
 import java.sql.Connection;
-import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,116 +21,75 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
-    // 独立固定业务唯一键，避免随 DDL 改动一起放宽约束。
-    private static final Map<String, List<String>> BUSINESS_KEYS = Map.ofEntries(
-            Map.entry("ma_session", List.of("tenant_id", "session_id")),
-            Map.entry("ma_user_message_queue", List.of("tenant_id", "session_id")),
-            Map.entry("ma_user_message", List.of("tenant_id", "session_id", "message_id")),
-            Map.entry("ma_user_message_command", List.of("tenant_id", "session_id", "command_key")),
-            Map.entry("ma_turn", List.of("tenant_id", "session_id", "turn_id")),
-            Map.entry("ma_session_head", List.of("tenant_key", "harness_key")),
-            Map.entry("ma_session_journal_tx", List.of("tenant_id", "session_id", "journal_revision")),
-            Map.entry("ma_event_stream", List.of("tenant_id", "session_id", "stream_kind", "stream_id")),
-            Map.entry("ma_public_event", List.of("tenant_id", "session_id", "stream_kind", "stream_id", "sequence_id")),
-            Map.entry("ma_message", List.of("tenant_id", "session_id", "item_id")),
-            Map.entry("ma_session_record", List.of("session_scope_key", "record_key")),
-            Map.entry("ma_agent_definition", List.of("tenant_id", "agent_id", "revision")),
-            Map.entry("ma_resource", List.of("resource_key")),
-            Map.entry("ma_resource_ref", List.of("session_scope_key", "owner_kind", "owner_key", "owner_revision", "resource_key")),
-            Map.entry("ma_output_capture", List.of("scope_key", "publication_id")),
-            Map.entry("ma_artifact", List.of("artifact_id")),
-            Map.entry("ma_request_receipt", List.of("receipt_key")),
-            Map.entry("ma_operation", List.of("operation_key")),
-            Map.entry("ma_operation_work", List.of("operation_key", "work_kind", "target_key")),
-            Map.entry("ma_workspace", List.of("tenant_id", "workspace_id")),
-            Map.entry("ma_workspace_access", List.of("tenant_id", "workspace_id", "actor_id")),
-            Map.entry("ma_extension_package", List.of("package_key")),
-            Map.entry("ma_extension_settings", List.of("settings_key")),
-            Map.entry("ma_extension_operation", List.of("operation_key")),
-            Map.entry("ma_storage", List.of("alias_key")),
-            Map.entry("ma_runtime_slot", List.of("request_key")),
-            Map.entry("ma_runtime_binding", List.of("binding_id")),
-            Map.entry("ma_runtime_session", List.of("scope_key", "runtime_session_id")),
-            Map.entry("ma_tool_execution", List.of("execution_call_id_hash")),
-            Map.entry("ma_storage_owner", List.of("storage_key")),
-            Map.entry("ma_tenant_guard", List.of("tenant_key", "guard_domain")),
-            Map.entry("ma_read_lease", List.of("lease_id")),
-            Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
-            Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
-            Map.entry("ma_delivery", List.of("delivery_key")),
-            Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),
-            Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
-            Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
-            Map.entry("ma_session_principal", List.of("tenant_id", "session_id")));
-
     @Test
-    void generatesRowIdentitiesWithoutWeakeningBusinessUniqueness() throws Exception {
+    void sharedCatalogValidationIsExplicitAndPreservesBusinessRows() throws Exception {
         DataSource source = initialized();
-        assertEquals(ManagedSchemaContract.TABLES, BUSINESS_KEYS.keySet());
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            for (String table : ManagedSchemaContract.TABLES) {
-                try (var columns = connection.getMetaData().getColumns(null, null, table, "id")) {
-                    assertTrue(columns.next(), table);
-                    assertEquals("YES", columns.getString("IS_AUTOINCREMENT"), table);
-                }
-                try (var keys = connection.getMetaData().getPrimaryKeys(null, null, table)) {
-                    assertTrue(keys.next(), table);
-                    assertEquals("id", keys.getString("COLUMN_NAME"), table);
-                    assertTrue(!keys.next(), table);
-                }
-                try (var keys = connection.getMetaData().getImportedKeys(null, null, table)) {
-                    assertTrue(!keys.next(), table);
-                }
-                Map<String, Map<Integer, String>> uniqueKeys = new HashMap<>();
-                try (var keys = connection.getMetaData().getIndexInfo(null, null, table, true, false)) {
-                    while (keys.next()) {
-                        String column = keys.getString("COLUMN_NAME");
-                        if (column != null) {
-                            uniqueKeys.computeIfAbsent(keys.getString("INDEX_NAME"), ignored -> new TreeMap<>())
-                                    .put(keys.getInt("ORDINAL_POSITION"), column);
-                        }
-                    }
-                }
-                assertTrue(uniqueKeys.values().stream()
-                        .anyMatch(columns -> List.copyOf(columns.values()).equals(BUSINESS_KEYS.get(table))),
-                        table + " business key " + BUSINESS_KEYS.get(table));
-                for (String column : BUSINESS_KEYS.get(table)) {
-                    try (var columns = connection.getMetaData().getColumns(null, null, table, column)) {
-                        assertTrue(columns.next(), table + "." + column);
-                        assertEquals(DatabaseMetaData.columnNoNulls, columns.getInt("NULLABLE"), table + "." + column);
-                    }
-                }
-            }
-            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
-                    + " VALUES ('tenant','session','qwen-code',1,1)");
-            assertThrows(SQLException.class, () -> statement.execute(
-                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
-                            + " VALUES ('tenant','session','qwen-code',1,1)"));
-            assertThrows(IllegalArgumentException.class,
-                    () -> candidate(connection, "ma_session", "is_recovery_protected", 2));
-            statement.execute("UPDATE ma_session SET is_recovery_protected=1");
-            try (var row = statement.executeQuery("SELECT id,is_recovery_protected FROM ma_session")) {
+            statement.execute("CREATE TABLE da_business (witness INT NOT NULL)");
+            statement.execute("INSERT INTO da_business VALUES (42)");
+            statement.execute("CREATE VIEW business_view AS SELECT witness FROM da_business");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+        ManagedSchema.validateSharedCatalog(source);
+        try (var connection = source.getConnection()) {
+            Map<String, String> before = ManagedSchemaCatalog.tables(connection);
+            ManagedSchema.validateSharedCatalog(connection);
+            assertEquals(before, ManagedSchemaCatalog.tables(connection));
+            assertEquals(ManagedSchemaContract.TABLES.size() + 2, before.size());
+            try (var statement = connection.createStatement();
+                    var row = statement.executeQuery("SELECT witness FROM business_view")) {
                 assertTrue(row.next());
-                assertTrue(row.getLong(1) > 0);
-                assertTrue(row.getBoolean(2));
+                assertEquals(42, row.getInt(1));
             }
         }
-        ManagedSchema.validate(source);
     }
 
     @Test
-    void rejectsMissingIdentityGenerationAndUnexpectedForeignKeys() throws Exception {
-        DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE ma_read_lease ALTER COLUMN id DROP IDENTITY");
+    void sharedCatalogValidationRejectsMissingUnknownLegacyAndViewBackedManagedTables() throws Exception {
+        for (String declaration : Set.of("DROP TABLE ma_tenant_guard",
+                "CREATE TABLE ma_unpublished (witness INT)",
+                "CREATE VIEW ma_unpublished AS SELECT 1 AS witness",
+                "CREATE TABLE managed_agent_legacy (witness INT)",
+                "DROP TABLE ma_tenant_guard; CREATE VIEW ma_tenant_guard AS SELECT 1 AS witness")) {
+            DataSource source = initialized();
+            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE da_business (witness INT)");
+                for (String command : declaration.split(";")) {
+                    statement.execute(command);
+                }
+            }
+            assertThrows(IllegalStateException.class, () -> ManagedSchema.validateSharedCatalog(source));
         }
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
-        DataSource foreignKey = initialized();
-        try (var connection = foreignKey.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE ma_resource_ref ADD CONSTRAINT fk_unexpected"
-                    + " FOREIGN KEY (resource_key) REFERENCES ma_resource(resource_key)");
+    }
+
+    @Test
+    void sharedCatalogValidationRetainsDatabaseConstraintChecks() throws Exception {
+        for (String declaration : Set.of(
+                "ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_resource_gc",
+                "ALTER TABLE ma_event_stream DROP CONSTRAINT fk_ma_stream_session")) {
+            DataSource source = initialized();
+            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE da_business (witness INT)");
+                statement.execute(declaration);
+            }
+            assertThrows(IllegalStateException.class, () -> ManagedSchema.validateSharedCatalog(source));
         }
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(foreignKey));
+    }
+
+    @Test
+    void sharedCatalogValidationDoesNotInitializeEmptyOrBusinessOnlyCatalogs() throws Exception {
+        for (boolean businessTable : new boolean[] {false, true}) {
+            DataSource source = source();
+            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+                if (businessTable) {
+                    statement.execute("CREATE TABLE da_business (witness INT)");
+                }
+                Map<String, String> before = ManagedSchemaCatalog.tables(connection);
+                assertThrows(SQLException.class, () -> ManagedSchema.validateSharedCatalog(connection));
+                assertEquals(before, ManagedSchemaCatalog.tables(connection));
+            }
+        }
     }
 
     @Test
@@ -162,12 +117,12 @@ class ManagedSchemaTest {
                 assertNull(row.getObject(1));
                 assertNull(row.getObject(2));
             }
-            assertThrows(IllegalArgumentException.class, () -> candidate(connection, "ma_session", "model_id", "m"));
-            assertThrows(IllegalArgumentException.class, () -> candidate(connection, "ma_turn", "model_id", "m"));
-            assertThrows(IllegalArgumentException.class, () -> candidate(connection, "ma_turn", "model_revision", 1L));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_id='m'"));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_id='m'"));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_revision=1"));
             statement.execute("UPDATE ma_session SET model_id='m',model_revision=1");
             statement.execute("UPDATE ma_turn SET model_id='m',model_revision=1");
-            assertThrows(IllegalArgumentException.class, () -> candidate(connection, "ma_session", "model_revision", 9_007_199_254_740_992L));
+            assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
         }
         ManagedSchema.validate(source);
     }
@@ -187,108 +142,6 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void rejectsBusinessTablesAndViewsInDedicatedCatalogsWithoutChangingThem() throws Exception {
-        for (boolean initialized : new boolean[] {false, true}) {
-            DataSource source = initialized ? initialized() : source();
-            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-                statement.execute("CREATE TABLE da_business (witness INT NOT NULL)");
-                statement.execute("INSERT INTO da_business VALUES (42)");
-                statement.execute("CREATE VIEW business_view AS SELECT witness FROM da_business");
-            }
-            assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-            assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
-            try (var connection = source.getConnection(); var statement = connection.createStatement();
-                    var row = statement.executeQuery("SELECT witness FROM business_view")) {
-                assertTrue(row.next());
-                assertEquals(42, row.getInt(1));
-                Set<String> expected = new java.util.HashSet<>(Set.of("da_business", "business_view"));
-                if (initialized) {
-                    expected.addAll(ManagedSchemaContract.TABLES);
-                }
-                assertEquals(expected, ManagedSchemaCatalog.tables(connection).keySet());
-            }
-        }
-    }
-
-    @Test
-    void rejectsUnknownManagedTablesAndManagedViewsInDedicatedCatalogs() throws Exception {
-        for (String declaration : Set.of("CREATE TABLE ma_unpublished (witness INT)",
-                "CREATE VIEW ma_unpublished AS SELECT 1 AS witness")) {
-            DataSource source = initialized();
-            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-                statement.execute(declaration);
-            }
-            assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
-            assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-        }
-    }
-
-    @Test
-    void sharedCatalogValidationIsExplicitAndPreservesBusinessRows() throws Exception {
-        DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("CREATE TABLE da_business (witness INT NOT NULL)");
-            statement.execute("INSERT INTO da_business VALUES (42)");
-            statement.execute("CREATE VIEW business_view AS SELECT witness FROM da_business");
-        }
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-        ManagedSchema.validateSharedCatalog(source);
-        try (var connection = source.getConnection(); var statement = connection.createStatement();
-                var row = statement.executeQuery("SELECT witness FROM business_view")) {
-            assertTrue(row.next());
-            assertEquals(42, row.getInt(1));
-            assertEquals(ManagedSchemaContract.TABLES.size() + 2, ManagedSchemaCatalog.tables(connection).size());
-            ManagedSchema.validateSharedCatalog(connection);
-        }
-    }
-
-    @Test
-    void sharedCatalogValidationStillRejectsUnknownManagedTablesAndViews() throws Exception {
-        for (String declaration : Set.of("CREATE TABLE ma_unpublished (witness INT)",
-                "CREATE VIEW ma_unpublished AS SELECT 1 AS witness",
-                "CREATE TABLE managed_agent_legacy (witness INT)")) {
-            DataSource source = initialized();
-            try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-                statement.execute("CREATE TABLE da_business (witness INT)");
-                statement.execute(declaration);
-            }
-            assertThrows(IllegalStateException.class, () -> ManagedSchema.validateSharedCatalog(source));
-        }
-    }
-
-    @Test
-    void preservesPrivatePrincipalAndSharedDispatchContracts() throws Exception {
-        DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            String principal = "INSERT INTO ma_session_principal"
-                    + " (tenant_id,session_id,version,user_id,is_actor_present,gmt_create)"
-                    + " VALUES ('tenant','session',1,'user',0,1)";
-            statement.execute(principal);
-            assertThrows(SQLException.class, () -> statement.execute(principal));
-            for (int invalid : new int[] {-1, 2}) {
-                assertThrows(IllegalArgumentException.class, () -> ManagedSchemaIntegrity.validate(
-                        "ma_session_principal", ManagedSchemaIntegrity.row("is_actor_present", invalid)));
-            }
-            statement.execute("UPDATE ma_session_principal SET is_actor_present=1");
-            try (var row = statement.executeQuery("SELECT id,is_actor_present FROM ma_session_principal")) {
-                assertTrue(row.next());
-                assertTrue(row.getLong(1) > 0);
-                assertEquals(1, row.getInt(2));
-            }
-            try (var column = connection.getMetaData().getColumns(
-                    null, null, "ma_tool_execution", "shared_dispatch_class")) {
-                assertTrue(column.next());
-                assertEquals(java.sql.Types.VARCHAR, column.getInt("DATA_TYPE"));
-                assertEquals(16, column.getInt("COLUMN_SIZE"));
-                assertEquals(DatabaseMetaData.columnNullable, column.getInt("NULLABLE"));
-                assertNull(column.getString("COLUMN_DEF"));
-            }
-        }
-        ManagedSchema.validate(source);
-    }
-
-    @Test
     void preservesReceiptsAndNamespaceConstraintsAcrossRestart() throws Exception {
         DataSource source = initialized();
         try (var connection = source.getConnection()) {
@@ -303,17 +156,29 @@ class ManagedSchemaTest {
                 assertEquals(2, row.getInt(1));
             }
             for (String invalid : Set.of("WORKSPACE_CREATE ", "workspace_create", "OTHER")) {
-                assertThrows(IllegalArgumentException.class, () -> receipt(connection, invalid, invalid));
+                assertThrows(SQLException.class, () -> receipt(connection, invalid, invalid));
             }
         }
     }
 
     @Test
-    void rejectsUnexpectedDatabaseNamespaceConstraints() throws Exception {
+    void rejectsSameNameNamespaceConstraintWithAnUnpublishedDefinition() throws Exception {
         DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE ma_request_receipt ADD CONSTRAINT ck_unpublished_namespace"
-                    + " CHECK (namespace <> 'WORKSPACE_CREATE')");
+        String declaration =
+                ManagedSchema.ddl()
+                        .lines()
+                        .filter(line -> line.contains("CONSTRAINT ck_ma_request_namespace CHECK"))
+                        .findFirst()
+                        .orElseThrow()
+                        .trim()
+                        .replaceFirst(",$", "");
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute(
+                    "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
+            statement.execute(
+                    "ALTER TABLE ma_request_receipt ADD "
+                            + declaration.replace("'WORKSPACE_CREATE'", "'WORKSPACE_ATTACK'"));
         }
         assertThrows(IllegalStateException.class, () -> ManagedSchema.schemaVersion(source));
         assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
@@ -340,21 +205,21 @@ class ManagedSchemaTest {
                     "BOOLEAN GENERATED ALWAYS AS (last_sequence >= covered_sequence)")) {
                 String table = "ma_generated_drift_" + variant++;
                 statement.execute("CREATE TABLE " + table
-                        + " (last_sequence BIGINT, covered_sequence BIGINT, is_projection_pending "
+                        + " (last_sequence BIGINT, covered_sequence BIGINT, projection_pending "
                         + declaration + ")");
                 var error = assertThrows(SQLException.class,
                         () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, table,
-                                "    is_projection_pending BOOLEAN GENERATED ALWAYS AS"
+                                "    projection_pending BOOLEAN GENERATED ALWAYS AS"
                                         + " (last_sequence > covered_sequence)"));
                 assertTrue(error.getMessage().contains(
-                        "Managed schema generated column differs: " + table + ".is_projection_pending"));
+                        "Managed schema generated column differs: " + table + ".projection_pending"));
             }
         }
     }
 
     @Test
     void rejectsForeignLegacyAndPartialSchemasBeforeCreatingAnything() throws Exception {
-        for (String table : Set.of("managed_agent_session", "ma_unpublished", "ma_session")) {
+        for (String table : Set.of("managed_agent_session", "business_data", "ma_session")) {
             DataSource source = source();
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
@@ -397,14 +262,14 @@ class ManagedSchemaTest {
         DataSource source = initialized();
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
-            statement.execute("DROP INDEX idx_ma_read_session");
+            statement.execute("DROP INDEX ix_ma_read_session");
             statement.execute("ALTER TABLE ma_read_lease DROP COLUMN expires_at");
         }
         assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
         DataSource missingConstraint = initialized();
         try (var connection = missingConstraint.getConnection();
                 var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE ma_operation ADD CONSTRAINT ck_unexpected_operation CHECK (claim_generation >= 0)");
+            statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
         }
         assertThrows(
                 IllegalStateException.class, () -> ManagedSchema.initialize(missingConstraint));
@@ -414,11 +279,10 @@ class ManagedSchemaTest {
     void requiresIndexedPhysicalStorageScopesWithoutRepairingDrift() throws Exception {
         for (String index :
                 Set.of(
-                        "idx_ma_runtime_storage_alias_state",
-                        "idx_ma_session_storage_scope",
-                        "idx_ma_head_workspace",
-                        "idx_ma_work_evidence",
-                        "idx_ma_storage_owner_binding")) {
+                        "ix_ma_runtime_storage_alias_state",
+                        "ix_ma_session_storage_scope",
+                        "ix_ma_head_workspace",
+                        "ix_ma_storage_owner_binding")) {
             DataSource source = initialized();
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
@@ -436,7 +300,7 @@ class ManagedSchemaTest {
         DataSource missingCompletionCheck = initialized();
         try (var connection = missingCompletionCheck.getConnection();
                 var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE ma_session ADD CONSTRAINT ck_unexpected_completion CHECK (is_resource_gc_completed IN (0,1))");
+            statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_resource_gc");
         }
         assertThrows(
                 IllegalStateException.class,
@@ -466,24 +330,37 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void rejectsAdditionalDatabaseRulesWithoutRepairingThem() throws Exception {
+    void rejectsSameNameConstraintsWithDifferentRules() throws Exception {
         DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE ma_operation ADD CONSTRAINT ck_ma_operation_kind CHECK"
-                    + " (claim_generation >= 0)");
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
+            statement.execute(
+                    "ALTER TABLE ma_operation ADD CONSTRAINT ck_ma_operation_kind CHECK"
+                            + " (claim_generation >= 0)");
         }
         assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
     }
 
     @Test
-    void requiresByteExactResourceOwnerKindsInJava() {
-        for (String owner : Set.of("SESSION_ATTACK", "SESSION_RECORD ", "session_record")) {
-            assertThrows(IllegalArgumentException.class, () -> ManagedSchemaIntegrity.validate(
-                    "ma_resource_ref", ManagedSchemaIntegrity.row("owner_kind", owner,
-                            "owner_revision", 1L, "runtime_binding_key", null)));
+    void rejectsChangedUnderscoredOwnerKindInsteadOfTreatingItAsCharsetMetadata() throws Exception {
+        DataSource source = initialized();
+        String declaration =
+                ManagedSchema.ddl()
+                        .lines()
+                        .filter(line -> line.contains("CONSTRAINT ck_ma_ref_owner CHECK"))
+                        .findFirst()
+                        .orElseThrow()
+                        .trim()
+                        .replaceFirst(",$", "");
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_resource_ref DROP CONSTRAINT ck_ma_ref_owner");
+            statement.execute(
+                    "ALTER TABLE ma_resource_ref ADD "
+                            + declaration.replace("'SESSION_RECORD'", "'SESSION_ATTACK'"));
         }
-        ManagedSchemaIntegrity.validate("ma_resource_ref", ManagedSchemaIntegrity.row(
-                "owner_kind", "SESSION_RECORD", "owner_revision", 1L, "runtime_binding_key", null));
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
     }
 
     @Test
@@ -513,22 +390,27 @@ class ManagedSchemaTest {
     @Test
     void requiresCompletePublicBindingsWhileAllowingControlOnlyBindings() throws Exception {
         DataSource source = initialized();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
             session(connection, "tenant", "public", "PUBLIC");
-            assertThrows(IllegalArgumentException.class,
-                    () -> candidate(connection, "ma_session", "workspace_id", "workspace"));
-            candidate(connection, "ma_session", "workspace_id", "workspace", "workspace_generation", 1L,
-                    "workspace_storage_id", "storage", "cwd_relative", ".", "context_config_ref", "config",
-                    "context_revision", 1L, "workspace_config_ref", "config", "workspace_policy_ref", "policy");
-            statement.execute("UPDATE ma_session SET workspace_id='workspace',workspace_generation=1,"
-                    + "workspace_storage_id='storage',cwd_relative='.',context_config_ref='config',"
-                    + "context_revision=1,workspace_config_ref='config',workspace_policy_ref='policy'");
-            assertThrows(IllegalArgumentException.class,
-                    () -> candidate(connection, "ma_session", "context_revision", null));
-            assertThrows(IllegalArgumentException.class,
-                    () -> candidate(connection, "ma_session", "workspace_generation", 0L));
-            candidate(connection, "ma_session", "session_kind", "CONTROL", "workspace_id", "control-workspace",
-                    "context_revision", null);
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET workspace_id = 'workspace'"));
+            statement.execute(
+                    "UPDATE ma_session SET workspace_id = 'workspace',workspace_generation ="
+                            + " 1,workspace_storage_id = 'storage',cwd_relative ="
+                            + " '.',context_config_ref = 'config',context_revision ="
+                            + " 1,workspace_config_ref = 'config',workspace_policy_ref = 'policy'");
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET context_revision = NULL"));
+            assertThrows(
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET workspace_generation = 0"));
+            session(connection, "tenant", "control", "CONTROL");
+            statement.execute(
+                    "UPDATE ma_session SET workspace_id = 'control-workspace'"
+                            + " WHERE session_kind = 'CONTROL'");
         }
         ManagedSchema.validate(source);
     }
@@ -554,8 +436,8 @@ class ManagedSchemaTest {
                 assertNull(row.getObject(3));
             }
             assertThrows(
-                    IllegalArgumentException.class,
-                    () -> candidate(connection, "ma_session_head", "journal_revision", 0L));
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_session_head SET journal_revision = 0"));
             statement.execute(
                     "INSERT INTO ma_storage (alias_key,tenant_key,storage_key,tenant_id,storage_id)"
                             + " VALUES ('alias','tenant','storage','tenant','storage')");
@@ -567,8 +449,10 @@ class ManagedSchemaTest {
                 assertNull(row.getObject(2));
             }
             assertThrows(
-                    IllegalArgumentException.class,
-                    () -> candidate(connection, "ma_storage", "registration_state", "REGISTERED"));
+                    SQLException.class,
+                    () ->
+                            statement.execute(
+                                    "UPDATE ma_storage SET registration_state = 'REGISTERED'"));
         }
     }
 
@@ -583,8 +467,13 @@ class ManagedSchemaTest {
             statement.execute(
                     "INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role)"
                             + " VALUES ('tenant','first','actor','READER')");
-            assertThrows(IllegalArgumentException.class, () -> ManagedSchemaIntegrity.validate(
-                    "ma_workspace_access", ManagedSchemaIntegrity.row("role", "READER ")));
+            assertThrows(
+                    SQLException.class,
+                    () ->
+                            statement.execute(
+                                    "INSERT INTO ma_workspace_access"
+                                            + " (tenant_id,workspace_id,actor_id,role) VALUES"
+                                            + " ('tenant','first','another','READER ' )"));
         }
     }
 
@@ -600,14 +489,14 @@ class ManagedSchemaTest {
             operation(statement, "three", "OBJECT_PUT", "same", "capture");
             operation(statement, "four", "CAPTURE_GC", "same", "capture");
             assertThrows(
-                    IllegalArgumentException.class,
+                    SQLException.class,
                     () -> operation(statement, "unknown", "ARBITRARY_WORKFLOW", "unknown", null));
             assertThrows(
-                    IllegalArgumentException.class,
+                    SQLException.class,
                     () -> operation(statement, "padded", "CLOSE ", "padded", null));
             assertThrows(
-                    IllegalArgumentException.class,
-                    () -> candidate(connection, "ma_operation", "claim_generation", -1L));
+                    SQLException.class,
+                    () -> statement.execute("UPDATE ma_operation SET claim_generation = -1"));
         }
     }
 
@@ -627,16 +516,16 @@ class ManagedSchemaTest {
                     operation(statement, kind.name(), kind.name(), kind.name(), null);
                 }
                 // SshWorkspaceStore writes this kind as a plain string.
-                operation(statement, "plain-workspace-create", "WORKSPACE_CREATE",
-                        "plain-workspace-create", null);
-                assertThrows(IllegalArgumentException.class,
+                operation(statement, "WORKSPACE_CREATE", "WORKSPACE_CREATE",
+                        "WORKSPACE_CREATE", null);
+                assertThrows(SQLException.class,
                         () -> operation(statement, "unknown", "INPUT", "unknown", null));
             }
         }
     }
 
     @Test
-    void hookOnceRemainsUniqueWithoutDatabaseForeignKeys() throws Exception {
+    void hookOnceAndResourceReferencesAreDatabaseConstraints() throws Exception {
         DataSource source = initialized();
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
@@ -653,12 +542,14 @@ class ManagedSchemaTest {
                             statement.execute(
                                     prefix
                                             + "('scope','record2','tenant','workspace','session','hook','record2',1,0,'body','once')"));
-            statement.execute(
-                    "INSERT INTO ma_resource_ref"
-                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
-                        + " VALUES"
-                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")");
-            ManagedSchema.validate(source);
+            assertThrows(
+                    SQLException.class,
+                    () ->
+                            statement.execute(
+                                    "INSERT INTO ma_resource_ref"
+                                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
+                                        + " VALUES"
+                                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")"));
         }
     }
 
@@ -706,13 +597,7 @@ class ManagedSchemaTest {
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
         Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalTargets.removeAll(
-                Set.of(
-                        "ma_extension_package",
-                        "ma_extension_settings",
-                        "ma_extension_operation",
-                        "ma_session_worktree",
-                        "ma_session_principal"));
+        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation", "ma_session_worktree"));
         assertEquals(
                 originalTargets,
                 inventory.values().stream()
@@ -744,15 +629,6 @@ class ManagedSchemaTest {
         assertThrows(IllegalArgumentException.class, ManagedSchemaKeys::key);
     }
 
-    private static void candidate(Connection connection, String table, Object... changes) throws SQLException {
-        try (var statement = connection.createStatement(); var rows = statement.executeQuery("SELECT * FROM " + table)) {
-            assertTrue(rows.next());
-            Map<String, Object> candidate = ManagedSchemaRows.read(rows);
-            candidate.putAll(ManagedSchemaIntegrity.row(changes));
-            ManagedSchemaIntegrity.validate(table, candidate);
-        }
-    }
-
     private static void session(Connection connection, String tenant, String session, String kind)
             throws SQLException {
         try (var statement =
@@ -782,9 +658,6 @@ class ManagedSchemaTest {
     private static void operation(
             java.sql.Statement statement, String key, String kind, String id, String capture)
             throws SQLException {
-        ManagedSchemaIntegrity.validate("ma_operation", ManagedSchemaIntegrity.row(
-                "operation_kind", kind, "claim_generation", 0L, "attempt_count", 0L,
-                "payload_version", 1L, "execution_mode", "SYNC", "is_verification_ready", false));
         statement.execute(
                 "INSERT INTO ma_operation"
                     + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,"
@@ -808,8 +681,6 @@ class ManagedSchemaTest {
 
     private static void receipt(Connection connection, String key, String namespace)
             throws SQLException {
-        ManagedSchemaIntegrity.validate("ma_request_receipt", ManagedSchemaIntegrity.row(
-                "namespace", namespace, "scope_kind", "ACTOR", "is_workspace_bound", null));
         try (var statement =
                 connection.prepareStatement(
                         "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_key,"

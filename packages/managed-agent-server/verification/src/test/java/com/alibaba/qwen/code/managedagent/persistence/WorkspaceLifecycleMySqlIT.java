@@ -350,13 +350,13 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc));
         fixture.transactions.executeWithoutResult(ignored ->
                 new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
-        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommandAsActor("tenant", "SUBMIT_TURN",
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
                 "ambiguous-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
         fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
                 "dispatch-owner", Duration.ofMinutes(1)));
         fixture.transactions.executeWithoutResult(ignored -> fixture.store.markSubmissionAttempted("tenant", fixture.session,
                 turn, "dispatch-owner"));
-        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommandAsActor("tenant", "CANCEL_TURN",
+        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
                 "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
         String prompt = "other-settled".equals(cut) ? "other-prompt"
                 : fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();

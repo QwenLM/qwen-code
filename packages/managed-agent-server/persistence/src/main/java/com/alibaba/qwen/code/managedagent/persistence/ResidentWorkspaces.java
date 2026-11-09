@@ -85,7 +85,7 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                 + " AND b.canonical_cwd = ? AND b.storage_id = ? AND b.capability_digest = ?"
                 + " AND b.isolation_class = 'workspace' AND b.isolation_key IS NULL"
                 + " AND b.provisioner_kind = 'kubernetes-workspace' AND b.binding_state = 'READY'"
-                + " AND b.is_drain_requested = FALSE AND b.resource_handle_json IS NOT NULL"
+                + " AND b.drain_requested = FALSE AND b.resource_handle_json IS NOT NULL"
                 + " AND b.provision_seed_ciphertext IS NOT NULL AND b.attestation_generation > 0 FOR UPDATE",
                 (row, index) -> new Original(row.getString(1), row.getLong(2), row.getString(3)), request(binding).requestKey(), tenantId,
                 binding.getWorkspaceId(), Long.toString(binding.getWorkspaceGeneration()), selected.registration().mountRoot(),

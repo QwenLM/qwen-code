@@ -49,14 +49,14 @@ class ReplayFloorRetractionTest {
         String tenant = "retraction-" + UUID.randomUUID();
         String session = session(tenant);
         var turn =
-                store.insertTurnCommandAsActor(
+                store.insertTurnCommand(
                         tenant,
                         "SUBMIT_TURN",
                         UUID.randomUUID().toString(),
                         "digest-turn",
                         session,
                         List.of(),
-                        "payload-turn", "owner");
+                        "payload-turn");
         String owner = "owner";
         assertThat(store.claimTurn(tenant, session, turn.turnId(), owner, Duration.ofMinutes(1)))
                 .isPresent();
@@ -156,7 +156,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant, "owner", session, window.floorSequence() - 1);
+                    .publicStream(tenant, null, session, window.floorSequence() - 1);
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.ids).isEmpty();
             assertThat(expired.failed).isEmpty();
@@ -176,14 +176,14 @@ class ReplayFloorRetractionTest {
         String tenant = "reissued-items-" + UUID.randomUUID();
         String session = session(tenant);
         String turn =
-                store.insertTurnCommandAsActor(
+                store.insertTurnCommand(
                                 tenant,
                                 "SUBMIT_TURN",
                                 "turn",
                                 "digest",
                                 session,
                                 List.of(),
-                                "payload", "owner")
+                                "payload")
                         .turnId();
         store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1));
         store.appendPublicEventIfAbsent(
@@ -283,7 +283,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant, "owner", session, initial.lastSequence());
+                    .publicStream(tenant, null, session, initial.lastSequence());
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.failed).isEmpty();
             assertThat(expired.resync).containsExactly(new SessionResyncRequired(
@@ -308,7 +308,7 @@ class ReplayFloorRetractionTest {
 
     private String session(String tenant) {
         return store.insertSessionCommand(
-                        tenant, "owner",
+                        tenant,
                         "CREATE_SESSION",
                         UUID.randomUUID().toString(),
                         "digest",

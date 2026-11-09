@@ -38,15 +38,14 @@ public class ManagedActionController {
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit,
             @RequestParam(name = "include_children", defaultValue = "false") boolean includeChildren) {
-        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId,
-                cursor, limit, includeChildren);
+        return actions.listPublic(tenant.requirePrincipal(), sessionId, cursor,
+                limit, includeChildren);
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}")
     public JsonNode get(
             TenantContext tenant, @PathVariable String sessionId, @PathVariable String actionId) {
-        return actions.get(tenant.tenantId(), tenant.actorId(), sessionId,
-                actionId, false);
+        return actions.get(tenant.requirePrincipal(), sessionId, actionId, false);
     }
 
     @PostMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}/responses")
@@ -58,8 +57,7 @@ public class ManagedActionController {
             @Valid @RequestBody PermissionResponse response) {
         var admission =
                 actions.respond(
-                        tenant.tenantId(),
-                        tenant.principal(),
+                        tenant.requirePrincipal(),
                         sessionId,
                         actionId,
                         idempotencyKey,
@@ -76,8 +74,7 @@ public class ManagedActionController {
     public WebShellPage<JsonNode> query(
             TenantContext tenant, @Valid @RequestBody WebShellActionQueryRequest request) {
         return actions.listWebShell(
-                tenant.tenantId(),
-                tenant.actorId(),
+                tenant.requirePrincipal(),
                 request.sessionId(),
                 request.cursor(),
                 request.limit() == null ? 20 : request.limit(), Boolean.TRUE.equals(request.includeChildren()));
@@ -87,8 +84,8 @@ public class ManagedActionController {
     public JsonNode getWebShell(
             TenantContext tenant, @Valid @RequestBody WebShellActionGetRequest request) {
         return actions.get(
-                tenant.tenantId(), tenant.actorId(), request.sessionId(),
-                request.actionId(), true);
+                tenant.requirePrincipal(), request.sessionId(), request.actionId(),
+                true);
     }
 
     @PostMapping("/api/agent/web-shell/v1/actions/respond")
@@ -101,8 +98,7 @@ public class ManagedActionController {
         var response = request.response();
         var admission =
                 actions.respond(
-                        tenant.tenantId(),
-                        tenant.principal(),
+                        tenant.requirePrincipal(),
                         request.sessionId(),
                         request.actionId(),
                         request.idempotencyKey(),

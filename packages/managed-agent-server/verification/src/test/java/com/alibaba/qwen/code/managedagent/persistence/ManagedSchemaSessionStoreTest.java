@@ -259,11 +259,11 @@ public class ManagedSchemaSessionStoreTest {
         tx.executeWithoutResult(status -> {
             ManagedProjectionResourceCollector.release(jdbc, scope, "JOURNAL", scope);
             jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND owner_key = ?", scope);
-            jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         });
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("REFERENCED");
-        jdbc.update("UPDATE ma_session SET is_recovery_protected = FALSE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("UPDATE ma_session SET recovery_protected = FALSE WHERE tenant_id = ? AND session_id = ?", tenant, session);
         makeProjectionCandidatesDue();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
@@ -297,7 +297,7 @@ public class ManagedSchemaSessionStoreTest {
         var command =
                 tx.execute(
                         status ->
-                                store.beginSessionRename(tenant, "r1", "digest", session, "first", "actor"));
+                                store.beginSessionRename(tenant, "r1", "digest", session, "first"));
         var candidate = store.deliverableRenames(clock.millis()).getFirst();
         var old =
                 tx.execute(
@@ -329,7 +329,7 @@ public class ManagedSchemaSessionStoreTest {
                 tx.execute(
                         status ->
                                 store.beginSessionRename(
-                                        tenant, "r2", "digest2", session, "second", "actor"));
+                                        tenant, "r2", "digest2", session, "second"));
         assertThat(later.renameRevision()).isGreaterThan(command.renameRevision());
         assertThatThrownBy(
                         () ->
@@ -517,15 +517,14 @@ public class ManagedSchemaSessionStoreTest {
         String turn =
                 tx.execute(
                                 status ->
-                                        store.insertTurnCommandAsActor(
+                                        store.insertTurnCommand(
                                                 tenant,
                                                 "SUBMIT_TURN",
                                                 "retract-turn",
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload",
-                                                "actor"))
+                                                "payload"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));
@@ -626,15 +625,14 @@ public class ManagedSchemaSessionStoreTest {
         String turn =
                 tx.execute(
                                 status ->
-                                        store.insertTurnCommandAsActor(
+                                        store.insertTurnCommand(
                                                 tenant,
                                                 "SUBMIT_TURN",
                                                 "partial-turn",
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload",
-                                                "actor"))
+                                                "payload"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));

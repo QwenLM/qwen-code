@@ -29,9 +29,6 @@ final class HostedCleanupReferences {
         }
         String binding = bindingKey(tenant, workspace, descriptor.path("bindingId").textValue());
         long generation = Long.parseLong(descriptor.path("generation").textValue());
-        if (generation <= 0) {
-            throw new IllegalArgumentException("Cleanup generation must be positive");
-        }
         String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
         var previous = jdbc.queryForList("SELECT resource_key, runtime_binding_key, owner_revision"
                 + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'HOSTED_CLEANUP'"

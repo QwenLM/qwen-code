@@ -42,7 +42,7 @@ class ManagedEventIdentityMigrationTest {
                         .execute(
                                 status ->
                                         store.insertSessionCommand(
-                                                tenant, "owner",
+                                                tenant,
                                                 "CREATE_SESSION",
                                                 "key",
                                                 "digest",

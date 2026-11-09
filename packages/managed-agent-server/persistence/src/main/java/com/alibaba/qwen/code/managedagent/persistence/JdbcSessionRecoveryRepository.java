@@ -24,7 +24,7 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
     @Override
     public long nonInitialTurns(String tenantId, String sessionId) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
-                        + " AND (status <> 'CANCELLED' OR is_submission_attempted = TRUE OR harness_event_epoch IS NOT NULL)",
+                        + " AND (status <> 'CANCELLED' OR submission_attempted = TRUE OR harness_event_epoch IS NOT NULL)",
                 Long.class, tenantId, sessionId);
     }
 }

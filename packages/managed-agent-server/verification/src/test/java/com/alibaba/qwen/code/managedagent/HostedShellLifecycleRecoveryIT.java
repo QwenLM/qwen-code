@@ -442,14 +442,14 @@ class HostedShellLifecycleRecoveryIT {
         /** The durable blocker the collectors persisted; survives a lost Spring log. */
         private Map<String, Object> collectionState() {
             var state = new LinkedHashMap<String, Object>();
-            state.put("capture", jdbc.queryForList("SELECT retention_state, collected_at, is_write_evidence,"
-                    + " is_accepted_complete, is_quarantined, producer_phase FROM ma_output_capture"
+            state.put("capture", jdbc.queryForList("SELECT retention_state, collected_at, write_evidence,"
+                    + " accepted_complete, quarantined, producer_phase FROM ma_output_capture"
                     + " WHERE tenant_id = ? AND session_id = ?", tenant, session));
             state.put("operations", jdbc.queryForList("SELECT operation_kind, state, phase, failure_code,"
                     + " available_at FROM ma_operation WHERE operation_kind IN ('CAPTURE_GC',"
                     + " 'SESSION_RESOURCE_GC') AND tenant_id = ? AND session_id = ?", tenant, session));
-            state.put("retirement", jdbc.queryForList("SELECT retired_at, is_recovery_protected,"
-                    + " is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+            state.put("retirement", jdbc.queryForList("SELECT retired_at, recovery_protected,"
+                    + " resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     tenant, session));
             state.put("liveReadLeases", jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease"
                     + " WHERE tenant_key = ? AND session_key = ? AND expires_at > ?", Long.class,

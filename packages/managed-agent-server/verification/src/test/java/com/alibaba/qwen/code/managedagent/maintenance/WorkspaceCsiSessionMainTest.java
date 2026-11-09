@@ -461,7 +461,7 @@ class WorkspaceCsiSessionMainTest {
     void retainedRequestPinStillRefusesAfterAConflictingProfileChange() {
         var original = create(request("retained-pin"));
         jdbc.update("UPDATE ma_session SET tool_profile = 'hosted-workspace-files/1'");
-        assertThat(jdbc.queryForObject("SELECT is_csi_guard FROM ma_session", Boolean.class)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT csi_guard FROM ma_session", Boolean.class)).isTrue();
         var before = allTables();
         assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
                 store().appendPublicEventIfAbsent("tenant", original.sessionId(), null, "session.environment",
@@ -517,7 +517,7 @@ class WorkspaceCsiSessionMainTest {
         var privateTurn = new java.util.LinkedHashMap<>(ordinaryTurn);
         privateTurn.put("session_id", jdbc.queryForObject(
                         "SELECT session_id FROM ma_session"
-                                + " WHERE is_csi_guard = TRUE ORDER BY session_id LIMIT 1", String.class));
+                                + " WHERE csi_guard = TRUE ORDER BY session_id LIMIT 1", String.class));
         privateTurn.put("turn_id", "private-legacy-turn");
         privateTurn.put("prompt_id", UUID.randomUUID().toString());
         privateTurn.put("gmt_modified", 0L);
@@ -645,7 +645,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(40);
+        assertThat(result).hasSize(39);
         return result;
     }
 

@@ -210,90 +210,6 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
-    void modelRoutesKeepMissingPrincipalUnauthorizedAndPreserveTheFullOwner() {
-        var f = new Fixture();
-        f.tx.executeWithoutResult(status -> {
-            String id = f.create(OWNER, "create");
-            for (Runnable route : List.<Runnable>of(
-                    () -> f.service.queryWebShellSessionModels((SessionPrincipal) null, id),
-                    () -> f.service.changeWebShellSessionModel(null, id, "change", "model", 0),
-                    () -> f.service.queryWebShellSessionModels("tenant", null, id),
-                    () -> f.service.changeWebShellSessionModel("tenant", null, id, "change", "model", 0))) {
-                assertThatThrownBy(route::run).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                    assertThat(error.getStatus()).isEqualTo(401);
-                    assertThat(error.getCode()).isEqualTo("actor_required");
-                });
-            }
-            assertThat(f.service.queryWebShellSessionModels(OWNER, id).modelSelection()).isNotNull();
-            denied(() -> f.service.queryWebShellSessionModels(SessionPrincipal.ofUser("tenant", "user"), id));
-        });
-    }
-
-    @Test
-    void legacyTaskRoutesKeepAbsentActorsNotFoundAndValidUserPrincipalsReadable() {
-        var f = new Fixture();
-        var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(f.jdbc);
-        var events = new com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore(f.jdbc);
-        var tasks = new ManagedTaskService(f.service, records, events);
-        f.tx.executeWithoutResult(status -> {
-            String id = f.create(SessionPrincipal.ofUser("tenant", "user"), "create");
-            f.legacyState(id);
-            // A null actor keeps the trusted internal tenant-scoped read
-            // (R2-5): the pages load, and only a missing task 404s. The
-            // HTTP boundary passes its verified principal and never
-            // travels the null-actor overloads.
-            assertThat(tasks.listPublicTasks("tenant", null, id, null, 10).data()).isEmpty();
-            assertThat(tasks.queryWebShellTasks("tenant", null, id, null, 10).data()).isEmpty();
-            for (Runnable route : List.<Runnable>of(
-                    () -> tasks.getPublicTask("tenant", null, id, "missing"),
-                    () -> tasks.getWebShellTask("tenant", null, id, "missing"),
-                    () -> tasks.listPublicTaskEvents("tenant", null, id, "missing", null, 10),
-                    () -> tasks.queryWebShellTaskEvents("tenant", null, id, "missing", null, 10))) {
-                assertThatThrownBy(route::run).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                    assertThat(error.getStatus()).isEqualTo(404);
-                    assertThat(error.getCode()).isEqualTo("task_not_found");
-                });
-            }
-            assertThat(tasks.listPublicTasks("tenant", "user", id, null, 10).data()).isEmpty();
-            assertThat(tasks.queryWebShellTasks("tenant", "user", id, null, 10).data()).isEmpty();
-            denied(() -> tasks.listPublicTasks("other-tenant", "user", id, null, 10));
-            // The null-actor mirror: the principal-less internal read keeps
-            // the CALLER's tenant too — a foreign tenant answers the uniform
-            // 404, never the recorded tenant's page (R2-4).
-            denied(() -> tasks.listPublicTasks("other-tenant", null, id, null, 10));
-            denied(() -> tasks.queryWebShellTasks("other-tenant", null, id, null, 10));
-            // The unified authority: a genuine legacy no-row Session reads
-            // tenant-wide for any named caller; only a row-present Session
-            // hides itself from a non-owner (pinned by the ownership tests).
-            assertThat(tasks.listPublicTasks("tenant", "intruder", id, null, 10).data()).isEmpty();
-        });
-    }
-
-    @Test
-    void principalOnlyReadRefusesNullWhileTheTenantScopedOverloadKeepsTheCallerTenant() {
-        var f = new Fixture();
-        f.tx.executeWithoutResult(status -> {
-            String id = f.create(SessionPrincipal.ofUser("tenant", "user"), "create");
-            f.legacyState(id);
-            // The principal-only overload has no tenant argument, so a null
-            // principal must be refused outright instead of resolving the
-            // PUBLIC Session by global id across tenants (R2-4).
-            assertThatThrownBy(() -> f.service.requireReadableSession(
-                    (SessionPrincipal) null, id))
-                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                        assertThat(error.getStatus()).isEqualTo(401);
-                        assertThat(error.getCode()).isEqualTo("actor_required");
-                    });
-            // The tenant-scoped overload keeps the principal-less internal
-            // read for the Session's own tenant and 404s a foreign one.
-            assertThat(f.service.requireReadableSession("tenant",
-                    (SessionPrincipal) null, id).sessionId()).isEqualTo(id);
-            denied(() -> f.service.requireReadableSession("other-tenant",
-                    (SessionPrincipal) null, id));
-        });
-    }
-
-    @Test
     void taskAndRecoveryEntryPointsKeepTheActorWhileRecheckingExistingWork() {
         var f = new Fixture();
         var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(f.jdbc);
@@ -373,41 +289,6 @@ class SessionPrincipalOwnershipTest {
             denied(() -> extensions.query(sibling, id, null));
             denied(() -> actions.listPublic(sibling, id, null, 10));
             denied(() -> mcpManagement.get(sibling, id));
-        });
-    }
-
-    @Test
-    void actionRespondConsultsTheOwnershipRowNotTheRawOwnerColumn() {
-        var f = new Fixture();
-        var actionStore =
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore(
-                        f.jdbc, f.store);
-        var records =
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(
-                        f.jdbc);
-        var actions =
-                new com.alibaba.qwen.code.managedagent.session.ManagedActionService(
-                        f.service, actionStore, records,
-                        mock(ActionResponseCoordinator.class),
-                        new RequestDigests(), Clock.systemUTC(), new ObjectMapper());
-        var actorless = SessionPrincipal.ofUser("tenant", "user");
-        f.tx.executeWithoutResult(status -> {
-            String id = f.create(actorless, "create");
-            String actionId = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
-            // The read gate must refuse before admission touches the Action,
-            // so the witness needs no journaled Action row: the raw owner
-            // column would admit both callers below (same tenant + user id).
-            var crossSubject = SessionPrincipal.of("tenant", "user", "actor-A");
-            denied(() -> actions.respond(crossSubject, id, actionId,
-                    "cross-subject", "permission",
-                    new ObjectMapper().getNodeFactory().numberNode(1),
-                    "hosted-tool-approval/1", "allow"));
-            f.jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id=? AND session_id=?",
-                    "tenant", id);
-            denied(() -> actions.respond(actorless, id, actionId,
-                    "deleted-row", "permission",
-                    new ObjectMapper().getNodeFactory().numberNode(1),
-                    "hosted-tool-approval/1", "allow"));
         });
     }
 
@@ -594,17 +475,6 @@ class SessionPrincipalOwnershipTest {
         String create(SessionPrincipal principal, String key) {
             return service.createSession(principal, key, "qwen-code", null,
                     "private", Map.of(), List.of()).sessionId();
-        }
-
-        // Creation requires a trusted actor; the anonymous probes model the
-        // historical row-less state, so drop the ownership row and clear the
-        // structured CREATE_SESSION receipt mark right after the create.
-        void legacyState(String sessionId) {
-            jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id=? AND session_id=?",
-                    "tenant", sessionId);
-            jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id=? AND session_id=?"
-                    + " AND namespace='SESSION_COMMAND' AND operation='CREATE_SESSION'",
-                    "tenant", sessionId);
         }
 
         long count(String table) {

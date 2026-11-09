@@ -263,7 +263,7 @@ class WorkspaceCsiSessionGuardTest {
         second.put("runtime_generation", 2L);
         second.put("binding_state", "RELEASED");
         second.put("isolation_key", "foreign-owned-isolation-key");
-        second.remove("is_provision_seeded");
+        second.remove("provision_seeded");
         jdbc.update(
                 "INSERT INTO ma_runtime_binding ("
                         + String.join(",", second.keySet()) + ") VALUES ("
@@ -311,7 +311,7 @@ class WorkspaceCsiSessionGuardTest {
                         + " runtime_request_key = NULL");
         jdbc.update("UPDATE ma_runtime_slot SET active_binding_id = NULL");
         jdbc.update("DELETE FROM ma_runtime_binding");
-        assertThat(jdbc.queryForObject("SELECT is_csi_guard FROM ma_session", Boolean.class)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT csi_guard FROM ma_session", Boolean.class)).isFalse();
         assertBrokerCode(() -> transaction.execute(status -> acquire()), "csi_original_binding_unavailable");
     }
 

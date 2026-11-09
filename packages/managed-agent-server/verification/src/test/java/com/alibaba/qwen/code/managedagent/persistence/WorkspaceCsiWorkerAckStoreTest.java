@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationC
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -281,9 +280,9 @@ public class WorkspaceCsiWorkerAckStoreTest {
         document.set("original", original);
         document.set("confirmation", response);
         // Only historical read fixtures: no binding, execution, retirement or successful acknowledge is manufactured.
-        jdbc.update("INSERT INTO ma_output_capture (gmt_create, gmt_modified, scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
                         + " execution_key, capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes)"
-                        + " VALUES (" + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ADMITTED', 1, 1, 1)",
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ADMITTED', 1, 1, 1)",
                 ToolPublicationDataStore.scope(key), hash(selector.tenantId()), selector.tenantId(), selector.workspaceId(), selector.sessionId(),
                 selector.publicationId(), hash(capture.path("executionCallId").asText()), publication.path("captureId").asText(),
                 publication.toString(), ToolPublicationContract.bindingDigest(publication), "a".repeat(64));

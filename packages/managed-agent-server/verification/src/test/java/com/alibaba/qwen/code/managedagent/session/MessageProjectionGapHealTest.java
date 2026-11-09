@@ -60,7 +60,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aSequenceGapHealsInsteadOfWedgingTheProjection() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "owner",
+        String sessionId = store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
 
@@ -135,7 +135,7 @@ class MessageProjectionGapHealTest {
     @Test
     void theScanHoldsTheSessionRowLockForTheWholeBatch() throws Exception {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "owner",
+        String sessionId = store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -177,7 +177,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aLostTerminalTurnEventSettlesItsOrphanedItemsAsFailed() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "owner",
+        String sessionId = store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -220,7 +220,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aTurnSpanningTheGapStillCompletesItsOwnItems() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "owner",
+        String sessionId = store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -253,7 +253,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aCommittedTerminalEventPastTheGapProtectsItsItems() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "owner",
+        String sessionId = store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -283,7 +283,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aGapInsideARunningTurnLeavesItsItemsStreaming() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "owner",
+        String sessionId = store.insertSessionCommand(TENANT,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -360,7 +360,7 @@ class MessageProjectionGapHealTest {
         // the gap are still materialized, not merely skipped over.
         jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
                         + " sequence_id, event_id, turn_id, event_type,"
-                        + " data_json, is_terminal, source_key, gmt_create,"
+                        + " data_json, terminal, source_key, gmt_create,"
                         + " schema_version, projection_version, item_id,"
                         + " content_part_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
                         + " ?, ?, ?, ?, ?, ?)",

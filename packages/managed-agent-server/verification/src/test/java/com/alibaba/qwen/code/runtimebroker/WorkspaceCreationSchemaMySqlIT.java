@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -97,14 +98,11 @@ class WorkspaceCreationSchemaMySqlIT {
             ManagedSchema.validate(source);
             assertEquals(1, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
-            // public_child_agents_version is INT UNSIGNED, so Connector/J
-            // boxes it as Long while TINYINT UNSIGNED (is_plan_enabled) stays
-            // Integer (R3-27).
-            assertThat(upgradedSession).containsEntry("is_plan_enabled", 0)
-                    .containsEntry("public_child_agents_version", 0L);
+            assertThat(upgradedSession).containsEntry("plan_enabled", false)
+                    .containsEntry("public_child_agents_version", 0);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
-            assertThat(upgradedTurn).containsKey("is_plan_enabled");
-            assertThat(upgradedTurn).containsEntry("is_plan_enabled", null);
+            assertThat(upgradedTurn).containsKey("plan_enabled");
+            assertThat(upgradedTurn).containsEntry("plan_enabled", null);
             assertThat(upgradedSession)
                     .usingRecursiveComparison().isEqualTo(session);
             assertThat(upgradedTurn)
@@ -144,17 +142,7 @@ class WorkspaceCreationSchemaMySqlIT {
             operation(jdbc, "created", "WORKSPACE_CREATE");
             operation(jdbc, "input", "SUBMIT_INPUT");
             operation(jdbc, "cancel", "CANCEL");
-            // The baseline carries no CHECK on operation_kind: the domain
-            // rule lives in ManagedSchemaIntegrity, so the unknown kind is
-            // refused there with a complete candidate (R3-27).
-            var rejected = assertThrows(IllegalArgumentException.class,
-                    () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                            "ma_operation",
-                            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row(
-                                    "attempt_count", 0L, "claim_generation", 0L,
-                                    "execution_mode", "SYNC", "is_verification_ready", false,
-                                    "operation_kind", "INPUT", "payload_version", 1L)));
-            assertTrue(rejected.getMessage().contains("ck_ma_operation_kind"));
+            assertThrows(DataAccessException.class, () -> operation(jdbc, "unknown", "INPUT"));
         }
     }
 
@@ -176,8 +164,6 @@ class WorkspaceCreationSchemaMySqlIT {
                 receipt(connection, "existing", "SESSION_COMMAND");
                 statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                         + " VALUES ('tenant','session','qwen-code',1,1)");
-                statement.execute("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,"
-                        + "stream_id,covered_sequence,gmt_modified) VALUES ('tenant','session','SESSION','',0,1)");
                 statement.execute("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,"
                         + "payload_digest,status,gmt_create,gmt_modified) VALUES ('tenant','session','turn',"
                         + "'prompt','[]','digest','COMPLETED',1,1)");
@@ -192,17 +178,8 @@ class WorkspaceCreationSchemaMySqlIT {
                         connection,
                         "created",
                         ManagedSchemaContract.ReceiptNamespace.WORKSPACE_CREATE.name());
-                // The baseline carries no CHECK on the receipt namespace: the
-                // domain rule lives in ManagedSchemaIntegrity, so the unknown
-                // namespace is refused there with a complete candidate (R3-27).
-                var rejected = assertThrows(IllegalArgumentException.class,
-                        () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                                "ma_request_receipt",
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row(
-                                        "is_workspace_bound", 0L,
-                                        "namespace", "WORKSPACE_ATTACK",
-                                        "scope_kind", "ACTOR")));
-                assertTrue(rejected.getMessage().contains("ck_ma_request_namespace"));
+                assertThrows(
+                        SQLException.class, () -> receipt(connection, "unknown", "WORKSPACE_ATTACK"));
                 try (var result =
                         statement.executeQuery(
                                 "SELECT result_json FROM ma_request_receipt"
@@ -224,124 +201,13 @@ class WorkspaceCreationSchemaMySqlIT {
                     assertNull(result.getObject(1));
                     assertNull(result.getObject(2));
                 }
-                // The baseline declares no CHECK constraints (the catalog
-                // validator refuses them outright): the model-selection
-                // domain rules live in ManagedSchemaIntegrity, so the
-                // half-selected and out-of-range candidates are refused
-                // there, not by the engine (R3-27, same shape as the
-                // namespace case above).
-                var sessionCandidate = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row(
-                        "agent_id", null,
-                        "approval_revision", 0L,
-                        "context_config_ref", null,
-                        "context_revision", null,
-                        "cwd_relative", null,
-                        "harness_instance_id", null,
-                        "harness_owner_boot_id", null,
-                        "harness_placement_epoch", 0L,
-                        "harness_placement_state", "UNASSIGNED",
-                        "is_plan_enabled", 0L,
-                        "is_recovery_protected", 0L,
-                        "is_resource_gc_completed", 0L,
-                        "model_id", null,
-                        "model_revision", 0L,
-                        "permission_rules_json", null,
-                        "public_child_agents_version", 0L,
-                        "selected_approval_mode", null,
-                        "session_kind", "CONTROL",
-                        "workspace_config_ref", null,
-                        "workspace_generation", null,
-                        "workspace_id", null,
-                        "workspace_policy_ref", null,
-                        "workspace_storage_id", null);
-                sessionCandidate.put("model_id", "m".getBytes(StandardCharsets.UTF_8));
-                var sessionRejected = assertThrows(IllegalArgumentException.class,
-                        () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                                "ma_session", sessionCandidate));
-                assertTrue(sessionRejected.getMessage().contains("ck_ma_session_model_selection"));
-                sessionCandidate.put("model_revision", 9007199254740992L);
-                var sessionRangeRejected = assertThrows(IllegalArgumentException.class,
-                        () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                                "ma_session", sessionCandidate));
-                assertTrue(sessionRangeRejected.getMessage().contains("ck_ma_session_model_selection"));
-                sessionCandidate.put("model_revision", 1L);
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                        "ma_session", sessionCandidate);
-                var turnCandidate = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row(
-                        "approval_mode", null,
-                        "approval_revision", null,
-                        "is_plan_enabled", null,
-                        "is_submission_attempted", 0L,
-                        "model_id", null,
-                        "model_revision", null,
-                        "permission_rules_json", null);
-                turnCandidate.put("model_id", "m".getBytes(StandardCharsets.UTF_8));
-                var turnRejected = assertThrows(IllegalArgumentException.class,
-                        () -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                                "ma_turn", turnCandidate));
-                assertTrue(turnRejected.getMessage().contains("ck_ma_turn_model_selection"));
-                turnCandidate.put("model_revision", 1L);
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
-                        "ma_turn", turnCandidate);
+                assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_id='m'"));
+                assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_id='m'"));
+                assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_turn SET model_revision=1"));
                 statement.execute("UPDATE ma_session SET model_id='m',model_revision=1");
                 statement.execute("UPDATE ma_turn SET model_id='m',model_revision=1");
+                assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
             }
-            // The same invalid values must be refused at the owning store's
-            // admission wiring, not only by the rule unit above (R4-7): the
-            // half-selected model rows are planted underneath the store and
-            // its locked-copy validate gates must refuse to admit them.
-            var storeJdbc = new JdbcTemplate(source);
-            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
-                    storeJdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
-                    java.time.Clock.systemUTC(), ignored -> {},
-                    new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(storeJdbc),
-                    new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(),
-                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            storeJdbc.update("UPDATE ma_session SET model_id='m', model_revision=0"
-                    + " WHERE tenant_id='tenant' AND session_id='session'");
-            var storeTransactions = new org.springframework.transaction.support.TransactionTemplate(
-                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
-            var storeSessionRejected = assertThrows(IllegalArgumentException.class,
-                    () -> storeTransactions.execute(status -> store.beginOperation("tenant", "session",
-                            com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.CLOSE,
-                            "", "close-refused", "digest")));
-            assertTrue(storeSessionRejected.getMessage().contains("ck_ma_session_model_selection"));
-            storeJdbc.update("UPDATE ma_session SET model_id=NULL, model_revision=0"
-                    + " WHERE tenant_id='tenant' AND session_id='session'");
-            // A create with initial input drives insertTurn's admission
-            // gates; the wrapping update() proxy plants the half-selected
-            // model on the just-inserted Session row between the two
-            // statements. insertTurn validates the locked Session copy
-            // before building the mirrored Turn candidate, so the paired
-            // gate refuses the same invalid model pair there.
-            var plantingJdbc = new JdbcTemplate(source) {
-                private boolean planted;
-
-                @Override
-                public int update(String sql, Object... args) {
-                    int updated = super.update(sql, args);
-                    if (!planted && sql.startsWith("INSERT INTO ma_event_stream")) {
-                        planted = true;
-                        super.update("UPDATE ma_session SET model_id='m', model_revision=0"
-                                + " WHERE tenant_id='tenant' AND model_id IS NULL"
-                                + " AND session_id NOT IN ('session')");
-                    }
-                    return updated;
-                }
-            };
-            var plantingStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
-                    plantingJdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
-                    java.time.Clock.systemUTC(), ignored -> {},
-                    new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(plantingJdbc),
-                    new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(),
-                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            var storeTurnRejected = assertThrows(IllegalArgumentException.class,
-                    () -> storeTransactions.execute(status -> plantingStore.insertSessionCommand(
-                            "tenant", "CREATE_SESSION",
-                            "create-turn-refused", "digest", "qwen-code", null, null,
-                            java.util.List.of(java.util.Map.of("type", "text", "text", "hello")),
-                            null)));
-            assertTrue(storeTurnRejected.getMessage().contains("model_selection"));
         }
     }
 

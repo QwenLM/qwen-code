@@ -67,7 +67,7 @@ class AutomationScannerConcurrencyMySqlIT {
                         + " session_id, workspace_id, actor_id,"
                         + " record_revision, definition_revision,"
                         + " definition_digest, goal, cron, timezone,"
-                        + " session_mode, overlap, catch_up, is_enabled, state,"
+                        + " session_mode, overlap, catch_up, enabled, state,"
                         + " armed_at, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, 'workspace', 'actor', 1, 1,"
                         + " 'digest', 'Goal', '* * * * *', 'UTC', 'default',"

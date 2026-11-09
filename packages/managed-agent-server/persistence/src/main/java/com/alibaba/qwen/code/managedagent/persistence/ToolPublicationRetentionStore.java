@@ -17,6 +17,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -64,10 +66,26 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
      * (#13800).
      */
     static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
+        String key = hash(tenant);
         jdbc.execute((ConnectionCallback<Void>) connection -> {
-            com.alibaba.qwen.code.runtimebroker.persistence.JdbcTenantGuardLocks.lock(connection, tenant,
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.OUTPUT_PUBLICATION,
-                    timeoutSeconds);
+            try (PreparedStatement insert = connection.prepareStatement(
+                    "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
+                            + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+                insert.setQueryTimeout(timeoutSeconds);
+                insert.setString(1, key);
+                insert.setBytes(2, ManagedSchemaKeys.identity(tenant));
+                insert.executeUpdate();
+            }
+            try (PreparedStatement lock = connection.prepareStatement(
+                    "SELECT tenant_id FROM ma_tenant_guard"
+                            + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE")) {
+                lock.setQueryTimeout(timeoutSeconds);
+                lock.setString(1, key);
+                try (ResultSet result = lock.executeQuery()) {
+                    ToolPublicationContract.require(result.next() && tenant.equals(result.getString("tenant_id")),
+                            "Retention tenant conflicts");
+                }
+            }
             return null;
         });
     }
@@ -97,11 +115,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     boundedParameters(jdbc, timeoutSeconds, tenant, session, hash(tenant), hash(session),
                             com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
             return jdbc.query(
-                    "SELECT tenant_id, session_id, is_csi_guard FROM ma_session WHERE tenant_id = ? AND"
+                    "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
                             + " session_id = ? FOR UPDATE",
                     boundedParameters(jdbc, timeoutSeconds, tenant, session),
                     (row, index) -> {
-                        boolean guarded = row.getBoolean("is_csi_guard");
+                        boolean guarded = row.getBoolean("csi_guard");
                         if (legacyMutation) {
                             ManagedLegacySessionGuard.requireLegacyMutation(guarded);
                         }
@@ -151,15 +169,9 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static void requireLive(JdbcTemplate jdbc, String tenant, String session) {
-        // FOR UPDATE makes this a current read: a writer whose REPEATABLE
-        // READ snapshot was pinned before it queued on the tenant guard must
-        // still see a retirement committed underneath that wait, otherwise
-        // it answers managed_session_not_writable instead of the retirement's
-        // own refusal (R4-2). The caller already holds the root/CAS fence, so
-        // the extra row lock takes no new ordering edge.
         if (!jdbc.query(
                         "SELECT retirement_generation FROM ma_session WHERE tenant_key = ? AND"
-                                + " session_key = ? AND retired_at IS NOT NULL FOR UPDATE",
+                                + " session_key = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         hash(tenant),
                         hash(session))
@@ -213,7 +225,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         }
         jdbc.update(
                 "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retirement_operation_id = ?, retirement_generation ="
-                        + " retirement_generation + 1, retired_at = ?, is_recovery_protected = ? WHERE"
+                        + " retirement_generation + 1, retired_at = ?, recovery_protected = ? WHERE"
                         + " tenant_key = ? AND session_key = ? AND retired_at IS NULL",
                 operation,
                 time,
@@ -280,7 +292,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     String publication = (String) row.get("publication_id");
                     lockRetainedPublication(scope, publication);
                     jdbc.update(
-                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_key = ?"
+                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", quarantined = TRUE WHERE scope_key = ?"
                                     + " AND publication_id = ?",
                             scope,
                             publication);
@@ -656,7 +668,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 .query(
                         "SELECT scope_key, publication_id, tenant_id, session_id,"
                             + " capture_used_bytes, producer_used_bytes, admission_used_bytes,"
-                            + " is_write_evidence, is_quarantined, is_accepted_complete, producer_phase FROM"
+                            + " write_evidence, quarantined, accepted_complete, producer_phase FROM"
                             + " ma_output_capture WHERE retention_state = 'RETIRING' ORDER BY"
                             + " scope_key, publication_id LIMIT 100",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow))
@@ -674,7 +686,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 + number(row, "admission_used_bytes");
         var roots =
                 jdbc.query(
-                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_key = ?"
+                        "SELECT retired_at, recovery_protected FROM ma_session WHERE tenant_key = ?"
                                 + " AND session_key = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         hash(tenant),
@@ -682,16 +694,16 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         String blocker;
         if (roots.isEmpty()) {
             blocker = "session_not_retired";
-        } else if (flag(roots.getFirst(), "is_recovery_protected")) {
+        } else if (flag(roots.getFirst(), "recovery_protected")) {
             blocker = "recovery_protected";
         } else if (number(roots.getFirst(), "retired_at") > now(jdbc) - grace.toMillis()) {
             blocker = "grace_period";
-        } else if (!flag(row, "is_write_evidence")) {
+        } else if (!flag(row, "write_evidence")) {
             blocker = "legacy_write_evidence_missing";
-        } else if (flag(row, "is_quarantined")) {
+        } else if (flag(row, "quarantined")) {
             blocker = "quarantined";
         } else if (!"REFERENCED".equals(row.get("producer_phase"))
-                || !flag(row, "is_accepted_complete")) {
+                || !flag(row, "accepted_complete")) {
             blocker = "not_accepted_complete";
         } else if (count(
                         "SELECT COUNT(*) FROM ma_read_lease WHERE tenant_key = ? AND session_key ="

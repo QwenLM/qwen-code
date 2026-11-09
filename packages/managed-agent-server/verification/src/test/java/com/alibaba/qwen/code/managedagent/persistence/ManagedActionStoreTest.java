@@ -431,15 +431,15 @@ class ManagedActionStoreTest {
     void planExitUsesItsActiveTurnAfterLivePolicyChanges(String turnStatus, String option,
             boolean expectedPlan, long expectedRevision) {
         jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
-                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+                + " approval_revision=2, plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
         jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
-                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
+                        + "status,approval_mode,approval_revision,plan_enabled,gmt_create,gmt_modified)"
                         + " VALUES (?,?,'turn','turn','[]','digest',?,'default',1,TRUE,0,0)",
                 TENANT, SESSION, turnStatus);
         ObjectNode options = planExitOptions();
         project("requested", null, 1, options);
         project("decided", response(option), 2, options);
-        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+        assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Boolean.class, TENANT, SESSION)).isEqualTo(expectedPlan);
         assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Long.class, TENANT, SESSION)).isEqualTo(expectedRevision);

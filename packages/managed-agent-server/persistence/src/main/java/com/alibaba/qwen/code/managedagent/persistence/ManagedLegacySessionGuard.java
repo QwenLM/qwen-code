@@ -19,14 +19,14 @@ final class ManagedLegacySessionGuard {
                                             connection.getMetaData().getDatabaseProductName();
                                     String index =
                                             "MySQL".equals(product) || "MariaDB".equals(product)
-                                                    ? " FORCE INDEX (idx_ma_session_csi_guard)"
+                                                    ? " FORCE INDEX (ma_session_csi_guard_idx)"
                                                     : "";
                                     try (var statement =
                                             connection.prepareStatement(
-                                                    "SELECT is_csi_guard FROM ma_session"
+                                                    "SELECT csi_guard FROM ma_session"
                                                             + index
                                                             + " WHERE tenant_id = ? AND session_id"
-                                                            + " = ? AND is_csi_guard = TRUE FOR"
+                                                            + " = ? AND csi_guard = TRUE FOR"
                                                             + " UPDATE")) {
                                         statement.setQueryTimeout(10);
                                         statement.setBytes(

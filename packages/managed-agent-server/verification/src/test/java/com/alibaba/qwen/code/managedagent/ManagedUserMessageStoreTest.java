@@ -59,7 +59,7 @@ class ManagedUserMessageStoreTest {
 
     @BeforeEach
     void setUp() {
-        session = agents.createSession(TENANT, ACTOR, "create-" + UUID.randomUUID(),
+        session = agents.createSession(TENANT, "create-" + UUID.randomUUID(),
                 "qwen-code", null, "queue", Map.of(), List.of()).sessionId();
         ManagedAgentService queueAgents = mock(ManagedAgentService.class);
         when(queueAgents.supportsUserMessageQueue()).thenReturn(true);
@@ -131,11 +131,11 @@ class ManagedUserMessageStoreTest {
     @Test
     void admitsClaimedSeedThroughTheRealSchemaAdapterAndKeepsTheQueueBarrier() {
         Message first = command("first", submit("first")).messages().getFirst();
-        assertCode("user_message_queue_pending", () -> store.insertTurnCommandAsActor(TENANT, "queue-test", "ordinary-key",
+        assertCode("user_message_queue_pending", () -> store.insertTurnCommand(TENANT, "queue-test", "ordinary-key",
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR));
         jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
 
-        var admission = store.insertTurnCommandAsActor(TENANT, "queue-test", "user-queue:" + first.id(),
+        var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:" + first.id(),
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR);
         assertThat(admission.turnId()).isNotBlank();
     }

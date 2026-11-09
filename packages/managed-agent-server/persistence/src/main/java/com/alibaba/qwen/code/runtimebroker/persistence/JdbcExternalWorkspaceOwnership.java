@@ -266,7 +266,7 @@ public final class JdbcExternalWorkspaceOwnership {
                         || acquiring && (!session.isAcquirable() || !java.util.Set.of("ACQUIRING", "READY").contains(row.getString("session_state"))
                                 || session.getState() == RuntimeSessionRecord.State.READY && !"READY".equals(row.getString("session_state")))
                         || !acquiring && !java.util.Set.of("ACQUIRING", "READY", "RELEASING", "RELEASED").contains(row.getString("session_state"))
-                        || row.getBoolean("is_execution_exclusive")
+                        || row.getBoolean("execution_exclusive")
                         || row.getString("execution_storage_key") != null && !physical.equals(row.getString("execution_storage_key"))) {
                     throw unavailable();
                 }
@@ -339,7 +339,7 @@ public final class JdbcExternalWorkspaceOwnership {
             RuntimeSessionRecord session) throws SQLException {
         held(connection, owner, binding, session, false);
         try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " is_execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+                + " execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?")) {
             statement.setString(1, owner.registration().ownerKey());
             JdbcRepositorySupport.setIdentity(statement, 2, binding.getBindingId());

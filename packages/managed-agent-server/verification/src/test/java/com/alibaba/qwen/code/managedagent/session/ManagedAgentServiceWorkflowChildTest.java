@@ -172,7 +172,7 @@ class ManagedAgentServiceWorkflowChildTest {
     @Test
     void userTextWithALoneSurrogateIsNormalizedTheSameWay() {
         when(harness.isAvailable()).thenReturn(true);
-        when(store.insertSessionCommand(anyString(), any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class), anyString(),
+        when(store.insertSessionCommand(anyString(), anyString(), anyString(),
                 anyString(), anyString(), any(), any(), any(), anyList(),
                 anyString())).thenReturn(new StoreModels.Admission(
                         "session-new", null, false, true));
@@ -184,7 +184,7 @@ class ManagedAgentServiceWorkflowChildTest {
         ArgumentCaptor<List<Map<String, Object>>> input =
                 ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<String> digest = ArgumentCaptor.forClass(String.class);
-        verify(store).insertSessionCommand(anyString(), any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class),
+        verify(store).insertSessionCommand(anyString(), anyString(),
                 anyString(), anyString(), anyString(), any(), any(), any(),
                 input.capture(), digest.capture());
         List<Map<String, Object>> inserted = input.getValue();

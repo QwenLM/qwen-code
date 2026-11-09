@@ -72,7 +72,7 @@ public final class JdbcRuntimeSessionRepository
             JdbcRepositorySupport.setIdentity(statement, 1, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
-                if (!row.next() || !row.getBoolean("is_csi_guard")) {
+                if (!row.next() || !row.getBoolean("csi_guard")) {
                     throw new IllegalArgumentException("Original managed Session is required");
                 }
                 context = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "tenant_id"),
