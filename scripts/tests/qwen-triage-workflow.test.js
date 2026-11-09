@@ -10166,3 +10166,55 @@ describe('stage 1-pre duplicate gate', () => {
     expect(summary).not.toContain('production diff');
   });
 });
+
+describe('triage agent-state ownership hand-back (#16616)', () => {
+  const restoreStep = () =>
+    parse(workflow).jobs['triage'].steps.find(
+      (s) => s.name === 'Restore workspace ownership after agent',
+    );
+
+  it('stays the always() tail of the triage job', () => {
+    const steps = parse(workflow).jobs['triage'].steps;
+    expect(steps[steps.length - 1].name).toBe(
+      'Restore workspace ownership after agent',
+    );
+    expect(restoreStep().if).toBe('always()');
+  });
+
+  it('hands back every RUNNER_TEMP path the context step chowned away', () => {
+    // The context step chowns these to node (uid 1000); each one left
+    // node-owned poisons the next host-user job on the shared pool.
+    const run = restoreStep().run;
+    for (const dir of [
+      '"$QWEN_HOME"',
+      // A review quarantines a foreign-owned home instead of failing; that
+      // copy keeps the owner that made it unremovable, and this root
+      // container is the only body that can ever hand it back.
+      '"$RUNNER_TEMP"/qwen-home.stale-*',
+      '"$RUNNER_TEMP/triage-drafts"',
+      '"$RUNNER_TEMP/triage-results"',
+      '"$RUNNER_TEMP/triage-context"',
+    ]) {
+      expect(run).toContain(dir);
+    }
+    expect(run).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
+    expect(run).toContain('chown -R "$RUNNER_UID:$RUNNER_GID" "$handback"');
+  });
+
+  it('takes the quarantine prefix from the workflow that mints it', () => {
+    // The prefix is spelled three times — the producer and the sweep in the
+    // review workflow, and this hand-back glob. Renaming it on the review
+    // side updates that suite's own pins, so both suites would stay green
+    // while this glob matched nothing: every quarantine would then strand
+    // permanently, with one warning as the only trace. Read the producer.
+    const review = readFileSync(
+      '.github/workflows/qwen-code-pr-review.yml',
+      'utf8',
+    );
+    const home = review.match(/QWEN_HOME="\$\{RUNNER_TEMP:\?\}\/([^"]+)"/)?.[1];
+    const suffix = review.match(/quarantine="\$\{QWEN_HOME\}\.([^"$]+)/)?.[1];
+    expect(home).toBeTruthy();
+    expect(suffix).toBeTruthy();
+    expect(restoreStep().run).toContain(`"$RUNNER_TEMP"/${home}.${suffix}*`);
+  });
+});
