@@ -28,6 +28,7 @@ import {
   channelEventFilePath,
   DEFAULT_BOUND_ROLE_GUIDANCE,
   getWorkspaceScopeDirName,
+  MAX_POLL_INTERVAL_MS,
   PairingStore,
   type ChannelAgentBridge,
   type ChannelBoundSessions,
@@ -19513,17 +19514,26 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(calls.map((call) => call.ifNoneMatch)).toEqual([null, null]);
       });
 
-      it('drops the cache on disconnect so a reconnect revalidates from scratch', async () => {
-        await initChannel(watchConfig, { boundSessions });
+      it('drops the cache and the poll floor on disconnect', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
         const calls = installRevalidatingTransport(makePrMeta({}));
         const transport = adapterFetch();
 
         await transport(prUrl, { method: 'GET' });
+        await feedHeaders({ 'x-poll-interval': '60' });
+        expect(pollIntervalMs()).toBe(60_000);
+
         channel.disconnect();
         await transport(prUrl, { method: 'GET' });
 
         expect(calls).toHaveLength(2);
         expect(calls[1]!.ifNoneMatch).toBeNull();
+        // The floor came from the previous connection's endpoint; a reconnect
+        // must re-learn it rather than inherit it.
+        expect(pollIntervalMs()).toBe(10_000);
       });
 
       it('evicts the oldest entry past the cap while keeping the newest', async () => {
@@ -19631,6 +19641,20 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         );
         await feedHeaders({ 'x-poll-interval': '60' });
         expect(pollIntervalMs()).toBe(300_000);
+      });
+
+      it('never raises the poll interval past the runtime ceiling', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
+        // The header is server-controlled, and the base class bounds both
+        // ends of the configured value for a reason: Node clamps a timeout
+        // above its 32-bit range to 1ms, so an unbounded floor would turn the
+        // poll loop into a hot loop that burns the very quota this saves.
+        // 2_147_484s is just past that range.
+        await feedHeaders({ 'x-poll-interval': '2147484' });
+        expect(pollIntervalMs()).toBe(MAX_POLL_INTERVAL_MS);
       });
 
       it('still re-checks CI on its interval while every PR read is a 304', async () => {

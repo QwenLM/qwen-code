@@ -103,7 +103,14 @@ awareness from #16701 keeps working without modification.
 
 `GithubAdapter` overrides the protected `pollInterval` getter to return the
 larger of the base interval and the last observed `X-Poll-Interval`, which is
-read from response headers in the existing request hook.
+read from response headers in the existing request hook, capped at
+`MAX_POLL_INTERVAL_MS`.
+
+The cap is not redundant with the base class. The base clamps the _configured_
+value at both ends; the header is server-controlled and arrives after that
+clamp, so raising the interval by it reopens the upper end. Node rounds a
+timeout above its 32-bit range down to 1 ms, which would turn the poll loop
+into a hot loop burning the very quota this change saves.
 
 ### Watch and CI
 
@@ -211,7 +218,8 @@ No config descriptor change: the feature has no new operator-facing option.
   `304`.
 - CI re-checks fire on their existing schedule during a `304`-only sequence.
 - No `304` produces an error-level log line.
-- The poll interval never runs faster than the last `X-Poll-Interval`.
+- The poll interval never runs faster than the last `X-Poll-Interval`, and
+  never exceeds `MAX_POLL_INTERVAL_MS` however large that header is.
 - Existing watch, notification and budget tests stay green.
 
 ## Open questions

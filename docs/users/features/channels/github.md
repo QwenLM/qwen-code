@@ -385,7 +385,9 @@ The notifications endpoint also returns `X-Poll-Interval`, and the channel
 will not poll faster than it. Because one interval drives the whole poll and
 the watch runs first, this raises the watch interval too. At the default
 `pollInterval: 60000` the header is also 60 seconds and nothing changes; only
-a faster configured poll is slowed down.
+a faster configured poll is slowed down. The result stays within the same
+one-day ceiling `pollInterval` itself is held to, so an implausibly large
+header cannot push the poll loop past the runtime's timer range.
 Transitions are persisted before delivery, so restarts do not re-fire them.
 A head move fires whoever pushed it, including the bound session itself —
 see Known Limitations.

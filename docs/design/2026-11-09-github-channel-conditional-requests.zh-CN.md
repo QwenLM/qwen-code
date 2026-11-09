@@ -67,7 +67,9 @@ GitHub channel 不发送任何条件头。即使什么都没变，每轮轮询�
 
 ### 轮询间隔
 
-`GithubAdapter` 覆写 protected 的 `pollInterval` getter，返回基础间隔与最近一次观测到的 `X-Poll-Interval` 中的较大者；后者在现有 request hook 中从响应头读取。
+`GithubAdapter` 覆写 protected 的 `pollInterval` getter，返回基础间隔与最近一次观测到的 `X-Poll-Interval` 中的较大者，并以 `MAX_POLL_INTERVAL_MS` 封顶；后者在现有 request hook 中从响应头读取。
+
+这个封顶与基类的钳制不重复。基类钳制的是**配置值**的两端；而该头由服务端控制、在那次钳制之后才到达，因此用它抬高间隔会重新打开上界。Node 会把超过其 32 位范围的超时向下取整为 1 毫秒，那会让轮询循环变成热循环，烧掉本改动想省下的配额。
 
 ### 监视与 CI
 
@@ -129,7 +131,7 @@ GitHub channel 不发送任何条件头。即使什么都没变，每轮轮询�
 - 当每一页都应答 `304` 时，多页通知列表仍被完整返回。
 - 在全 `304` 序列期间，CI 复查按既有节奏触发。
 - 没有任何 `304` 产生 error 级别日志。
-- 轮询间隔绝不快于最近一次的 `X-Poll-Interval`。
+- 轮询间隔绝不快于最近一次的 `X-Poll-Interval`，且无论该头多大都绝不超过 `MAX_POLL_INTERVAL_MS`。
 - 既有的监视、通知与预算测试保持全绿。
 
 ## 待定问题

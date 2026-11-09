@@ -36,6 +36,7 @@ import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   lowercaseGroupAllowedUsers,
+  MAX_POLL_INTERVAL_MS,
   PollingChannelBase,
   PR_BINDING_ROLES,
   renderBoundActionTemplate,
@@ -2030,9 +2031,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * so honouring the floor also slows the watch. At the default 60s poll the
    * header is also 60 and nothing changes; only a faster configured poll is
    * raised, which is exactly what GitHub is asking for.
+   *
+   * The ceiling is re-applied because the header is server-controlled and
+   * super's clamp only covers the configured value: Node rounds a timeout
+   * above its 32-bit range down to 1ms, so an unbounded floor would turn the
+   * poll loop into a hot loop that burns the quota this is meant to save.
    */
   protected override get pollInterval(): number {
-    return Math.max(super.pollInterval, this.notificationsPollFloorMs);
+    return Math.min(
+      Math.max(super.pollInterval, this.notificationsPollFloorMs),
+      MAX_POLL_INTERVAL_MS,
+    );
   }
 
   disconnect(): void {
