@@ -5739,7 +5739,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // A live prompt belongs to the daemon already and must not be submitted a
     // second time after a page reload. The recovery snapshot is authoritative
     // for whether a stopped turn is eligible for continuation.
-    if (session.hasActivePrompt || !recovery.canContinue) return;
+    if (
+      session.hasActivePrompt ||
+      !recovery.canContinue ||
+      recovery.cancellationConfirmationId !== undefined
+    ) {
+      return;
+    }
 
     void actions.continueSession().catch((error: unknown) => {
       // continueSession already publishes a recoverable action notice. Keep

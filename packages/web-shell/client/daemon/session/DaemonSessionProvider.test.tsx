@@ -26109,6 +26109,57 @@ describe('DaemonSessionProvider', () => {
       expect(continued).toHaveBeenCalledOnce();
     });
 
+    it('does not auto-continue when cancellation confirmation is required', async () => {
+      const sessionId = 'auto-continue-cancellation-session';
+      const context = vi.fn(
+        async (): Promise<DaemonSessionContextStatus> => ({
+          v: 1,
+          sessionId,
+          workspaceCwd: '/mock-workspace',
+          state: {},
+          recovery: {
+            kind: 'interrupted_prompt',
+            canContinue: true,
+            cancellationConfirmationId: 'confirm-1',
+          },
+        }),
+      );
+      const continued = vi.fn();
+      const session = Object.assign(
+        createMockSession({
+          sessionId,
+          context,
+          async *events(opts) {
+            yield {
+              v: 1,
+              type: 'replay_complete',
+              data: { sessionId },
+            };
+            yield* createIdleEvents()(opts);
+          },
+        }),
+        { continueSession: continued },
+      );
+      sdkMocks.sessions.push(session);
+
+      function Harness() {
+        useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoContinueInterruptedTurns: true,
+        sessionId,
+      });
+      await vi.waitFor(() => expect(context).toHaveBeenCalled());
+      await act(async () => {
+        await flushPromises();
+      });
+
+      expect(continued).not.toHaveBeenCalled();
+    });
+
     it.each([true, false])(
       'does not copy recovery from another session when a terminal races metadata (%s)',
       async (immediateTerminal) => {
