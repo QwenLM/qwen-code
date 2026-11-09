@@ -57,7 +57,7 @@ public final class ToolPublicationStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
-    private final ManagedSessionStore sessions;
+    private final JdbcManagedSessionStore sessions;
     private final ToolExecutionRepository executions;
     private final RuntimeBindingRepository bindings;
     private final Capacity capacity;
@@ -82,7 +82,7 @@ public final class ToolPublicationStore {
         }
     }
     public ToolPublicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            ManagedSessionStore sessions, ToolExecutionRepository executions,
+            JdbcManagedSessionStore sessions, ToolExecutionRepository executions,
             RuntimeBindingRepository bindings, Capacity capacity) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(manager);
@@ -337,8 +337,8 @@ public final class ToolPublicationStore {
         boolean csi = WorkspaceCsiReservationStore.PROVISIONER_KIND
                 .equals(target.runtime().getRequest().getProvisionerKind());
         if (csi) {
-            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
-                    ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+            JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                    JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         }
         JsonNode owner = request.get("owner");
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
@@ -433,7 +433,7 @@ public final class ToolPublicationStore {
         return grant(id, row.withState(state, null));
     }
 
-    private long requireEvidence(JsonNode b, String writerToken, ManagedSessionStore.PublicationWriter writer,
+    private long requireEvidence(JsonNode b, String writerToken, JdbcManagedSessionStore.PublicationWriter writer,
             boolean preparing) {
         JsonNode key = b.get("sessionKey");
         require("READY".equals(writer.recoveryStatus()), "Session recovery is blocked");
@@ -485,7 +485,7 @@ public final class ToolPublicationStore {
      */
     private JsonNode readIntent(JsonNode b, JsonNode key, String writerToken,
             long intentSequence,
-            ManagedSessionStore.PublicationWriter writer) {
+            JdbcManagedSessionStore.PublicationWriter writer) {
         long headRevision = writer.journalRevision();
         String tenant = text(key, "tenantId");
         String session = text(key, "sessionId");
@@ -501,7 +501,7 @@ public final class ToolPublicationStore {
         // (500). A sequence beyond the committed span means the binding
         // names evidence that was never committed — a client request fault.
         if (revisions.size() > 1) {
-            throw ManagedSessionStore.journalCorrupt();
+            throw JdbcManagedSessionStore.journalCorrupt();
         }
         if (revisions.isEmpty()) {
             if (intentSequence > writer.committedSequence()) {
@@ -510,7 +510,7 @@ public final class ToolPublicationStore {
                 throw new IllegalArgumentException(
                         "Committed publication evidence is missing");
             }
-            throw ManagedSessionStore.journalCorrupt();
+            throw JdbcManagedSessionStore.journalCorrupt();
         }
         long revision = revisions.get(0);
         // The committed revisions above the intent must be contiguous
@@ -523,13 +523,13 @@ public final class ToolPublicationStore {
                 Long.class, tenant, session, revision, headRevision,
                 ManagedSessionStoreModels.MAX_TRANSACTION_BYTES);
         if (above == null || above != headRevision - revision) {
-            throw ManagedSessionStore.journalCorrupt();
+            throw JdbcManagedSessionStore.journalCorrupt();
         }
         var page = sessions.transactions(tenant, text(key, "workspaceId"),
                 session, writerToken, revision - 1, 1);
         if (page.transactions().size() != 1
                 || page.transactions().get(0).journalRevision() != revision) {
-            throw ManagedSessionStore.journalCorrupt();
+            throw JdbcManagedSessionStore.journalCorrupt();
         }
         byte[] bytes = Base64.getDecoder().decode(
                 page.transactions().get(0).recordBytesBase64());
@@ -564,7 +564,7 @@ public final class ToolPublicationStore {
         return intent;
     }
 
-    private static void requireCheckpoint(JsonNode b, JsonNode checkpoint, ManagedSessionStore.PublicationWriter writer) {
+    private static void requireCheckpoint(JsonNode b, JsonNode checkpoint, JdbcManagedSessionStore.PublicationWriter writer) {
         JsonNode key = b.get("sessionKey");
         long intentSequence = b.get("intentSequence").longValue();
         JsonNode identity = checkpoint.path("identity");
@@ -925,8 +925,8 @@ public final class ToolPublicationStore {
         // guard acquisition; it runs bounded with the shared named-failure
         // mapping: a held row answers tenant_guard_contended instead of
         // out-waiting the caller (#13800).
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
-                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private static JsonNode grant(String id, Row row) {

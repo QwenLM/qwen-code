@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellShellResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellToolDetails;
+import com.alibaba.qwen.code.managedagent.repository.ManagedToolDetailsStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -16,15 +17,15 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Repository
-public class ManagedToolDetailsStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedToolDetailsStore {
+public class JdbcManagedToolDetailsStore
+        implements ManagedToolDetailsStore {
     private static final int READ_LIMIT = 8 * 1024 * 1024;
     private final JdbcTemplate jdbc;
-    private final ManagedExtensionRecordStore resources;
+    private final JdbcManagedExtensionRecordStore resources;
     private final ObjectMapper json;
 
-    public ManagedToolDetailsStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            ManagedExtensionRecordStore resources, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
+    public JdbcManagedToolDetailsStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            JdbcManagedExtensionRecordStore resources, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.resources = resources;
         this.json = json;

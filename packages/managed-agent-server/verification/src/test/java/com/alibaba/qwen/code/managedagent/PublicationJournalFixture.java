@@ -4,7 +4,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityD
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -62,7 +64,7 @@ public final class PublicationJournalFixture {
 
     public final JdbcTemplate jdbc;
     public final DataSourceTransactionManager manager;
-    public final ManagedSessionStore sessions;
+    public final JdbcManagedSessionStore sessions;
     public final JdbcRuntimeBindingRepository bindings;
     public final JdbcToolExecutionRepository executions;
     public final ToolPublicationStore store;
@@ -80,11 +82,11 @@ public final class PublicationJournalFixture {
 
     private PublicationJournalFixture(DataSource source,
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore results) {
+            JdbcManagedToolResultStore results) {
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null,
+                new JdbcManagedExtensionRecordStore(jdbc), null,
                 null, null, objects, results, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         bindings = new JdbcRuntimeBindingRepository(source,
@@ -104,7 +106,7 @@ public final class PublicationJournalFixture {
 
     public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration,
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore results) {
+            JdbcManagedToolResultStore results) {
         PublicationJournalFixture fixture =
                 new PublicationJournalFixture(source, objects, results);
         fixture.populate(source, registration, false, false);
@@ -113,7 +115,7 @@ public final class PublicationJournalFixture {
 
     static PublicationJournalFixture createWithExecutionDiagnostics(DataSource source,
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore results) {
+            JdbcManagedToolResultStore results) {
         var fixture = new PublicationJournalFixture(source, objects, results);
         fixture.populate(source, null, false, true);
         return fixture;
