@@ -1008,6 +1008,63 @@ describe('gitCommit', () => {
       gitCommit(dir, 'bad', { paths: ['/etc/passwd'] }),
     ).rejects.toThrow('invalid commit path');
   });
+
+  it('treats glob metacharacters in a selected name literally', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'ab.txt', 'one\n', 'add ab');
+    // Two files, one literal `*` in its name and one the glob would match.
+    write(dir, { 'a*.txt': 'fresh\n', 'ab.txt': 'two\n' });
+
+    await gitCommit(dir, 'commit the starred file', { paths: ['a*.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'a*.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('M ab.txt');
+  });
+
+  it('creates a non-ASCII path', async () => {
+    const dir = makeRepo();
+    write(dir, { '中文.txt': 'fresh\n' });
+
+    await gitCommit(dir, 'add a unicode file', { paths: ['中文.txt'] });
+
+    expect(
+      git(dir, 'show', '--name-only', '-z', '--format=', 'HEAD')
+        .split('\0')
+        .filter(Boolean),
+    ).toEqual(['中文.txt']);
+  });
+
+  it('pairs both halves of a non-ASCII rename', async () => {
+    const dir = makeRepo();
+    commitFile(dir, '旧.txt', 'body\n', 'add old');
+    git(dir, 'mv', '旧.txt', '新.txt');
+
+    await gitCommit(dir, 'rename to unicode', { paths: ['新.txt'] });
+
+    expect(
+      git(dir, 'show', '--name-status', '-M', '-z', '--format=', 'HEAD')
+        .split('\0')
+        .filter(Boolean),
+    ).toEqual(['R100', '旧.txt', '新.txt']);
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('commits into a repository that has no HEAD yet', async () => {
+    const dir = tmpDir('qwen-gitbranches-unborn-');
+    git(dir, 'init', '-q', '-b', 'master');
+    git(dir, 'config', 'user.email', 'test@example.com');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    write(dir, { 'first.txt': 'hello\n' });
+
+    await gitCommit(dir, 'initial commit', { paths: ['first.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'first.txt',
+    );
+  });
 });
 
 describe('gitPull', () => {

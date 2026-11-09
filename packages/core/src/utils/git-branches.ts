@@ -1336,6 +1336,31 @@ export interface GitCommitOptions {
   paths?: readonly string[];
 }
 
+/**
+ * Git reads `*`, `?` and `[]` in a pathspec as glob wildcards, so a selection
+ * naming a file that literally contains one would also match its neighbours.
+ * `:(literal)` turns that off for the single pathspec that follows it.
+ */
+function literalPathspec(path: string): string {
+  return `:(literal)${path}`;
+}
+
+function literalPathspecs(paths: readonly string[]): string[] {
+  return paths.map(literalPathspec);
+}
+
+async function hasHead(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  try {
+    await runGit(cwd, ['rev-parse', '--verify', '-q', 'HEAD'], env);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeCommitPaths(paths: readonly string[]): string[] {
   const normalized: string[] = [];
   for (const raw of paths) {
@@ -1402,7 +1427,7 @@ async function resolveCommitPaths(
 ): Promise<string[]> {
   const output = await runGit(
     cwd,
-    ['status', '--porcelain', '-z', '--', ...paths],
+    ['status', '--porcelain', '-z', '--', ...literalPathspecs(paths)],
     env,
   );
   const entries = parseStatusEntries(output);
@@ -1428,19 +1453,31 @@ async function resolveCommitPaths(
   // A rename only exists when its two halves are recorded in one commit.
   // `git commit -- <new path>` alone leaves the deletion behind, so add the
   // pre-image whenever the selected paths form the other half of a rename.
-  const diffOutput = await runGit(
-    cwd,
-    ['diff', '--cached', '--name-status', '-M', '--diff-filter=R', 'HEAD'],
-    env,
-  );
-  const selectedSet = new Set(paths);
-  for (const line of diffOutput.split('\n')) {
-    const parts = line.split('\t');
-    if (parts.length < 3 || !parts[0].startsWith('R')) continue;
-    const [, oldPath, newPath] = parts;
-    if (selectedSet.has(newPath) || selectedSet.has(oldPath)) {
-      if (!resolved.includes(newPath)) resolved.push(newPath);
-      if (!resolved.includes(oldPath)) resolved.push(oldPath);
+  // An unborn HEAD has nothing to rename against and `HEAD` does not resolve.
+  if (await hasHead(cwd, env)) {
+    const diffOutput = await runGit(
+      cwd,
+      [
+        'diff',
+        '--cached',
+        '--name-status',
+        '-z',
+        '-M',
+        '--diff-filter=R',
+        'HEAD',
+      ],
+      env,
+    );
+    const selectedSet = new Set(paths);
+    const tokens = diffOutput.split('\0');
+    for (let i = 0; i + 2 < tokens.length; i += 3) {
+      if (!tokens[i].startsWith('R')) continue;
+      const oldPath = tokens[i + 1];
+      const newPath = tokens[i + 2];
+      if (selectedSet.has(newPath) || selectedSet.has(oldPath)) {
+        if (!resolved.includes(newPath)) resolved.push(newPath);
+        if (!resolved.includes(oldPath)) resolved.push(oldPath);
+      }
     }
   }
   return resolved;
@@ -1508,20 +1545,32 @@ export async function gitCommit(
       // staged; `commit` still records the deletion from the index diff.
       const stageable = await runGit(
         cwd,
-        ['ls-files', '--cached', '--others', '--', ...selection],
+        [
+          'ls-files',
+          '--cached',
+          '--others',
+          '-z',
+          '--',
+          ...literalPathspecs(selection),
+        ],
         env,
       );
       const known = new Set(
-        stageable
-          .split('\n')
-          .map((line) => line.trim())
-          .filter((line) => line !== ''),
+        stageable.split('\0').filter((line) => line !== ''),
       );
       const existing = selection.filter((p) => known.has(p));
       if (existing.length > 0) {
-        await runGit(cwd, ['add', '-A', '--', ...existing], env);
+        await runGit(
+          cwd,
+          ['add', '-A', '--', ...literalPathspecs(existing)],
+          env,
+        );
       }
-      await runGit(cwd, ['commit', '-m', message, '--', ...selection], env);
+      await runGit(
+        cwd,
+        ['commit', '-m', message, '--', ...literalPathspecs(selection)],
+        env,
+      );
     } else {
       await runGit(cwd, ['commit', '-m', message], env);
     }
