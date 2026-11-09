@@ -1,5 +1,7 @@
 # Channel Named Sessions: Part 4B
 
+[English](channel-named-sessions-part4b.md) | [简体中文](channel-named-sessions-part4b.zh-CN.md)
+
 ## Status
 
 Proposed. Parts 1, 2, 3A, 3B, and 4A are merged. This design is the final
@@ -256,9 +258,13 @@ cleanup turned out. The `!spawnCompleted` "no session exists" rationale
 belongs to the spawn-failed outer catch, a different block this PR does not
 change.
 
-Issue #11024 (the follow-up for the last two rows) also carries the
-reap-cleanup requirements gathered during this design's review, so they
-survive contact with implementation there rather than being re-derived:
+Issue #11024 (the follow-up for the last two rows) also carries the reap-cleanup
+requirements gathered during this design's review, so they survive contact with
+implementation there rather than being re-derived. They are the review's inputs,
+not the rules as built: `channel-worktree-orphan-reap.md` records the
+implemented cleanup, which departs from them in places — for example, of the two
+links only `supersededBy` refuses there, because refusing on `supersedes` as
+well left every post-reset worktree uncleanable. The requirements as gathered:
 
 - Place the deletion at the reap call site, as the create route does, never
   inside the shared `deleteDaemonSessionIfOrphan` primitive — the primitive's
@@ -821,15 +827,18 @@ supersededBy?: string; // on the old sidecar: the replacement that owns the work
 supersedes?: string; // on the new sidecar: the session it replaced
 ```
 
-The forward link is the redirect signal read on restore — read on its own,
-before any marker or reverse-link read, so a redirect names a candidate owner
-rather than a proven one (see the redirect section below). The reverse link
-makes a reset retry's resume check bidirectional, so a `supersededBy` value
-is only acted on when the session it names also claims to replace `S_old` for
-the same worktree. `isValidWorktreeSession` accepts both as optional strings.
-Readers that do not know the fields ignore them. Only the daemon route writes
-them; only the restore/reset paths read them. The registry, the marker
-format, and the sidecar's versionless shape otherwise stay unchanged.
+The `supersededBy` link is the redirect signal read on restore — read on its
+own, before any marker or `supersedes` read, so a redirect names a candidate
+owner rather than a proven one (see the redirect section below). The
+`supersedes` link makes a reset retry's resume check bidirectional, so a
+`supersededBy` value is only acted on when the session it names also claims to
+replace `S_old` for the same worktree. `isValidWorktreeSession` accepts both as
+optional strings. Readers that do not know the fields ignore them. Only the
+daemon route writes them. The restore and reset routes read both; the shared
+worktree-context restore that a session load or resume runs
+(`restoreWorktreeContext`), the `exit_worktree` tool's stale-marker check and
+the delete-path orphan cleanup (#11024) read `supersededBy`. The registry, the
+marker format, and the sidecar's versionless shape otherwise stay unchanged.
 
 ### Missing-marker restore signal
 
@@ -1088,7 +1097,9 @@ every other daemon failure keeps the existing generic named-session message.
   integrity `500` — and simply fails closed on it. Every non-live Part 4A
   restore takes the worktree-keyed ownership lock for the same reason: the
   reset route is public, so a source-less restore must not attest exclusive
-  ownership while a transfer moves it. `S_old` never reclaims the worktree.
+  ownership while a transfer moves it. A Part 4A sidecar read that names a
+  checkout the restore did not lock fails with a `500` before either check.
+  `S_old` never reclaims the worktree.
 
 ## User-facing error classes
 
