@@ -501,6 +501,16 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('attributes a creation after a heredoc with an escaped delimiter (H2)', () => {
+    // The escaped delimiter must still be recognised so the body is consumed
+    // and its apostrophe does not swallow the creation that follows.
+    const entry = shellResult(
+      "cat > note.md <<\\EOF\nit's quoted\nEOF\ngh pr comment 42 --body-file note.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('does not let a line continuation hide a real comment before a later heredoc', () => {
     // `: \` + newline joins to `: # Use <<'EOF' …`: the # is a real comment, the
     // gh api read between it and the later heredoc is real → two API commands.
