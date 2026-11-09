@@ -722,15 +722,21 @@ describeTui(SUITE, () => {
     },
     {
       name: 'a stream that drops and is retried',
+      sent: 'The connection dropped mid-response.',
       requests: 2,
       rounds: 1,
       batches: 0,
       prompts: ['Tell me a story.'],
+      // The connection drops once the TUI has read the first chunk, so the
+      // client continues after it. Dropped right after the chunk, whether the
+      // chunk survives the drop depends on how fast the TUI reads it.
       reply: (_messages, _dir, index) =>
         index === 0
           ? {
-              contentChunks: ['Once ', 'upon'],
-              disconnectAfterContentChunks: 1,
+              contentChunks: ['Once ', ''],
+              holdAfterChunks: 1,
+              holdUntil: sleep(1_000),
+              disconnectAfterContentChunks: 2,
             }
           : { contentChunks: ['Once ', 'upon a time.'] },
     },
