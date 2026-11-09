@@ -202,7 +202,10 @@ written to a state file, so that network is what brings the slot back into
 cleanup on the next cycle. A permanent identity refusal (an ambiguous or
 mismatched identity) reclaims the containers the same way and keeps reporting
 the same error from the network anchor until a human reconciles; it never
-deletes a registration. A runner deletion GitHub rejects (for example while it
+deletes a registration. Because the containers are gone by the time anyone
+investigates a wedged slot, the diagnostics to inspect are the `.log` and
+`.tar` exports written to the log directory before the refusal, not a live
+container. A runner deletion GitHub rejects (for example while it
 still reports the runner busy) keeps either the slot state or, for a
 label-recovered identity, the network anchor, and is retried, instead of
 dropping the only record that can remove the registration. The identity-less
