@@ -66,7 +66,7 @@ The hook **must not be awaited inside the restore**. `PathMutexRegistry.runExclu
 
 Register an app drain that, in order: stops the refresh timer; waits for the drain's in-flight restores and admissions to settle; then releases the owner record via `releasePrWatchOwnershipSync`. Registering it through `addAppDrain` places it in `closeOnce`'s drain set, which completes before the listener closes.
 
-The wait needs a settle signal the drain does not expose today. Add an `idle()` promise to the drain state that resolves when `restoring` is empty and no admission is in flight, with a bounded timeout so a hung restore cannot block shutdown past the lifecycle's own deadline. The owner record is released **only after** that wait, so a successor never overlaps in-flight work (master §2). A daemon that never claimed releases nothing.
+The wait needs a settle signal the drain does not expose today. Add an `idle()` promise to the drain state that resolves when no tick and no restore is in flight. An admitted mark left by a failed recording write is not in-flight work — it is a retry the next owner performs — so it never holds the wait open. `idle()` itself is unbounded: `stopPrWatch` races it against a timeout, since only the caller knows its shutdown deadline. The owner record is released **only after** the wait succeeds, so a successor never overlaps in-flight work (master §2). On timeout the record is deliberately **kept** — releasing it while a restore is still admitting would let a successor deliver the same transition twice, whereas leaving it is safe because the claim sweeps a record whose process is provably gone. A daemon that never claimed releases nothing, and a record this process does not own is left alone.
 
 ### 4. Deps provisioning
 
@@ -91,7 +91,8 @@ Thread the bindings scan's `partial` flag into the observation options. The obse
 | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/serve/server/session-restore.ts` (new)        | the shared restore core, typed errors, `release()`, optional `isCancelled` and `onRestored`                           |
 | `packages/cli/src/serve/routes/session.ts`                      | route delegates to the shared core; keeps parsing, runtime resolution, telemetry, disconnect checks, response shaping |
-| `packages/cli/src/serve/server/pr-watch-drain.ts`               | `idle()` settle signal on the drain state                                                                             |
+| `packages/cli/src/serve/server/pr-watch-drain.ts`               | `idle()` settle signal on the drain state, and `stopPrWatch` (stop, wait, then release)                               |
+| `packages/cli/src/serve/server/pr-watch-store.ts`               | `releaseOwnedPrWatchSync`: release only a record this process owns                                                    |
 | `packages/cli/src/serve/server/pr-watch-gh-hosts.ts` (new)      | enumerate the daemon's `gh` configured hosts                                                                          |
 | `packages/cli/src/serve/server/pr-watch-deps.ts` (new)          | build the observation and drain deps: hosts, admission, restore mapping, ledger                                       |
 | `packages/cli/src/serve/run-qwen-serve.ts`                      | populate both seams via late-bound getters; register the shutdown drain                                               |

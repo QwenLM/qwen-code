@@ -66,7 +66,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 注册一个 app drain，依次：停止 refresh timer；等待 drain 的在途 restore 与准入落定；然后经 `releasePrWatchOwnershipSync` 释放 owner 记录。经 `addAppDrain` 注册使它进入 `closeOnce` 的 drain 集合，该集合在关闭 listener 之前完成。
 
-等待需要 drain 今天未暴露的落定信号。给 drain state 加一个 `idle()` promise，在 `restoring` 为空且无准入在途时 resolve，并带有限超时，使挂起的 restore 不会把shutdown 拖过 lifecycle 自身的 deadline。owner 记录**只在该等待之后**释放，因此后继者绝不与在途工作重叠（主 §2）。从未 claim 的 daemon 不释放任何东西。
+等待需要 drain 今天未暴露的落定信号。给 drain state 加一个 `idle()` promise，在无 tick 且无 restore 在途时 resolve。写失败留下的 admitted 标记不是在途工作——它是下一任 owner 要做的重试——因此绝不把等待卡住。`idle()` 本身无界：由 `stopPrWatch` 用超时与之赛跑，因为只有调用方知道自己的关停 deadline。owner 记录**只在等待成功之后**释放，因此后继者绝不与在途工作重叠（主 §2）。超时则刻意**保留**记录——在 restore 仍在准入时释放会让后继者把同一转换投递两次，而留着是安全的，因为 claim 会清扫进程已确证消失的记录。从未 claim 的 daemon 不释放任何东西，本进程不拥有的记录也原样留下。
 
 ### 4. deps 填充
 
@@ -91,7 +91,8 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `packages/cli/src/serve/server/session-restore.ts`（新）         | 共享 restore 核心、typed error、`release()`、可选 `isCancelled` 与 `onRestored` |
 | `packages/cli/src/serve/routes/session.ts`                       | 路由委托给共享核心；保留解析、runtime 解析、telemetry、断连检查、响应 shaping   |
-| `packages/cli/src/serve/server/pr-watch-drain.ts`                | drain state 上的 `idle()` 落定信号                                              |
+| `packages/cli/src/serve/server/pr-watch-drain.ts`                | drain state 上的 `idle()` 落定信号，以及 `stopPrWatch`（停止、等待、再释放）    |
+| `packages/cli/src/serve/server/pr-watch-store.ts`                | `releaseOwnedPrWatchSync`：只释放本进程持有的记录                               |
 | `packages/cli/src/serve/server/pr-watch-gh-hosts.ts`（新）       | 枚举 daemon 的 `gh` 已配置 hosts                                                |
 | `packages/cli/src/serve/server/pr-watch-deps.ts`（新）           | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本                       |
 | `packages/cli/src/serve/run-qwen-serve.ts`                       | 经 late-bound getter 填充两个接缝；注册关停 drain                               |

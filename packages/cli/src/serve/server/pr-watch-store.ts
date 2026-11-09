@@ -816,6 +816,29 @@ function attemptPrWatchClaimSync(
   }
 }
 
+/**
+ * Release the owner record only when this process is the owner. Shutdown holds
+ * no handle on the record a claim returned — the observation and the drain
+ * each claim independently — so it reads the file and verifies identity by the
+ * claim's own rules. A daemon that never claimed, or whose record a successor
+ * already replaced, removes nothing. The re-read inside the release is still
+ * authoritative: this outer read only decides whether to try.
+ */
+export function releaseOwnedPrWatchSync(watchDir: string): boolean {
+  if (!existsSync(watchDir)) return false;
+  const ownerFile = readOwnerFileGuardedSync(prWatchOwnerPath(watchDir));
+  if (ownerFile.kind !== 'content') return false;
+  let current: PrWatchOwnerRecord | null;
+  try {
+    current = parseOwnerRecord(JSON.parse(ownerFile.raw));
+  } catch {
+    return false;
+  }
+  if (!current || current.pid !== process.pid) return false;
+  if (!isSameProcess(current.pid, current.procStart)) return false;
+  return releasePrWatchOwnershipSync(watchDir, current);
+}
+
 /** Remove the owner record only when it is still the expected one. */
 export function releasePrWatchOwnershipSync(
   watchDir: string,

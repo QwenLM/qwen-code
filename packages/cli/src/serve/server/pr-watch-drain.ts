@@ -25,6 +25,7 @@ import {
   PR_WATCH_DELIVERED_CAP,
   prWatchFilePath,
   readPrWatchStateSync,
+  releaseOwnedPrWatchSync,
   writePrWatchStateSync,
   type PrWatchIdentity,
   type PrWatchPendingEntry,
@@ -107,15 +108,59 @@ export interface PrWatchDrainState {
   restoring: Set<string>;
   /** Recipients with a permanent Gone outcome, sessionId -> excluded-at ms. */
   gone: Map<string, number>;
+  /**
+   * Resolves once no tick and no restore is in flight, so a shutting-down
+   * owner can release its record without a successor overlapping it. An
+   * admitted mark left by a failed recording write is NOT in-flight work — it
+   * is a retry the next owner performs — so it never holds this open.
+   * Unbounded on purpose: the caller bounds it, since only the caller knows
+   * its shutdown deadline.
+   */
+  idle: () => Promise<void>;
+}
+
+interface PrWatchDrainLiveness {
+  activeTicks: number;
+  waiters: Set<() => void>;
+}
+
+/** Kept out of the public state so only this module can settle it. */
+const drainLiveness = new WeakMap<PrWatchDrainState, PrWatchDrainLiveness>();
+
+function livenessOf(state: PrWatchDrainState): PrWatchDrainLiveness {
+  let liveness = drainLiveness.get(state);
+  if (!liveness) {
+    liveness = { activeTicks: 0, waiters: new Set() };
+    drainLiveness.set(state, liveness);
+  }
+  return liveness;
+}
+
+function settleIfIdle(state: PrWatchDrainState): void {
+  const liveness = drainLiveness.get(state);
+  if (!liveness || liveness.activeTicks > 0 || state.restoring.size > 0) return;
+  for (const resolve of liveness.waiters) resolve();
+  liveness.waiters.clear();
 }
 
 export function createPrWatchDrainState(): PrWatchDrainState {
-  return {
+  const state: PrWatchDrainState = {
     retained: new Map(),
     inFlight: new Map(),
     restoring: new Set(),
     gone: new Map(),
+    idle: () =>
+      new Promise<void>((resolve) => {
+        const liveness = livenessOf(state);
+        if (liveness.activeTicks === 0 && state.restoring.size === 0) {
+          resolve();
+          return;
+        }
+        liveness.waiters.add(resolve);
+      }),
   };
+  livenessOf(state);
+  return state;
 }
 
 export interface PrWatchDrainResult {
@@ -123,6 +168,61 @@ export interface PrWatchDrainResult {
   delivered: number;
   dropped: number;
   deleted: number;
+}
+
+/** Default bound on the shutdown wait; the caller's own deadline governs. */
+export const PR_WATCH_SHUTDOWN_WAIT_MS = 5_000;
+
+export interface PrWatchShutdownOptions {
+  state: PrWatchDrainState;
+  watchDir: string;
+  /** Stops the refresh timer so no new tick can start. */
+  stopTimer: () => void;
+  timeoutMs?: number;
+  log?: (message: string) => void;
+}
+
+/**
+ * Stop the watch, let in-flight work settle, then release the owner record —
+ * in that order, so a successor never overlaps this daemon's restores and
+ * admissions (master §2).
+ *
+ * On timeout the record is deliberately KEPT. Releasing it while a restore is
+ * still admitting would let a successor claim and deliver the same transition
+ * twice; leaving it is safe because the claim sweeps a record whose process is
+ * provably gone, so the successor takes over once this process exits.
+ */
+export async function stopPrWatch(
+  options: PrWatchShutdownOptions,
+): Promise<void> {
+  const log = options.log ?? (() => {});
+  const timeoutMs = options.timeoutMs ?? PR_WATCH_SHUTDOWN_WAIT_MS;
+  options.stopTimer();
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
+  try {
+    await Promise.race([
+      options.state.idle(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  if (timedOut) {
+    log(
+      `PR watch: shutdown wait exceeded ${timeoutMs}ms with work still in flight; keeping the owner record for the successor to sweep`,
+    );
+    return;
+  }
+  if (releaseOwnedPrWatchSync(options.watchDir)) {
+    log('PR watch: released the owner record on shutdown');
+  }
 }
 
 function roleGroupOf(role: PrWatchRecipient['role']): PrWatchRoleGroup {
@@ -393,6 +493,22 @@ export async function runPrWatchDrainTick(
   deps: PrWatchDrainDeps,
   state: PrWatchDrainState,
   coveragePartial = false,
+): Promise<PrWatchDrainResult> {
+  const liveness = livenessOf(state);
+  liveness.activeTicks += 1;
+  try {
+    return await drainTick(workspaces, deps, state, coveragePartial);
+  } finally {
+    liveness.activeTicks -= 1;
+    settleIfIdle(state);
+  }
+}
+
+async function drainTick(
+  workspaces: readonly WorkspaceRuntime[],
+  deps: PrWatchDrainDeps,
+  state: PrWatchDrainState,
+  coveragePartial: boolean,
 ): Promise<PrWatchDrainResult> {
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
@@ -678,7 +794,10 @@ async function drainEntry(
           group,
           recipient,
           log,
-        ).finally(() => state.restoring.delete(recipient.sessionId));
+        ).finally(() => {
+          state.restoring.delete(recipient.sessionId);
+          settleIfIdle(state);
+        });
         break;
       }
       const promptText = buildDrainPrompt(current, entry, recipient, actions);
