@@ -979,6 +979,32 @@ function commandNodeProgram(node: ShellSyntaxNode): string {
 }
 
 /**
+ * Decode a literal shell value (a `--repo` argument) to the string Bash would
+ * pass, or undefined when it carries an expansion we cannot evaluate. Handles
+ * the quoted equals form `--repo='o/r'`, which tree-sitter spells as a
+ * `concatenation` of the `--repo=` word and a quoted value node.
+ */
+function literalShellValue(
+  node: ShellSyntaxNode | undefined,
+): string | undefined {
+  if (!node) return undefined;
+  if (node.type === 'word') return node.text;
+  if (node.type === 'raw_string') return node.text.slice(1, -1);
+  if (node.type === 'string') {
+    if (node.namedChildren.some((c) => c.type !== 'string_content')) {
+      return undefined;
+    }
+    return node.namedChildren.map((c) => c.text).join('');
+  }
+  if (node.type === 'concatenation') {
+    const parts = node.namedChildren.map(literalShellValue);
+    if (parts.some((p) => p === undefined)) return undefined;
+    return parts.join('');
+  }
+  return undefined;
+}
+
+/**
  * The text to run the execution gate over for one AST command node.
  *
  * The gate splits on shell separators without tracking quotes, so feeding it
@@ -995,7 +1021,11 @@ function createCandidateText(node: ShellSyntaxNode): string {
   const parts: string[] = [];
   for (const child of node.namedChildren) {
     if (child.type === 'command_name') {
-      parts.push(child.text);
+      // A quoted executable such as `'gh; gh pr create'` is NOT gh; copying its
+      // text verbatim lets the quote-blind gate find a create inside the name
+      // and stop the walk early. Sanitise it like an argument. Backslash and
+      // slash stay legal so path-qualified gh (incl. Windows) still matches.
+      parts.push(/[;&|`$\n'"]|\s/.test(child.text) ? 'X' : child.text);
       continue;
     }
     if (child.type === 'variable_assignment') {
@@ -1323,23 +1353,20 @@ async function resolveGhPrCreateDirectory(
               const args = node.namedChildren;
               for (let i = 0; i < args.length; i++) {
                 const arg = args[i]!;
-                let valueNode: ShellSyntaxNode | undefined;
-                let inlineValue: string | undefined;
-                if (arg.text === '--repo') {
-                  valueNode = args[i + 1];
+                if (arg.type === 'word' && arg.text === '--repo') {
+                  createRepo = literalShellValue(args[i + 1]);
                 } else if (arg.text.startsWith('--repo=')) {
-                  inlineValue = arg.text.slice('--repo='.length);
+                  // `--repo=o/r` is one word; `--repo='o/r'` is a concatenation
+                  // of the `--repo=` word and a quoted value. Decode the whole
+                  // node, then drop the prefix, so quotes are not kept.
+                  const decoded = literalShellValue(arg);
+                  createRepo =
+                    decoded === undefined
+                      ? undefined
+                      : decoded.slice('--repo='.length);
                 } else {
                   continue;
                 }
-                createRepo =
-                  inlineValue ??
-                  (valueNode?.type === 'raw_string' ||
-                  valueNode?.type === 'word'
-                    ? valueNode.text.replace(/^'(.*)'$/, '$1')
-                    : valueNode?.type === 'string'
-                      ? valueNode.namedChildren.map((c) => c.text).join('')
-                      : valueNode?.text);
                 break;
               }
               found = dir;
@@ -3144,10 +3171,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // An explicit repo naming the SAME key as the derived one (e.g.
       // `--repo o/r` in a worktree of o/r) is NOT a trigger: that is an
       // ordinary create and must keep attributing to the worktree.
-      const repoKeysBare = [
+      // `gh --repo` accepts `[HOST/]OWNER/REPO`, so the explicit value may or
+      // may not carry a host while the derived keys always do. Canonicalise
+      // BOTH sides to `host/owner/repo` (defaulting a host-less explicit value
+      // to the derived host) before deciding they differ — comparing a bare
+      // `o/r` against `github.com/o/r` would wrongly re-point a same-repo
+      // create to the launch directory.
+      const derivedHost =
+        preRunRepoKeys?.resolved?.split('/')[0] || 'github.com';
+      const canonicalRepo = (spec: string): string => {
+        const parts = spec.split('/').filter(Boolean);
+        if (parts.length >= 3) return parts.slice(-3).join('/');
+        if (parts.length === 2) return `${derivedHost}/${parts[0]}/${parts[1]}`;
+        return spec;
+      };
+      const repoKeys = [
         preRunRepoKeys?.resolved,
         preRunRepoKeys?.parent,
-      ].flatMap((key) => (key ? [key.replace(/^[^/]+\//, '')] : []));
+      ].flatMap((key) => (key ? [canonicalRepo(key)] : []));
       const explicitRepo =
         (ghPrCreateDirectory.kind === 'resolved'
           ? ghPrCreateDirectory.repository
@@ -3163,8 +3204,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         (preRunPrSnapshot?.status === 'error' &&
           findGitRoot(attributionDir) === null) ||
         (explicitRepo !== undefined &&
-          repoKeysBare.length > 0 &&
-          !repoKeysBare.includes(explicitRepo));
+          repoKeys.length > 0 &&
+          !repoKeys.includes(canonicalRepo(explicitRepo)));
       if (attributionDir !== cwd && targetsOtherRepo) {
         attributionDir = cwd;
         [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([

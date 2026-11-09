@@ -507,6 +507,38 @@ cases with controls surviving:
 Every mutation was restored from a byte-level backup; the final `shell.ts`
 SHA-256 matches the pre-mutation freeze (`5d00698edc5738c1f5880a12104c3936d91f0b92ec7b0a097a22bd5a9cf59dfc`).
 
+### Review round 5 (2026-11-09, re-review of `29d8b326b9`)
+
+The re-review confirmed the round-4 fixes and reported two new P2 binding
+regressions plus one remaining R1-1 witness. All three reproduced against the
+head with a real linked worktree before fixing.
+
+1. **Host-qualified `--repo` treated as a different repository.** The derived
+   key was reduced to bare `o/r` while the explicit value kept its host
+   (`github.com/o/r`), so `cd <worktree-of-o/r> && gh pr create --repo
+github.com/o/r` re-pointed both legs to launch and bound nothing. Both sides
+   are now canonicalised to `host/owner/repo` (a host-less explicit value
+   defaults to the derived host) before comparing.
+2. **Quoted equals-form `--repo='o/r'` kept its quotes.** tree-sitter spells it
+   as a `concatenation` of the `--repo=` word and a quoted value; the raw slice
+   stored `'o/r'` (with quotes) and the identity compare treated it as another
+   repo. A new `literalShellValue` decoder resolves word / raw_string / string /
+   concatenation to the string Bash passes, for both the separated and equals
+   forms.
+3. **R1-1 remaining witness — a quoted executable forging a create.**
+   `'gh; gh pr create' 2>/dev/null; cd <worktree> && gh pr create` stopped the
+   walk at launch because `createCandidateText` copied the `command_name`
+   verbatim and the quote-blind gate found `gh pr create` inside it. The
+   command name is now sanitised like an argument (backslash/slash stay legal so
+   path-qualified gh still matches).
+
+Round-5 verification: **475 passed** (462 unit + 13 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses Y (command-name
+sanitisation), Z (equals-form decoding) and AA (host canonicalisation) each red
+their named cases with the bare/quoted controls green; every mutation restored
+from a byte-level backup (final `shell.ts` SHA-256
+`352239efcf047ac37f931da6edd23154cff7e940f1e42fc704639a88a9688b22`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

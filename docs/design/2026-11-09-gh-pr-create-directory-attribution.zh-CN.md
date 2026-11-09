@@ -228,6 +228,16 @@ const attributionDir =
 
 每次变异都从字节级备份还原；最终 `shell.ts` 的 SHA-256 与变异前冻结一致（`5d00698edc5738c1f5880a12104c3936d91f0b92ec7b0a097a22bd5a9cf59dfc`）。
 
+### 第五轮评审（2026-11-09，复评 `29d8b326b9`）
+
+复评确认第四轮的修复，并报出两条新 P2 绑定回归与一条 R1-1 残留见证。三条都先用真实 linked worktree 对 head 复现再修。
+
+1. **带 host 的 `--repo` 被当成不同仓库。** derived key 被削成裸 `o/r`，而显式值保留 host（`github.com/o/r`），于是 `cd <o/r 的 worktree> && gh pr create --repo github.com/o/r` 把两条腿回退到启动目录、什么都没绑。现在两侧都规范化为 `host/owner/repo`（无 host 的显式值默认用 derived host）再比较。
+2. **引号等号形式 `--repo='o/r'` 保留了引号。** tree-sitter 把它拼作 `--repo=` word 与引号值的 `concatenation`；裸 slice 存下带引号的 `'o/r'`，身份比较把它当成另一个仓库。新增 `literalShellValue` 解码器把 word / raw_string / string / concatenation 解析为 Bash 实际传入的字符串，分离与等号两种形式都覆盖。
+3. **R1-1 残留见证——引号可执行文件伪造 create。** `'gh; gh pr create' 2>/dev/null; cd <worktree> && gh pr create` 之所以停在启动目录，是因为 `createCandidateText` 原样拷贝 `command_name`，不认引号的闸门在其中找到了 `gh pr create`。现在命令名与参数一样被净化（反斜杠/斜杠仍合法，路径限定的 gh 仍能匹配）。
+
+第五轮验证：**475 passed**（462 单测 + 13 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 Y（命令名净化）、Z（等号解码）、AA（host 规范化）各自杀掉点名用例且裸名/引号对照绿；每次从字节级备份还原（最终 `shell.ts` SHA-256 `352239efcf047ac37f931da6edd23154cff7e940f1e42fc704639a88a9688b22`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

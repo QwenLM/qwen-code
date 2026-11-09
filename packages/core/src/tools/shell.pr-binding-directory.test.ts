@@ -256,6 +256,21 @@ describe.skipIf(process.platform === 'win32')(
       expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
     });
 
+    it.each(['--repo github.com/o/r', "--repo='o/r'"])(
+      'binds a same-repo create spelled %s',
+      async (repoArg) => {
+        // gh --repo accepts [HOST/]OWNER/REPO; a host-qualified or quoted-equals
+        // spelling of the worktree's OWN repo must not be mistaken for a
+        // different repository and re-pointed to the launch branch.
+        const result = await run(
+          `cd '${worktree}' && gh pr create ${repoArg} --fill`,
+        );
+        expect(result.error).toBeUndefined();
+        const prs = await waitForSidecar();
+        expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+      },
+    );
+
     it('binds a single-quoted worktree path containing a space', async () => {
       // A space is the ordinary reason to quote a path at all, and
       // tree-sitter spells single quotes as `raw_string` rather than

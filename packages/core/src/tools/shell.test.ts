@@ -1286,6 +1286,9 @@ describe('ShellTool', () => {
         ["--repo 'o/r'", 'a single-quoted repo flag'],
         ['--repo "o/r"', 'a double-quoted repo flag'],
         ['--repo=o/r', 'an equals-form repo flag'],
+        ["--repo='o/r'", 'a single-quoted equals-form repo flag'],
+        ['--repo="o/r"', 'a double-quoted equals-form repo flag'],
+        ['--repo github.com/o/r', 'a host-qualified repo flag'],
         [
           "--body 'explains --repo someone/else'",
           'a repo-looking flag inside the PR body',
@@ -1293,6 +1296,19 @@ describe('ShellTool', () => {
       ])('keeps %s attribution in the worktree: %s', async (args) => {
         mockCreatedPr(77);
         await runShell(`cd /test/dir/nested && gh pr create ${args}`, PR_77);
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('does not stop on a quoted executable that merely names gh pr create', async () => {
+        // `'gh; gh pr create'` is a nonexistent quoted program, not gh. Copying
+        // the command_name verbatim let the quote-blind gate find a create
+        // inside it and stop the walk at launch; the real create in the
+        // worktree then went unbound with no notice.
+        mockCreatedPr(77);
+        await runShell(
+          "'gh; gh pr create' 2>/dev/null; cd /test/dir/nested && gh pr create --fill",
+          PR_77,
+        );
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
