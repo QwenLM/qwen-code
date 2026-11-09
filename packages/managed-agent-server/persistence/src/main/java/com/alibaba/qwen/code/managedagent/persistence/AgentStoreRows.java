@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -144,7 +145,7 @@ final class AgentStoreRows {
     static String sessionOperationKey(String tenantId, String sessionId, OperationKind kind, String operationId) {
         return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), operationId);
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), operationId);
     }
 
     long lifecycleDatabaseTime() {
@@ -299,7 +300,7 @@ final class AgentStoreRows {
         String configRef = result.getString("workspace_config_ref");
         String policyRef = result.getString("workspace_policy_ref");
         String contextConfigRef = result.getString("context_config_ref");
-        if (!ManagedWorkspaceRegistry.descriptorRef(configRef, policyRef)
+        if (!JdbcManagedWorkspaceRegistry.descriptorRef(configRef, policyRef)
                 .equals(contextConfigRef)) {
             throw new IllegalStateException(
                     "Persisted Workspace configuration descriptor changed for session "

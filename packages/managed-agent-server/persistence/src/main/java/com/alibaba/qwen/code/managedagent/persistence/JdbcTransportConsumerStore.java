@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.TransportConsumerStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,13 +26,13 @@ import java.util.Set;
  * recovery scan finds committed unconsumed inputs after writer loss even when a notice was already
  * claimed.
  */
-public class TransportConsumerStore
-        implements com.alibaba.qwen.code.managedagent.repository.TransportConsumerStore {
+public class JdbcTransportConsumerStore
+        implements TransportConsumerStore {
     private static final int HELD_CHUNK = 200;
 
     private final JdbcTemplate jdbc;
 
-    public TransportConsumerStore(JdbcTemplate jdbc) {
+    public JdbcTransportConsumerStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 

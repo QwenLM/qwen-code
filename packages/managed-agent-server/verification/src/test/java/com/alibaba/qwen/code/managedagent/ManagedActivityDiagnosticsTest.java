@@ -4,9 +4,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityD
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedSessionActivityService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -38,8 +39,8 @@ class ManagedActivityDiagnosticsTest {
     private static final String SESSION = "activity-session";
     private final ObjectMapper json = new ObjectMapper();
     private ManagedSchemaJdbcTemplate jdbc;
-    private ManagedSessionStore sessions;
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedSessionStore sessions;
+    private JdbcManagedExtensionRecordStore records;
     private TransactionTemplate transactions;
     private ExtensionRecordJournal journal;
 
@@ -54,7 +55,7 @@ class ManagedActivityDiagnosticsTest {
         DataSource source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        records = new ManagedExtensionRecordStore(jdbc);
+        records = new JdbcManagedExtensionRecordStore(jdbc);
         sessions = VerificationFixtures.managedSessionStore(jdbc, records);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 1, 1)", TENANT, SESSION);
@@ -95,7 +96,7 @@ class ManagedActivityDiagnosticsTest {
         assertThat(records.findActivityStatistics("other-tenant", SESSION)).isNull();
         assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, SESSION)).isEqualTo(4);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE task_kind IS NOT NULL", Integer.class)).isZero();
-        ManagedExtensionRecordStore restarted = new ManagedExtensionRecordStore(jdbc);
+        JdbcManagedExtensionRecordStore restarted = new JdbcManagedExtensionRecordStore(jdbc);
         assertThat(restarted.findActivityStatistics(TENANT, SESSION)).isEqualTo(summary);
     }
 
@@ -248,7 +249,7 @@ class ManagedActivityDiagnosticsTest {
     @Test
     void paginationBoundsCandidateScanningAndAdvancesPastNewMembers() {
         commitRequests();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         String resource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE session_id = ? AND domain = ? LIMIT 1",
                 String.class, SESSION, ManagedActivityDiagnostics.TOOLS);
         for (int index = 0; index < 512; index++) {

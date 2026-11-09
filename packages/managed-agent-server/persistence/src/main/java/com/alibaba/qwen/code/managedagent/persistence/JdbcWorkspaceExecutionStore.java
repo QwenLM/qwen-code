@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -24,8 +25,8 @@ import java.sql.SQLException;
 import java.util.List;
 
 @Repository
-public class WorkspaceExecutionStore
-        implements com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore {
+public class JdbcWorkspaceExecutionStore
+        implements WorkspaceExecutionStore {
     private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
     @org.springframework.beans.factory.annotation.Autowired
     public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
@@ -36,7 +37,7 @@ public class WorkspaceExecutionStore
     private final ResidentWorkspaces residents;
 
     @Autowired
-    public WorkspaceExecutionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+    public JdbcWorkspaceExecutionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
             com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties) {
         this.jdbc = jdbc;
@@ -45,7 +46,7 @@ public class WorkspaceExecutionStore
         this.residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
     }
 
-    public WorkspaceExecutionStore(JdbcTemplate jdbc,
+    public JdbcWorkspaceExecutionStore(JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
@@ -53,7 +54,7 @@ public class WorkspaceExecutionStore
         this.residents = new ResidentWorkspaces(List.of());
     }
 
-    public WorkspaceExecutionStore(JdbcTemplate jdbc,
+    public JdbcWorkspaceExecutionStore(JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
@@ -74,7 +75,7 @@ public class WorkspaceExecutionStore
         var selected = residents.find(binding);
         if (selected == null || !com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.selects(session.getSession().getScope())
                 || !ResidentWorkspaces.scope(selected).equals(session.getSession().getScope())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         ResidentWorkspaces.requireRegistration(jdbc, selected);
         var rows = jdbc.query("SELECT rs.runtime_session_id, b.resource_handle_json, o.csi_revision, o.csi_reservation_id"
@@ -104,7 +105,7 @@ public class WorkspaceExecutionStore
         var storage = ResidentWorkspaces.heldStorage(held.handle());
         if (!Long.toString(held.revision()).equals(storage.get("reservationRevision"))
                 || !held.reservationId().equals(storage.get("reservationId"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -119,7 +120,7 @@ public class WorkspaceExecutionStore
 
     public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         try {
-            WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+            JdbcWorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
         } catch (ManagedAgentException error) {
             throw new RuntimeBrokerException(error.getStatus(), error.getCode(), error.getMessage(), false, error);
         }
@@ -130,8 +131,8 @@ public class WorkspaceExecutionStore
     }
 
     public void authorizeLegacyClose(SessionRecord session) {
-        if (!WorkspaceLifecycleStore.legacyClose(jdbc, session.tenantId(), session.sessionId())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        if (!JdbcWorkspaceLifecycleStore.legacyClose(jdbc, session.tenantId(), session.sessionId())) {
+            throw WorkspaceExecutionStore.unavailable();
         }
         authorizePassiveAttachment(session, null, true);
         if (storageGuard != null && residents.find(session.workspace()) == null) {
@@ -176,7 +177,7 @@ public class WorkspaceExecutionStore
                         + " AND is_submission_attempted = TRUE AND harness_event_epoch IS NOT NULL"
                         + " AND dispatch_owner = ? AND dispatch_lease_until >= " + ManagedSchemaTime.SQL_NOW,
                         Long.class, session.tenantId(), session.sessionId(), turnId, dispatchOwner) != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         authorizeAttachment(session, false, false, null, false, true);
     }
@@ -218,7 +219,7 @@ public class WorkspaceExecutionStore
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (!cancellation && !committedStop && authority == null && !legacyClose) {
             requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
@@ -230,7 +231,7 @@ public class WorkspaceExecutionStore
             if (!WorkspaceToolProfiles.FILES.equals(session.toolProfile())
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                             + " AND parent_session_id IS NULL", Long.class, session.tenantId(), session.sessionId()) != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             ResidentWorkspaces.requireRegistration(jdbc, resident);
         }
@@ -316,13 +317,13 @@ public class WorkspaceExecutionStore
                 cancellation || committedStop ? new Object[] {session.tenantId(), session.sessionId()}
                         : new Object[] {executionActor, session.tenantId(), session.sessionId()});
         if (grants.size() != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (grants.getFirst() == 1) {
-            throw actionResponse ? com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailablePendingGrant() : com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw actionResponse ? WorkspaceExecutionStore.unavailablePendingGrant() : WorkspaceExecutionStore.unavailable();
         }
         if (grants.getFirst() != 2) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -330,18 +331,18 @@ public class WorkspaceExecutionStore
         java.util.Set<String> visited = new java.util.HashSet<>();
         String current = sessionId;
         while (visited.add(current)) {
-            SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenantId, current);
+            JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenantId, current);
             var parents = jdbc.query("SELECT parent_session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     (row, index) -> row.getString(1), tenantId, current);
             if (parents.size() != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (parents.getFirst() == null) {
                 return;
             }
             current = parents.getFirst();
         }
-        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        throw WorkspaceExecutionStore.unavailable();
     }
 
     static byte[] inheritedExecutionActor(JdbcTemplate jdbc, ContextBinding binding, String sessionId) {
@@ -352,7 +353,7 @@ public class WorkspaceExecutionStore
                     + " workspace_id, workspace_generation, workspace_storage_id FROM ma_session"
                     + " WHERE tenant_id = ? AND session_id = ?", binding.getTenantId(), current);
             if (rows.size() != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             var row = rows.getFirst();
             if (!binding.getTenantId().equals(row.get("tenant_id")) || !current.equals(row.get("session_id"))
@@ -360,18 +361,18 @@ public class WorkspaceExecutionStore
                     || !(row.get("workspace_generation") instanceof Number generation)
                     || binding.getWorkspaceGeneration() != generation.longValue()
                     || !binding.getStorageId().equals(row.get("workspace_storage_id"))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             String parent = (String) row.get("parent_session_id");
             if (parent == null) {
                 if (!(row.get("creator_actor_key") instanceof byte[] actor)) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
                 return actor;
             }
             current = parent;
         }
-        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        throw WorkspaceExecutionStore.unavailable();
     }
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
@@ -388,7 +389,7 @@ public class WorkspaceExecutionStore
                 + " AND mount_state = 'READY' AND storage_kind IN ('LOCAL', 'SSH_LOCAL')",
                 (row, index) -> row.getLong("mount_revision"), key);
         if (revisions.size() != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         long mountRevision = revisions.getFirst();
         if (storageGuard != null) {
@@ -400,7 +401,7 @@ public class WorkspaceExecutionStore
     private void admit(ContextBinding binding, RuntimeSessionRecord session, String key, long mountRevision) {
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!key.equals(storageKey(binding))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
         List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state, is_drain_requested,"
@@ -414,7 +415,7 @@ public class WorkspaceExecutionStore
                         && Long.toString(binding.getWorkspaceGeneration()).equals(row.getString("workspace_generation"))
                         && binding.getStorageId().equals(row.getString("storage_id")), session.getBindingId());
         if (live.size() != 1 || !live.getFirst()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         List<String> held = jdbc.query("SELECT binding_id, runtime_generation, runtime_session_id,"
                 + " harness_session_id, session_state, execution_storage_key FROM ma_runtime_session"
@@ -426,13 +427,13 @@ public class WorkspaceExecutionStore
                             || !session.getSession().getHarnessSessionId().equals(row.getString("harness_session_id"))
                             || (!"ACQUIRING".equals(row.getString("session_state"))
                                     && !"READY".equals(row.getString("session_state")))) {
-                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                        throw WorkspaceExecutionStore.unavailable();
                     }
                     return row.getString("execution_storage_key");
                 },
                 session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId());
         if (held.size() != 1 || (held.getFirst() != null && !key.equals(held.getFirst()))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (!directoryAdmits(key)) {
             throw busy();
@@ -450,7 +451,7 @@ public class WorkspaceExecutionStore
                 + " AND session_state IN ('ACQUIRING', 'READY') AND execution_storage_key IS NULL",
                 key, session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(),
                 session.getSession().getHarnessSessionId()) != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -473,7 +474,7 @@ public class WorkspaceExecutionStore
         transaction.executeWithoutResult(status -> {
             String key = storageKey(binding);
             if (!isHeld(binding, session) || !directoryAdmits(key)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (jdbc.update("UPDATE ma_runtime_session SET is_rewind_pending = TRUE WHERE binding_id = ?"
                     + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?"
@@ -484,7 +485,7 @@ public class WorkspaceExecutionStore
                     throw new RuntimeBrokerException(409, "workspace_rewind_recovery_required",
                             "An earlier Workspace rewind has an unconfirmed outcome.", false);
                 }
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         });
     }
@@ -555,7 +556,7 @@ public class WorkspaceExecutionStore
                 requireResidentHeld(binding, session, true);
                 if (session.getState() != RuntimeSessionRecord.State.RELEASING
                         && session.getState() != RuntimeSessionRecord.State.RELEASED) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
             });
             return;
@@ -571,7 +572,7 @@ public class WorkspaceExecutionStore
                                     || "DRAINING".equals(row.getString("binding_state"))),
                     session.getBindingId());
             if (live.size() != 1 || !live.getFirst()) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (!stopped && !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?"
@@ -613,7 +614,7 @@ public class WorkspaceExecutionStore
             List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_operation WHERE operation_key = ? AND operation_kind = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + " FOR UPDATE",
                     Long.class, WorkspaceOperations.key(kind, binding.getTenantId(), maintenanceId), kind.name());
             if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
@@ -705,7 +706,7 @@ public class WorkspaceExecutionStore
     public void releaseLost(RuntimeBindingRecord saved) {
         if (!saved.getRequest().isManagedContext() || saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.hasStoppedWriters() || saved.getOperationOwner() == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, saved.getRequest().getScope().getTenantId());
@@ -734,7 +735,7 @@ public class WorkspaceExecutionStore
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id = ?"
                             + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED')",
                             Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             var memberKeys = jdbc.queryForList("SELECT execution_storage_key FROM ma_runtime_session"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key IS NOT NULL FOR UPDATE",
@@ -743,13 +744,13 @@ public class WorkspaceExecutionStore
                 return;
             }
             if (key == null || memberKeys.stream().anyMatch(member -> !key.equals(member))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding WHERE binding_id = ?"
                     + " AND runtime_generation = ? AND operation_owner = ? AND operation_generation = ?"
                     + " AND operation_lease_until > " + ManagedSchemaTime.SQL_NOW, Long.class, saved.getBindingId(),
                     saved.getGeneration(), saved.getOperationOwner(), saved.getOperationGeneration()) != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key = ?",
@@ -770,13 +771,13 @@ public class WorkspaceExecutionStore
     // A probe's momentary I/O failure is not the structural verdict the
     // terminal refusal promises: it retries through the delivery machine,
     // keeping the cause for the log. Structural refusals keep
-    // com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable().
+    // WorkspaceExecutionStore.unavailable().
 
     // A creation grant or the registry state changes under operator
     // control: refusing a committed decision over it is not the
-    // structural verdict of com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(), and the delivery machine must
+    // structural verdict of WorkspaceExecutionStore.unavailable(), and the delivery machine must
     // retry so a restored grant still reaches the Harness. Structural
-    // refusals keep com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable().
+    // refusals keep WorkspaceExecutionStore.unavailable().
 
     static RuntimeBrokerException busy() {
         return new RuntimeBrokerException(409, "workspace_busy",
@@ -785,7 +786,7 @@ public class WorkspaceExecutionStore
 
     static void releaseMembers(JdbcTemplate jdbc, String storageKey, int count) {
         if (count > 0 && jdbc.update(RELEASE_MEMBERS, count, storageKey, count) != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -799,7 +800,7 @@ public class WorkspaceExecutionStore
             statement.setString(2, storageKey);
             statement.setInt(3, count);
             if (statement.executeUpdate() != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         }
     }
@@ -809,12 +810,12 @@ public class WorkspaceExecutionStore
     }
 
     private String storageKey(String tenant, String storage) {
-        String ssh = SshWorkspaceStore.physicalKey(jdbc, tenant, storage);
+        String ssh = JdbcSshWorkspaceStore.physicalKey(jdbc, tenant, storage);
         return ssh == null ? LocalStorageOwners.key(jdbc, tenant, storage) : ssh;
     }
 
     static String storageKey(JdbcTemplate jdbc, ContextBinding binding) {
-        String ssh = SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId());
+        String ssh = JdbcSshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId());
         return ssh == null ? LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId()) : ssh;
     }
 

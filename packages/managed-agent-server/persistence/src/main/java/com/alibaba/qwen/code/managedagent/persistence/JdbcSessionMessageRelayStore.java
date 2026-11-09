@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.lang3.StringUtils;
@@ -17,8 +19,8 @@ import java.util.List;
  * never authorize a second one.
  */
 @Repository
-public class SessionMessageRelayStore
-        implements com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore {
+public class JdbcSessionMessageRelayStore
+        implements SessionMessageRelayStore {
     /** The failed steps after which the relay gives an entry up. */
 
     /** Over a ledger row `l` joined to its entry: the row still owes work —
@@ -92,7 +94,7 @@ public class SessionMessageRelayStore
 
     private final JdbcTemplate jdbc;
 
-    public SessionMessageRelayStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcSessionMessageRelayStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
@@ -133,7 +135,7 @@ public class SessionMessageRelayStore
                 (result, row) -> new CurrentRecord(
                         result.getString("delivery_state"),
                         result.getString("record_resource_id")),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -145,7 +147,7 @@ public class SessionMessageRelayStore
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = ? AND record_id = ?",
                 (result, row) -> result.getString("delivery_state"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -163,7 +165,7 @@ public class SessionMessageRelayStore
     }
 
     private static String deliveryKey(String tenant, String sender, String message) {
-        return ManagedSchemaKeys.key("delivery", "SESSION_MESSAGE", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sender), message);
+        return ManagedSchemaKeys.key("delivery", "SESSION_MESSAGE", ManagedSessionStore.sessionScopeKey(tenant, sender), message);
     }
 
     /** Whether an older command of the same sender is still unclassified:
@@ -194,7 +196,7 @@ public class SessionMessageRelayStore
                         + " AND (l.transport_state IS NULL"
                         + " OR l.transport_state NOT IN ('done', 'unknown', 'orphaned'))"
                         + " LIMIT 1",
-                (result, row) -> result.getInt(1), commandId, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId,
+                (result, row) -> result.getInt(1), commandId, ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId,
                 senderSessionId).isEmpty();
     }
 
@@ -222,14 +224,14 @@ public class SessionMessageRelayStore
                         + " AND r.delivery_state IN ('planned', 'accepting', 'unknown')"
                         + " AND " + LEDGER_OWES_WORK,
                 (result, row) -> result.getString("record_resource_id"), messageId,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId, senderSessionId);
+                ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId), tenantId, senderSessionId);
     }
 
     /** Insert-or-claim: returns the row this worker now owns, or null when
      * another live claim holds it. */
     public MessageRow claim(String tenantId, String senderSessionId,
             String messageId, String owner, long leaseUntil, long now) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, senderSessionId);
         String key = deliveryKey(tenantId, senderSessionId, messageId);
         jdbc.update("INSERT IGNORE INTO ma_delivery (delivery_key, delivery_kind, tenant_id, source_scope_key,"
                         + " source_session_id, delivery_id, payload_json, transport_state, reception_state,"

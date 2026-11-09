@@ -62,7 +62,7 @@ class ToolPublicationAcknowledgementTest {
     private static final String PRODUCER_TOKEN = Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]);
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
-    private ManagedSessionStore sessions;
+    private JdbcManagedSessionStore sessions;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository runtimeSessions;
     private JdbcToolExecutionRepository executions;
@@ -111,7 +111,7 @@ class ToolPublicationAcknowledgementTest {
             public void validateConfiguration() { }
         };
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
-                new ManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
         runtimeSessions = new JdbcRuntimeSessionRepository(source);
