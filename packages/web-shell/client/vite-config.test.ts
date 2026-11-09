@@ -10,6 +10,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
 import { preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
@@ -19,6 +20,7 @@ import viteConfig, {
   MANAGED_AGENT_JAVA_ROUTE_PROXY,
   MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
   probeAddress,
+  probeDaemonTarget,
   probeHostname,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
@@ -321,18 +323,17 @@ describe('Web Shell launcher-supplied open path', () => {
 });
 
 describe('Web Shell daemon proxy failure', () => {
-  function emitProxyError(res: unknown) {
+  function emitProxyError(
+    res: unknown,
+    error: Error & { code?: string } = Object.assign(
+      new Error('connect ECONNREFUSED'),
+      { code: 'ECONNREFUSED' },
+    ),
+  ) {
     const options = loadConfig().server?.proxy?.['/session'] as ProxyOptions;
     const proxy = new EventEmitter();
     (options.configure as (proxy: EventEmitter) => void)(proxy);
-    proxy.emit(
-      'error',
-      Object.assign(new Error('connect ECONNREFUSED'), {
-        code: 'ECONNREFUSED',
-      }),
-      {} as IncomingMessage,
-      res,
-    );
+    proxy.emit('error', error, {} as IncomingMessage, res);
   }
 
   it('answers an unreachable daemon with a labeled 502 instead of an empty 500', () => {
@@ -354,8 +355,33 @@ describe('Web Shell daemon proxy failure', () => {
     // the target and errno must live there, not under a machine token.
     expect(body.error).toContain('ECONNREFUSED');
     // The fixture error names no address, so only the target clause can
-    // supply it.
-    expect(body.error).toContain('http://127.0.0.1:4170');
+    // supply it. Compare against the expression the config resolves, so an
+    // exported QWEN_DAEMON_URL does not turn this file red.
+    const target =
+      process.env['QWEN_DAEMON_URL']?.trim() || 'http://127.0.0.1:4170';
+    expect(body.error).toContain(target);
+  });
+
+  // ECONNREFUSED alone cannot tell the classifier apart from the old
+  // hardcoded body; drive the real handler with a reset so the
+  // present-but-broken branch is pinned end to end.
+  it('attributes a mid-request reset through the real proxy handler', () => {
+    const res = {
+      headersSent: false,
+      writableEnded: false,
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+
+    emitProxyError(
+      res,
+      Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+    );
+
+    const body = JSON.parse(String(res.end.mock.calls[0]?.[0]));
+    expect(body.code).toBe('daemon_proxy_error');
+    expect(body.error).not.toContain('No daemon answered');
+    expect(body.error).toContain('ECONNRESET');
   });
 
   it('leaves an already-answered response alone', () => {
@@ -380,7 +406,7 @@ describe('Web Shell daemon proxy failure', () => {
 
   // A daemon that accepts the connection and then resets it is present, so
   // neither the token nor the sentence may claim nothing was listening.
-  it.each(['ECONNRESET', 'ETIMEDOUT', 'EPIPE'])(
+  it.each(['ECONNRESET', 'EPIPE'])(
     'does not call a present-but-broken daemon unreachable (%s)',
     (code) => {
       const failure = daemonProxyFailure(
@@ -395,18 +421,25 @@ describe('Web Shell daemon proxy failure', () => {
     },
   );
 
-  it.each(['ENOTFOUND', 'EHOSTUNREACH'])(
-    'still reports an absent daemon as unreachable (%s)',
-    (code) => {
-      const failure = daemonProxyFailure(
-        'http://daemon.internal:4170',
-        Object.assign(new Error(`getaddrinfo ${code}`), { code }),
-      );
+  // The proxy sets no read timeout, so these codes all mean nothing was
+  // reached: a refused/dropped connect or a failed lookup, never a daemon
+  // that received the request.
+  it.each([
+    'ENOTFOUND',
+    'EHOSTUNREACH',
+    'ETIMEDOUT',
+    'EAI_AGAIN',
+    'ENETDOWN',
+    'EHOSTDOWN',
+  ])('still reports an absent daemon as unreachable (%s)', (code) => {
+    const failure = daemonProxyFailure(
+      'http://daemon.internal:4170',
+      Object.assign(new Error(`getaddrinfo ${code}`), { code }),
+    );
 
-      expect(failure.code).toBe('daemon_unreachable');
-      expect(failure.error).toContain('No daemon answered');
-    },
-  );
+    expect(failure.code).toBe('daemon_unreachable');
+    expect(failure.error).toContain('No daemon answered');
+  });
 });
 
 describe('Web Shell daemon probe address', () => {
@@ -421,6 +454,43 @@ describe('Web Shell daemon probe address', () => {
     ['http://[::1]:51840', { host: '::1', port: 51840 }],
   ])('probes %s on the authority the proxy dials', (target, expected) => {
     expect(probeAddress(target)).toEqual(expected);
+  });
+});
+
+describe('Web Shell daemon probe call site', () => {
+  function fakeConnect() {
+    return vi.fn(() => {
+      const probe = new EventEmitter() as EventEmitter & Partial<Socket>;
+      probe.destroy = vi.fn();
+      probe.setTimeout = vi.fn();
+      return probe as unknown as Socket;
+    });
+  }
+
+  // Pins probeDaemonTarget itself, not only probeAddress: reverting the
+  // call site to `url.hostname` / `Number(url.port || 4170)` must go red.
+  it.each([
+    ['http://127.0.0.1', { host: '127.0.0.1', port: 80 }],
+    ['http://[::1]:51840', { host: '::1', port: 51840 }],
+  ])('dials the proxy authority for %s', (target, expected) => {
+    const connect = fakeConnect();
+
+    probeDaemonTarget(target, connect);
+
+    expect(connect).toHaveBeenCalledExactlyOnceWith(
+      expected,
+      expect.any(Function),
+    );
+  });
+
+  it('probes each target only once per process', () => {
+    const connect = fakeConnect();
+    const target = 'http://127.0.0.1:45999';
+
+    probeDaemonTarget(target, connect);
+    probeDaemonTarget(target, connect);
+
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 });
 

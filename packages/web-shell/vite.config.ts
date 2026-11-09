@@ -38,18 +38,19 @@ const probedTargets = new Set<string>();
 // One probe per dev server, not per request: an unreachable daemon is not
 // fatal (the E2E suites mock it per page), but the operator learns about it
 // at startup instead of through a suite of slow browser timeouts.
-function probeDaemonTarget(): void {
+export function probeDaemonTarget(
+  target: string = daemonTarget,
+  connect: typeof createConnection = createConnection,
+): void {
   // One probe per target per process: a run that starts several servers
   // against the same daemon learns nothing from repeating it.
-  if (probedTargets.has(daemonTarget)) return;
-  probedTargets.add(daemonTarget);
-  const probe = createConnection(probeAddress(daemonTarget), () =>
-    probe.destroy(),
-  );
+  if (probedTargets.has(target)) return;
+  probedTargets.add(target);
+  const probe = connect(probeAddress(target), () => probe.destroy());
   const unreachable = () => {
     probe.destroy();
     console.warn(
-      `[web-shell] no daemon is listening at ${daemonTarget}; proxied ` +
+      `[web-shell] no daemon is listening at ${target}; proxied ` +
         'daemon routes answer 502 until one is started (page-level E2E ' +
         'mocks are unaffected)',
     );
@@ -58,13 +59,19 @@ function probeDaemonTarget(): void {
   probe.once('error', unreachable);
 }
 
-// A refused connection means nothing is listening; a reset or a timeout means
-// a daemon is there but did not answer. Only the first is `daemon_unreachable`.
+// A refused connection, a failed lookup, or a connect-phase timeout means
+// nothing was listening; a reset mid-request means a daemon is there but did
+// not answer. Only the former is `daemon_unreachable`. The proxy sets no
+// read timeout, so ETIMEDOUT here can only come from the connect phase.
 const DAEMON_ABSENT_ERRNOS = new Set([
   'ECONNREFUSED',
   'ENOTFOUND',
   'EHOSTUNREACH',
   'ENETUNREACH',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ENETDOWN',
+  'EHOSTDOWN',
 ]);
 
 export function daemonProxyFailure(
