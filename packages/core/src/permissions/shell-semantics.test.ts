@@ -1303,3 +1303,74 @@ describe('amendSegmentsForExemption HEAD-movement allowlist (#16075 R15-2)', () 
     expect(analysis.kind).toBe('segments');
   });
 });
+
+// ── #16075 R17-1: silent-allow constructs fail closed ─────────────────────
+describe('amend guard fail-closed witnesses (#16075 R17-1)', () => {
+  it.each([
+    'echo $((1<<2)); X=git; $X commit --amend',
+    'cat <<E\\OF\ndata\nE\\OF\nX=git; $X commit --amend',
+    'IFS+=:; X="git:commit:--amend"; $X',
+    "script /tmp/x.log -c $'git commi\\x74 --amend'",
+    'X=ls; for X in git; do :; done; $X commit --amend',
+    "X='env git'; $X${Z} commit --amend",
+    'X=git; Y=--; Z=amend; $X commit $Y$Z',
+    'bash <<< "$(echo \'git commit --am\')end"',
+    "printf '%s' g 'it commit --amend' | bash",
+    "GIT_CONFIG_PARAMETERS=\"'alias.x=commit --amend'\" bash -c 'git x --no-edit'",
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0="commit --amend" git x',
+    "echo 'ref: refs/heads/main' > .git/HEAD && git commit --amend --no-edit",
+  ])('recognises the amend instead of silently allowing: %s', (command) => {
+    expect(classifyGitAmend(command)).not.toBe('none');
+  });
+
+  it.each([
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    "echo 'git commit --amend'",
+    'git status',
+    'echo $((1<<2))',
+    "printf '%s\\n' 'plain text' | cat",
+  ])('keeps the certified inert forms allowed: %s', (command) => {
+    expect(classifyGitAmend(command)).toBe('none');
+  });
+
+  it('keeps the pinned pass-through pipe blocked', () => {
+    expect(
+      classifyGitAmend("echo 'git commit --amend --no-edit' | cat | bash"),
+    ).toBe('invocation');
+  });
+
+  it('treats fetch --update-head-ok as a HEAD movement', () => {
+    expect(
+      amendSegmentsForExemption(
+        'git fetch --update-head-ok . +refs/heads/w:refs/heads/main && git commit --amend',
+        CWD,
+      ),
+    ).toEqual({ kind: 'untrackable', headMayMove: true });
+  });
+
+  it('keeps a plain fetch HEAD-neutral', () => {
+    const analysis = amendSegmentsForExemption(
+      'git fetch origin main && git commit --amend --no-edit',
+      CWD,
+    );
+    expect(analysis.kind).toBe('segments');
+  });
+
+  it('propagates a HEAD movement out of a carrier', () => {
+    expect(
+      amendSegmentsForExemption(
+        "bash -c 'git update-ref HEAD HEAD~1' && git commit --amend",
+        CWD,
+      ),
+    ).toEqual({ kind: 'untrackable', headMayMove: true });
+  });
+
+  it('refuses to attribute a cd that only runs inside a loop body', () => {
+    expect(
+      amendSegmentsForExemption(
+        'while false; do cd /session/repo; done && git commit --amend',
+        CWD,
+      ).kind,
+    ).toBe('untrackable');
+  });
+});
