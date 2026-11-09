@@ -1109,11 +1109,15 @@ When the daemon runs on a remote pod (no shared display with you), a client can
 trigger an OAuth device flow over HTTP. The daemon polls the IdP itself; your job
 is just to open a URL on whatever device has a browser.
 
+For new setups, use [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) with a Plus or Pro subscription. Use the same Qwen account for the subscription and browser authorization.
+
+1. Start sign-in with `POST /auth/subscription/flows?paywallScene=cli`. Keep the `id` from the response.
+2. Poll `GET /auth/subscription/flows/:id`. Open `authorizationUrl` when it appears and complete sign-in in the browser.
+3. When the flow reaches `ready`, call `POST /workspaces/:workspace/auth/subscription` for the workspace that will use the subscription.
+
 > [!note]
 >
-> Qwen OAuth free tier was discontinued on 2026-04-15. The `qwen-oauth`
-> examples below document the device-flow protocol shape and legacy provider
-> identifier; new setups should use a currently supported auth provider.
+> Qwen OAuth free tier was discontinued on 2026-04-15. The `qwen-oauth` examples below are a reference for the legacy device-flow protocol.
 
 ```bash
 # 1. Start a flow. The daemon contacts the IdP, returns a code + URL.

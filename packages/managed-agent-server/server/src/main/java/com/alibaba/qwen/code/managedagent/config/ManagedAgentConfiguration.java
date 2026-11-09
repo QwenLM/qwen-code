@@ -26,6 +26,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
     ManagedArtifactConfiguration.class,
     ToolPublicationConfiguration.class,
     EventTransportConfiguration.class,
+    ManagedMemoryConfiguration.class,
     AliyunToolPublicationStorageAutoConfiguration.class
 })
 @ComponentScan(
@@ -38,6 +39,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
             "com.alibaba.qwen.code.managedagent.automation",
             "com.alibaba.qwen.code.managedagent.event",
             "com.alibaba.qwen.code.managedagent.session",
+            "com.alibaba.qwen.code.managedagent.memory",
             "com.alibaba.qwen.code.managedagent.persistence",
             "com.alibaba.qwen.code.managedagent.adapters.extensions"
         },

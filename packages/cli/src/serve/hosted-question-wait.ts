@@ -78,7 +78,7 @@ export function questionWaitDefinitionAdmitted(
 
 export async function acquireHostedQuestionRuntime(
   broker: HostedWorkspaceBroker,
-  original: HostedApprovalContinuation['runtime'],
+  original: NonNullable<HostedApprovalContinuation['runtime']>,
   signal: AbortSignal,
   expiresAt?: number,
 ): Promise<boolean> {

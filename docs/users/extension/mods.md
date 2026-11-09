@@ -136,8 +136,8 @@ this recovery exception.
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless and Ink sessions, those a Mod submits, described in [Turn events](#turn-events)      |
-| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs and the Ink terminal, described in [Submitted prompts](#submitted-prompts)   |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                     |
+| Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                          |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
 | Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
@@ -466,7 +466,7 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`, and in OpenTUI `methods` does not list `prompt.submit` yet.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -635,7 +635,7 @@ ends a turn, with [`$.prompt.submit`](#a-mods-own-prompt).
 ## Submitted prompts
 
 In headless runs and in the Ink and OpenTUI terminals, `prompt.submit` fires for
-each prompt a person submits, and in headless runs for each prompt a Mod submits
+each prompt a person submits, and for each prompt a Mod submits
 ([A Mod's own prompt](#a-mods-own-prompt)), before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
 prompt, attach context the model reads beside it, or drop it:
 
@@ -729,9 +729,9 @@ where transcript logs do.
 
 ### A Mod's own prompt
 
-In headless runs and the Ink terminal, `$.prompt.submit({ text })` submits a
-prompt of the Mod's own. It starts a turn once the session is idle, after the
-turn that is running, and never joins a running turn:
+In headless runs and the Ink and OpenTUI terminals, `$.prompt.submit({ text })`
+submits a prompt of the Mod's own. It starts a turn once the session is idle,
+after the turn that is running, and never joins a running turn:
 
 ```javascript
 export function register(on) {
@@ -772,29 +772,36 @@ export function register(on) {
   queued and the background notifications, and waits while a Goal is running.
   A Monitor update that waits out the minimum interval between its turns does
   not hold it.
-  The transcript shows it as the line `Mod <name>: <text>`, live and when the
-  session is resumed, with `asUser` too, and it does not enter the input
-  history.
+- In the OpenTUI terminal the prompt's turn starts after the prompts and
+  commands the person queued, and waits while a dialog is open, a `!` command
+  runs, something the person sent is still being routed or run as a command,
+  and while a Goal is active. OpenTUI runs no Goal continuation turns, so an
+  active Goal holds the prompt until a turn of the person's ends the Goal or
+  the person runs `/goal pause` or `/goal clear`.
+- In both terminals the transcript shows the prompt as the line
+  `Mod <name>: <text>`, live and when the session is resumed, with `asUser`
+  too, and it does not enter the input history.
 - The Mods' prompts start at most 8 turns before the person sends a prompt
   again. Past that a call resolves to a drop, and the line
   `$.prompt.submit refused: …` appears where transcript logs do. In a headless
   run, the prompt the run was given is the person's, and in a stream-json
   session each message the client sends is, a slash command too. In the Ink
-  terminal, each prompt or slash command the person sends is.
+  and OpenTUI terminals, each prompt or command the person sends is; one
+  queued during a turn counts when it runs. In OpenTUI, text steered into a
+  running turn counts as soon as the turn takes it; in Ink it does not, and
+  the count and a stop hold until the person's next prompt runs.
 - `/clear` and `/resume` start the new session with no prompts queued and the
   count at 0. A prompt submitted while the old session ends, from a
   `session.end` hook for instance, resolves to
   `{ drop: 'the session is ending' }`.
 - A prompt still queued when the run stops early, on an interrupt, a structured
   result, a detected loop or a slash command that fails, does not run. In the
-  Ink terminal, neither does one still queued when the person stops a turn,
+  terminals, neither does one still queued when the person stops a turn,
   with Esc or by declining every tool it asks to run. Until the person sends a
   prompt again, a call then resolves to
   `{ drop: 'the person stopped a turn and has not sent a prompt since' }`, so a
   `turn.complete` hook of the stopped turn starts no turn. A turn a Mod ends
   with `$.turn.abort` keeps them.
-- In the OpenTUI terminal the method is not listed in `methods` yet, and a
-  call resolves to `{ drop: 'this host does not run prompts a Mod submits' }`.
 
 These differ from Claude Code:
 

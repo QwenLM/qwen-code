@@ -35,6 +35,9 @@ CREATE TABLE ma_session (
     tool_profile VARCHAR(64) DEFAULT 'hosted-workspace-files/1' COMMENT 'Hosted tool capability profile admitted for the Session.',
     creator_actor_key VARBINARY(2048) NULL COMMENT 'Encoded identity of the actor that created the Session.',
     owner_actor_key VARBINARY(2048) NULL COMMENT 'Encoded identity of the actor that owns the Session.',
+    memory_store_id VARBINARY(512) NULL COMMENT 'Immutable optional personal memory Store binding.',
+    owner_only TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether only the Session owner may access this Session.',
+    CONSTRAINT ck_ma_session_memory CHECK ((owner_only = 0 AND memory_store_id IS NULL) OR (owner_only = 1 AND owner_actor_key IS NOT NULL)),
     parent_session_id VARBINARY(512) NULL COMMENT 'Immediate parent Session identity for a child Session.',
     root_session_id VARBINARY(512) NULL COMMENT 'Root Session identity of the child-Session lineage.',
     parent_child_run_id VARBINARY(2048) NULL COMMENT 'Child-run identity in the immediate parent Session.',
@@ -583,6 +586,36 @@ CREATE TABLE ma_artifact (
 
 CREATE INDEX idx_ma_artifact_page ON ma_artifact (scope_key, creation_sequence, artifact_id);
 
+CREATE TABLE ma_memory_store (
+    store_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and MemoryStore identity.',
+    owner_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and actor identity enforcing one personal Store.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    memory_store_id VARBINARY(512) NOT NULL COMMENT 'Opaque personal MemoryStore identity.',
+    owner_actor_key VARBINARY(2732) NOT NULL COMMENT 'Authenticated owner actor identity.',
+    namespace VARCHAR(128) NOT NULL COMMENT 'Opaque provider user_id selected only by the server.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_memory_store_key UNIQUE (store_key),
+    CONSTRAINT uk_ma_memory_store_identity UNIQUE (tenant_id, memory_store_id),
+    CONSTRAINT uk_ma_memory_store_owner UNIQUE (owner_key),
+    CONSTRAINT uk_ma_memory_store_namespace UNIQUE (namespace),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_memory_store_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='User-owned personal memory resources and provider namespaces.';
+
+CREATE TABLE ma_memory_entry (
+    entry_key CHAR(64) NOT NULL COMMENT 'Hashed Store and provider entry identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    memory_store_id VARBINARY(512) NOT NULL COMMENT 'Owning personal MemoryStore identity.',
+    memory_id VARBINARY(512) NOT NULL COMMENT 'Provider entry identity, never an authorization capability.',
+    is_deleted TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Deletion marker suppressing stale provider search hits.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Creation time in Unix epoch milliseconds.',
+    gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last change in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_memory_entry_key UNIQUE (entry_key),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_memory_entry_id PRIMARY KEY (id),
+    CONSTRAINT ck_ma_memory_entry_boolean CHECK ((is_deleted >= 0 AND is_deleted <= 1))
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Memory entry ownership and deletion markers without memory bodies.';
+
 CREATE TABLE ma_request_receipt (
     receipt_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the scoped idempotency receipt.',
     namespace VARCHAR(32) NOT NULL COMMENT 'Closed command namespace used to separate idempotency domains.',
@@ -619,7 +652,7 @@ CREATE TABLE ma_request_receipt (
     CONSTRAINT uk_ma_request_receipt_business_key UNIQUE (receipt_key),
     CONSTRAINT uk_ma_decision_slot UNIQUE (tenant_key, decision_scope_key),
     CONSTRAINT uk_ma_request UNIQUE (namespace, tenant_key, scope_key, idempotency_digest),
-    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 ELSE -1 END = CHAR_LENGTH(namespace))),
+    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'MEMORY' THEN 6 ELSE -1 END = CHAR_LENGTH(namespace))),
     CONSTRAINT ck_ma_request_scope CHECK ((CASE scope_kind WHEN 'TENANT' THEN 6 WHEN 'ACTOR' THEN 5 WHEN 'SESSION' THEN 7 WHEN 'CHANNEL' THEN 7 ELSE -1 END = CHAR_LENGTH(scope_kind))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_request_receipt_id PRIMARY KEY (id),

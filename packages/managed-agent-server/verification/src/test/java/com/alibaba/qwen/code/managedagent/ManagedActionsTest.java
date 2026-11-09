@@ -284,7 +284,7 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-            "todo_write",
+            "todo_write", "context_search", "context_remember", "context_get", "context_forget",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
@@ -298,6 +298,10 @@ class ManagedActionsTest {
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
             // #15076: the task list is the only preview this profile adds.
             case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
+            case "context_search" -> "{ \"query\" : \"preferences\" }";
+            case "context_remember" -> "{ \"content\" : \"Prefer concise answers\" }";
+            case "context_get" -> "{ \"memoryId\" : \"memory-1\" }";
+            case "context_forget" -> "{ \"memoryId\" : \"memory-1\", \"expectedContent\" : \"Prefer concise answers\" }";
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";
