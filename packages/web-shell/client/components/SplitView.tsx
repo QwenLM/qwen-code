@@ -1037,11 +1037,8 @@ export function SplitView({
                     <ChatPane
                       showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
-                      sessionSummary={
-                        showSessionDetails
-                          ? sessionById.get(sessionId)
-                          : undefined
-                      }
+                      sessionSummary={sessionById.get(sessionId)}
+                      showSessionDetails={showSessionDetails}
                       isActive={activeId === sessionId}
                       onApprovalChange={handleApprovalChange}
                       workspaceCwd={paneWorkspaceCwd}
