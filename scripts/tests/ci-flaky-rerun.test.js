@@ -393,6 +393,61 @@ describe('ci flaky rerun patrol', () => {
     expect(args[args.indexOf('--json') + 1].split(',')).toContain('number');
   });
 
+  it('passes --allow-escape-sequences so gh serves the colourised job log', async () => {
+    // A current gh refuses the logs endpoint without the flag (exit 1, empty
+    // stdout); without this the patrol's distillation is log-blind. Witness:
+    // the bare call throws the refusal, the flagged call serves the log.
+    const api = new GhClient('QwenLM/qwen-code');
+    const calls = [];
+    api.gh = async (args) => {
+      calls.push(args);
+      if (!args.includes('--allow-escape-sequences')) {
+        throw Object.assign(new Error('gh refused'), {
+          stderr:
+            'the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway',
+        });
+      }
+      return '##[error]boom\n\x1b[31mcolored\x1b[0m\n';
+    };
+    const log = await api.jobLog(7);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      'api',
+      '--allow-escape-sequences',
+      'repos/QwenLM/qwen-code/actions/jobs/7/logs',
+    ]);
+    expect(log).toContain('##[error]boom');
+    expect(log).toContain('colored');
+    expect(log).not.toContain('\x1b');
+  });
+
+  it('falls back to the bare call for a gh without the flag', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    const calls = [];
+    api.gh = async (args) => {
+      calls.push(args);
+      if (args.includes('--allow-escape-sequences')) {
+        throw Object.assign(new Error('gh failed'), {
+          stderr: 'unknown flag: --allow-escape-sequences',
+        });
+      }
+      return 'boom';
+    };
+    await expect(api.jobLog(7)).resolves.toBe('boom');
+    expect(calls.at(-1)).toEqual([
+      'api',
+      'repos/QwenLM/qwen-code/actions/jobs/7/logs',
+    ]);
+  });
+
+  it('propagates a log error that is not the unknown-flag refusal', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    api.gh = async () => {
+      throw Object.assign(new Error('HTTP 404'), { stderr: 'Not Found' });
+    };
+    await expect(api.jobLog(7)).rejects.toThrow('HTTP 404');
+  });
+
   it('handles an exact run attempt once and allows a new attempt', () => {
     const comments = [markerComment()];
     expect(alreadyHandled(comments, target(), 'patrol-bot')).toBe(true);
