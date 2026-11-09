@@ -102,6 +102,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   unstable_session_resume: LEGACY_ONLY('deprecated alias of the legacy resume'),
   session_list: { standing: 'managed', evidence: 'surface:SESSION_LIST' },
+  session_last_user_prompt_sort: LEGACY_ONLY(
+    'no question-time sorting in Managed',
+  ),
   session_catalog_batch: LEGACY_ONLY('no batched catalog route in Managed'),
   session_info: LEGACY_ONLY('aggregate counts are a legacy disk scan'),
   session_source_metadata: NO_MANAGED_EQUIVALENT(
@@ -394,6 +397,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
+  workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
+    'no Managed Git ignore query route',
+  ),
   workspace_mcp_restart: {
     standing: 'managed',
     evidence: 'surface:MCP_MANAGEMENT',
@@ -483,6 +489,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   },
   workspace_display_name: NO_MANAGED_EQUIVALENT(
     'Workspace identity is the registered directory',
+  ),
+  workspace_order: NO_MANAGED_EQUIVALENT(
+    'daemon-local workspace presentation order',
   ),
   scratch_workspace_registration: {
     standing: 'managed',

@@ -8,7 +8,7 @@ const messages = {
     'An earlier invocation is unavailable.',
     '前序调用暂不可读。',
   ],
-  context: ['Context', 'Context'],
+  context: ['Context', '上下文'],
   statistics: ['Statistics', '统计'],
   modelStatistics: ['Model statistics', '模型统计'],
   tools: ['Tools', '工具'],

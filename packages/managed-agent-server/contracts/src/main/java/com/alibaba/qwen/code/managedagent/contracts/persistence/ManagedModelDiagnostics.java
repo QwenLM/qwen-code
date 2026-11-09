@@ -131,8 +131,13 @@ public final class ManagedModelDiagnostics {
         text(context.get("model"), 512, false, "context.model");
         hash(context.get("providerPin"), "context.providerPin");
         counter(context.get("observedAt"), "context.observedAt");
-        for (String field : List.of("inputTokens", "cachedTokens", "contextWindowSize")) {
+        for (String field : List.of("inputTokens", "cachedTokens")) {
             nullableCount(context.get(field), field);
+        }
+        JsonNode contextWindowSize = context.get("contextWindowSize");
+        require(contextWindowSize != null, "Missing contextWindowSize");
+        if (!contextWindowSize.isNull()) {
+            count(contextWindowSize, 1, MAX_SAFE, "contextWindowSize");
         }
         counters(context.get("breakdown"), Set.copyOf(CATEGORIES), "breakdown");
         if (!context.get("thresholds").isNull()) {
