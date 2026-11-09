@@ -57,6 +57,12 @@ export interface PrWatchPendingEntry {
   summary: string;
   detectedAt: string;
   served?: PrWatchRoleGroup[];
+  /**
+   * The head a `head_change` was detected for. Delivery judges self-push
+   * against this, not the file's current head, which a later observation may
+   * have moved on. Absent on entries written before the field existed.
+   */
+  headSha?: string;
 }
 
 export interface PrWatchState {
@@ -186,12 +192,16 @@ function parsePendingEntry(value: unknown): PrWatchPendingEntry | null {
       return null;
     }
   }
+  if (entry.headSha !== undefined && !isNonEmptyString(entry.headSha)) {
+    return null;
+  }
   return {
     type: entry.type as PrTransitionType,
     key: entry.key,
     summary: entry.summary,
     detectedAt: entry.detectedAt,
     ...(entry.served !== undefined ? { served: [...entry.served] } : {}),
+    ...(entry.headSha !== undefined ? { headSha: entry.headSha } : {}),
   };
 }
 

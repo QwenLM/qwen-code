@@ -104,13 +104,12 @@ export async function runManagedWebServe(
   const token = resolveServeToken(options.token);
   if (
     !token ||
-    Buffer.byteLength(token) < 32 ||
     Buffer.byteLength(signingKey) < 32 ||
     token === signingKey ||
     token === signingKey.trim()
   ) {
     throw new Error(
-      'Managed Web requires independent browser and signing keys of at least 32 bytes.',
+      'Managed Web requires a non-empty browser token and an independent signing key of at least 32 bytes.',
     );
   }
   if (

@@ -526,7 +526,12 @@ it.each(scenarios)(
       );
       const action = session.authority.action(actionId)!;
       if (local) {
-        await vi.waitFor(() => expect(releaseMount).toHaveBeenCalledOnce());
+        // The mount release follows the same async authority path as the
+        // authorization wait above, so it needs that wait's budget rather
+        // than vi.waitFor's 1000ms default (#16552).
+        await vi.waitFor(() => expect(releaseMount).toHaveBeenCalledOnce(), {
+          timeout: 15000,
+        });
         expect(acquire).toHaveBeenCalledTimes(1);
         const saved = await findHostedApprovalContinuation(session, promptId);
         expect(saved?.plan.runtime.provisionerKind).toBe('local-process');

@@ -430,6 +430,35 @@ describe('POST /session/:id/worktree-reset', () => {
     expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
   });
 
+  it('transfers a checkout recorded with a `..` over a missing directory', async () => {
+    // JS `fs.realpathSync` folds the `..` before walking; `.native` and
+    // `fs.promises.realpath` would fail on the missing `nowhere` (POSIX), so
+    // the reset would refuse (409) a checkout the restore attests and the
+    // cleanup keys by its realpath.
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, {
+      worktreePath: [
+        fixture.workspaceDir,
+        'nowhere',
+        '..',
+        '.qwen',
+        'worktrees',
+        fixture.slug,
+      ].join(path.sep),
+    });
+    await fixture.createMarker(oldId);
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktree.path).toBe(fixture.realTarget);
+    await expectMarkerOwner(fixture, res.body.sessionId);
+  });
+
   it('rejects with 409 when the session has no worktree sidecar', async () => {
     const fixture = makeFixture();
     const sessionId = randomUUID();
@@ -1874,6 +1903,33 @@ describe('POST /session/:id/load worktree classifications', () => {
         'worktrees',
         fixture.slug,
       ),
+    });
+    await fixture.createMarker(sessionId);
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktreeState).toBe('persisted-v1');
+    expect(res.body.worktree.path).toBe(fixture.realTarget);
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+  });
+
+  it('attests a checkout recorded with a `..` over a missing directory', async () => {
+    // The restore compares the lock key with the `realTarget` it resolves
+    // itself; both must fold the `..` the way JS `fs.realpathSync` does.
+    const fixture = makeFixture();
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId, {
+      worktreePath: [
+        fixture.workspaceDir,
+        'nowhere',
+        '..',
+        '.qwen',
+        'worktrees',
+        fixture.slug,
+      ].join(path.sep),
     });
     await fixture.createMarker(sessionId);
 
