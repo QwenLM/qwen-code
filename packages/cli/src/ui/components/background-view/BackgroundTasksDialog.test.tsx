@@ -1774,6 +1774,12 @@ describe('BackgroundTasksDialog', () => {
   });
 
   describe('auto-opened dialog disarm (#16432 Critical 1)', () => {
+    // vi.waitFor carries its own 1000ms default, independent of the raised
+    // testTimeout. ink flushes these state changes on its own scheduler
+    // outside act, so under CI contention the flush can outlast 1s and the
+    // wait expires on a state that is about to settle (#16609).
+    const autoOpenWaitOptions = { timeout: 5000 };
+
     // The auto-open lands mid-keystroke and keypress dispatch is a
     // broadcast: a letter still aimed at the unmounted composer must not
     // cancel/pause the run, and a stray Enter must not arm the approval.
@@ -1803,7 +1809,7 @@ describe('BackgroundTasksDialog', () => {
       // pre-effect frame.
       await vi.waitFor(() => {
         expect(h.probe.current!.state.dialogMode).toBe('list');
-      });
+      }, autoOpenWaitOptions);
       // The provider auto-opens in list mode — no explicit openDialog.
       expect(h.probe.current!.state.autoOpened).toBe(true);
       return h;
@@ -1820,7 +1826,7 @@ describe('BackgroundTasksDialog', () => {
       // effect; wait for it to flush so the next key sees autoOpened=false.
       await vi.waitFor(() => {
         expect(h.probe.current!.state.autoOpened).toBe(false);
-      });
+      }, autoOpenWaitOptions);
       h.pressKey({ sequence: 'x' });
       expect(h.workflowCancel).toHaveBeenCalledWith(
         'wf_test1234',
@@ -1837,7 +1843,7 @@ describe('BackgroundTasksDialog', () => {
       h.pressKey({ name: 'up' });
       await vi.waitFor(() => {
         expect(h.probe.current!.state.autoOpened).toBe(false);
-      });
+      }, autoOpenWaitOptions);
       h.pressKey({ sequence: 'p' });
       expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
     });
@@ -1855,7 +1861,7 @@ describe('BackgroundTasksDialog', () => {
       const h = setup([paused, wf]);
       await vi.waitFor(() => {
         expect(h.probe.current!.state.dialogMode).toBe('list');
-      });
+      }, autoOpenWaitOptions);
       expect(h.probe.current!.state.autoOpened).toBe(true);
 
       h.pressKey({ name: 'k' });
@@ -1867,7 +1873,7 @@ describe('BackgroundTasksDialog', () => {
       h.pressKey({ name: 'up' });
       await vi.waitFor(() => {
         expect(h.probe.current!.state.autoOpened).toBe(false);
-      });
+      }, autoOpenWaitOptions);
       h.pressKey({ sequence: 'r' });
       expect(h.resume).toHaveBeenCalledWith('a');
     });
@@ -1881,7 +1887,7 @@ describe('BackgroundTasksDialog', () => {
       h.pressKey({ name: 'up' });
       await vi.waitFor(() => {
         expect(h.probe.current!.state.autoOpened).toBe(false);
-      });
+      }, autoOpenWaitOptions);
       h.pressKey({ name: 'return' });
       expect(h.probe.current!.state.dialogMode).toBe('detail');
     });
@@ -1919,7 +1925,7 @@ describe('BackgroundTasksDialog', () => {
       h.pressKey({ name: 'up' });
       await vi.waitFor(() => {
         expect(h.probe.current!.state.autoOpened).toBe(false);
-      });
+      }, autoOpenWaitOptions);
       h.pressKey({ sequence: 'x' });
       expect(h.workflowCancel).toHaveBeenCalledWith(
         'wf_test1234',
@@ -1940,7 +1946,7 @@ describe('BackgroundTasksDialog', () => {
       h.pressKey({ name: 'down' });
       await vi.waitFor(() => {
         expect(h.probe.current!.state.autoOpened).toBe(false);
-      });
+      }, autoOpenWaitOptions);
       h.pressKey({ name: 'escape' });
       expect(h.probe.current!.state.dialogMode).toBe('closed');
     });
@@ -1955,7 +1961,7 @@ describe('BackgroundTasksDialog', () => {
       h.pressKey({ name: 'up' });
       await vi.waitFor(() => {
         expect(h.probe.current!.state.autoOpened).toBe(false);
-      });
+      }, autoOpenWaitOptions);
       expect(h.lastFrame()).toContain('Enter view');
     });
   });
