@@ -33,6 +33,7 @@ const mocks = createSidebarMocks({
 const {
   connection,
   workspace,
+  workspaceActions,
   active,
   pinned,
   archived,
@@ -40,6 +41,8 @@ const {
   useSessionCatalogQueries,
   loadSession,
 } = mocks;
+const archiveSelections = vi.fn();
+Object.assign(workspace.client, { archiveSessionsData: archiveSelections });
 // Stable identity across renders: the sidebar's useLayoutEffect depends on
 // the controller object, and a fresh literal per render re-runs the effect
 // (extra refreshQueries) on each render.
@@ -122,6 +125,7 @@ function renderSidebar(
     onSessionsDeleted?: (sessionIds: string[]) => void;
     currentSessionActive?: boolean;
     managedWorkspaces?: React.ReactNode;
+    sessionContent?: React.ReactNode;
     managedArchivedSessions?: React.ComponentProps<
       typeof WebShellSidebar
     >['managedArchivedSessions'];
@@ -156,6 +160,7 @@ function renderSidebar(
               onSessionsDeleted={props.onSessionsDeleted}
               currentSessionActive={props.currentSessionActive}
               managedWorkspaces={props.managedWorkspaces}
+              sessionContent={props.sessionContent}
               managedArchivedSessions={props.managedArchivedSessions}
               onSearchQueryChange={props.onSearchQueryChange}
               onLoadStandaloneSession={props.onLoadStandaloneSession}
@@ -230,6 +235,7 @@ function secondaryDeletion(locked: boolean) {
   });
   workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
     ...defaultWorkspaceByCwd(cwd),
+    archiveSessionsData: archiveSelections,
     listWorkspaceSessions: vi.fn().mockResolvedValue([secondary]),
     deleteSessionsData,
   }));
@@ -271,6 +277,16 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation(defaultWorkspaceByCwd);
   generatedUiOwner = undefined;
+  archiveSelections.mockReset().mockImplementation(async (ids: string[]) => ({
+    archived: ids,
+    alreadyArchived: [],
+    notFound: [],
+    errors: [],
+  }));
+  workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+    ...defaultWorkspaceByCwd(cwd),
+    archiveSessionsData: archiveSelections,
+  }));
   active.sessions = [];
   active.data = active.sessions;
   active.deleteSession.mockClear();
@@ -289,6 +305,283 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   window.localStorage.clear();
+});
+
+describe('sidebar session selection', () => {
+  function button(label: string): HTMLButtonElement {
+    const result = container.querySelector<HTMLButtonElement>(
+      `button[aria-label="${label}"]`,
+    );
+    expect(result).not.toBeNull();
+    return result!;
+  }
+
+  function selection(name: string): HTMLElement {
+    const result = container.querySelector<HTMLElement>(
+      `[role="checkbox"][aria-label="Select ${name}"]`,
+    );
+    expect(result).not.toBeNull();
+    return result!;
+  }
+
+  function action(label: string): HTMLButtonElement {
+    const result = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === label,
+    );
+    expect(result).toBeDefined();
+    return result!;
+  }
+
+  async function enterSelection(): Promise<void> {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [
+        ...(connection.capabilities?.features ?? []),
+        'session_archive',
+        'session_archive_idle_guard',
+      ],
+    };
+    workspace.capabilities = connection.capabilities;
+    active.sessions = [
+      makeSession('first', { displayName: 'First session' }),
+      makeSession('second', { displayName: 'Second session' }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(button('Select sessions')));
+  }
+
+  it('counts selected sessions without navigating and clears them on exit', async () => {
+    await enterSelection();
+    expect(action('Pin').disabled).toBe(true);
+    expect(action('Archive').disabled).toBe(true);
+    act(() => click(selection('First session')));
+    act(() => click(selection('Second session')));
+    expect(container.textContent).toContain('2 sessions selected');
+    expect(selection('First session').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    act(() => click(selection('First session')));
+    expect(container.textContent).toContain('1 session selected');
+    expect(loadSession).not.toHaveBeenCalled();
+    act(() => click(button('Exit selection')));
+    expect(container.querySelector('[role="checkbox"]')).toBeNull();
+    act(() => click(button('Select sessions')));
+    expect(container.textContent).toContain('0 sessions selected');
+  });
+
+  it('keeps the selection toggle visible and clears selection when toggled off', async () => {
+    await enterSelection();
+    expect(button('Select sessions').getAttribute('aria-pressed')).toBe('true');
+    act(() => click(selection('First session')));
+    act(() => click(button('Select sessions')));
+    expect(button('Select sessions').getAttribute('aria-pressed')).toBe(
+      'false',
+    );
+    expect(container.querySelector('[role="checkbox"]')).toBeNull();
+    act(() => click(button('Select sessions')));
+    expect(container.textContent).toContain('0 sessions selected');
+    expect(selection('First session').getAttribute('aria-checked')).toBe(
+      'false',
+    );
+  });
+
+  it('exits selection with Escape', async () => {
+    await enterSelection();
+    act(() => click(selection('First session')));
+    act(() => {
+      selection('First session').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(container.querySelector('[role="checkbox"]')).toBeNull();
+    expect(button('Select sessions')).toBeDefined();
+  });
+
+  it('archives selected sessions immediately without confirmation or deletion', async () => {
+    await enterSelection();
+    act(() => click(selection('First session')));
+    act(() => click(selection('Second session')));
+    await act(async () => click(action('Archive')));
+    await flushSidebar();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(archiveSelections).toHaveBeenCalledWith(['first'], {
+      requireIdle: true,
+    });
+    expect(archiveSelections).toHaveBeenCalledWith(['second'], {
+      requireIdle: true,
+    });
+    expect(active.deleteSession).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="checkbox"]')).toBeNull();
+  });
+
+  it('keeps unsuccessful archives selected for retry', async () => {
+    archiveSelections.mockImplementation(async ([id]: string[]) => {
+      if (id === 'second') throw new Error('Archive failed');
+      return { archived: [id], alreadyArchived: [], notFound: [], errors: [] };
+    });
+    await enterSelection();
+    act(() => click(selection('First session')));
+    act(() => click(selection('Second session')));
+    await act(async () => click(action('Archive')));
+    await flushSidebar();
+    expect(selection('First session').getAttribute('aria-checked')).toBe(
+      'false',
+    );
+    expect(selection('Second session').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    expect(container.textContent).toContain('1 session selected');
+  });
+
+  it('keeps missing sessions selected rather than reporting archive success', async () => {
+    archiveSelections.mockResolvedValue({
+      archived: [],
+      alreadyArchived: [],
+      notFound: ['first'],
+      errors: [],
+    });
+    await enterSelection();
+    act(() => click(selection('First session')));
+    await act(async () => click(action('Archive')));
+    await flushSidebar();
+    expect(selection('First session').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+  });
+
+  it('does not archive the current session even when idle', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    connection.sessionId = 'first';
+    await enterSelection();
+    act(() => click(selection('First session')));
+    expect(container.textContent).toContain('1 session selected');
+    expect(action('Archive').disabled).toBe(true);
+    expect(archiveSelections).not.toHaveBeenCalled();
+  });
+
+  it('disables bulk archive when the daemon cannot guarantee idle-only archive', async () => {
+    await enterSelection();
+    act(() => click(selection('First session')));
+    connection.capabilities!.features = ['session_archive'];
+    renderSidebar();
+    await flushSidebar();
+    expect(action('Archive').disabled).toBe(true);
+    expect(archiveSelections).not.toHaveBeenCalled();
+  });
+
+  it('retains failed pins while preserving successful pins', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    workspaceActions.updateSessionOrganization
+      .mockReset()
+      .mockImplementation(async (id: string) => {
+        if (id === 'second') throw new Error('Pin failed');
+        return {};
+      });
+    await enterSelection();
+    act(() => click(selection('First session')));
+    act(() => click(selection('Second session')));
+    await act(async () => click(action('Pin')));
+    await flushSidebar();
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('1 session selected');
+    expect(selection('Second session').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+  });
+
+  it('pins unpinned selections without toggling already pinned sessions off', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    workspaceActions.updateSessionOrganization.mockReset();
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+    pinned.sessions = [
+      makeSession('pinned', { displayName: 'Already pinned', isPinned: true }),
+    ];
+    pinned.data = pinned.sessions;
+    await enterSelection();
+    act(() => click(selection('Already pinned')));
+    expect(action('Pin').disabled).toBe(true);
+    act(() => click(selection('First session')));
+    expect(action('Pin').disabled).toBe(false);
+    await act(async () => click(action('Pin')));
+    await flushSidebar();
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledTimes(1);
+    expect(workspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'first',
+      { isPinned: true },
+    );
+  });
+
+  it('keeps matching session IDs in different workspaces separate', async () => {
+    const { props } = secondaryDeletion(false);
+    connection.capabilities!.features.push(
+      'session_archive',
+      'session_archive_idle_guard',
+    );
+    renderSidebar(props);
+    await expandSecondaryWorkspace();
+    act(() => click(button('Select sessions')));
+    act(() => click(selection('Primary same ID')));
+    expect(selection('Secondary same ID').getAttribute('aria-checked')).toBe(
+      'false',
+    );
+    act(() => click(selection('Secondary same ID')));
+    expect(container.textContent).toContain('2 sessions selected');
+    await act(async () => click(action('Archive')));
+    await flushSidebar();
+    expect(archiveSelections).toHaveBeenCalledTimes(2);
+    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('disables archiving when a selected idle session starts running', async () => {
+    await enterSelection();
+    act(() => click(selection('First session')));
+    expect(action('Archive').disabled).toBe(false);
+    active.sessions = active.sessions.map((session) =>
+      session.sessionId === 'first'
+        ? { ...session, hasActivePrompt: true }
+        : session,
+    );
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(action('Archive').disabled).toBe(true);
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('does not restore failed selections after changing session content during archiving', async () => {
+    let rejectArchive!: (reason: Error) => void;
+    archiveSelections.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectArchive = reject;
+        }),
+    );
+    await enterSelection();
+    act(() => click(selection('First session')));
+    act(() => click(action('Archive')));
+    renderSidebar({ sessionContent: <div>Replacement sessions</div> });
+    await act(async () => rejectArchive(new Error('Archive failed')));
+    await flushSidebar();
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(button('Select sessions')));
+    expect(container.textContent).toContain('0 sessions selected');
+    expect(selection('First session').getAttribute('aria-checked')).toBe(
+      'false',
+    );
+  });
 });
 
 it('excludes standalone archives and their errors from the Channels archive filter', async () => {

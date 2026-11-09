@@ -214,6 +214,14 @@ interface PreflightInboundOptions {
    * public replies. Every other group, sender and pairing check still runs.
    */
   waiveGroupMention?: boolean;
+  /**
+   * Admit a private bound delivery that only fails the sender gate. For the
+   * comment watch delivering the channel account's own comments: the sender
+   * allowlist guidance excludes that account, but the watch is operator opt-in
+   * and private. Group, DM, pairing and route checks still run; only the sender
+   * gate is waived. The public path never sets this.
+   */
+  waiveGroupSender?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -3920,6 +3928,9 @@ export abstract class ChannelBase {
   }
 
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
+    // A tagged (automated) sender's text is prose, so it never takes a
+    // command/bang bypass: it binds a named turn like any other message.
+    if (envelope.senderTag) return false;
     const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
     const bangText = envelope.text.trimStart();
@@ -6490,6 +6501,13 @@ export abstract class ChannelBase {
       return true;
     }
 
+    // Private comment-watch delivery of the channel account's own comments: the
+    // group/DM/route checks above already ran; only the sender gate is waived.
+    if (options.waiveGroupSender === true) {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
     const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
@@ -6877,9 +6895,13 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    const parsed = this.parseCommand(envelope.text);
+    // Automated senders (see Envelope.senderTag) get prose treatment: their
+    // command-shaped text reaches the model instead of this channel's local
+    // commands and memory intents.
+    const automated = envelope.senderTag !== undefined;
+    const parsed = automated ? null : this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
-      parsed?.command === 'btw'
+      automated || parsed?.command === 'btw'
         ? null
         : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
@@ -6887,6 +6909,7 @@ export abstract class ChannelBase {
       this.deletePendingChannelMemoryMutation(envelope);
     }
     if (
+      !automated &&
       !memoryIntent &&
       parsed?.command !== 'btw' &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
@@ -6971,7 +6994,9 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = envelope.text.trimStart();
+    // An automated sender's text is never a shell command (Envelope.senderTag),
+    // so it skips both the refusal and the execution arms below.
+    const bangText = automated ? '' : envelope.text.trimStart();
     if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`
@@ -7140,8 +7165,17 @@ export abstract class ChannelBase {
       }
 
       const recognizedSlashCommand =
+        !automated &&
         this.isSlashCommand(envelope.text) &&
         this.isRecognizedCommand(envelope.text, sessionId);
+      // Adapter-tagged automated sender (Envelope.senderTag): rendered here,
+      // after prompt sanitization, because a line-leading `[tag]` inside `text`
+      // would be peeled by unwrapStartOfLineTags. Self-prefixing adapters
+      // (`alreadyPrefixed`) render the tag themselves.
+      const senderTagBar =
+        !envelope.alreadyPrefixed && envelope.senderTag?.trim()
+          ? `[${sanitizeSenderName(envelope.senderTag)}] `
+          : '';
       // Prepend referenced (quoted) message text for reply context
       let promptText = envelope.text;
 
@@ -7174,7 +7208,7 @@ export abstract class ChannelBase {
         const who = sanitizeSenderName(
           envelope.senderName || envelope.senderId || 'unknown',
         );
-        promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+        promptText = `${senderTagBar}[${who}] ${sanitizePromptText(promptText)}`;
         // Render the non-bot mention marker AFTER sanitization (like the
         // [Replying to:] wrapper below). Inside `text` it would pass through
         // sanitizePromptText, which strips brackets only on content <=64 chars
@@ -7193,6 +7227,10 @@ export abstract class ChannelBase {
             promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
           }
         }
+      } else if (senderTagBar) {
+        // No sender attribution to attach the tag to (per-user 1:1 DM), so the
+        // tag opens the prompt on its own.
+        promptText = `${senderTagBar}${promptText}`;
       }
 
       if (envelope.referencedText) {

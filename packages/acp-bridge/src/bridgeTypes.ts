@@ -605,6 +605,8 @@ export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
   'qwen.daemon.sessionInitializationDeadlineMs';
 export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
   'session_initialization_timeout';
+export const SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY =
+  'qwen.session.startupSubscriptionModel';
 export const SESSION_MODEL_PERSIST_DEFAULT_META_KEY =
   'qwen.session.modelPersistDefault';
 
@@ -878,7 +880,15 @@ export interface BridgeRestoredSession extends BridgeSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at some point, so
+   * Publish-time summary/unverified-seed boundary in eventEpoch, captured
+   * with a full in-memory load snapshot. A suffix starting after this ID
+   * excludes those sources, but may still be partial, truncated or degraded.
+   * Zero places the boundary before the first event; absence is not zero.
+   * Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed at some point, so
    * `compactedReplay`/`liveJournal` may silently miss events. Clients
    * should prefer the full transcript over this replay.
    */
@@ -1217,6 +1227,9 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or

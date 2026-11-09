@@ -374,6 +374,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     .withHarnessPlacement(placementDescriptor(session))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withModelConfigDigest(modelConfigDigest(session))
+                    .withMemoryStoreId(session.memoryStoreId())
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                     .withMcpServers(mcpServers(session))
@@ -762,6 +763,96 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPackagePreparation() {
+        try {
+            return client().capabilities().getFeatures().contains("managed-package-preparation/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        try {
+            HostedHarnessClient owner = client();
+            Map<String, Object> descriptor = owner.prepareManagedPackage(metadata, source);
+            Map<String, Object> scope = new LinkedHashMap<>(metadata);
+            scope.remove("input");
+            return new PreparedPackage(descriptor,
+                    owner.managedPackageArchive((String) descriptor.get("preparationId"), scope));
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        try {
+            return client().inspectManagedPackage(metadata, source);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        try {
+            return client().previewManagedPackage(metadata, source);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public boolean supportsRuntimeSkillImport() {
+        try {
+            return client().capabilities().getFeatures().contains("managed-runtime-skill-import/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            return client().runtimeSkillCandidates(extensionAttachment(tenant, session, false));
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            return client().runtimeSkillSnapshot(extensionAttachment(tenant, session, false), request);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            Map<String, Object> owner = (Map<String, Object>) request.get("owner");
+            return client().runtimeSkillArchive(extensionAttachment(tenant, session, false), (String) request.get("operationId"),
+                    (String) request.get("preparationId"), (String) owner.get("bindingId"), (String) owner.get("generation"),
+                    ((Number) request.get("offset")).longValue());
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         try {
             requireReadyForNewWork(tenantId, sessionId, false);
@@ -868,6 +959,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             return client().capabilities().getFeatures().contains("model-selection/1");
         } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean supportsPersonalMemory() {
+        try {
+            return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("session-memory/1");
+        } catch (RuntimeException error) {
             return false;
         }
     }
@@ -1202,7 +1302,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // adoption closing the captured client during that window
             // would strand this call on a dead instance instead of the
             // rebuilt one (the ordering doContinueManagedRuntime follows).
-            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            HarnessSessionRef ref = automationAttachment(tenantId, sessionId);
             return client().runAutomationOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
@@ -1307,6 +1407,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         .withHarnessPlacement(placementDescriptor(session))
                         .withAgentDefinition(agentDefinition(session, false))
                         .withModelConfigDigest(modelConfigDigest(session))
+                        .withMemoryStoreId(session.memoryStoreId())
                         .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                         .withMcpServers(mcpServers(session))
@@ -1492,6 +1593,44 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return attachment;
     }
 
+    /**
+     * An automation verb can be the first thing a Session ever does: a
+     * Session created with no input has no journal on the Harness to load,
+     * so resolve it the way that first Turn would — create when the store
+     * never bound a boot id, and re-take passively when the Harness
+     * already holds the Session. The create also binds the boot id at
+     * Session level, so the next cold verb loads instead of collecting
+     * the create's 409.
+     */
+    private HarnessSessionRef automationAttachment(String tenantId,
+            String sessionId) {
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
+        AttachmentKey key = attachmentKey(tenantId, sessionId);
+        HarnessSessionRef attachment = attachments.get(key);
+        if (attachment == null || attachment.isRecoveryCleanupOnly()) {
+            boolean bound = session.harnessBootId() != null;
+            try {
+                createOrLoad(tenantId, sessionId, bound, false);
+            } catch (DaemonHttpException error) {
+                // The Harness already holds a Session this store never
+                // bound (a peer's create, or this one's lost answer):
+                // re-take it passively, the way the channel attachment
+                // does.
+                if (error.getStatusCode() != 409) {
+                    throw error;
+                }
+                createOrLoad(tenantId, sessionId, true, true);
+            }
+            attachment = attachments.get(key);
+            if (!bound && attachment != null) {
+                sessions.bindSessionHarness(tenantId, sessionId,
+                        attachment.getHarnessBootId());
+            }
+        }
+        return attachment;
+    }
+
     private HarnessSessionRef mcpManagementAttachment(String tenantId, String sessionId, boolean initialize) {
         AttachmentKey key = attachmentKey(tenantId, sessionId);
         HarnessSessionRef attached = attachments.get(key);
@@ -1574,6 +1713,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     CreateHarnessSession.builder()
                             .harnessSessionId(session.sessionId())
                             .modelConfigDigest(modelConfigDigest(session))
+                            .memoryStoreId(session.memoryStoreId())
                             .harnessPlacement(placementDescriptor(session))
                             .approvalMode(
                                     session.workspace() == null
@@ -1669,6 +1809,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .withHarnessPlacement(placementDescriptor(session))
                 .withAgentDefinition(agentDefinition(session, false))
                 .withModelConfigDigest(modelConfigDigest(session))
+                .withMemoryStoreId(session.memoryStoreId())
                 .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                 .withMcpServers(mcpServers(session))
@@ -1832,6 +1973,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     .withHarnessPlacement(placementDescriptor(session))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withModelConfigDigest(modelConfigDigest(session))
+                    .withMemoryStoreId(session.memoryStoreId())
                     .withSessionSkillsRef(sessionSkillsRef(session, false))
                     .withInitialSelection(initialSelection(session))
                     .withPublicChildAgentsVersion(session.publicChildAgentsVersion())

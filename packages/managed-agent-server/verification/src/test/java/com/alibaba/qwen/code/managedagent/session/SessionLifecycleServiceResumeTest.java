@@ -8,10 +8,10 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
@@ -49,7 +49,7 @@ import static org.mockito.Mockito.when;
  * protocol 0 and the parked v1 fence row is never rebound.
  */
 class SessionLifecycleServiceResumeTest {
-    private WorkspaceLifecycleStore lifecycle;
+    private JdbcWorkspaceLifecycleStore lifecycle;
     private static final String TENANT = "lifecycle-resume";
     private final AtomicLong now = new AtomicLong(1_000);
     private JdbcTemplate jdbc;
@@ -316,7 +316,7 @@ class SessionLifecycleServiceResumeTest {
             ObjectProvider<RuntimeBindingRepository> bindings = mock(ObjectProvider.class);
             when(bindings.getIfAvailable()).thenReturn(new JdbcRuntimeBindingRepository(dataSource,
                     new AesGcmSecretProtector("test", new byte[32])));
-            lifecycle = new WorkspaceLifecycleStore(jdbc, new ObjectMapper(), bindings);
+            lifecycle = new JdbcWorkspaceLifecycleStore(jdbc, new ObjectMapper(), bindings);
         }
         return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
@@ -333,6 +333,6 @@ class SessionLifecycleServiceResumeTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
+        }, ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
     }
 }

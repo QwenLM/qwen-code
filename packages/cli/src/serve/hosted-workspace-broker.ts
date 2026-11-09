@@ -49,6 +49,7 @@ import type {
   ManagedMonitorOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import type { ManagedRuntimeSkillControl } from './managed-runtime-skill-source.js';
 import {
   MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
   MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
@@ -118,6 +119,37 @@ export function isTerminalUnknownRejection(
     cause.status === 409 &&
     cause.code === 'runtime_broker_execution_unknown' &&
     cause.details?.['terminal'] === true
+  );
+}
+
+/**
+ * The release-mount handback sweeps nothing (unlike the drain release), so it
+ * refuses while any work is still live or unproven — background processes
+ * included. Those refusals are the handback's "keep it attached, retry once it
+ * settles" fence (R14-2): an owner closing non-terminally names them as
+ * recovery-required instead of letting a raw rejection escape as a generic
+ * close failure. The codes are the documented release-mount refusals
+ * (docs/design/workspace-execution-mount-recovery-block-release.md). The 503
+ * reconciliation answer joins them (R15-2): a Broker that restarted beside the
+ * Harness holds no resident Session Context, so it proves nothing was handed
+ * back — name it recovery-required (attached/retryable), exactly as the close's
+ * held-Runtime drain already tolerates it, never read it as a successful handback.
+ * The 409 admission_closed joins them (R15-2): a close, archive or delete racing
+ * the handback owns the mount release through its own drain, so the detach backs
+ * off attached/retryable instead of escaping as a generic close failure.
+ */
+export function fencedMountHandback(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      (cause.code === 'runtime_session_busy' ||
+        cause.code === 'runtime_session_conflict' ||
+        cause.code === 'workspace_writer_unproven' ||
+        cause.code === 'runtime_admission_closed')) ||
+      (cause.status === 503 &&
+        cause.code === 'runtime_reconciliation_required'))
   );
 }
 
@@ -234,6 +266,35 @@ export class HostedWorkspaceBroker {
         this.capabilityResolution = undefined;
         throw cause;
       }));
+  }
+
+  async readWorkspaceContext(): Promise<{
+    cwdRelative: string;
+    contextRevision: string;
+  } | null> {
+    const response = await this.harnessRequest('/runtimes:capabilities', {});
+    this.readRuntime(response);
+    if (response['workspaceContext'] == null) return null;
+    const context = object(response['workspaceContext']);
+    const cwd = context['cwdRelative'];
+    const revision = context['contextRevision'];
+    if (
+      typeof cwd === 'string' &&
+      [...cwd].some((character) => character.codePointAt(0)! < 32)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    if (
+      typeof cwd !== 'string' ||
+      !cwd ||
+      cwd.startsWith('/') ||
+      cwd.includes('\\') ||
+      cwd.includes('://') ||
+      cwd.split('/').some((part) => !part || part === '..') ||
+      typeof revision !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/.test(revision)
+    )
+      throw new Error('Invalid saved Workspace context.');
+    return { cwdRelative: cwd, contextRevision: revision };
   }
 
   async mcpDefinitions(
@@ -773,6 +834,18 @@ export class HostedWorkspaceBroker {
 
   async extensionControl(
     operation: ManagedExtensionRuntimeControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  async skillControl(
+    operation: ManagedRuntimeSkillControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  private async runtimeMetadataControl(
+    operation: ManagedExtensionRuntimeControl | ManagedRuntimeSkillControl,
   ): Promise<Record<string, unknown>> {
     const envelope = await this.request(
       `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/extensions/control`,

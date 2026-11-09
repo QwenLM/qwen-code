@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -46,7 +47,7 @@ class WorkspaceRuntimeTransportTest {
     void invalidRemoteCwdIsRejectedBeforeClaimingStorageOrInstallingContext() throws Exception {
         var fixture = sshAcquisitionFixture();
         var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
-        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(fixture.resolver())
+        doThrow(WorkspaceExecutionStore.unavailable()).when(fixture.resolver())
                 .verifyInstallable(binding, binding.getCwdRelative());
         unavailable(() -> fixture.transport().acquire(fixture.lease(), fixture.session()));
         verifyNoInteractions(fixture.ownership(), fixture.http());
@@ -133,7 +134,7 @@ class WorkspaceRuntimeTransportTest {
     @Test
     void dedicatedWorkspaceExemptionDoesNotOpenTheExistingGenericRoutes() throws Exception {
         var fixture = fixture();
-        when(fixture.resolver().resolve(any(), any())).thenThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+        when(fixture.resolver().resolve(any(), any())).thenThrow(WorkspaceExecutionStore.unavailable());
         Map<String, Object> reference = Map.of("runtimeProtocol", 3, "callId", "original");
         unavailable(() -> fixture.transport().statusV3(fixture.lease(), fixture.session(), reference, 0));
         unavailable(() -> fixture.transport().cancelV3(fixture.lease(), fixture.session(), reference));
@@ -194,7 +195,7 @@ class WorkspaceRuntimeTransportTest {
         when(bindings.findById("binding-a")).thenReturn(runtime);
         var sessions = mock(RuntimeSessionRepository.class);
         var http = mock(HttpRuntimeTransport.class);
-        var transport = new WorkspaceRuntimeTransport(http, mock(WorkspaceExecutionStore.class), bindings, sessions,
+        var transport = new WorkspaceRuntimeTransport(http, mock(JdbcWorkspaceExecutionStore.class), bindings, sessions,
                 harness -> new ContextBinding("tenant", "workspace", 7, "storage", ".", "config", 1));
         for (String harness : new String[] {"harness-a", "harness-b"}) {
             var session = new RuntimeSession(harness, harness + "-turn", "continuation", scope);
@@ -319,7 +320,7 @@ class WorkspaceRuntimeTransportTest {
         when(bindings.findById("binding-a")).thenReturn(runtime);
         var sessions = mock(RuntimeSessionRepository.class);
         when(sessions.findById(scope, session.getRuntimeSessionId())).thenReturn(record);
-        var ownership = mock(WorkspaceExecutionStore.class);
+        var ownership = mock(JdbcWorkspaceExecutionStore.class);
         var http = mock(HttpRuntimeTransport.class);
         return new Fixture(new WorkspaceRuntimeTransport(http, resolver, ownership, bindings, sessions), http, resolver,
                 ownership, bindings, sessions, runtime, record, lease, session, boot, map(fixture.get("expectedPod")), request, capture);
@@ -350,7 +351,7 @@ class WorkspaceRuntimeTransportTest {
     }
 
     private record Fixture(WorkspaceRuntimeTransport transport, HttpRuntimeTransport http, WorkspaceRuntimeResolver resolver,
-            WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
+            JdbcWorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             RuntimeBindingRecord runtime, RuntimeSessionRecord record, RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> pod, Map<String, Object> request, Map<String, Object> capture) {
     }

@@ -345,8 +345,7 @@ function OpenTuiEntryApp({
   useKeyboard((key: KeyEvent) => {
     if (
       key.eventType === 'release' ||
-      !key.ctrl ||
-      (key.name !== 'c' && key.name !== 'd')
+      (!matchesCommand(Command.QUIT, key) && !matchesCommand(Command.EXIT, key))
     )
       return;
     if (key.name === 'd' && composerHandle.current?.getText()) return;
@@ -488,6 +487,7 @@ function OpenTuiEntryApp({
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
       onScheduleTool={live.scheduleTool}
+      onRunModPrompt={live.runModPrompt}
       onRetryPrompt={live.retryLastPrompt}
       onInputProcessed={live.notifyInputProcessed}
       onQuit={handleQuit}

@@ -10,14 +10,15 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegi
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiSessionMain;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -94,7 +95,7 @@ class ToolPublicationLockOrderMySqlIT {
             var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
             var descriptor = JSON.readTree(jdbc.queryForObject(
                     "SELECT result_json FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class));
-            var projection = new ManagedToolResultStore.Projection(descriptor, "pub-1",
+            var projection = new JdbcManagedToolResultStore.Projection(descriptor, "pub-1",
                     artifacts.getFirst().binding(), artifacts.getFirst().manifestRef(), artifacts, fixture.policy().version());
             ToolPublicationStoreTest.releaseArtifacts(jdbc, fixture.manager());
             jdbc.update("DELETE FROM ma_public_event WHERE event_type = 'item.tool_result.updated'");
@@ -332,7 +333,7 @@ class ToolPublicationLockOrderMySqlIT {
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                    ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             var properties = new ManagedAgentProperties();
             properties.setAgentRevision("reviewed-agent/1");
             // A full pinned original: the seal below walks the whole CSI
@@ -342,7 +343,7 @@ class ToolPublicationLockOrderMySqlIT {
             var bindings = new JdbcRuntimeBindingRepository(source,
                     new AesGcmSecretProtector("test", new byte[32]));
             var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                    new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             var transaction = new TransactionTemplate(manager);
             var request = transaction.execute(status ->
                     requireCsiRequest(managed, registration, sessionId));
@@ -557,7 +558,7 @@ class ToolPublicationLockOrderMySqlIT {
         try {
             source.enabled = true;
             var owner = owners.submit(() -> transaction.executeWithoutResult(status ->
-                    WorkspaceLifecycleStore.lockPlacement(journal.jdbc, "tenant-1")));
+                    JdbcWorkspaceLifecycleStore.lockPlacement(journal.jdbc, "tenant-1")));
             assertThat(source.ownerPlacement.await(10, TimeUnit.SECONDS)).isTrue();
             var result = subjects.submit(subject);
             JsonNode value;
