@@ -10,6 +10,7 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { fitPendingSlice } from '../../utils/pending-rendered-height.js';
 import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
@@ -92,6 +93,27 @@ type DiffResultDisplay = Pick<
   | 'fileDiffLength'
   | 'fileDiffTruncated'
 >;
+
+/**
+ * Whether `text` renders taller than `maxHeight` rows at `maxWidth`.
+ *
+ * Measured with the same helper `MarkdownDisplay` pre-slices with, so the
+ * markdown branch and the plain-text fallback agree about what "fits": the
+ * fallback exists to bound a tall result, and a result the markdown renderer
+ * already keeps inside the budget has nothing to bound.
+ */
+function exceedsRenderedHeight(
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+): boolean {
+  if (maxHeight <= 0) return false;
+  const lines = text.split(/\r?\n/);
+  return (
+    fitPendingSlice(lines, Math.max(1, maxWidth), maxHeight, maxHeight)
+      .keptLines < lines.length
+  );
+}
 
 function sliceTextForMaxHeight(
   text: string,
@@ -887,16 +909,30 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
-  // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
-  // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox.
-  // `isCappingShell` keeps the cap honest when ctrl+s has been pressed
-  // (#10640): constrainHeight=false drops the height budget (availableHeight
-  // above is undefined) but the ui.shellOutputMaxLines cap still binds.
-  // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
-  // (default true), so without this the capped shell output would escape
-  // through the markdown branch, which MaxSizedBox does not contain.
-  if (availableHeight || isCappingShell) {
+  // A result too tall for its budget falls back to plain text, which
+  // MaxSizedBox then bounds by `availableHeight`. That fallback is about
+  // HEIGHT, not about depth: a result whose rendered height fits the budget
+  // keeps the markdown its tool declared (`isOutputMarkdown`), so
+  // `ask_user_question`'s `**Color**: Blue` no longer loses its formatting just
+  // because the message carries a terminal-height budget (#13956).
+  //
+  // Shell output is the exception and stays on the plain-text path whenever a
+  // height is known: the `ui.shellOutputMaxLines` cap binds through
+  // MaxSizedBox (`isCappingShell`), a finished capped shell result's budget IS
+  // that cap, and the `ANSI`/plain path is what renders the ShellStatsBar
+  // overflow count. `isCappingShell` also covers ctrl+s, which drops the budget
+  // (so `availableHeight` is undefined) while the cap still binds (#10640).
+  // The `!renderOutputAsMarkdown` clause keeps resumed shell results — which
+  // the rebuild leaves without the flag and therefore default to markdown —
+  // from escaping that cap through the markdown branch (#10640).
+  if (isShellTool) {
+    renderOutputAsMarkdown = false;
+  } else if (
+    renderOutputAsMarkdown &&
+    availableHeight !== undefined &&
+    typeof resultDisplay === 'string' &&
+    exceedsRenderedHeight(resultDisplay, innerWidth, availableHeight)
+  ) {
     renderOutputAsMarkdown = false;
   }
 

@@ -518,6 +518,68 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
+  describe('markdown survives a terminal height budget', () => {
+    // availableHeight = 20 - STATIC_HEIGHT(1) - RESERVED_LINE_COUNT(5) = 14.
+    const BUDGET = { availableTerminalHeight: 20 } as const;
+
+    it('renders a short result as markdown when the budget has room', () => {
+      // The ask_user_question answer summary (`**Color**: Blue`) used to be
+      // demoted to plain text whenever ANY budget was present, so the bold
+      // markers showed up verbatim even though the two lines fit 14 rows
+      // (#13956).
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={'**Color**: Blue\n\n**Later**: Green'}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('MockMarkdown:**Color**: Blue');
+    });
+
+    it('falls back to plain text when the result is taller than the budget', () => {
+      const tooTall = Array.from(
+        { length: 40 },
+        (_, i) => `line ${i + 1}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={tooTall}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      const output = lastFrame()!;
+      expect(output).not.toContain('MockMarkdown:');
+      expect(output).toContain('line 40');
+    });
+
+    it('keeps shell output on the plain-text path under the same budget', () => {
+      // Shell output is bounded by `ui.shellOutputMaxLines`, which renders
+      // through MaxSizedBox and counts its hidden lines there.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="Shell"
+          resultDisplay={'Shell'}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+  });
+
   describe('fullDetail (§4.9 transcript) data-source switch', () => {
     it('swaps summary for detailedDisplay on a collapsible tool in fullDetail mode', () => {
       const { lastFrame } = renderWithContext(
