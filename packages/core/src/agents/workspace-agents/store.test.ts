@@ -278,15 +278,19 @@ describe('agent versioned store', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(Date.now() + 16 * 60_000);
-      await expect(
-        enrollAgentHost(PROJECT_ROOT, {
-          token,
-          name: 'worker',
-          workspaceCwd: '/worker',
-          providers: ['qwen'],
-          secret: 'p'.repeat(43),
-        }),
-      ).rejects.toThrow('Invalid or expired Agent Host enrollment token.');
+      const error = await enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'worker',
+        workspaceCwd: '/worker',
+        providers: ['qwen'],
+        secret: 'p'.repeat(43),
+      }).catch((failure: unknown) => failure);
+      expect(error).toHaveProperty(
+        'message',
+        'Invalid or expired Agent Host enrollment token.',
+      );
+      // A refusal, so the Host drops a secret that enrolled nothing.
+      expect(isAgentHostEnrollmentRefusal(error)).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -352,9 +356,23 @@ describe('agent versioned store', () => {
       expect(isAgentHostEnrollmentRefusal(error)).toBe(true);
     }
     expect(isAgentHostEnrollmentRefusal(new Error('EIO'))).toBe(false);
-    expect(
-      isAgentHostEnrollmentRefusal(new Error(AGENT_HOST_ALREADY_ENROLLED)),
-    ).toBe(false);
+  });
+
+  it('refuses an invalid request without a secret before touching the store', async () => {
+    // Without a secret it cannot be a repeat, and the route is
+    // unauthenticated: no lock taken, no store created.
+    const error = await enrollAgentHost(PROJECT_ROOT, {
+      token: 'any',
+      name: '',
+      workspaceCwd: '/worker',
+      providers: ['qwen'],
+    }).catch((failure: unknown) => failure);
+
+    expect(error).toHaveProperty('message', 'Invalid Agent Host enrollment.');
+    expect(isAgentHostEnrollmentRefusal(error)).toBe(true);
+    await expect(
+      fs.access(getWorkspaceFilePath(PROJECT_ROOT)),
+    ).rejects.toThrow();
   });
 
   it('does not answer a secret it never enrolled without a valid token', async () => {
@@ -693,9 +711,13 @@ describe('removing and replacing an Agent Host', () => {
         providers: ['Qwen Code ACP'],
       };
 
-      await expect(
-        enrollAgentHost(PROJECT_ROOT, { ...input, secret }),
-      ).rejects.toThrow(AGENT_HOST_ALREADY_ENROLLED);
+      const error = await enrollAgentHost(PROJECT_ROOT, {
+        ...input,
+        secret,
+      }).catch((failure: unknown) => failure);
+      expect(error).toHaveProperty('message', AGENT_HOST_ALREADY_ENROLLED);
+      // Not a refusal: the Host keeps that secret for the join it enrolled.
+      expect(isAgentHostEnrollmentRefusal(error)).toBe(false);
       expect((await readWorkspaceAgents(PROJECT_ROOT))[0]?.execution).toEqual({
         mode: 'managed-host',
         hostIds: [old.host.id],
@@ -731,15 +753,15 @@ describe('removing and replacing an Agent Host', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(Date.now() + 16 * 60_000);
-      await expect(
-        enrollAgentHost(PROJECT_ROOT, {
-          token,
-          name: 'new',
-          workspaceCwd: '/worker',
-          providers: ['Qwen Code ACP'],
-          secret,
-        }),
-      ).rejects.toThrow(AGENT_HOST_ALREADY_ENROLLED);
+      const error = await enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'new',
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        secret,
+      }).catch((failure: unknown) => failure);
+      expect(error).toHaveProperty('message', AGENT_HOST_ALREADY_ENROLLED);
+      expect(isAgentHostEnrollmentRefusal(error)).toBe(false);
     } finally {
       vi.useRealTimers();
     }

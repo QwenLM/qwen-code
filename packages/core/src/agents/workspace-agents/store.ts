@@ -24,6 +24,7 @@ import { getProjectHash } from '../../utils/paths.js';
 import {
   AGENT_HOSTS_SCHEMA_VERSION,
   AGENT_HOST_ALREADY_ENROLLED,
+  AGENT_HOST_PROPOSED_SECRET_PATTERN,
   AGENT_HOST_REPLACEMENT_REQUIRED,
   AGENTS_SCHEMA_VERSION,
   type AgentHost,
@@ -618,12 +619,6 @@ export async function issueAgentHostEnrollment(
   });
 }
 
-/**
- * A secret a Host proposes for itself: base64url, at least as long as 32
- * bytes encode to. Its randomness is the Host's to supply.
- */
-const PROPOSED_SECRET_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
-
 /** An enrollment the store turned down, as opposed to one it could not do. */
 function refuseEnrollment(message: string): Error {
   return Object.assign(new Error(message), { enrollmentRefused: true });
@@ -669,7 +664,10 @@ export async function enrollAgentHost(
   },
 ): Promise<{ host: AgentHostView; secret: string }> {
   const proposed = input.secret;
-  if (proposed !== undefined && !PROPOSED_SECRET_PATTERN.test(proposed)) {
+  if (
+    proposed !== undefined &&
+    !AGENT_HOST_PROPOSED_SECRET_PATTERN.test(proposed)
+  ) {
     throw refuseEnrollment('Invalid Agent Host enrollment.');
   }
   const name = input.name.trim();
@@ -685,6 +683,9 @@ export async function enrollAgentHost(
             providers.some((provider) => !provider || provider.length > 80)
           ? 'Invalid Agent Host providers.'
           : undefined;
+  // Without a secret it cannot be a repeat: refused before the store is
+  // touched, as the route that calls this is unauthenticated.
+  if (invalid && proposed === undefined) throw refuseEnrollment(invalid);
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const registry = await readAgentHostsUnlocked(projectRoot);
     const { enrollment } = registry;

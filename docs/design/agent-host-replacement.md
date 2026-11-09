@@ -33,7 +33,7 @@ The Host keeps the file only while it may hold an enrollment:
 - It removes the file once the credential holds the secret.
 - It removes the file when the coordinator refuses the enrollment outright: an invalid or expired token, or a request the store rejects. The secret enrolled nothing then, or only a staged replacement, which its capability finishes with a new one.
 - A coordinator that could not complete the enrollment (busy or failing, 503) says nothing about an earlier attempt, so the file stays.
-- It removes the file when the credential is revoked, before removing the credential, unless the file holds another secret; one it cannot read goes too. Enrolled again after a revocation, the secret would come back. If the file cannot be removed, the credential stays for the next attempt. A Host removed on the coordinator before this Host ever saved its credential is not seen as revoked here, so its secret, which never left this machine, can be enrolled again.
+- It removes the file when the credential is revoked, before removing the credential, unless the file holds another secret; one it cannot read goes too. Enrolled again after a revocation, the secret would come back. If the file cannot be removed, the credential stays for the next attempt. A Host removed on the coordinator before this Host ever saved its credential is not seen as revoked here, so its secret can be enrolled again. That enrolls a new Host, not the removed one: the coordinator keeps only the secret's hash, and no other Host holds it.
 - A file that cannot be read, or that this version did not write, stops the enrollment before the token is spent rather than being replaced.
 - A secret that the saved credential already holds is not reused.
 

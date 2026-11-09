@@ -57,10 +57,15 @@ vi.mock('./agent-host-programs.js', () => ({
     probes.filter((probe) => probe.available).map((probe) => probe.program),
 }));
 vi.mock('./session-agents/adapters/index.js', () => ({ getAdapter }));
-// Passed through; one case fails reading the saved enrollment secret.
+// Passed through; some cases fail reading the saved enrollment secret or
+// saving the credential.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, readFile: vi.fn(actual.readFile) };
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+    rename: vi.fn(actual.rename),
+  };
 });
 vi.mock('./agent-host-relay.js', () => ({
   openAgentHostRelayRun: openRelay,
@@ -1319,8 +1324,9 @@ describe('enrolling', () => {
         const own = sent[2];
         expect(own).not.toBe(stranded);
 
+        // The superseded connection hears its 409 now, and stops there.
         answerFirst();
-        await expect(first).rejects.toThrow();
+        await expect(first).rejects.toThrow('Agent Host connection replaced.');
 
         // Still the secret the Replace that went through holds.
         await expect(readJson(files.enrolling)).resolves.toEqual({
@@ -1392,7 +1398,7 @@ describe('enrolling', () => {
       }),
     ],
     [
-      'sent with a token hash this version did not write',
+      'sent with a malformed token hash',
       JSON.stringify({
         schemaVersion: 1,
         secret: 'k'.repeat(43),
@@ -1481,6 +1487,173 @@ describe('enrolling', () => {
           schemaVersion: 1,
           secret: other,
         });
+      },
+    );
+  });
+
+  it.each([
+    // A rerun of another command still finds its own token.
+    [
+      'adds this command’s token beside another’s',
+      [tokenHash('the-first-replace')],
+      [tokenHash('the-first-replace'), tokenHash('join-token')],
+    ],
+    [
+      'records this command’s token once',
+      [tokenHash('join-token')],
+      [tokenHash('join-token')],
+    ],
+    // At most what it reads back: the oldest goes.
+    [
+      'keeps the latest eight tokens',
+      Array.from({ length: 8 }, (_, i) => tokenHash(`command-${i}`)),
+      [
+        ...Array.from({ length: 7 }, (_, i) => tokenHash(`command-${i + 1}`)),
+        tokenHash('join-token'),
+      ],
+    ],
+  ])(
+    '%s when it sends its saved secret again',
+    async (_label, saved, expected) => {
+      const kept = 'k'.repeat(43);
+      await withCoordinator(
+        () =>
+          Response.json(
+            { error: AGENT_HOST_ENROLLMENT_UNAVAILABLE },
+            { status: 503 },
+          ),
+        async (files, sent) => {
+          await fs.mkdir(path.dirname(files.enrolling), { recursive: true });
+          await fs.writeFile(
+            files.enrolling,
+            JSON.stringify({
+              schemaVersion: 1,
+              secret: kept,
+              tokenHashes: saved,
+            }),
+          );
+
+          await expect(connect()).rejects.toThrow(
+            AGENT_HOST_ENROLLMENT_UNAVAILABLE,
+          );
+          await expect(readJson(files.enrolling)).resolves.toEqual({
+            schemaVersion: 1,
+            secret: kept,
+            tokenHashes: expected,
+          });
+
+          // What it wrote, it reads back.
+          await expect(connect()).rejects.toThrow(
+            AGENT_HOST_ENROLLMENT_UNAVAILABLE,
+          );
+          expect(sent).toEqual([kept, kept]);
+        },
+      );
+    },
+  );
+
+  it('keeps its saved secret when the credential cannot be saved after the enrollment', async () => {
+    let failSave = true;
+    await withCoordinator(
+      (secret) => {
+        if (failSave) {
+          failSave = false;
+          // The next rename is the credential's save, after this answer.
+          vi.mocked(fs.rename).mockRejectedValueOnce(
+            Object.assign(new Error('ENOSPC: no space left on device'), {
+              code: 'ENOSPC',
+            }),
+          );
+        }
+        return Response.json({ host: { id: 'host-1' }, secret });
+      },
+      async (files, sent) => {
+        await expect(connect()).rejects.toThrow('ENOSPC');
+
+        // The coordinator took the enrollment: the retry needs this secret.
+        await expect(fs.access(files.credential)).rejects.toThrow();
+        await expect(readJson(files.enrolling)).resolves.toEqual({
+          schemaVersion: 1,
+          secret: sent[0],
+          tokenHashes: [tokenHash('join-token')],
+        });
+
+        await connect();
+
+        expect(sent).toEqual([sent[0], sent[0]]);
+        await expect(readJson(files.credential)).resolves.toMatchObject({
+          hostId: 'host-1',
+          secret: sent[0],
+        });
+      },
+    );
+  });
+
+  it('keeps the new secret when a Replace retried after its 409 gets no definite answer', async () => {
+    const stranded = 's'.repeat(43);
+    await withCoordinator(
+      (secret) =>
+        secret === stranded
+          ? Response.json(
+              { error: AGENT_HOST_ALREADY_ENROLLED },
+              { status: 409 },
+            )
+          : // Busy: the Replace may yet have gone through with this one.
+            Response.json(
+              { error: AGENT_HOST_ENROLLMENT_UNAVAILABLE },
+              { status: 503 },
+            ),
+      async (files, sent) => {
+        await fs.mkdir(path.dirname(files.enrolling), { recursive: true });
+        await fs.writeFile(
+          files.enrolling,
+          JSON.stringify({ schemaVersion: 1, secret: stranded }),
+        );
+
+        await expect(connect()).rejects.toThrow(
+          AGENT_HOST_ENROLLMENT_UNAVAILABLE,
+        );
+
+        expect(sent).toHaveLength(2);
+        expect(sent[1]).not.toBe(stranded);
+        await expect(readJson(files.enrolling)).resolves.toEqual({
+          schemaVersion: 1,
+          secret: sent[1],
+          tokenHashes: [tokenHash('join-token')],
+        });
+      },
+    );
+  });
+
+  it('starts on its new credential when the saved secret cannot be dropped after it', async () => {
+    let release: (() => Promise<void>) | undefined;
+    await withCoordinator(
+      async (secret) => {
+        const files = hostFiles(
+          process.env['QWEN_HOME']!,
+          serverUrl,
+          workspaceId,
+          workspaceCwd,
+        );
+        // Another process holds the secret file's lock past its retries.
+        release = await lockfile.lock(files.enrolling, { realpath: false });
+        return Response.json({ host: { id: 'host-1' }, secret });
+      },
+      async (files, sent) => {
+        try {
+          await connect();
+
+          await expect(readJson(files.credential)).resolves.toMatchObject({
+            hostId: 'host-1',
+            secret: sent[0],
+          });
+          // Left behind, it is not reused: the credential holds it.
+          await expect(readJson(files.enrolling)).resolves.toMatchObject({
+            secret: sent[0],
+          });
+        } finally {
+          await release?.();
+        }
       },
     );
   });

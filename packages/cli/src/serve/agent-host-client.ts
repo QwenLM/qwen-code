@@ -48,6 +48,7 @@ import {
   AGENT_HOST_ALREADY_ENROLLED,
   AGENT_HOST_CREDENTIAL_REJECTED,
   AGENT_HOST_ENROLLMENT_REFUSED,
+  AGENT_HOST_PROPOSED_SECRET_PATTERN,
   AGENT_HOST_REPLACEMENT_REQUIRED,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import {
@@ -359,7 +360,7 @@ async function readEnrollmentSecret(
   if (
     schemaVersion !== 1 ||
     typeof secret !== 'string' ||
-    !/^[A-Za-z0-9_-]{43,128}$/.test(secret) ||
+    !AGENT_HOST_PROPOSED_SECRET_PATTERN.test(secret) ||
     !Array.isArray(tokenHashes) ||
     tokenHashes.length > MAX_ENROLLMENT_TOKENS ||
     !tokenHashes.every(
@@ -934,8 +935,7 @@ async function connectAgentHost(
         ...(enrollmentToken ? { enrollmentToken } : {}),
       }),
     });
-  if (credential && options.enrollmentToken) {
-    const savedCredential = credential;
+  if (savedCredential && options.enrollmentToken) {
     try {
       await sendHeartbeat(savedCredential, options.enrollmentToken);
     } catch (error) {

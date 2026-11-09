@@ -30,6 +30,12 @@ export const AGENT_HOST_ENROLLMENT_REFUSED = 'Agent Host enrollment refused.';
 /** ...and for one it could not complete (busy or failing); retry it. */
 export const AGENT_HOST_ENROLLMENT_UNAVAILABLE =
   'Agent Host enrollment did not complete; retry.';
+/**
+ * A secret a Host proposes for itself: base64url, at least as long as 32
+ * bytes encode to. Its randomness is the Host's to supply. The Host reads
+ * back only a saved secret that matches it.
+ */
+export const AGENT_HOST_PROPOSED_SECRET_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 
 export const AGENT_HOSTS_SCHEMA_VERSION = 1;
 export const LOCAL_AGENT_RUNTIME_ID = 'local';
