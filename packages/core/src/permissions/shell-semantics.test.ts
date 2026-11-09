@@ -586,11 +586,25 @@ describe('extractShellOperations', () => {
   });
 
   // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication; bash
-  // reads the unquoted `&` as "run in background", and the check keeps the
-  // literal write.
+  // reads the unquoted `&` as "run in background" and then runs `1`, so no
+  // file is written.
   it('2">"&1 is not fd duplication', () => {
-    expect(ops('printf X 2">"&1')).toContainEqual(write(`${CWD}/&1`));
+    expect(ops('printf X 2">"&1')).toEqual([]);
   });
+
+  // A quoted or escaped `>` ends the word; an adjacent unquoted `>` is still
+  // a redirect: `echo x '>'>file` passes `>` to echo and writes `file`.
+  it.each<[command: string, file: string]>([
+    ["echo x '>'>.qwen/settings.json", '.qwen/settings.json'],
+    ['echo x \\>>out2.txt', 'out2.txt'],
+    ['echo x ">">out3.txt', 'out3.txt'],
+    ["echo x $'\\x3e'>out4.txt", 'out4.txt'],
+  ])(
+    'a quoted operator before a real redirect keeps the write: %s',
+    (command, file) => {
+      expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
+    },
+  );
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
   it.each<[command: string, file: string]>([
@@ -921,6 +935,7 @@ describe('ANSI-C wrapper payloads', () => {
       String.raw`sh -c $\
 '--' 'cat > /etc/motd'`,
     ],
+    ['a brace-expanded terminator', "sh -c {--,'cat > /etc/motd'}"],
   ])('extracts the write inside %s', (_what, command) => {
     expect(across(command)).toEqual([write('/etc/motd')]);
   });

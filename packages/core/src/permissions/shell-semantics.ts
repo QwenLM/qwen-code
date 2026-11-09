@@ -415,6 +415,32 @@ function isNetworkPseudoDevice(target: string): boolean {
 }
 
 /**
+ * Index where bash ends the word and starts an unquoted redirection operator.
+ *
+ * A quoted or escaped `<`/`>` stays inside the word, so `'>'>file` is the
+ * word `>` followed by the redirect `>file`. The tokenizer keeps both in one
+ * token, and the masked spelling alone would hide the real operator.
+ */
+function operatorAfterMaskedOperator(
+  token: string,
+  bare: string | undefined,
+): number {
+  if (bare === undefined || bare.length !== token.length) return -1;
+  for (let index = 1; index < token.length; index++) {
+    const character = token[index]!;
+    if (
+      (character === '<' || character === '>') &&
+      bare[index] === '1' &&
+      (token[index - 1] === '<' || token[index - 1] === '>') &&
+      bare[index - 1] !== '1'
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
  * The file that `>&word`, `N>&word` or `<&word` opens, or undefined when it
  * only duplicates or closes a descriptor (`2>&1`, `>&2`, `<&0`, `2>&-`).
  *
@@ -557,12 +583,22 @@ function extractRedirects(
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = syntax.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
+      const split = operatorAfterMaskedOperator(tok, tokBare);
+      const matchText = split > 0 ? tok.slice(split) : syntax;
+      const m = matchText.match(
+        /^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+      );
       if (m) {
         const op = m[1]!;
-        const target = tok.slice(op.length);
+        const targetStart = Math.max(split, 0) + op.length;
+        const target = tok.slice(targetStart);
         if (op.startsWith('<<')) {
-          toRemove.add(i);
+          if (split > 0) {
+            tokens[i] = tok.slice(0, split);
+            if (bares !== undefined) bares[i] = tokBare!.slice(0, split);
+          } else {
+            toRemove.add(i);
+          }
           continue;
         }
         if (
@@ -570,14 +606,24 @@ function extractRedirects(
           looksLikePath(target) &&
           !isNetworkPseudoDevice(target)
         ) {
-          const file = resolvePath(target, cwd, tokBare?.slice(op.length));
+          const file = resolvePath(target, cwd, tokBare?.slice(targetStart));
           if (op === '<') {
             readFiles.push(file);
           } else {
             writeFiles.push(file);
           }
         }
-        toRemove.add(i);
+        if (split > 0) {
+          tokens[i] = tok.slice(0, split);
+          if (bares !== undefined) bares[i] = tokBare!.slice(0, split);
+        } else {
+          toRemove.add(i);
+        }
+      } else if (split > 0) {
+        // A quoted operator before a descriptor duplication or control
+        // syntax (`'>'>&1`): the quoted word stays, the rest opens no file.
+        tokens[i] = tok.slice(0, split);
+        if (bares !== undefined) bares[i] = tokBare!.slice(0, split);
       }
     }
   }

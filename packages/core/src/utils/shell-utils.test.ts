@@ -723,6 +723,13 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper("sh -c -- 'ls -l'")).toEqual('ls -l');
   });
 
+  // Brace expansion runs before the shell reads the words, so
+  // `{--,'ls -l'}` hands `--` and `ls -l` to `-c`.
+  it('reads the payload after a brace-expanded option terminator', async () => {
+    expect(stripShellWrapper("sh -c {--,'ls -l'}")).toEqual('ls -l');
+    expect(stripShellWrapper("sh -c {'--','ls -l'}")).toEqual('ls -l');
+  });
+
   it('does not treat a locale word as an option terminator', async () => {
     // The locale word is the payload (bash runs a program named `x2dx2d`), so
     // the word after it is positional argv. Like every other static payload it
@@ -759,7 +766,7 @@ describe('stripShellWrapper', () => {
   });
 
   it('does not read a lone terminator as a payload', () => {
-    expect(stripShellWrapper('sh -c --')).toEqual('sh -c --');
+    expect(stripShellWrapper('sh -c --')).toEqual('--');
   });
 
   it.each(RESOLVED_PAYLOADS)(
@@ -824,6 +831,7 @@ describe('detectSelfKillCommand', () => {
       "sh -c $'--\\0x' 'pkill -f qwen'",
       "sh -c $'--\\x00x' 'pkill -f qwen'",
       "sh -c $'--\\0' 'pkill -f qwen'",
+      "sh -c {--,'pkill -f qwen'}",
     ]);
   });
 

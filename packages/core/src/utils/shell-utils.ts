@@ -802,14 +802,66 @@ function shellWordQuoteRemoval(
 }
 
 /**
+ * The words an unquoted top-level `{a,b}` word expands to, or null when the
+ * word is not a brace list. Bash expands braces before it hands the words to
+ * the shell, so `{--,'script'}` is the terminator `--` plus the script.
+ */
+function braceAlternatives(token: string): string[] | null {
+  if (!token.startsWith('{') || !token.endsWith('}')) return null;
+  const body = token.slice(1, -1);
+  const parts: string[] = [];
+  let start = 0;
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index]!;
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quote = '';
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    // A nested list keeps its literal spelling; do not guess its expansion.
+    if (char === '{' || char === '}') return null;
+    if (char === ',') {
+      parts.push(body.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (parts.length === 0) return null;
+  parts.push(body.slice(start));
+  return parts;
+}
+
+/**
  * True when the word right after `-c` is the option terminator `--` in any
  * quoting bash resolves to that word, including ANSI-C escapes and a NUL
- * truncation (`$'--\0x'`). A word carrying an expansion is not a resolved
+ * truncation (`$'--\0x'`) or a brace list whose first word is `--`
+ * (`{--,'script'}`). A word carrying an expansion is not a resolved
  * terminator; it keeps the base reading as the payload word.
  */
 function isOptionTerminatorWord(token: string): boolean {
   const removed = shellWordQuoteRemoval(token);
-  return removed !== null && !removed.hasExpansion && removed.text === '--';
+  if (removed === null || removed.hasExpansion) return false;
+  if (removed.text === '--') return true;
+  const first = braceAlternatives(token)?.[0];
+  return first !== undefined && isOptionTerminatorWord(first);
 }
 
 /**
@@ -819,14 +871,19 @@ function isOptionTerminatorWord(token: string): boolean {
  */
 function restAfterOptionTerminator(rest: string): string | null {
   const terminator = takeLeadingToken(rest);
-  if (
-    terminator &&
-    isOptionTerminatorWord(terminator.token) &&
-    takeLeadingToken(terminator.rest)
-  ) {
-    return terminator.rest;
+  if (!terminator) return null;
+  const removed = shellWordQuoteRemoval(terminator.token);
+  const alternatives =
+    removed !== null && !removed.hasExpansion
+      ? braceAlternatives(terminator.token)
+      : null;
+  if (alternatives && isOptionTerminatorWord(alternatives[0]!)) {
+    const payload = alternatives[1];
+    if (payload === undefined || payload === '') return null;
+    return `${payload} ${terminator.rest}`;
   }
-  return null;
+  if (!isOptionTerminatorWord(terminator.token)) return null;
+  return takeLeadingToken(terminator.rest) ? terminator.rest : null;
 }
 
 export function stripShellWrapper(command: string): string {
@@ -864,12 +921,6 @@ export function stripShellWrapper(command: string): string {
         const afterTerminator = restAfterOptionTerminator(markerRest);
         if (afterTerminator !== null) {
           markerRest = afterTerminator;
-        } else if (
-          isOptionTerminatorWord(takeLeadingToken(markerRest)?.token ?? '')
-        ) {
-          // A lone terminator with no payload word is a flag-only wrapper;
-          // keep the base reading so the gates keep refusing it.
-          return trimmed;
         }
       }
       const commandToken = takeLeadingToken(markerRest);
