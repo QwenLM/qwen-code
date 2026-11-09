@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const CLAUDE_CODE_EVENTS_VERSION = '2.1.318';
+export const CLAUDE_CODE_EVENTS_VERSION = '2.1.319';
 
 // Claude Code's engine events, `$` API events and `classic.*` settings hook
 // events, so registrations for events Qwen does not run yet can be skipped
@@ -103,10 +103,10 @@ const eventsByNamespace: Record<string, readonly string[]> = {
   state: ['get', 'set'],
   store: ['delete', 'get', 'keys', 'set'],
   telemetry: ['log', 'mark'],
+  theme: ['clear', 'set'],
   tool: ['call', 'check', 'describe', 'list', 'register'],
   turn: ['abort', 'complete', 'start', 'step'],
   ui: [
-    'backdrop',
     'blit',
     'close',
     'copy',

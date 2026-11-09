@@ -45,6 +45,7 @@ import {
   type ModPromptSubmitted,
   type ModQueuedPrompt,
   type ModTurnComplete,
+  type ModTurnCompleted,
   type ModTurnStart,
   type ModWorkerReply,
   type ModSource,
@@ -611,10 +612,11 @@ export class ModRuntime {
   async completeTurn(
     input: ModTurnComplete,
     signal: AbortSignal,
-  ): Promise<string> {
+  ): Promise<ModTurnCompleted> {
     const result = await this.request({ type: 'turn-complete', input }, signal);
     validateResult('turn.complete', result);
-    return (result as { text: string }).text;
+    const { text, by } = result as ModTurnCompleted;
+    return by?.length ? { text, by } : { text };
   }
 
   // The host owns the running turn, so it judges the id and ends the turn.

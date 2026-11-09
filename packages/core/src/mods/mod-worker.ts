@@ -446,6 +446,24 @@ async function ownCheck(
   return { ...answer, plugin };
 }
 
+// The engine names the plugins that wrote a turn's text: a hook that answers
+// its own, or passes on a text other than the one it heard. One that passes
+// on what it heard keeps the names it heard, and a hook cannot write them.
+async function ownTurnText(
+  value: { text: string; by?: string[] },
+  below: Promise<unknown> | undefined,
+  plugin: string,
+): Promise<{ text: string; by?: string[] }> {
+  const { by: _written, ...answer } = value;
+  const heard = (await below?.catch(() => undefined)) as
+    | { text?: unknown; by?: string[] }
+    | undefined;
+  const by = heard?.by ?? [];
+  if (heard?.text !== answer.text)
+    return { ...answer, by: by.includes(plugin) ? by : [...by, plugin] };
+  return by.length ? { ...answer, by } : answer;
+}
+
 async function dispatch(
   event: ModEvent,
   input: ModInput,
@@ -517,6 +535,12 @@ async function dispatch(
           call.last,
           realm.plugin.name,
         );
+      if (event === 'turn.complete')
+        return await ownTurnText(
+          value as { text: string },
+          call.last,
+          realm.plugin.name,
+        );
       return notice(event) && record(value) && !('deny' in value)
         ? { value: value['value'] }
         : value;
@@ -555,6 +579,12 @@ async function dispatch(
           if (event === 'tool.check')
             return await ownCheck(
               value as ModToolCheckResult,
+              recovery.last ?? call.last,
+              realm.plugin.name,
+            );
+          if (event === 'turn.complete')
+            return await ownTurnText(
+              value as { text: string },
               recovery.last ?? call.last,
               realm.plugin.name,
             );

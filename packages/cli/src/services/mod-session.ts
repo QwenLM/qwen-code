@@ -1027,13 +1027,14 @@ export class ModSession implements ICommandLoader {
       ...(answer.truncated && { isAnswerTruncated: true as const }),
     };
     const run = async (signal: AbortSignal) => {
-      const text = await this.runtime!.completeTurn(input, signal);
-      // A different text is shown beneath the answer; the record keeps it.
+      const { text, by } = await this.runtime!.completeTurn(input, signal);
+      // A different text is shown beneath the answer, under the plugins that
+      // wrote it; the record keeps it.
       if (text === input.answer || !text.trim()) return;
       const note = {
         text: cpLen(text) > 4096 ? `${cpSlice(text, 0, 4096)}…` : text,
         to: 'transcript' as const,
-        plugin: plugins.join('+'),
+        plugin: (by ?? plugins).join('+'),
         sessionId: turn.sessionId,
         isTurnNote: true as const,
       };

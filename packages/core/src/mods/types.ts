@@ -148,6 +148,15 @@ export interface ModTurnComplete {
   isAnswerTruncated?: true;
 }
 
+/**
+ * What a turn's `turn.complete` hooks settled on: the text, and the plugins
+ * that wrote it when it is not the answer they heard.
+ */
+export interface ModTurnCompleted {
+  text: string;
+  by?: string[];
+}
+
 export type ModRequest =
   | {
       type: 'load';

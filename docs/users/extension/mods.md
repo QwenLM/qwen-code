@@ -163,14 +163,16 @@ Patterns select among the engine events `session.start`, `session.end`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.318 also defines events that Qwen Code does not run yet, such as
+Claude Code 2.1.319 also defines events that Qwen Code does not run yet, such as
 `prompt.fill` or `classic.Stop`. `ui.render` runs only where a host draws it. A registration for one of them,
 or for a prefix such as `classic.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
 `Hooks for unsupported events will not run: prompt.fill, ui.render`. A skipped
 hook never runs, including a guard and its `.catch`. Names that Claude Code does
-not define, such as `tool.calls`, still reject initialization. A prefix that
+not define, such as `tool.calls`, still reject initialization. So does
+`ui.backdrop`, which Claude Code 2.1.319 replaced with `theme.set` and
+`theme.clear`. A prefix that
 covers a supported event, such as `prompt.*` or `*`, is not skipped: it hears
 that event.
 
@@ -417,7 +419,7 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.318",
+    "claudeCode": "2.1.319",
     "events": [
       "clock.now",
       "clock.sleep",
@@ -518,7 +520,7 @@ Mod discovery. Mod manifests must be relative paths inside the extension.
 directory, the one that holds `qwen-extension.json` or
 `.claude-plugin/plugin.json`. They are plain properties.
 
-The other methods are API events that resolve to the shapes Claude Code 2.1.318
+The other methods are API events that resolve to the shapes Claude Code 2.1.319
 declares:
 
 | Method                                | Resolves to                                                                             |
@@ -610,9 +612,16 @@ The fields of both events are pinned. `next(e)` resolves to `{text: e.answer}`,
 with `usage` when the turn has it. Return a different, non-blank `text` to show
 it beneath the answer, up to 4,096 characters:
 
-- in a terminal, as the transcript line `[Mod <plugins>] <text>`;
+- in a terminal, as the transcript line `[Mod <plugins>] <text>`, where
+  `<plugins>` are the plugins that wrote the text;
 - in headless text mode, as the same line on stderr after the answer;
 - in JSON modes, as a `system` `ui_log` message before the result.
+
+Qwen Code names those plugins in `by`, which `next(e)` resolves with once a
+hook below wrote a text: a hook that answers without `next`, or returns a text
+other than the one it heard, is added after the names it heard. One that hands
+on the text it heard keeps the names it heard. A `by` that a hook returns is
+replaced.
 
 The conversation record keeps the answer. In a terminal the hooks run after the
 answer, and the next prompt can already start. A headless run waits for them
@@ -838,7 +847,7 @@ its props and its children flattened into an array, and throws for a string tag 
 JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
 [TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
 
-A tree a hook returns is judged with Claude Code 2.1.318's rules for `Box` and
+A tree a hook returns is judged with Claude Code 2.1.319's rules for `Box` and
 `Text`, and any other element refuses it with
 `<Element> is not drawn by Qwen Code yet`.
 
@@ -1085,6 +1094,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API follows the Claude Code 2.1.318 declarations, event names
+The author API follows the Claude Code 2.1.319 declarations, event names
 included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).

@@ -338,10 +338,11 @@ describe('ModRuntime with the real QuickJS worker', () => {
         return next(e);
       });
       on('classic.Stop', ($, e, next) => next(e));
-      // Added in Claude Code 2.1.316 and 2.1.318.
+      // Added in Claude Code 2.1.316 and 2.1.319.
       on('prompt.paint', ($, e, next) => next(e));
       on('ui.place', ($, e, next) => next(e));
-      on('ui.backdrop', ($, e, next) => next(e));
+      on('theme.set', ($, e, next) => next(e));
+      on('theme.clear', ($, e, next) => next(e));
       on('ui.render', {component:'Spinner'}, ($, e, next) => next(e));
       on('session.start', async ($, e, next) => {
         await $.command.register({name:'hello',description:'Hello'});
@@ -352,7 +353,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(logs).toEqual([
       {
         to: 'transcript',
-        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, prompt.paint, ui.backdrop, ui.place, ui.render',
+        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, prompt.paint, theme.clear, theme.set, ui.place, ui.render',
       },
     ]);
     expect(await runtime.runCommand('hello', '', signal())).toBe('still works');
@@ -424,7 +425,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       {
         version: '1.2.3+wrapped',
         qwen: {
-          claudeCode: '2.1.318',
+          claudeCode: '2.1.319',
           events: [
             'clock.now',
             'clock.sleep',
@@ -731,6 +732,11 @@ describe('ModRuntime with the real QuickJS worker', () => {
       /event not supported: models\.\*/,
     ],
     [
+      'event Claude Code 2.1.319 retired',
+      "export function register(on) { on('ui.backdrop', () => ({})); }",
+      /event not supported: ui\.backdrop/,
+    ],
+    [
       'unknown classic event',
       "export function register(on) { on('classic.BeforeRun', () => ({})); }",
       /event not supported: classic\.BeforeRun/,
@@ -865,7 +871,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         { ...turnEnd, answer: text, isAnswerTruncated: true },
         signal(),
       ),
-    ).toBe(text);
+    ).toEqual({ text });
     expect(logs.map((log) => log.text)).toEqual([
       `start ${text.length} true`,
       `complete ${text.length} true`,
@@ -911,8 +917,13 @@ describe('ModRuntime with the real QuickJS worker', () => {
       isAborted: true,
     };
     await runtime.startTurn({ text: 'Fix it', turnId: 'turn-1' }, signal());
-    expect(await runtime.completeTurn(turnEnd, signal())).toBe('TL;DR 5');
-    expect(await runtime.completeTurn(aborted, signal())).toBe('Done.');
+    expect(await runtime.completeTurn(turnEnd, signal())).toEqual({
+      text: 'TL;DR 5',
+      by: ['mod-1'],
+    });
+    expect(await runtime.completeTurn(aborted, signal())).toEqual({
+      text: 'Done.',
+    });
     expect(logs.map((log) => log.text)).toEqual([
       'start:{"text":"Fix it","turnId":"turn-1"}:{"turnId":"turn-1"}',
       `complete:${JSON.stringify(turnEnd)}`,
@@ -933,7 +944,39 @@ describe('ModRuntime with the real QuickJS worker', () => {
     for (const durationMs of [1, 2])
       expect(
         await runtime.completeTurn({ ...turnEnd, durationMs }, signal()),
-      ).toBe('Done.');
+      ).toEqual({ text: 'Done.' });
+  });
+
+  it('names the plugins that wrote the text, whatever a hook puts in by', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('turn.complete', async ($, e, next) => {
+          const heard = await next(e);
+          $.ui.log(heard.text + ' ' + JSON.stringify(heard.by));
+          if (e.durationMs === 1) return {...heard, by: ['someone']};
+          if (e.durationMs === 2) return {text: heard.text + '!', by: []};
+          if (e.durationMs === 3) return {text: heard.text, by: ['someone']};
+          return heard;
+        });
+      }`,
+      `export function register(on) {
+        on('turn.complete', ($, e, next) =>
+          e.durationMs === 3 ? next(e) : {text: 'TL;DR', by: ['someone']});
+      }`,
+    ]);
+    const end = (durationMs: number) =>
+      runtime.completeTurn({ ...turnEnd, durationMs }, signal());
+    // Passed on as heard, the names stay the ones heard.
+    expect(await end(1)).toEqual({ text: 'TL;DR', by: ['mod-1'] });
+    // A text rewritten on the way up adds its writer after them.
+    expect(await end(2)).toEqual({ text: 'TL;DR!', by: ['mod-1', 'mod-0'] });
+    // The answer itself, heard and handed on, has no writer.
+    expect(await end(3)).toEqual({ text: 'Done.' });
+    expect(logs.map((log) => log.text)).toEqual([
+      'TL;DR ["mod-1"]',
+      'TL;DR ["mod-1"]',
+      'Done. undefined',
+    ]);
   });
 
   it('asks the host to end the running turn and rejects with its reason', async () => {
@@ -1000,7 +1043,10 @@ describe('ModRuntime with the real QuickJS worker', () => {
       .startTurn({ text: '', turnId: 'turn-1' }, turn.signal)
       .catch(() => {});
     // The next dispatch runs; the abandoned hook never resumed.
-    expect(await runtime.completeTurn(turnEnd, signal())).toBe('pending');
+    expect(await runtime.completeTurn(turnEnd, signal())).toEqual({
+      text: 'pending',
+      by: ['mod-0'],
+    });
   });
 
   it('lets another plugin deny or rewrite $.turn.abort', async () => {

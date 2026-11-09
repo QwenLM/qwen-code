@@ -308,10 +308,14 @@ export function validateResult(
           (value['origin'] === undefined ||
             isDeepStrictEqual(value['origin'], input?.['origin']));
   else if (event === 'turn.complete')
+    // `by` is the engine's: a hook may pass on the one it heard, and what it
+    // writes there is replaced.
     valid =
-      only(value, ['text', 'usage']) &&
+      only(value, ['text', 'usage', 'by']) &&
       text(value['text']) &&
-      (value['usage'] === undefined || validTurnUsage(value['usage']));
+      (value['usage'] === undefined || validTurnUsage(value['usage'])) &&
+      (value['by'] === undefined ||
+        (Array.isArray(value['by']) && value['by'].every(text)));
   else {
     valid =
       Object.keys(value).every((key) => key === 'deny' || key === 'value') &&
