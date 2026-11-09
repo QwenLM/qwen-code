@@ -2439,12 +2439,48 @@ function resolveCdTargetCwd(
         (target === '~' || target.startsWith('~/')))) &&
     !isShellAbsolutePath(target);
 
+  // Bash expands a brace list before the builtin sees its arguments: for
+  // `cd {a,b}` the two expanded words make bash report "too many arguments"
+  // and exit 1, so the cd never happens and the segment keeps the cwd it
+  // started in. Resolving the literal `{a,b}` publishes a phantom directory
+  // that a relative write later in the segment is then attributed to, which
+  // is exactly where a deny rule for a protected relative path would miss.
+  // There is no static cwd to derive, so keep the target static-loop-inert
+  // and mark the rest of the segment cwd-unknown.
+  if (canBraceExpand(target, targetBare)) {
+    return {
+      kind: 'static',
+      cwd,
+      cwdUnknown: true,
+      redirects,
+    };
+  }
+
   return {
     kind: 'static',
     cwd: resolvePath(target, cwd, targetBare),
     cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
     redirects,
   };
+}
+
+/**
+ * True when bash would brace-expand a `cd`/`pushd` target before it runs.
+ *
+ * Only an unquoted, escaped `{` opens a brace list, and a list needs a comma or
+ * a `..` range between the braces. `{a}` therefore stays literal and so does a
+ * quoted `'{a,b}'`, which is a real directory name a static cd can resolve.
+ */
+function canBraceExpand(target: string, bare: string | undefined): boolean {
+  const opening = target.indexOf('{');
+  if (opening === -1) return false;
+  const closing = target.indexOf('}', opening + 1);
+  if (closing === -1) return false;
+  // `bare` is undefined when the caller has no per-character marking; a target
+  // reached here is always shell-decoded, so assume the braces were typed bare.
+  if (bare !== undefined && bare[opening] !== '1') return false;
+  const body = target.slice(opening + 1, closing);
+  return body.includes(',') || body.includes('..');
 }
 
 function toRedirectOperations({

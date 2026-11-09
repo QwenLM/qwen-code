@@ -776,6 +776,26 @@ describe('extractShellOperationsAcrossCommand', () => {
       "popd $DIR && printf '{}' > settings.local.json",
       [uncertainWrite('/repo/settings.local.json')],
     ],
+    [
+      'marks a brace-expanded cd target as cwd-unknown instead of a phantom path',
+      'cd {a,b} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a brace-range cd target as cwd-unknown',
+      'cd sub{1..3} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'keeps a quoted brace list as a literal cd target',
+      "cd '{a,b}' && echo x > settings.json",
+      [uncertainWrite('/repo/{a,b}/settings.json')],
+    ],
+    [
+      'keeps a single-item brace as a literal cd target',
+      'cd {a} && echo x > settings.json',
+      [write('/repo/{a}/settings.json')],
+    ],
     // Keep the guessed path, but mark it unsafe to trust as final.
     [
       'marks relative writes after dynamic `cd` targets as cwd-unknown',
