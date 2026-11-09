@@ -186,7 +186,7 @@ function tokenize(
     }
 
     let quoteAt = i + 1;
-    while (command.startsWith('\\\n', quoteAt)) quoteAt += 2;
+    while (ch === '$' && command.startsWith('\\\n', quoteAt)) quoteAt += 2;
     if (!(ch === '$' && command[quoteAt] === "'")) flushAnsiC();
     if (ch === "'" || ch === '"' || ch === '\\') {
       if (!current.includes('/')) tildeQuoted = true;
