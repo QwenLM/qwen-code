@@ -330,7 +330,7 @@ export function OpenTuiStatsDialog(props: {
                   {formatDuration(lastGeneration.generationDurationMs)}
                 </text>
               </Row>
-              <Row label="Output Tokens:">
+              <Row label="Output (incl. Reasoning):">
                 <text fg={C.text}>
                   {lastGeneration.outputTokens.toLocaleString()}
                 </text>

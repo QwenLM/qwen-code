@@ -36,15 +36,15 @@
 
 ### D5 — 涉及的界面
 
-- **CLI `/stats`：** 最近一次请求的 TPS 和 Session TPS，覆盖 Ink 标签页、OpenTUI 对话框和文本输出。三处共用一个辅助函数计算；Generation Time 一行仍显示生成窗口。
+- **CLI `/stats`：** 最近一次请求的 TPS 和 Session TPS，覆盖 Ink 标签页、OpenTUI 对话框和文本输出。三处共用一个辅助函数计算；Generation Time 一行仍显示生成窗口。最近一次请求的 token 行标为 Output (incl. Reasoning)：对 Gemini 来说，它包含会话 Output 总数中不计的推理 token。
 - **Web Shell Token Usage：** 总览中的会话输出速度和每个模型的输出速度都按 D1 计算。每个模型的“生成”平均值是 `totalTimedGenerationDurationMs` 除以 `timedRequests`，与“首 token”覆盖同一批请求，两者相加正好是这些计时请求到最后一个可见输出的平均时间。只要模型有速度或有任何生成时间就显示它，所以请求没有返回 usage 的模型也会显示。面板和趋势图共用一个速度辅助函数。
 - **速度趋势图和按模型的分布：** 每个样本的速度按 D1 计算，因此生成窗口很短的样本也会出现在速度视图中。提示框里的“输出 N token，耗时 D”使用同一时间，即 TTFT 加生成时间。
 - **线上类型：** daemon stats 路由中每个模型的 `generation` 新增三个可选字段：`totalTimedGenerationDurationMs`、`totalOutputSpeedTokens` 和 `totalOutputSpeedDurationMs`。`totalGenerationDurationMs`、`totalThroughputOutputTokens` 和 `timingSamples[].generationMs` 的名称、结构和含义都不变。
 
 ## 兼容性
 
-- 新字段在线上都是可选的，没有删除、重命名或重新定义字段，所以本次修改之前发布的客户端读取新 daemon 时，显示的仍是同样的生成窗口速度。恢复会话时会按新规则重放事件。
-- `timingSamples[].outputTokens` 现在推理 token 只计一次（D4）。OpenAI 兼容服务商和 Qwen OAuth 的值不变；Gemini 的值现在包含推理 token。
+- 新字段在线上都是可选的，没有删除或重命名字段。恢复会话时会按新规则重放事件。
+- 唯一重新定义的值是 `timingSamples[].outputTokens`，现在推理 token 只计一次（D4）。OpenAI 兼容服务商和 Qwen OAuth 的值不变，所以本次修改之前发布的客户端读取新 daemon 时，显示的仍是同样的生成窗口速度。对 Gemini 思考模型，样本现在包含推理 token，而 `totalThroughputOutputTokens` 仍不包含，因此这类客户端中该模型的速度趋势图和分布会高于总览速度。
 - Web Shell 读取旧版 daemon 时拿不到任何新字段。旧 daemon 的几个总和覆盖的请求不同（TTFT 覆盖所有计时请求，token 和生成时间只覆盖不小于 100 ms 的窗口），它们唯一能支持的是旧 daemon 自己的速度：`totalThroughputOutputTokens / totalGenerationDurationMs`。在 daemon 升级之前，Web Shell 在总览和模型卡片上显示这个速度；趋势图和按模型的分布也使用同一规则，即 token 除以不小于 100 ms 的生成窗口，所以同一个面板只有一种速度定义。同一次 status 中的所有模型都来自同一个 daemon，只要有一个模型缺少这些字段，就对所有模型使用旧规则。
 - 所有输出速度读数都会比之前低。prompt 较长时，以及服务商隐藏推理文本时，差距更大。
 - TTFT 从发起请求时开始计时，因此本来就包含流打开之前发生的 SDK 重试。现在这类重试也会拉低该请求的输出速度，与客户端对整次调用计时的结果一致。

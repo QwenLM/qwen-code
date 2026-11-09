@@ -84,6 +84,7 @@ describe('<SessionTab /> generation metrics', () => {
     expect(output).toContain('qwen3-coder');
     expect(output).toContain('342ms');
     expect(output).toContain('4.2s');
+    expect(output).toMatch(/Output \(incl\. Reasoning\):\s+187/);
     // 187 tokens over 342 ms + 4210 ms; 300 tokens over 800 ms + 7000 ms.
     expect(output).toContain('41.1 tok/s');
     expect(output).toContain('400ms');

@@ -257,6 +257,7 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Model: qwen3-coder');
       expect(result.content).toContain('TTFT: 250ms');
       expect(result.content).toContain('Generation Time: 1.3s');
+      expect(result.content).toContain('Output (incl. Reasoning): 60');
       // TTFT counts: 60 tokens over 250 ms + 1250 ms, 92 over 300 + 2000 ms.
       expect(result.content).toContain('TPS: 40.0 tok/s');
       expect(result.content).toContain('Average TTFT: 150ms');

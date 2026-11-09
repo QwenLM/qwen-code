@@ -87,9 +87,8 @@ export interface GenerationMetrics {
   /** Summed over every timed request. */
   totalTtftMs: number;
   /**
-   * Generation time of the requests whose window is at least 100 ms, the
-   * output-rate rule before #16714. Kept with that meaning for clients that
-   * still divide `totalThroughputOutputTokens` by it.
+   * Generation time of the requests whose window is at least 100 ms. Older
+   * clients divide `totalThroughputOutputTokens` by it, so its meaning stays.
    */
   totalGenerationDurationMs: number;
   /** Output tokens of the same requests as `totalGenerationDurationMs`. */

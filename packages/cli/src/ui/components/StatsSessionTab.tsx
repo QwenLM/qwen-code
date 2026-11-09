@@ -195,7 +195,9 @@ export const SessionTab: React.FC = () => {
           </Box>
           <Box>
             <Box width={labelWidth}>
-              <Text color={theme.text.secondary}>{t('Output Tokens')}:</Text>
+              <Text color={theme.text.secondary}>
+                {t('Output (incl. Reasoning)')}:
+              </Text>
             </Box>
             <Text color={theme.text.primary}>
               {lastGeneration.outputTokens.toLocaleString()}

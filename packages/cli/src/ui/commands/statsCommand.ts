@@ -58,7 +58,7 @@ function formatGenerationMetrics(metrics: GenerationMetrics | undefined) {
     `${t('Model')}: ${last.model}`,
     `TTFT: ${formatDuration(last.ttftMs)}`,
     `${t('Generation Time')}: ${formatDuration(last.generationDurationMs)}`,
-    `${t('Output Tokens')}: ${formatInteger(last.outputTokens)}`,
+    `${t('Output (incl. Reasoning)')}: ${formatInteger(last.outputTokens)}`,
     `TPS: ${lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}`,
     `${t('Requests')}: ${formatInteger(metrics.timedRequests)}`,
     `${t('Average TTFT')}: ${
