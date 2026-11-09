@@ -13,6 +13,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
 import { ManagedHookActivationController } from './managed-hook-activation.js';
+import { enableManagedSessionDiagnostics } from './managed-session-diagnostics.js';
 import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
@@ -1769,6 +1770,79 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
+  it.each([1, 2, 3])(
+    'requires storage 3 before committing model statistics (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { stores, session } = await bootStoresAndSession(server);
+      try {
+        if (version === 3) server.headOverrides['storageVersion'] = 3;
+        expect(stores.supportsModelDiagnostics()).toBe(version === 3);
+        await enableManagedSessionDiagnostics(session);
+        await new ManagedHookActivationController(session).runTurn(
+          'diagnostics-turn',
+          async (scope) => {
+            const complete = await scope.beginMainAttempt('model');
+            if (version === 3) await complete(true, []);
+            else
+              await expect(complete(true, [])).rejects.toThrow(
+                'storage version 3',
+              );
+          },
+        );
+        const event = session.authority.lastEventOfKind('model.attempt')!;
+        expect(event.payload['state']).toBe(
+          version === 3 ? 'output_committed' : 'started',
+        );
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
+  it('continues writing and cold restores after diagnostics promote storage to version 3', async () => {
+    const server = new FakeManagedSessionStore();
+    server.supportedStorageVersion = 3;
+    server.enforceReaderCeiling = true;
+    const first = await bootStoresAndSession(server);
+    try {
+      await enableManagedSessionDiagnostics(first.session);
+      await new ManagedHookActivationController(first.session).runTurn(
+        'diagnostics-before-promotion',
+        async (scope) => {
+          const complete = await scope.beginMainAttempt('model');
+          await complete(true, []);
+          server.headOverrides['storageVersion'] = 3;
+        },
+      );
+      await appendMessage(
+        first.session,
+        1,
+        await first.session.resources.publish('managed-message', MESSAGE_BODY),
+      );
+    } finally {
+      await first.session.close().catch(() => undefined);
+    }
+    const second = await bootStoresAndSession(server);
+    try {
+      await enableManagedSessionDiagnostics(second.session);
+      expect(second.stores.supportsModelDiagnostics()).toBe(true);
+      await appendMessage(
+        second.session,
+        2,
+        await second.session.resources.publish('managed-message', MESSAGE_BODY),
+      );
+      expect(
+        second.session.authority.lastEventOfKind('message.committed')?.payload[
+          'messageId'
+        ],
+      ).toBe('m-2');
+    } finally {
+      await second.session.close();
+    }
+  });
+
   it.each([undefined, 1, 2])(
     'requires Store acknowledgement before a bounded retraction (version=%s)',
     async (version) => {
@@ -1902,7 +1976,7 @@ describe('HTTP Managed Session store', () => {
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
         expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '2',
+          '3',
         );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
@@ -7269,6 +7343,7 @@ describe('HTTP Managed Session store', () => {
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
     ['storageVersion', 3],
+    ['storageVersion', 4],
     ['state', 'SEALED'],
     ['writerGeneration', 2],
     ['compactedThroughRevision', 1],
@@ -8057,6 +8132,7 @@ class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   private activationLease?: ManagedSessionActivationLease;
   supportedStorageVersion: number | undefined = 2;
+  enforceReaderCeiling = false;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   readonly headOverrides: Record<string, unknown> = {};
@@ -8081,6 +8157,21 @@ class FakeManagedSessionStore {
     const headers = new Headers(init?.headers);
     expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
     expect(headers.get('X-Qwen-Managed-Writer-Token')).toMatch(/^[ab]{32}$/);
+    if (
+      this.enforceReaderCeiling &&
+      Number(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version') ?? 1) <
+        Number(this.headOverrides['storageVersion'] ?? 1)
+    )
+      return jsonResponse(
+        {
+          error: {
+            code: 'managed_session_reader_unsupported',
+            message:
+              'This reader cannot read the Managed Session storage version.',
+          },
+        },
+        409,
+      );
     const suffix = url.pathname.slice(
       url.pathname.indexOf('/internal/managed-session-store/v1/sessions/') +
         `/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}`

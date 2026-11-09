@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import {
   parsePublicChildModelRoute,
   type PublicChildExtensionAgent,
@@ -6019,6 +6020,8 @@ export function registerHostedHarnessSessionRoutes(
           ? { create: refs, requireNew: true }
           : { retainVerifiedResources: true }),
       });
+      if (stores.supportsModelDiagnostics?.())
+        await enableManagedSessionDiagnostics(managed);
       if (!acceptingWork()) {
         await managed.close();
         error(res, 409, 'hosted_harness_quiescing');

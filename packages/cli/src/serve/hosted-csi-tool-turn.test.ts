@@ -1241,6 +1241,39 @@ it('cancels an in-flight prepare while reconciling once with an independent live
   expect(commit).toHaveBeenCalledTimes(1);
 });
 
+it('reuses the admitted immutable profile for later history commits', async () => {
+  await history.commitInitialHostedCsiHistory(managed, emptyHistory());
+  const originalRead = managed.resources.read.bind(managed.resources);
+  const read = vi.spyOn(managed.resources, 'read').mockImplementation((ref) => {
+    if (
+      ref.resourceId ===
+      managed.authority.sessionHeader.definitionRef.resourceId
+    )
+      return Promise.reject(
+        new Error('The definition should not be fetched again.'),
+      );
+    return originalRead(ref);
+  });
+  const committed = await history.commitHostedCsiHistory(
+    managed,
+    emptyHistory(),
+    null,
+    null,
+    'cached-profile',
+  );
+  expect(
+    JSON.parse((await managed.resources.read(committed.recordRef)).toString())
+      .profile,
+  ).toBe('csi-files-retirement/1');
+  expect(
+    read.mock.calls.some(
+      ([ref]) =>
+        ref.resourceId ===
+        managed.authority.sessionHeader.definitionRef.resourceId,
+    ),
+  ).toBe(false);
+});
+
 it('refuses nonempty initial history before committing it', async () => {
   const observation = emptyHistory();
   observation.state.files['owned.txt'] = null;

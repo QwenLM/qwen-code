@@ -486,6 +486,22 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getDiagnosticContextUsage(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticContextUsage']>(
+      '/session-context-usage/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getDiagnosticStatistics(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticStats']>(
+      '/session-stats/query',
+      { sessionId },
+      signal,
+    );
+  }
+
   getDiagnosticResources(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['ManagedDiagnosticResources']>(
       '/session-resources/query',
