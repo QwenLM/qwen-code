@@ -676,14 +676,20 @@ export function registerWorkspaceChannelManagementRoutes(
             loginId,
             clientId ?? undefined,
           );
-          if (!cancelled) {
+          const view = resolved.service.qrLoginState(
+            loginId,
+            clientId ?? undefined,
+          );
+          if (!cancelled || !view) {
             res.status(404).json({
               error: `QR login ${loginId} not found`,
               code: 'channel_qr_login_not_found',
             });
             return;
           }
-          res.status(204).end();
+          // Return the terminal view rather than an empty 204 so the caller can
+          // render the outcome without a second read, matching sibling routes.
+          res.status(200).json(view);
         } catch (error) {
           sendManagementError(res, error);
         }

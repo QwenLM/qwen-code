@@ -5140,6 +5140,34 @@ export interface DaemonChannelTypeDescriptor {
 
 export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];
 
+export type DaemonChannelQrLoginStatus =
+  | 'pending'
+  | 'succeeded'
+  | 'failed'
+  | 'expired'
+  | 'cancelled';
+
+/**
+ * A browser-rendered QR login session. Carries no credential values: the daemon
+ * persists them itself and the client only learns that binding succeeded.
+ */
+export interface DaemonChannelQrLoginView {
+  loginId: string;
+  channelType: string;
+  channelName: string;
+  status: DaemonChannelQrLoginStatus;
+  expiresAt: number;
+  /** Rendered QR image; only the initiating client receives it. */
+  qrCodeDataUrl?: string;
+  error?: string;
+}
+
+export interface DaemonChannelQrLoginStartResult
+  extends DaemonChannelQrLoginView {
+  /** True when an existing pending login for the same channel was reattached. */
+  attached: boolean;
+}
+
 export interface DaemonChannelRuntimeState {
   state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
   lastError?: string;
