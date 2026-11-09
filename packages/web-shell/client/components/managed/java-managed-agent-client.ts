@@ -504,6 +504,25 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getActivityStatistics(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticActivityStats']>(
+      '/session-activity-stats/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  listActivity(
+    request: Schemas['WebShellActivityQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['ManagedDiagnosticActivityPage']>(
+      '/session-activity/query',
+      request,
+      signal,
+    );
+  }
+
   getDiagnosticResources(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['ManagedDiagnosticResources']>(
       '/session-resources/query',

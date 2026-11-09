@@ -7,6 +7,11 @@
 import { createHash } from 'node:crypto';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import {
+  getManagedExecutionDiagnostics,
+  executionDiagnosticDigest,
+  type ManagedInvocationObservation,
+} from './managed-execution-diagnostics.js';
+import {
   assertManagedSessionDurableRef,
   MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_LIMITS,
@@ -287,7 +292,11 @@ export class ManagedSessionMessageProjection {
    */
   async commit(
     command: ManagedSessionCommand,
-    input: { record: ChatRecord; modelAttemptId?: string | null },
+    input: {
+      record: ChatRecord;
+      modelAttemptId?: string | null;
+      diagnostics?: readonly ManagedInvocationObservation[];
+    },
     actor: ManagedSessionActor,
   ): Promise<{ receipt: ManagedSessionCommitReceipt; messageId: string }> {
     const record = input.record;
@@ -298,6 +307,9 @@ export class ManagedSessionMessageProjection {
     }
     const body = Buffer.from(JSON.stringify(record), 'utf8');
     const contentRef = await publishManagedMessageBody(this.resources, body);
+    const diagnosticsRef = await getManagedExecutionDiagnostics(
+      this.authority,
+    )?.message(record, input.diagnostics);
     const subject =
       actor.class === 'harness' && actor.activation !== undefined
         ? {
@@ -308,7 +320,15 @@ export class ManagedSessionMessageProjection {
           }
         : undefined;
     const receipt = await this.authority.appendExecutionEvent(
-      command,
+      diagnosticsRef
+        ? {
+            ...command,
+            contentDigest: executionDiagnosticDigest(
+              contentRef.digest,
+              diagnosticsRef,
+            ),
+          }
+        : command,
       (sequence) => ({
         v: MANAGED_SESSION_FORMAT_VERSION,
         sequence,
@@ -321,6 +341,7 @@ export class ManagedSessionMessageProjection {
           messageId: record.uuid,
           role: record.type,
           contentRef,
+          ...(diagnosticsRef ? { diagnosticsRef } : {}),
           parentMessageId: record.parentUuid,
           ...(input.modelAttemptId === undefined
             ? {}

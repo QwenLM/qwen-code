@@ -111,6 +111,18 @@ export type ManagedDiagnosticAgentTrace =
   components['schemas']['ManagedDiagnosticAgentTrace'];
 
 export interface ManagedDiagnosticsProvider {
+  getActivityStatistics?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<components['schemas']['ManagedDiagnosticActivityStats']>;
+  listActivity?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & {
+      kind: 'tools' | 'files' | 'skills';
+      cursor?: string;
+      limit?: number;
+    },
+  ): Promise<components['schemas']['ManagedDiagnosticActivityPage']>;
   getContextUsage(
     sessionId: string,
     options: ManagedAgentRequestOptions,

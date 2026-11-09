@@ -75,6 +75,7 @@ class WorkspaceCsiNativeActivationGateTest {
     private JsonNode nativeFixture;
     private String writerId;
     private String token;
+    private boolean activityDiagnostics;
     @TempDir
     Path directory;
 
@@ -130,6 +131,7 @@ class WorkspaceCsiNativeActivationGateTest {
         binding = bindings.compareAndSet(binding, binding.withAttestation(lease,
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
+        activityDiagnostics = method.contains("ActivityDiagnostics");
         boolean extracted = method.startsWith("hostedTextConversation");
         generate(method.startsWith("textConversation") || extracted, extracted, method.contains("LegacyTerminal"), method.contains("Diagnostics"));
         writerId = nativeFixture.path("writerId").textValue();
@@ -866,6 +868,28 @@ class WorkspaceCsiNativeActivationGateTest {
     }
 
     @Test
+    void hostedTextConversationActivityDiagnosticsRetireWithVerifiedDerivedRows() throws Exception {
+        ready();
+        for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
+            commit(index);
+        }
+        var head = journal.restore("tenant", "workspace", sessionId, token);
+        assertThat(head.storageVersion()).isEqualTo(4);
+        var intent = retire();
+        var baseline = applicationInventory(intent);
+        assertThat(baseline.blockers()).isEmpty();
+        assertThat(baseline.table("ma_session_record").rows().stream().map(row -> row.text("domain")))
+                .contains("hosted_activity_statistics");
+        var edges = CsiActivityDiagnosticProjection.references(baseline.table("ma_session_journal_tx").rows(),
+                baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(),
+                baseline.table("ma_resource_ref").rows(), request, Long.MAX_VALUE);
+        assertThat(edges).hasSize(1);
+        var before = allRows();
+        assertThat(applicationInventory(intent).bytes()).isEqualTo(baseline.bytes());
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    @Test
     void hostedTextConversationRetirementRefusesForgedUnknownAndStaleModelUsageProjection() throws Exception {
         ready();
         for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
@@ -963,6 +987,7 @@ class WorkspaceCsiNativeActivationGateTest {
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
                 .put("capabilityDigest", request.getScope().getCapabilityDigest())
                 .put("toolProfile", CsiFilesRetirementProfile.profile(request.getScope())).put("diagnostics", diagnostics);
+        value.put("activityDiagnostics", activityDiagnostics);
         if (conversation) {
             value.put("conversation", true);
         }

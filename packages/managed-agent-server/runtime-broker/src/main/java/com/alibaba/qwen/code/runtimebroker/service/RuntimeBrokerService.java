@@ -866,11 +866,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return capabilitiesContext(harnessSessionId, authority).thenApply(HarnessSessionResolver.Capabilities::scope);
+    }
+
+    @Override
+    public CompletionStage<HarnessSessionResolver.Capabilities> capabilitiesContext(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
-                "harnessSessionId");
-        return resolveScope(harnessId, true, authority);
+        return RuntimeBrokerSupport.resolveCapabilities(sessionResolver, harnessSessionId, authority);
     }
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
@@ -2653,10 +2655,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         scheduler.shutdownNow();
         renewalScheduler.shutdownNow();
         provisioner.close();
-    }
-
-    private CompletionStage<RuntimeScope> resolveScope(String harnessSessionId) {
-        return resolveScope(harnessSessionId, null);
     }
 
     private CompletionStage<RuntimeScope> resolveScope(
