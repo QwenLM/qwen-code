@@ -65,10 +65,17 @@ vi.mock('./contentGenerator.js', async (importOriginal) => {
 });
 
 const mockBuildAgentContentGeneratorConfig = vi.fn();
-vi.mock('../models/content-generator-config.js', () => ({
-  buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
-    mockBuildAgentContentGeneratorConfig(...args),
-}));
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
+      mockBuildAgentContentGeneratorConfig(...args),
+  };
+});
 
 const mockGenerateContent = vi.fn();
 const mockGenerateContentStream = vi.fn();
@@ -1105,6 +1112,51 @@ describe('BaseLlmClient', () => {
       await c.resolveForModel(fastModel);
 
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses cached-only OAuth for isolated requests and never sends after setup is cancelled', async () => {
+      const oauthModel = 'coder-model';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'main-model',
+      });
+      registerOnly(AuthType.QWEN_OAUTH, oauthModel, {
+        id: oauthModel,
+        authType: AuthType.QWEN_OAUTH,
+      });
+      const c = perModelClient();
+      const selector = `qwen-oauth:${oauthModel}`;
+      await c.resolveForModel(selector);
+
+      let finishSetup!: (generator: ContentGenerator) => void;
+      const setup = new Promise<ContentGenerator>((resolve) => {
+        finishSetup = resolve;
+      });
+      mockCreateContentGenerator.mockReturnValueOnce(setup);
+      const controller = new AbortController();
+      const request = askHi(
+        {
+          model: selector,
+          isolatedRequest: true,
+          abortSignal: controller.signal,
+        },
+        c,
+      );
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(mockCreateContentGenerator).toHaveBeenCalledTimes(2),
+      );
+      expect(mockCreateContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN' }),
+        crossProviderConfig,
+        true,
+      );
+      controller.abort();
+      finishSetup(fastContentGenerator);
+
+      await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+      expect(fastGenerateContent).not.toHaveBeenCalled();
+      expect(mockGenerateContent).not.toHaveBeenCalled();
     });
 
     it('clearPerModelGeneratorCache forces a rebuild on the next call', async () => {

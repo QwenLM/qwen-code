@@ -59,6 +59,7 @@ import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import { retryContext } from '../../utils/retryContext.js';
 import {
   reportOpenAiChunk,
   reportOpenAiRequest,
@@ -563,6 +564,7 @@ export class ContentGenerationPipeline {
             openaiRequest,
             {
               signal: perRequestAc?.signal,
+              ...(retryContext.getStore()?.singleAttempt && { maxRetries: 0 }),
             },
           )) as OpenAI.Chat.ChatCompletion;
           reportOpenAiResponse(telemetryAttempt, openaiResponse);
@@ -604,7 +606,10 @@ export class ContentGenerationPipeline {
           // returning text/html with HTTP 200).
           const createPromise = this.client.chat.completions.create(
             openaiRequest,
-            { signal: perRequestAc.signal },
+            {
+              signal: perRequestAc.signal,
+              ...(retryContext.getStore()?.singleAttempt && { maxRetries: 0 }),
+            },
           );
 
           // withResponse() is available on APIPromise (the OpenAI SDK's
@@ -1906,6 +1911,9 @@ export class ContentGenerationPipeline {
       // matching; never throws, so awaiting cannot mask the original error,
       // and it must complete before a fast retry can race the file write.
       await this.invalidateOmniOssCacheOnError(openaiRequest, error);
+      if (retryContext.getStore()?.singleAttempt) {
+        return await this.handleError(error, context, request);
+      }
       const model = context.model.toLowerCase();
       const wireRequest = openaiRequest as Record<string, unknown> | undefined;
       const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as

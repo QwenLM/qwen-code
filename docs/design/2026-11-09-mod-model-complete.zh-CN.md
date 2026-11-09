@@ -39,22 +39,22 @@ guest 的 `$.model.complete(request, options)` 检查 `options`（只接受 `sig
 
 worker 向主线程发送 `model-complete {id, input}`，等待 `model-result {id, result | error}`。宿主运行 CLI 的 `completeModModel`：
 
-- 模型名：`haiku` 使用已配置的 fast model，其选择器按配置原样传递，以保留它固定的 endpoint；没有设置 fast model 时用会话模型。`sonnet` 和 `opus` 映射到 `inherit`。其他名字经 `resolveModelId` 解析，必须是会话模型，或已配置且支持文本的模型。否则 `BaseLlmClient` 会把未知 id 静默发给会话模型。
+- 模型名：`haiku` 使用 fast model 及其选定的端点，未设置时用会话模型。`sonnet` 和 `opus` 使用会话模型。显式模型 id 保留供应商限定符，必须指向会话模型或已配置且支持文本的模型。选中的端点使用自己的凭据和请求头。OAuth 路由需要已有的缓存凭据。
 - `maxTokens` 默认 1024，超过已知的输出上限时拒绝。
-- `BaseLlmClient.generateText` 把 prompt 作为唯一一条用户消息发送，`system` 作为系统指令，`maxAttempts: 1`、`failClosed: true`。除非请求指定了 `effort`，否则关闭推理。
+- `BaseLlmClient.generateText` 把 prompt 作为唯一一条用户消息发送，`system` 作为系统指令。客户端和供应商均只尝试一次。除非请求指定了 `effort`，否则关闭推理。
 - 回复为空时结果是 `empty-reply`。失败时是 `api-error`，带 HTTP 状态码，以及由共用的 `classifyApiError` 给出的错误类别，另加 `overloaded` 和 `model_not_found`。中止或 `timeoutMs` 到期时是 `aborted`。
 - `usage` 使用与 `turn.complete` 相同的四项计数换算，这段换算现在是共用的。
 - 回复超过 Mod 载荷的一半时，只保留首尾，中间用标记替代。
 
 ### 3. 信号与生命周期
 
-guest 通过 token 转发自己的 `signal`：中止时发出内部的 `model.abort`，任何 hook 都听不到。worker 中止该调用的 controller，通知宿主取消，并立即以 `aborted` 返回。如果 signal 在调用前就已中止，直接返回 `aborted`，不发请求。
+guest 通过 token 转发自己的 `signal`，中止时发出内部的 `model.abort`。worker 在中间件运行前开始计算调用方的截止时间。信号中止或到期时，取消模型调用、其中间件及子模型请求，并返回 `aborted`。已中止的信号直接返回 `aborted`，不发请求。
 
 调用属于发起它的 dispatch。dispatch 被放弃或结束时，worker 取消宿主操作，宿主中止该根上仍在运行的所有调用。
 
 ### 4. 预算
 
-hook 自己的预算在 `$` 调用期间本来就会暂停。dispatch 的 60 秒上限此前只在原生工具执行时暂停。现在，当没有 guest 代码、检查或其他宿主调用在运行时，worker 会把正在进行的模型调用报告为它在等待的操作；只要这个操作是该根的模型调用，宿主就暂停根的计时，与原生工具完全相同。
+hook 自己的预算在 `$` 调用期间暂停。worker 只等待模型请求时，宿主暂停 dispatch 的 60 秒预算，包括权限检查在等待模型的情况。检查中的 guest 工作仍消耗预算。
 
 ## 设计决策
 
@@ -78,10 +78,10 @@ core 运行时测试，使用真实的 QuickJS worker：
 - 带块的请求到达宿主时已拼接，块保留在旁边，各种结果形状都能返回。
 - 错误形状、超限和宿主拒绝都会 reject；不支持模型调用的宿主会 reject，`$.session.version()` 只在宿主支持时列出 `model.complete`。
 - 另一个插件可以改写、代答和拒绝 `model.complete`。
-- 中止的 `signal` 会切断进行中的调用，并跳过新的调用。
-- 宿主执行调用期间，dispatch 计时暂停。
+- 中止和截止时间覆盖模型中间件及嵌套调用。已中止的信号跳过调用。
+- worker 只等待模型请求时，dispatch 计时暂停，包括权限检查期间。
 
-`completeModModel` 的 CLI 单元测试：别名和 id 解析、发出的请求、输出上限拒绝，以及空回复、API 错误、超时三种结果。
+CLI 和客户端测试覆盖别名与 id 解析、端点凭据、单次尝试、OAuth 缓存凭据、输出上限，以及空回复、API 错误和超时结果。
 
 验收：一个调用 `$.model.complete({model: 'haiku', prompt})` 的 Mod 命令，在 headless 运行和两种终端里都能打印出 fast model 的回答。
 

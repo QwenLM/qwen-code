@@ -50,6 +50,7 @@ import {
   type ModFrame,
   type ModInput,
   type ModInvocation,
+  type ModModelScope,
   type ModOrigin,
 } from './dispatch.js';
 
@@ -127,16 +128,21 @@ const send = (reply: ModReply, root = rootId) =>
   port.postMessage({ ...reply, root, phase });
 const abandoned = () =>
   Atomics.load(cancelled, 0) !== 0 || rootBudget?.expired === true;
+// The timeout timer cannot fire during a synchronous guest slice.
+const modelAbandoned = (scope?: ModModelScope) =>
+  scope !== undefined &&
+  (scope.signal.aborted || performance.now() >= scope.deadline);
 const callAbandoned = (call?: ModInvocation): boolean =>
   abandoned() ||
   Boolean(
     call &&
       (call.epoch !== epoch ||
         call.closed ||
+        modelAbandoned(call.modelScope) ||
         (call.parent && callAbandoned(call.parent))),
   );
-const assertLive = (call?: ModInvocation) => {
-  if (callAbandoned(call))
+const assertLive = (call?: ModInvocation, modelScope?: ModModelScope) => {
+  if (callAbandoned(call) || modelAbandoned(modelScope))
     throw new Error('Mod dispatch cancelled or timed out.');
 };
 
@@ -145,14 +151,13 @@ const assertLive = (call?: ModInvocation) => {
 function updateActivity(): void {
   if (!busy || !rootBudget) return;
   const waiting =
-    toolRoot && native !== undefined && hostOperations.has(native)
+    !checks && toolRoot && native !== undefined && hostOperations.has(native)
       ? native
       : modelOperations.keys().next().value;
   const lending =
     waiting !== undefined &&
     !abandoned() &&
     !executing &&
-    !checks &&
     !guestNotifications.size &&
     !realms.some((realm) => realm.runtime.hasPendingJob()) &&
     ![...calls.values()].some((call) => call.live && !call.budget.lending);
@@ -483,15 +488,16 @@ async function dispatch(
   ) => Promise<unknown>,
   index = 0,
   parent?: ModInvocation,
+  modelScope = parent?.modelScope,
 ): Promise<unknown> {
-  assertLive(parent);
+  assertLive(parent, modelScope);
   if (index === 0 && ++operations > 4096)
     throw new Error('Mod dispatch operation limit exceeded.');
   const realm = realms[index];
   if (!realm) return bottom(input, frames, parent);
   let owner = parent;
   const next = (e: ModInput, nested: ModFrame[]) =>
-    dispatch(event, e, origin, nested, bottom, index + 1, owner);
+    dispatch(event, e, origin, nested, bottom, index + 1, owner, modelScope);
   if (!realm.patterns.some((pattern) => patternMatches(pattern, event)))
     return next(input, frames);
   const view = modToolInputView(
@@ -508,6 +514,7 @@ async function dispatch(
     id: ++serial,
     epoch,
     parent,
+    modelScope,
     closed: false,
     plugin: index,
     event,
@@ -723,10 +730,25 @@ async function hostCall(
     return { drop: 'the prompt is too long for a Mod payload' };
   const detached = notice(method) || submits;
   let arrived: ModInput | undefined;
-  // The caller's `options.signal`, which the guest relays by token.
+  // The original call's deadline applies even while a hook is rewriting it.
   const model = models ? new AbortController() : undefined;
   const signalKey = call.plugin + ':' + String(payload['token']);
-  if (model) modelSignals.set(signalKey, model);
+  let modelScope = call.modelScope;
+  let modelTimer: ReturnType<typeof setTimeout> | undefined;
+  if (model) {
+    const timeout = (input as ModInput)['timeoutMs'];
+    const deadline =
+      typeof timeout === 'number' ? performance.now() + timeout : Infinity;
+    modelScope = {
+      signal: modelScope
+        ? AbortSignal.any([model.signal, modelScope.signal])
+        : model.signal,
+      deadline: Math.min(deadline, modelScope?.deadline ?? Infinity),
+    };
+    if (typeof timeout === 'number')
+      modelTimer = setTimeout(() => model.abort(), timeout);
+    modelSignals.set(signalKey, model);
+  }
   const invoke = async () => {
     const result = await dispatch(
       method,
@@ -734,7 +756,7 @@ async function hostCall(
       { plugin: plugin.name, tier: 'user' },
       frames,
       async (e) => {
-        assertLive(detached ? undefined : call);
+        assertLive(detached ? undefined : call, modelScope);
         if (call.epoch !== epoch)
           throw new Error('Mod call belongs to an ended dispatch.');
         if (method === 'command.register') {
@@ -780,7 +802,8 @@ async function hostCall(
           await abortTurn(String(e['turnId']));
           return { value: undefined };
         }
-        if (model) return { value: await completeModel(e, model.signal, call) };
+        if (model && modelScope)
+          return { value: await completeModel(e, modelScope, call) };
         if (submits) {
           arrived = {
             text: e['text'],
@@ -809,7 +832,9 @@ async function hostCall(
       },
       0,
       detached ? undefined : call,
+      modelScope,
     );
+    if (modelScope) assertLive(undefined, modelScope);
     if (!record(result)) throw new Error('Invalid Mod API result.');
     if (submits) return queueArrived(result, arrived, plugin.name);
     if ('deny' in result) throw new Error(String(result['deny']));
@@ -823,7 +848,11 @@ async function hostCall(
     return await (detached || method === 'clock.sleep'
       ? invoke()
       : call.budget.lend(invoke));
+  } catch (error) {
+    if (model && modelAbandoned(modelScope)) return ABORTED_MODEL_CALL;
+    throw error;
   } finally {
+    clearTimeout(modelTimer);
     if (model && modelSignals.get(signalKey) === model)
       modelSignals.delete(signalKey);
   }
@@ -933,7 +962,7 @@ const ABORTED_MODEL_CALL: ModModelCompleteResult = Object.freeze({
 // The host runs the call; the caller's signal cuts it, resolving `aborted`.
 async function completeModel(
   input: ModInput,
-  signal: AbortSignal,
+  { signal, deadline }: ModModelScope,
   parent?: ModInvocation,
 ): Promise<unknown> {
   assertLive(parent);
@@ -959,7 +988,7 @@ async function completeModel(
       };
       signal.addEventListener('abort', abort, { once: true });
       timer = setInterval(cancelAbandonedOperations, 5);
-      send({ type: 'model-complete', id, input: sent });
+      send({ type: 'model-complete', id, input: sent, deadline });
       updateActivity();
     });
   } finally {

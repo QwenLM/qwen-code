@@ -177,7 +177,10 @@ export class ModRuntime {
         )
           return;
         root.revision = reply.revision;
-        root.idle = this.tool?.checks.size ? undefined : reply.operation;
+        root.idle =
+          reply.operation === root.native && this.tool?.checks.size
+            ? undefined
+            : reply.operation;
         root.refresh();
       } else if (reply.type === 'log') {
         if (this.failure) return;
@@ -638,13 +641,24 @@ export class ModRuntime {
     reply: Extract<ModReply, { type: 'model-complete' }>,
     root: NonNullable<ModRuntime['root']>,
   ): void {
+    if (Atomics.load(this.cancelled, 0) !== 0) return;
+    // The worker and host share the process clock. A queued request may
+    // already have expired before the host gets to start it.
+    const remainingMs = reply.deadline - performance.now();
+    if (remainingMs <= 0) return;
     const controller = new AbortController();
+    const signal = Number.isFinite(remainingMs)
+      ? AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(Math.ceil(remainingMs)),
+        ])
+      : controller.signal;
     root.models.set(reply.id, controller);
     const answer = async (): Promise<ModRequest> => {
       try {
         if (!this.completeModel)
           throw new Error('this host runs no Mod model calls');
-        const result = await this.completeModel(reply.input, controller.signal);
+        const result = await this.completeModel(reply.input, signal);
         if (!validModelResult(result))
           throw new Error('the host answered with an invalid model result');
         return { type: 'model-result', id: reply.id, result };
@@ -659,7 +673,7 @@ export class ModRuntime {
       root.models.delete(reply.id);
       if (this.root !== root) return;
       // A cancelled call's caller has its answer already.
-      if (!controller.signal.aborted) {
+      if (!signal.aborted) {
         try {
           this.post(request, root.id);
         } catch (caught) {
@@ -780,9 +794,10 @@ export class ModRuntime {
         if (aborted || this.root !== root) return;
         const lending =
           root.idle !== undefined &&
-          ((request.type === 'tool' && root.idle === root.native) ||
+          ((request.type === 'tool' &&
+            root.idle === root.native &&
+            !this.tool?.checks.size) ||
             root.models.has(root.idle)) &&
-          !this.tool?.checks.size &&
           !budget.expired;
         if (lending !== budget.lending) {
           if (lending) budget.pause();
@@ -797,6 +812,7 @@ export class ModRuntime {
       aborted = true;
       Atomics.store(this.cancelled, 0, 1);
       this.tool?.controller.abort();
+      for (const model of root.models.values()) model.abort();
       if (timer) clearTimeout(timer);
       cancelTimer = setTimeout(stop, 250);
     };

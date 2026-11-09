@@ -24,6 +24,10 @@ import {
   buildModelIdContext,
   resolveModelId,
 } from '@qwen-code/qwen-code-core/utils/modelId.js';
+import {
+  isQuotaExhaustedError,
+  isQwenQuotaExceededError,
+} from '@qwen-code/qwen-code-core/utils/quotaErrorDetection.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { classifyApiError } from '../utils/classify-api-error.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
@@ -33,11 +37,11 @@ export const MOD_MODEL_DEFAULT_MAX_TOKENS = 1024;
 
 // Claude Code's model aliases, read as Qwen Code's selectors: the small model
 // is the fast model, the others the session's own.
-const ALIASES: Record<string, string> = {
-  haiku: 'fast',
-  sonnet: 'inherit',
-  opus: 'inherit',
-};
+const ALIASES = new Map([
+  ['haiku', 'fast'],
+  ['sonnet', 'inherit'],
+  ['opus', 'inherit'],
+]);
 
 const NO_USAGE: ModModelUsage = {
   input_tokens: 0,
@@ -56,45 +60,40 @@ export function resolveModModel(
   name: string,
 ): { selector: string; modelId: string; authType?: string } {
   const context = buildModelIdContext(config);
-  const wanted = ALIASES[name.trim()] ?? name.trim();
-  // The fast model's selector goes as the config gives it, keeping the
-  // endpoint it is pinned to; with none, the session's model answers.
-  if (wanted === 'fast' && context.fastModel) {
-    const fast = resolveModelId(context.fastModel, context);
-    if (fast)
-      return {
-        selector: context.fastModel,
-        modelId: fast.modelId,
-        ...(fast.authType && { authType: fast.authType }),
-      };
+  const modelName = name.trim();
+  const wanted = ALIASES.get(modelName) ?? modelName;
+  const target = wanted === 'fast' ? (context.fastModel ?? 'inherit') : wanted;
+  const [modelSelector, endpoint, extra] = target.split('\0');
+  if (!modelSelector?.trim() || endpoint === '' || extra !== undefined) {
+    throw new Error(`invalid model endpoint selector ${JSON.stringify(name)}`);
   }
-  const resolved = resolveModelId(
-    wanted === 'fast' ? 'inherit' : wanted,
-    context,
-  );
+  const resolved = resolveModelId(modelSelector, context);
   if (!resolved)
     throw new Error(`model ${JSON.stringify(name)} is not available`);
   const isSession =
     resolved.modelId === context.currentModel &&
-    (!resolved.authType || resolved.authType === context.currentAuthType);
+    (!resolved.authType || resolved.authType === context.currentAuthType) &&
+    (endpoint === undefined ||
+      endpoint === config.getContentGeneratorConfig()?.baseUrl);
   const configured = config
     .getAllConfiguredModels(resolved.authType ? [resolved.authType] : undefined)
     .some(
       (model) =>
         model.id === resolved.modelId &&
+        (endpoint === undefined || model.baseUrl === endpoint) &&
         !model.voiceOnly &&
         !model.imageOnly &&
         !model.visionOnly,
     );
   if (!isSession && !configured)
     throw new Error(`model ${JSON.stringify(name)} is not configured`);
-  // Bare on the session's own provider, qualified on another, as the fast
-  // model's selector is.
+  // BaseLlmClient parses the selector again, so preserve the provider and
+  // endpoint to keep literal names like `inherit` from becoming aliases.
+  const selector = resolved.authType
+    ? `${resolved.authType}:${resolved.modelId}`
+    : resolved.modelId;
   return {
-    selector:
-      resolved.authType && resolved.authType !== context.currentAuthType
-        ? `${resolved.authType}:${resolved.modelId}`
-        : resolved.modelId,
+    selector: endpoint === undefined ? selector : `${selector}\0${endpoint}`,
     modelId: resolved.modelId,
     ...(resolved.authType && { authType: resolved.authType }),
   };
@@ -143,6 +142,8 @@ function apiErrorKind(error: unknown, status: number | undefined): string {
   if (status === 529 || /overloaded/i.test(message)) return 'overloaded';
   if (status === 404 || /model[^.]*not (found|exist)/i.test(message))
     return 'model_not_found';
+  if (isQuotaExhaustedError(error) || isQwenQuotaExceededError(error))
+    return 'billing_error';
   const kind = classifyApiError({ message, status });
   return kind === 'loop_detected' ? 'unknown' : kind;
 }
@@ -158,6 +159,8 @@ export async function completeModModel(
   input: ModModelCompleteInput,
   signal: AbortSignal,
 ): Promise<ModModelCompleteResult> {
+  if (signal.aborted)
+    return { isAnswered: false, reason: 'aborted', usage: { ...NO_USAGE } };
   const model = resolveModModel(config, input.model);
   const maxTokens = input.maxTokens ?? MOD_MODEL_DEFAULT_MAX_TOKENS;
   if (
@@ -168,35 +171,40 @@ export async function completeModModel(
     throw new Error(
       `maxTokens ${maxTokens} is over ${model.modelId}'s output limit of ${tokenLimit(model.modelId, 'output')}`,
     );
-  if (signal.aborted)
-    return { isAnswered: false, reason: 'aborted', usage: { ...NO_USAGE } };
   const abortSignal =
     input.timeoutMs === undefined
       ? signal
       : AbortSignal.any([signal, AbortSignal.timeout(input.timeoutMs)]);
+  let onAbort: (() => void) | undefined;
   try {
-    const result = await config.getBaseLlmClient().generateText({
-      contents: [{ role: 'user', parts: [{ text: input.prompt }] }],
-      model: model.selector,
-      ...(typeof input.system === 'string' &&
-        input.system && { systemInstruction: input.system }),
-      abortSignal,
-      promptId: 'side-query:mod-model-complete',
-      config: {
-        maxOutputTokens: Math.min(
-          maxTokens,
-          hasExplicitOutputLimit(model.modelId)
-            ? tokenLimit(model.modelId, 'output')
-            : maxTokens,
-        ),
-        // Reasoning stays off, as on every side query, unless the Mod asks
-        // for an effort; the level itself is not sent yet.
-        thinkingConfig: { includeThoughts: input.effort !== undefined },
-      },
-      // A Mod retries as it chooses, from `status` and `error`.
-      maxAttempts: 1,
-      failClosed: true,
+    const request = Promise.resolve().then(() =>
+      config.getBaseLlmClient().generateText({
+        contents: [{ role: 'user', parts: [{ text: input.prompt }] }],
+        model: model.selector,
+        ...(typeof input.system === 'string' &&
+          input.system && { systemInstruction: input.system }),
+        abortSignal,
+        promptId: 'side-query:mod-model-complete',
+        config: {
+          maxOutputTokens: Math.min(
+            maxTokens,
+            hasExplicitOutputLimit(model.modelId)
+              ? tokenLimit(model.modelId, 'output')
+              : maxTokens,
+          ),
+          // Reasoning stays off, as on every side query, unless the Mod asks
+          // for an effort; the level itself is not sent yet.
+          thinkingConfig: { includeThoughts: input.effort !== undefined },
+        },
+        isolatedRequest: true,
+      }),
+    );
+    // Generator setup can be waiting on a shared credential refresh.
+    const cancelled = new Promise<never>((_, reject) => {
+      onAbort = () => reject(abortSignal.reason);
+      abortSignal.addEventListener('abort', onAbort, { once: true });
     });
+    const result = await Promise.race([request, cancelled]);
     const usage = modModelUsage(
       result.usage,
       model.authType ?? config.getContentGeneratorConfig()?.authType,
@@ -213,14 +221,33 @@ export async function completeModModel(
   } catch (error) {
     if (abortSignal.aborted)
       return { isAnswered: false, reason: 'aborted', usage: { ...NO_USAGE } };
-    const cause = error instanceof Error && error.cause ? error.cause : error;
-    const status = getErrorStatus(cause) ?? getErrorStatus(error);
+    const providerError =
+      error instanceof Error ? (error.cause ?? error) : error;
+    let cause = providerError;
+    let status = getErrorStatus(cause);
+    for (
+      let depth = 0;
+      depth < 4 &&
+      status === undefined &&
+      cause instanceof Error &&
+      cause.cause !== undefined;
+      depth++
+    ) {
+      cause = cause.cause;
+      status = getErrorStatus(cause);
+    }
+    const providerStatus = status ?? getErrorStatus(error);
     return {
       isAnswered: false,
       reason: 'api-error',
-      status: status ?? null,
-      error: apiErrorKind(cause, status),
+      status: providerStatus ?? null,
+      error: apiErrorKind(
+        status === undefined ? providerError : cause,
+        providerStatus,
+      ),
       usage: { ...NO_USAGE },
     };
+  } finally {
+    if (onAbort) abortSignal.removeEventListener('abort', onAbort);
   }
 }

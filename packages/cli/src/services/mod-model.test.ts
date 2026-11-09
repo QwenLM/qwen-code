@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { BaseLlmClient } from '@qwen-code/qwen-code-core/core/baseLlmClient.js';
+import type { ContentGenerator } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
+import { ModelRegistry } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { completeModModel, resolveModModel } from './mod-model.js';
 
 const usage = {
@@ -26,9 +32,15 @@ function fakeConfig(
   );
   const models = [
     { id: 'qwen-max', authType: 'openai' },
-    { id: 'qwen-flash', authType: 'openai' },
+    {
+      id: 'qwen-flash',
+      authType: 'openai',
+      baseUrl: 'https://workspace.example/v1',
+    },
     { id: 'deepseek-chat', authType: 'openai' },
     { id: 'claude-x', authType: 'anthropic' },
+    { id: 'inherit', authType: 'openai' },
+    { id: 'constructor', authType: 'openai' },
   ];
   const config = {
     getModel: () => 'qwen-max',
@@ -86,6 +98,21 @@ describe('resolveModModel', () => {
       'model "gpt-unknown" is not configured',
     );
   });
+
+  it('keeps literal ids distinct from aliases and verifies explicit endpoint pins', () => {
+    const { config } = fakeConfig();
+    expect(resolveModModel(config, 'openai:inherit').selector).toBe(
+      'openai:inherit',
+    );
+    expect(resolveModModel(config, 'constructor').selector).toBe(
+      'openai:constructor',
+    );
+    const pin = 'openai:qwen-flash\0https://workspace.example/v1';
+    expect(resolveModModel(config, pin).selector).toBe(pin);
+    expect(() =>
+      resolveModModel(config, 'openai:qwen-flash\0https://other.example/v1'),
+    ).toThrow('is not configured');
+  });
 });
 
 describe('completeModModel', () => {
@@ -109,15 +136,14 @@ describe('completeModModel', () => {
     expect(generateText).toHaveBeenCalledWith(
       expect.objectContaining({
         contents: [{ role: 'user', parts: [{ text: 'Translate' }] }],
-        model: 'qwen-flash',
+        model: 'openai:qwen-flash',
         systemInstruction: 'Be brief',
         promptId: 'side-query:mod-model-complete',
         config: {
           maxOutputTokens: 1024,
           thinkingConfig: { includeThoughts: false },
         },
-        maxAttempts: 1,
-        failClosed: true,
+        isolatedRequest: true,
       }),
     );
   });
@@ -186,11 +212,7 @@ describe('completeModModel', () => {
     });
 
     const slow = fakeConfig({
-      generateText: (request) =>
-        new Promise((_, reject) => {
-          const signal = request['abortSignal'] as AbortSignal;
-          signal.addEventListener('abort', () => reject(signal.reason));
-        }),
+      generateText: () => new Promise(() => {}),
     });
     expect(
       await completeModModel(
@@ -199,5 +221,160 @@ describe('completeModModel', () => {
         new AbortController().signal,
       ),
     ).toEqual({ isAnswered: false, reason: 'aborted', usage: zero });
+  });
+
+  it('keeps a wrapped quota exhaustion status without treating it as transient', async () => {
+    const { config } = fakeConfig({
+      generateText: async () => {
+        const quota = Object.assign(
+          new Error('Quota exhausted. The quota will reset at 09:00 UTC.'),
+          { status: 429 },
+        );
+        throw new Error('Failed to generate text content', {
+          cause: new Error(
+            'Quota exhausted: please retry after the reset time',
+            {
+              cause: quota,
+            },
+          ),
+        });
+      },
+    });
+    await expect(
+      completeModModel(
+        config,
+        { model: 'sonnet', prompt: 'p' },
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({
+      isAnswered: false,
+      reason: 'api-error',
+      status: 429,
+      error: 'billing_error',
+    });
+  });
+
+  it('sends one HTTP attempt to the selected endpoint with only its credentials', async () => {
+    const headers: Array<{ authorization?: string; primary?: string }> = [];
+    const server = createServer((request, response) => {
+      const authorization = request.headers.authorization;
+      const repeated = headers.some(
+        (entry) => entry.authorization === authorization,
+      );
+      headers.push({
+        authorization,
+        primary: request.headers['x-primary-only'] as string | undefined,
+      });
+      request.resume();
+      response.writeHead(repeated ? 418 : 429, {
+        'content-type': 'application/json',
+        'retry-after-ms': '1',
+      });
+      response.end(JSON.stringify({ error: { message: 'Too many requests' } }));
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('No server address');
+      const targetUrl = `http://127.0.0.1:${address.port}/v1`;
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', '1');
+      vi.stubEnv('OPENAI_API_KEY', 'sdk-default-key');
+      vi.stubEnv('QWEN_TEST_MOD_TARGET_KEY', 'target-key');
+      vi.stubEnv('QWEN_TEST_MOD_MISSING_KEY', undefined);
+      const registry = new ModelRegistry({
+        openai: [
+          {
+            id: 'other',
+            baseUrl: 'http://127.0.0.1:1/v1',
+            envKey: 'QWEN_TEST_MOD_MISSING_KEY',
+          },
+          {
+            id: 'other',
+            baseUrl: targetUrl,
+            envKey: 'QWEN_TEST_MOD_TARGET_KEY',
+          },
+          {
+            id: 'missing-key',
+            baseUrl: targetUrl,
+            envKey: 'QWEN_TEST_MOD_MISSING_KEY',
+          },
+          { id: 'default-key', baseUrl: targetUrl },
+          { id: 'default-primary-key', baseUrl: targetUrl },
+        ],
+      });
+      const primary = {
+        model: 'primary',
+        authType: AuthType.USE_OPENAI,
+        apiKey: 'primary-key',
+        apiKeyEnvKey: 'QWEN_TEST_MOD_PRIMARY_KEY',
+        baseUrl: 'http://127.0.0.1:2/v1',
+        customHeaders: { 'x-primary-only': 'primary-secret' },
+      };
+      const primaryGenerate = vi.fn();
+      const config = {
+        getModel: () => primary.model,
+        getContentGeneratorConfig: () => primary,
+        getBaseLlmClient: () => client,
+        getAllConfiguredModels: () =>
+          registry.getModelsForAuthType(AuthType.USE_OPENAI),
+        getModelsConfig: () => ({
+          getResolvedModel: registry.getModel.bind(registry),
+        }),
+        getSessionId: () => 'mod-model-test',
+        getCliVersion: () => 'test',
+        getProxy: () => undefined,
+        getTelemetryUserId: () => undefined,
+        getTelemetryLogPromptsEnabled: () => false,
+        getTelemetrySensitiveSpanAttributeMaxLength: () => undefined,
+        getChatRecordingService: () => undefined,
+      } as unknown as Config;
+      const client = new BaseLlmClient(
+        { generateContent: primaryGenerate } as unknown as ContentGenerator,
+        config,
+      );
+      const pinned = `openai:other\0${targetUrl}`;
+      // A normal side query may already have cached a non-isolated generator.
+      await client.resolveForModel(pinned);
+      await expect(
+        completeModModel(
+          config,
+          { model: pinned, prompt: 'p' },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ reason: 'api-error', status: 429 });
+      await expect(
+        completeModModel(
+          config,
+          { model: 'openai:missing-key', prompt: 'p' },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ reason: 'api-error', status: null });
+      await expect(
+        completeModModel(
+          config,
+          { model: 'openai:default-key', prompt: 'p' },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ reason: 'api-error', status: 429 });
+      vi.stubEnv('OPENAI_API_KEY', primary.apiKey);
+      await expect(
+        completeModModel(
+          config,
+          { model: 'openai:default-primary-key', prompt: 'p' },
+          new AbortController().signal,
+        ),
+      ).resolves.toMatchObject({ reason: 'api-error', status: null });
+      expect(headers).toEqual([
+        { authorization: 'Bearer target-key', primary: undefined },
+        { authorization: 'Bearer sdk-default-key', primary: undefined },
+      ]);
+      expect(primaryGenerate).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

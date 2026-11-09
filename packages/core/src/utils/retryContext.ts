@@ -35,6 +35,8 @@ export interface RetryAttemptContext {
    * immediately before `await fn()` to avoid measurement drift across layers.
    */
   readonly requestSetupMs: number;
+  /** Also skip SDK and adapter retries within this attempt. */
+  readonly singleAttempt?: boolean;
 }
 
 export const retryContext = new AsyncLocalStorage<RetryAttemptContext>();

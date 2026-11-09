@@ -58,6 +58,7 @@ import {
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
+import { retryContext } from '../../utils/retryContext.js';
 import { applyResponsesPromptCaching } from './prompt-caching.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
@@ -321,6 +322,7 @@ export class ResponsesPipeline {
     try {
       return await this.connect(apiRequest, signal);
     } catch (error) {
+      if (retryContext.getStore()?.singleAttempt) throw error;
       retryRequest = this.buildReasoningReplayRetry(apiRequest, error);
       if (!retryRequest) throw error;
     }

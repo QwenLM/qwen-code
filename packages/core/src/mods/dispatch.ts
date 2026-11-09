@@ -615,10 +615,16 @@ export class ModBudget {
   }
 }
 
+export interface ModModelScope {
+  signal: AbortSignal;
+  deadline: number;
+}
+
 export interface ModInvocation {
   id: number;
   epoch: number;
   parent?: ModInvocation;
+  modelScope?: ModModelScope;
   closed: boolean;
   plugin: number;
   event: ModEvent;

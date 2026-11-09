@@ -603,6 +603,8 @@ answer it with `{value: result}` without a request, or refuse it with `{deny}`.
 It reads the prompt as text with the caller's blocks beside it in `promptBlocks`
 and `systemBlocks`; passing `system: null` or `false` down sends no system
 prompt. The `signal` does not cross into the event.
+The caller's signal and deadline still apply while these hooks run. Cancelling
+the call also cancels model requests started by its hooks.
 
 Qwen Code differs from Claude Code here:
 
@@ -613,15 +615,17 @@ Qwen Code differs from Claude Code here:
   the provider reports.
 - The call is tried once. Retry from `status` and `error` when a kind such as
   `rate_limit` may clear.
+- The selected endpoint uses its own credentials. An OAuth model needs cached
+  credentials.
 - A reply too long for a Mod payload keeps its head and tail around a
   truncation marker.
 
-A model call is part of the dispatch that made it. The hook's budget and the
-dispatch's 60-second limit stop while the call runs, so a slow reply does not
-time the Mod out, and the call ends with the dispatch. A session runs one Mod
-dispatch at a time, so while a call runs, the other hooks of every Mod in the
-session wait for it, including `tool.call` hooks. Keep calls short, bound them
-with `timeoutMs`, and cache answers you will need again.
+A model call ends with its dispatch. The hook's budget pauses while it awaits
+the call. The dispatch's 60-second budget pauses when the worker is waiting
+only on the host model request, including inside a `tool.check` hook. A session
+runs one Mod dispatch at a time, so other hooks in the session wait for it.
+Keep calls short, bound them with `timeoutMs`, and cache answers you will need
+again.
 
 ## Turn events
 

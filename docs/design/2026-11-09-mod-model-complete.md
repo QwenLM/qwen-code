@@ -39,22 +39,22 @@ The input then passes through the `model.complete` hooks of every plugin, as oth
 
 The worker sends `model-complete {id, input}` to the main thread and waits for `model-result {id, result | error}`. The host runs the CLI's `completeModModel`:
 
-- Model names: `haiku` runs the configured fast model, its selector passed on as the config gives it so an endpoint it is pinned to holds, and the session's model when none is set; `sonnet` and `opus` map to `inherit`. Other names go through `resolveModelId`, and must be the session's model or a configured, text-capable model. `BaseLlmClient` would otherwise send an unknown id to the session's model.
+- Model names: `haiku` runs the configured fast model at its selected endpoint, or the session's model when none is set. `sonnet` and `opus` use the session's model. Explicit model ids keep their provider qualification and must name the session's model or a configured model that supports text. The selected endpoint uses its own credentials and headers. OAuth routes require cached credentials.
 - `maxTokens` defaults to 1024 and rejects above a curated output limit.
-- `BaseLlmClient.generateText` sends the prompt as the one user message and `system` as the system instruction, with `maxAttempts: 1` and `failClosed: true`. Reasoning is off unless the request names an `effort`.
+- `BaseLlmClient.generateText` sends the prompt as the one user message and `system` as the system instruction. The client and the provider make a single attempt. Reasoning is off unless the request names an `effort`.
 - An empty reply is `empty-reply`. A failure is `api-error` with the HTTP status and a kind from the shared `classifyApiError`, plus `overloaded` and `model_not_found`. An abort or elapsed `timeoutMs` is `aborted`.
 - `usage` uses the same four-count conversion as `turn.complete`, now shared.
 - A reply over half a Mod payload keeps its head and tail around a marker.
 
 ### 3. Signals and lifetime
 
-The guest relays its `signal` by token: on abort it sends an internal `model.abort`, which no hook hears. The worker aborts that call's controller, tells the host to cancel, and resolves `aborted` at once. An already aborted signal resolves `aborted` without a request.
+The guest relays its `signal` by token. On abort it sends an internal `model.abort`. The worker starts the caller's deadline before middleware runs. A signal or deadline cancels the model call, its middleware and any descendant model requests, and resolves `aborted`. An already aborted signal resolves `aborted` without a request.
 
 A call belongs to its dispatch. When the dispatch is abandoned or ends, the worker cancels the host operation, and the host aborts every call still running for that root.
 
 ### 4. Budgets
 
-The hook's own budget already stops during `$` calls. The dispatch's 60-second limit did not stop for anything but a native tool. The worker now reports a running model call as the operation it waits on when no guest code, check or other host call is active, and the host stops the root's clock while that operation is one of its model calls, exactly as for a native tool.
+The hook's own budget pauses during `$` calls. When the worker is waiting only on a model request, the host pauses the dispatch's 60-second budget. This includes a permission check waiting for the model. Guest work during a check still consumes the budget.
 
 ## Design decisions
 
@@ -78,10 +78,10 @@ Core runtime tests with the real QuickJS worker:
 - A request with blocks reaches the host joined, with the blocks beside it, and each result shape comes back.
 - Wrong shapes, limits and a host refusal reject; a host without model calls rejects, and `$.session.version()` lists `model.complete` only where the host runs it.
 - Another plugin rewrites, answers and denies `model.complete`.
-- An aborted `signal` cuts a running call and skips a new one.
-- The dispatch clock pauses while the host runs a call.
+- Cancellation and deadlines cover model middleware and nested calls. A signal that already aborted skips the call.
+- The dispatch clock pauses while the worker waits solely on a model call, including during a permission check.
 
-CLI unit tests for `completeModModel`: alias and id resolution, the request sent, the output-limit refusal, and the empty, API-error and timeout results.
+CLI and client tests cover alias and id resolution, endpoint credentials, single attempts, cached OAuth credentials, output limits, and the empty, API-error and timeout results.
 
 Acceptance: a Mod command that calls `$.model.complete({model: 'haiku', prompt})` prints the fast model's answer in a headless run and in both terminals.
 

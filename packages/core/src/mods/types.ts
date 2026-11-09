@@ -274,7 +274,12 @@ export type ModReply =
     }
   | { type: 'turn-abort'; id: number; turnId: string }
   | { type: 'prompt-queue'; id: number; prompt: ModQueuedPrompt }
-  | { type: 'model-complete'; id: number; input: ModModelCompleteInput }
+  | {
+      type: 'model-complete';
+      id: number;
+      input: ModModelCompleteInput;
+      deadline: number;
+    }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 

@@ -58,6 +58,7 @@ import {
 } from '../../providers/provider-config.js';
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
@@ -1217,6 +1218,35 @@ describe('ContentGenerationPipeline', () => {
         });
       }
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('returns a required-thinking error on a single attempt', async () => {
+      const model = 'qwen3.8-max-preview';
+      pipelineWith({
+        baseUrl: TOKEN_PLAN_URL,
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      const error = requiredThinkingError();
+      createMock().mockRejectedValueOnce(error);
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () =>
+          pipeline.execute(sideQuery(model), 'side-query:mod-model-complete'),
+        ),
+      ).rejects.toBe(error);
+      expect(createMock()).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ reasoning_effort: 'none' }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
     });
 
     it.each([
