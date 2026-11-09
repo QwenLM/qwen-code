@@ -1829,7 +1829,8 @@
 }
 
 .reasoningEffortRowActive {
-  background: var(--accent);
+  font-weight: 500;
+  background: color-mix(in oklab, var(--accent), var(--foreground) 6%);
 }
 
 .reasoningEffortRow:disabled {
