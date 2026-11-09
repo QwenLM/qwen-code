@@ -674,6 +674,12 @@ describe('clipboardUtils', () => {
       mockClipboard(['UTF8_STRING'], { UTF8_STRING: 'clipboard text' });
 
       await expect(readClipboardText()).resolves.toBe('clipboard text');
+      expect(mockSpawn).toHaveBeenNthCalledWith(
+        1,
+        'xclip',
+        ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
       expect(mockSpawn).toHaveBeenLastCalledWith(
         'xclip',
         ['-selection', 'clipboard', '-t', 'UTF8_STRING', '-o'],
