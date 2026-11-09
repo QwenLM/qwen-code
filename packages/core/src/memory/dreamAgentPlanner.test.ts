@@ -29,6 +29,7 @@ import {
 import { applyDreamOperations } from './dream-operations.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
+import { LoopType } from '../telemetry/types.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
@@ -390,6 +391,26 @@ describe('dreamAgentPlanner', () => {
     await expect(
       planManagedAutoMemoryDreamByAgent(config, projectRoot),
     ).rejects.toThrow('Agent stopped: maximum turns reached.');
+  });
+
+  it('names the loop detector when the dream agent stops on a loop', async () => {
+    // The gate that makes this reachable is the writes-denied pre-check in
+    // #15597; this pins the other half: the message an operator actually
+    // reads names the detector instead of the generic LOOP_DETECTED label.
+    // Reverting the `result.loopType` argument at the call site leaves the
+    // sentence generic and turns this case red.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'LOOP_DETECTED',
+      loopType: LoopType.ACTION_STAGNATION,
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      planManagedAutoMemoryDreamByAgent(config, projectRoot),
+    ).rejects.toThrow(
+      'Agent stopped: duplicate tool-call loop detected (action_stagnation).',
+    );
   });
 
   it('throws when the agent terminates as cancelled', async () => {
