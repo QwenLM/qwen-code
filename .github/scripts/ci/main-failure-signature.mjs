@@ -411,7 +411,10 @@ export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
     ...jobs
-      .filter((job) => job.conclusion === 'failure')
+      // A job that hit its execution cap concludes `cancelled`, not `failure`;
+      // keep it so a timed-out leg is named in the report (#16272). The step
+      // filter below already accepts cancelled, so the two levels agree.
+      .filter((job) => ['failure', 'cancelled'].includes(job.conclusion))
       .map((job) => {
         const steps = (job.steps ?? [])
           .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))

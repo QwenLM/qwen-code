@@ -21,6 +21,7 @@ import type {
   ChannelConfig,
   ChannelTaskLifecycleEvent,
   Envelope,
+  PrBindingEntry,
   PrBindingRole,
   PrBindingSummary,
 } from '@qwen-code/channel-base';
@@ -30,6 +31,7 @@ import {
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
   buildBoundEventPrompt,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   lowercaseGroupAllowedUsers,
@@ -201,7 +203,7 @@ interface GithubCursor {
   dispatchedComments?: string[];
   /**
    * created_at per dispatched comment key, so eviction can respect the
-   * re-list window: a comment whose created_at is newer than the committed
+   * re-list window: a comment whose created_at is not before the committed
    * cursor can still be re-fetched (mark-read may have failed), so its key
    * must NOT be evicted — otherwise a re-listed aggregate SUPERSET batch
    * re-dispatches already-replied comments under a fresh batch hash that
@@ -212,9 +214,47 @@ interface GithubCursor {
   dispatchedCommentTimes?: Record<string, string>;
   /** Direct-action event node IDs already accepted by the channel. */
   dispatchedEvents?: string[];
+  /**
+   * The comments of the cursor's own second that the window which advanced
+   * the cursor there read (`at` is that cursor). GitHub stamps comments and
+   * notifications to the second, so a notification that arrives after that
+   * window can name a comment of the same second. The next window reads the
+   * cursor's second again and leaves out only these. Without a record for the
+   * cursor (one saved by an older version, or more than MAX_BOUNDARY_COMMENTS
+   * such comments), the window starts after that second. The first cursor is
+   * the start time with milliseconds, which no GitHub timestamp equals.
+   * `threads` (`owner/repo|thread` keys, at most MAX_BOUNDARY_COMMENTS) are
+   * the threads whose notification of that second the window listed: such a
+   * notification listed again is a re-listing, not a late one.
+   */
+  boundaryComments?: { at: string; keys: string[]; threads: string[] };
 }
 
 const MAX_DISPATCHED = 500;
+/** Bounds each list of GithubCursor.boundaryComments (one second's worth). */
+const MAX_BOUNDARY_COMMENTS = 500;
+
+/** Keys a window has seen in the latest second it has seen one from. */
+interface LatestSecond {
+  at: string;
+  keys: Set<string>;
+  overflow: boolean;
+}
+
+function noteLatestSecond(
+  latest: LatestSecond | undefined,
+  at: string,
+  key: string,
+): LatestSecond {
+  if (!latest || at > latest.at) {
+    return { at, keys: new Set([key]), overflow: false };
+  }
+  if (at === latest.at && !latest.keys.has(key)) {
+    if (latest.keys.size < MAX_BOUNDARY_COMMENTS) latest.keys.add(key);
+    else latest.overflow = true;
+  }
+  return latest;
+}
 /**
  * Ceiling on the dispatchedCommentTimes map. The ring itself has no hard
  * cap: window-aware eviction never drops a protected (re-listable) key, so
@@ -247,6 +287,7 @@ interface GithubComment {
   node_id?: string;
   body?: string;
   created_at?: string | null;
+  updated_at?: string | null;
   user?: { login?: string } | null;
 }
 
@@ -278,10 +319,33 @@ interface NotificationContext {
   issueNumber: number;
   lastReadAt: string | null;
   windowSince: string;
+  /**
+   * Comments of the `windowSince` second the window that ended there read,
+   * or null when the window starts after that second (see
+   * GithubCursor.boundaryComments).
+   */
+  boundaryComments: ReadonlySet<string> | null;
   metaFloor: string;
   maxUpdatedAt: string;
   subjectTitle: string;
   reason: string;
+}
+
+/**
+ * Whether a comment is past the window's lower bound: created after the
+ * cursor's second, or in it when the window that ended there did not read it.
+ */
+function startsInWindow(
+  ctx: NotificationContext,
+  createdAt: string,
+  key: string,
+): boolean {
+  if (createdAt > ctx.windowSince) return true;
+  return (
+    createdAt === ctx.windowSince &&
+    ctx.boundaryComments !== null &&
+    !ctx.boundaryComments.has(key)
+  );
 }
 
 interface WorkingReaction {
@@ -1465,6 +1529,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * nothing new (a repeated skip) are written once per window.
    */
   private windowJournalKeys = new Set<string>();
+  /**
+   * The comments this window has read that were created in the latest second
+   * it has read a comment from, and the threads it has listed whose
+   * notification is of the latest second it has listed one from. When the
+   * window is marked read, those of the new cursor's second become
+   * GithubCursor.boundaryComments.
+   */
+  private windowLatestComments: LatestSecond | undefined;
+  private windowLatestThreads: LatestSecond | undefined;
+  /**
+   * Threads of late notifications (see `late` in pollOnce) this window has
+   * read: the comments of the cursor's second GitHub listed then were read,
+   * so a later failure reading one again in the window is treated as stale.
+   */
+  private windowLateThreadsRead = new Set<string>();
 
   constructor(
     name: string,
@@ -1544,6 +1623,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
       }
       base.dispatchedCommentTimes = clean;
+    }
+    // A record that does not belong to the cursor, or that cannot be read,
+    // is dropped: the window then starts after the cursor's second, as it
+    // did before the record existed, and nothing it read is read again.
+    const boundary = base.boundaryComments as unknown;
+    if (boundary !== undefined) {
+      const record = boundary as {
+        at?: unknown;
+        keys?: unknown;
+        threads?: unknown;
+      } | null;
+      const isKeyList = (list: unknown) =>
+        Array.isArray(list) &&
+        list.length <= MAX_BOUNDARY_COMMENTS &&
+        list.every((key) => typeof key === 'string');
+      if (
+        !record ||
+        typeof record !== 'object' ||
+        record.at !== base.lastProcessedAt ||
+        !isKeyList(record.keys) ||
+        !isKeyList(record.threads)
+      ) {
+        delete base.boundaryComments;
+      }
     }
     return base;
   }
@@ -2500,10 +2603,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : this.cursor.lastProcessedAt;
 
     // Comment window lower bound: the cursor BEFORE this poll advances it.
-    // Comments with updated_at <= windowSince were already eligible for
+    // Comments created before windowSince were already eligible for
     // processing in a previous poll — skip them to prevent duplicates when
-    // PUT /notifications' async mark fails to mark the thread read.
+    // PUT /notifications' async mark fails to mark the thread read. Comments
+    // of the windowSince second itself are read unless the window that ended
+    // there read them (see GithubCursor.boundaryComments).
     const windowSince = this.cursor.lastProcessedAt;
+    const boundary =
+      this.cursor.boundaryComments?.at === windowSince
+        ? this.cursor.boundaryComments
+        : undefined;
+    const boundaryComments = boundary ? new Set(boundary.keys) : null;
+    const boundaryThreads = new Set(boundary?.threads);
 
     if (maxUpdatedAt > this.cursor.lastProcessedAt) {
       this.pendingCursorUpdatedAt =
@@ -2610,6 +2721,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         issueNumber,
         lastReadAt,
         windowSince,
+        boundaryComments,
         metaFloor: this.cursor.metaFloor,
         maxUpdatedAt,
         subjectTitle: notification.subject.title || '',
@@ -2617,11 +2729,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       };
 
       const failureKey = `${chatId}|${threadId}`;
-      // A notification at or before the cursor belongs to a window that
-      // already committed; it is listed again only because its mark-as-read
-      // did not apply. A 5xx reading it neither holds the new window nor
-      // spends its budget; a rate limit still stops the poll.
-      const stale = notification.updated_at <= this.cursor.lastProcessedAt;
+      this.windowLatestThreads = noteLatestSecond(
+        this.windowLatestThreads,
+        notification.updated_at,
+        failureKey,
+      );
+      // A notification before the cursor belongs to a window that already
+      // committed; it is listed again only because its mark-as-read did not
+      // apply. A 5xx reading it neither holds the new window nor spends its
+      // budget; a rate limit still stops the poll. One of the cursor's own
+      // second that the window ending there did not list can instead be a
+      // late notification for a comment that window did not read, when the
+      // window reads that second: it holds a newer window waiting to be
+      // marked read, and while none waits it is not marked read anyway, so
+      // it spends no budget. Once the window has read its thread, it is
+      // stale again.
+      const late =
+        notification.updated_at === windowSince &&
+        boundaryComments !== null &&
+        !boundaryThreads.has(failureKey) &&
+        !this.windowLateThreadsRead.has(failureKey);
+      const stale =
+        notification.updated_at < windowSince ||
+        (notification.updated_at === windowSince &&
+          (!late || !this.pendingCursorUpdatedAt));
       try {
         switch (reason) {
           case 'mention':
@@ -2645,6 +2776,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             break;
           default:
             await this.processCommentLane(ctx, false);
+        }
+        // A thread held at poll start was not read (see fetchNewComments),
+        // and a failing task store or audit may have refused what it read.
+        if (
+          late &&
+          !this.threadHeldAtPollStart(chatId, threadId) &&
+          !this.inboundPersistenceBlocked &&
+          !this.publicationAuditBlocked &&
+          this.windowLateThreadsRead.size < MAX_WINDOW_KEYS
+        ) {
+          this.windowLateThreadsRead.add(failureKey);
         }
       } catch (err) {
         const failure = classifyThreadFailure(err);
@@ -2692,7 +2834,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // that task, so the thread is read again.
         const taskHeld =
           !retry && !storeHeld && this.threadTaskHoldsCursor(chatId, threadId);
-        const held = retry || storeHeld || taskHeld;
+        // A late notification of the cursor's own second that fails with a
+        // 5xx while no newer window waits is stale only for the budget:
+        // nothing is marked read this poll, so the thread is read again.
+        const idleHeld =
+          failure === 'transient' &&
+          !retry &&
+          !storeHeld &&
+          !taskHeld &&
+          late &&
+          !this.pendingCursorUpdatedAt;
+        const held = retry || storeHeld || taskHeld || idleHeld;
         const milestone = (n: number) => n === 1 || n % 10 === 0;
         const report =
           failure === 'shared'
@@ -2702,7 +2854,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 ? milestone(failures)
                 : this.journalOncePerWindow(`failing\0${failureKey}`)
               : this.journalOncePerWindow(
-                  `${storeHeld || taskHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
+                  `${storeHeld || taskHeld || idleHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
                 );
         if (report) {
           const error = sanitizeLogText(
@@ -2718,7 +2870,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                   ? `[Channel:${this.name}] error processing ${threadId} while channel state cannot be persisted, keeping it unread for the next poll: ${error}\n`
                   : taskHeld
                     ? `[Channel:${this.name}] error processing ${threadId} while its task is unfinished, keeping it unread for the next poll: ${error}\n`
-                    : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
+                    : idleHeld
+                      ? `[Channel:${this.name}] API error processing ${threadId} while no newer notification waits, keeping it unread for the next poll: ${error}\n`
+                      : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
           );
           let detail: Record<string, number> | undefined;
           if (failure === 'transient' && !stale) {
@@ -2784,14 +2938,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         await this.markNotificationsAsRead(committedAt);
         if (committedAt > this.cursor.lastProcessedAt) {
           this.cursor.lastProcessedAt = committedAt;
+          const read = this.windowLatestComments;
+          const listed = this.windowLatestThreads;
+          if (read?.at === committedAt && read.overflow) {
+            delete this.cursor.boundaryComments;
+          } else {
+            // Past the bound a listed thread is left out, so a notification
+            // of it listed again counts as late: the cautious direction.
+            this.cursor.boundaryComments = {
+              at: committedAt,
+              keys: read?.at === committedAt ? [...read.keys] : [],
+              threads: listed?.at === committedAt ? [...listed.keys] : [],
+            };
+          }
         }
         this.pendingCursorUpdatedAt = undefined;
-        // A new window starts: its hold budget, streaks and once-per-window
-        // journal keys start again.
+        // A new window starts: its hold budget, streaks, once-per-window
+        // journal keys and what it has read and listed start again.
         this.transientHoldPolls = 0;
         this.sharedHoldPolls = 0;
         this.transientNotificationFailures.clear();
         this.windowJournalKeys.clear();
+        this.windowLatestComments = undefined;
+        this.windowLatestThreads = undefined;
+        this.windowLateThreadsRead.clear();
       }
     } finally {
       // Bound the comment-time map EVERY poll, independent of dispatch: fetch
@@ -3205,13 +3375,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // every poll of the frozen window only spends the shared PAT budget.
     if (this.threadHeldAtPollStart(ctx.chatId, ctx.threadId)) return [];
     const [owner, repo] = ctx.chatId.split('/');
+    // When the window reads the cursor's own second, list from a second
+    // earlier, as the notification list does, so a comment last updated in
+    // that second is listed whether GitHub's `since` includes it or not.
+    const since = ctx.boundaryComments
+      ? new Date(new Date(ctx.windowSince).getTime() - 1000).toISOString()
+      : ctx.windowSince;
     const comments = (await this.githubApi(
       () =>
         this.octokit.paginate(this.octokit.rest.issues.listComments, {
           owner,
           repo,
           issue_number: ctx.issueNumber,
-          since: ctx.windowSince,
+          since,
           per_page: 100,
         }),
       `listComments(${ctx.threadId})`,
@@ -3228,13 +3404,83 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         times[comment.node_id || String(comment.id)] = comment.created_at;
       }
     }
-    return comments.filter(
+    this.recordEditedMentions(ctx, comments);
+    const inWindow = comments.filter(
       (comment) =>
         comment.user?.login !== this.botUsername &&
         (!comment.created_at ||
-          (comment.created_at > ctx.windowSince &&
+          (startsInWindow(
+            ctx,
+            comment.created_at,
+            comment.node_id || String(comment.id),
+          ) &&
             comment.created_at <= ctx.maxUpdatedAt)),
     );
+    for (const comment of inWindow) this.noteWindowComment(comment);
+    return inWindow;
+  }
+
+  /**
+   * Remember a comment this window read, if it is of the latest second the
+   * window has read a comment from (the cursor can advance at most to the
+   * newest notification, and no comment it reads is newer than that).
+   */
+  private noteWindowComment(comment: GithubComment): void {
+    if (!comment.created_at) return;
+    this.windowLatestComments = noteLatestSecond(
+      this.windowLatestComments,
+      comment.created_at,
+      comment.node_id || String(comment.id),
+    );
+  }
+
+  /**
+   * GitHub notifies a mention that an edit adds to an older comment, but the
+   * lanes read only comments created in the window. Journal such a comment
+   * once per window, so the notification it raised is not consumed without a
+   * trace (unless it arrives after the cursor has passed the edit, as a late
+   * notification for a new comment can). The edit time has no upper bound: a later edit (or a notification
+   * stamped before the edit) leaves the comment newer than the window, and
+   * once the window commits nothing reads it again. A later window that
+   * reads the thread again can record it once more.
+   */
+  private recordEditedMentions(
+    ctx: NotificationContext,
+    comments: readonly GithubComment[],
+  ): void {
+    const botUsername = this.botUsername;
+    if (!botUsername) return;
+    for (const comment of comments) {
+      if (
+        comment.user?.login === botUsername ||
+        !comment.created_at ||
+        startsInWindow(
+          ctx,
+          comment.created_at,
+          comment.node_id || String(comment.id),
+        ) ||
+        !comment.updated_at ||
+        comment.updated_at <= ctx.windowSince ||
+        !testBotMention(comment.body || '', botUsername)
+      ) {
+        continue;
+      }
+      const key = comment.node_id || String(comment.id);
+      // An edit to a comment the channel already took is not a new request.
+      if (this.cursor.dispatchedComments?.includes(key)) continue;
+      if (!this.journalOncePerWindow(`edited_comment\0${key}`)) continue;
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'edited_comment',
+        triggerKind: 'comment',
+        repository: ctx.chatId,
+        thread: ctx.threadId,
+        number: ctx.issueNumber,
+        messageId: key,
+        actor: (comment.user?.login || 'unknown').toLowerCase(),
+      });
+    }
   }
 
   private async fetchIssueMeta(ctx: NotificationContext): Promise<GithubMeta> {
@@ -3347,9 +3593,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   /**
    * Window-aware eviction. Once over the soft cap, drop EVERY key whose
-   * comment can no longer be re-listed (created_at <= the committed cursor),
-   * keeping protected keys regardless of position. A key newer than the
-   * cursor — or with no recorded time (legacy migration) — is protected:
+   * comment can no longer be re-listed (created_at before the committed
+   * cursor; the window can read the cursor's own second again, see
+   * GithubCursor.boundaryComments), keeping protected keys regardless of
+   * position. A key at or after the cursor — or with no recorded time
+   * (legacy migration) — is protected:
    * evicting it would let a re-listed aggregate SUPERSET re-dispatch
    * already-replied comments under a fresh batch hash that misses the
    * publication-audit backstop (duplicate public reply / private injection
@@ -3367,14 +3615,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const cursor = this.cursor.lastProcessedAt;
     return list.filter((key) => {
       const time = times[key];
-      return time === undefined || time > cursor;
+      return time === undefined || time >= cursor;
     });
   }
 
   /**
    * Bound the time map: drop entries that are neither in the ring nor still
    * re-listable. Times for fetched-but-not-yet-dispatched comments survive
-   * while their created_at is newer than the cursor (they may be dispatched
+   * while their created_at is not before the cursor (they may be dispatched
    * later this poll), so eviction never loses a key's protection mid-poll.
    */
   private pruneCommentTimes(): void {
@@ -3383,7 +3631,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const live = new Set(this.cursor.dispatchedComments ?? []);
     const cursor = this.cursor.lastProcessedAt;
     for (const [key, time] of Object.entries(times)) {
-      if (!live.has(key) && time <= cursor) delete times[key];
+      if (!live.has(key) && time < cursor) delete times[key];
     }
     // Bound the map even under a permanently frozen cursor (nothing expires):
     // fetch captures a time for every re-listable comment, including ones the
@@ -3890,7 +4138,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         let posted = task.errorCommentPosted === true;
         // Bound-session delivery is private: a failure must not post a public
         // error comment. The fallback path clears delivery before retrying.
-        if (!posted && !stillBound && task.privateOnly !== true) {
+        // A failed public attempt is run again on a later poll until the
+        // budget is spent (see isRecoverableInboundTask), so the comment,
+        // which asks the user to mention the bot again, waits for the last.
+        if (
+          !posted &&
+          !stillBound &&
+          task.privateOnly !== true &&
+          attempts >= MAX_INBOUND_TASK_ATTEMPTS
+        ) {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
@@ -5301,9 +5557,48 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const summary = this.boundSessionByPr.get(
       this.prBindingKey(chatId, issueNumber),
     );
-    return summary
-      ? { kind: 'bound-session', sessionId: summary.sessionId }
-      : undefined;
+    if (!summary) return undefined;
+    const role = this.boundRoleOf(summary, chatId, issueNumber);
+    return {
+      kind: 'bound-session',
+      sessionId: summary.sessionId,
+      ...(role ? { role } : {}),
+    };
+  }
+
+  /**
+   * The role of the entry that names THIS PR, or undefined for an untyped
+   * binding. Takes the winner legacy routing already resolved, so the URL
+   * parse stays within that one session's entries instead of repeating the
+   * whole follower scan on a path that used to be a single Map lookup.
+   */
+  private boundRoleOf(
+    summary: PrBindingSummary,
+    chatId: string,
+    issueNumber: number,
+  ): PrBindingRole | undefined {
+    return this.boundPrEntryFor(summary, this.prBindingKey(chatId, issueNumber))
+      ?.role;
+  }
+
+  /**
+   * The entry of `summary` that names the PR behind `key`, matched the same
+   * way for every candidate: the URL must parse, agree with its own number,
+   * and normalize to that key. Shared so the legacy role lookup and the
+   * role-aware follower scan cannot drift apart.
+   */
+  private boundPrEntryFor(
+    summary: PrBindingSummary,
+    key: string,
+  ): PrBindingEntry | undefined {
+    return summary.prs.find((pr) => {
+      const identity = this.parsePrBindingUrl(pr.url);
+      return (
+        !!identity &&
+        identity.number === pr.number &&
+        this.prBindingKey(identity.chatId, identity.number) === key
+      );
+    });
   }
 
   /**
@@ -5343,10 +5638,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ? {
           kind: 'bound-session',
           sessionId: best.summary.sessionId,
-          // Legacy mode must stay byte-compatible even when bindings carry
-          // roles (a /review backfill stamps them with no map configured):
-          // a role here would grow a Role: line in the generic prompt.
-          ...(this.boundRoleAware && best.role ? { role: best.role } : {}),
+          ...(best.role ? { role: best.role } : {}),
         }
       : undefined;
   }
@@ -5377,14 +5669,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }> = [];
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
-      const entry = summary.prs.find((pr) => {
-        const identity = this.parsePrBindingUrl(pr.url);
-        return (
-          !!identity &&
-          identity.number === pr.number &&
-          this.prBindingKey(identity.chatId, identity.number) === key
-        );
-      });
+      const entry = this.boundPrEntryFor(summary, key);
       if (!entry) continue;
       followers.push({ summary, ...(entry.role ? { role: entry.role } : {}) });
     }
@@ -5647,12 +5932,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const summary = this.boundSessionByPr.get(
         this.prBindingKey(chatId, issueNumber),
       );
-      return summary
-        ? {
-            targets: [{ sessionId: summary.sessionId }],
-            followed: true,
-          }
-        : { targets: [], followed: false };
+      if (!summary) return { targets: [], followed: false };
+      const role = this.boundRoleOf(summary, chatId, issueNumber);
+      return {
+        targets: [{ sessionId: summary.sessionId, ...(role ? { role } : {}) }],
+        followed: true,
+      };
     }
     const followers = this.boundFollowersOf(chatId, issueNumber);
     const byRole = new Map<
@@ -5840,8 +6125,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // removed on acceptance, so a silent cut would drop the tail from every
     // surface. With a matching operator template the generic workflow line
     // becomes a labeled trusted instruction block; the untrusted warning
-    // extends to the substituted values. Without one (and without a role)
-    // the prompt is byte-identical to the pre-template contract.
+    // extends to the substituted values. Without one, a role-carrying binding
+    // gets the built-in guidance for that role and an untyped binding keeps
+    // the prompt byte-identical to the pre-template contract.
     const eventClass = this.boundEventClass(envelope);
     const template = resolveBoundActionTemplate(
       this.boundSessionActions,
@@ -5867,6 +6153,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : {}),
       dataLines: [identity, ...contextLines],
       ...(role ? { role } : {}),
+      // The builder uses this only when no operator instruction resolved.
+      // Role-aware targets are selected BY template match, so they always
+      // carry an instruction and the guidance is inert there; the per-role
+      // subscription is enforced at selection, not by a flag here.
+      ...(role ? { roleGuidance: DEFAULT_BOUND_ROLE_GUIDANCE[role] } : {}),
       body: text,
     });
   }
@@ -5929,7 +6220,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.boundEventClass(envelope),
         this.boundLaneClass(task.dedupe),
       );
-      if (current && current.sessionId !== delivery.sessionId) {
+      // The ROLE is part of the target, not just the session: a deferred
+      // legacy delivery whose binding was re-roled in the meantime must not
+      // build its prompt from the frozen role, or a session that is now a
+      // verifier still receives the fixer's guidance. Role-aware targets are
+      // re-resolved within their own role group, so the role half is inert
+      // there.
+      if (
+        current &&
+        (current.sessionId !== delivery.sessionId ||
+          current.role !== delivery.role)
+      ) {
         this.transitionInboundTask(task.id, 'running', { delivery: current });
         task.delivery = current;
         delivery = current;
@@ -6043,10 +6344,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
         try {
+          // Rebuild for THIS target: the legacy fallback scans every
+          // follower, so it can land on a different role (or an untyped
+          // binding). Reusing the first target's prompt would hand this
+          // session the gone session's Role line and role guidance.
+          // Role-aware fallbacks stay inside their role group, where the
+          // deterministic renderer rebuilds the identical string.
+          const targetPrompt = this.buildBoundSessionPrompt(
+            envelope,
+            next.role,
+            this.boundLaneClass(task.dedupe),
+          );
           // Same event key: a different session's ring has never seen it.
           await boundSessions.deliverPrompt(
             next.sessionId,
-            prompt,
+            targetPrompt,
             idempotencyKey,
           );
           this.recordBoundDelivered(envelope, next.sessionId);
@@ -6643,7 +6955,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : '';
       events.push({
         type: 'ci_failure',
-        summary: `CI failed on head ${headSha}.${failedChecks} Inspect the failed checks and fix or attribute the failure.`,
+        summary: `CI failed on head ${headSha}.${failedChecks}`,
       });
     }
 
@@ -6661,7 +6973,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       events.push({
         type: 'merge_conflict',
-        summary: `Merge conflicts detected (mergeable_state: dirty). Rebase or merge the base branch and resolve the conflicts.`,
+        summary: 'Merge conflicts detected (mergeable_state: dirty).',
       });
     }
 
@@ -6675,7 +6987,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       events.push({
         type: 'state_change',
         summary: pr.merged
-          ? 'The PR was merged. Wrap up any follow-up work.'
+          ? 'The PR was merged.'
           : 'The PR was closed without merging.',
       });
     }
