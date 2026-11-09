@@ -33,6 +33,15 @@ describe('cdCommand', () => {
   let context: CommandContext;
   let relocateWorkingDirectory: ReturnType<typeof vi.fn>;
   let addWorkingDirectoryChangedContext: ReturnType<typeof vi.fn>;
+  let getBackgroundTasks: ReturnType<
+    typeof vi.fn<
+      () => Array<{
+        isBackgrounded: boolean;
+        status: string;
+        subagentType: string;
+      }>
+    >
+  >;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cd-command-'));
@@ -48,12 +57,14 @@ describe('cdCommand', () => {
 
     relocateWorkingDirectory = vi.fn().mockResolvedValue({});
     addWorkingDirectoryChangedContext = vi.fn().mockResolvedValue(undefined);
+    getBackgroundTasks = vi.fn(() => []);
     context = createMockCommandContext({
       services: {
         config: {
           getTargetDir: () => currentDir,
           getWorkingDir: () => currentDir,
           isRestrictiveSandbox: () => false,
+          getBackgroundTaskRegistry: () => ({ getAll: getBackgroundTasks }),
           relocateWorkingDirectory,
           getLlmClient: () => ({
             addWorkingDirectoryChangedContext,
@@ -166,6 +177,34 @@ describe('cdCommand', () => {
 
     await expect(action).resolves.toBeUndefined();
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
+  it('checks for a running background fork after path lookup and allows retry after it settles', async () => {
+    const pendingMove = cdCommand.action!(context, nextDir);
+    const fork = {
+      isBackgrounded: true,
+      status: 'running',
+      subagentType: 'fork',
+    };
+    getBackgroundTasks.mockReturnValue([fork]);
+
+    await expect(pendingMove).resolves.toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Wait for the background fork'),
+    });
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+
+    getBackgroundTasks.mockReturnValue([
+      { ...fork, status: 'completed' },
+      { ...fork, subagentType: 'general-purpose' },
+    ]);
+    await cdCommand.action!(context, nextDir);
+    const targetDir = await realpath(nextDir);
+    expect(relocateWorkingDirectory).toHaveBeenCalledExactlyOnceWith(
+      targetDir,
+      targetDir,
+    );
   });
 
   it('rejects restrictive sandbox sessions', async () => {

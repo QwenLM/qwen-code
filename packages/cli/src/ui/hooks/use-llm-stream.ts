@@ -820,6 +820,7 @@ export const useLlmStream = (
     existingInvocationItemId?: number,
     invocationPromptId?: string,
     isCurrentSubmission?: () => boolean,
+    submissionSignal?: AbortSignal,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -2220,6 +2221,7 @@ export const useLlmStream = (
               undefined,
               submitType === SendMessageType.UserQuery ? prompt_id : undefined,
               isCurrentSubmission,
+              abortSignal,
             )
           : false;
 

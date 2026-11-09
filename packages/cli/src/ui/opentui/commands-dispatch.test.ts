@@ -2570,6 +2570,7 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
       config: {
         getTargetDir: () => os.tmpdir(),
         isRestrictiveSandbox: () => false,
+        getBackgroundTaskRegistry: () => ({ getAll: () => [] }),
         relocateWorkingDirectory,
         getLlmClient: () => ({
           addWorkingDirectoryChangedContext: vi

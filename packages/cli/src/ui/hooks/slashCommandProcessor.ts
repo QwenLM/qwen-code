@@ -41,6 +41,7 @@ import type {
   SlashCommandProcessorResult,
   HistoryItem,
   ConfirmationRequest,
+  ShellConfirmationRequest,
 } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -433,6 +434,8 @@ export const useSlashCommandProcessor = (
     controller: AbortController;
     canCancel: boolean;
   } | null>(null);
+  const [commandCancellationBlocked, setCommandCancellationBlocked] =
+    useState(false);
 
   const isCommandCancellationBlocked = useCallback(
     () => activeCommandRef.current?.canCancel === false,
@@ -904,6 +907,7 @@ export const useSlashCommandProcessor = (
       // Identity shared by the invocation item and submitted prompt.
       invocationPromptId?: string,
       isCurrentSubmission?: () => boolean,
+      submissionSignal?: AbortSignal,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -918,7 +922,7 @@ export const useSlashCommandProcessor = (
       }
 
       // Shortcuts can dispatch directly while the composer is disabled.
-      if (isCommandCancellationBlocked()) {
+      if (isCommandCancellationBlocked() || submissionSignal?.aborted) {
         return { type: 'handled' };
       }
 
@@ -960,6 +964,19 @@ export const useSlashCommandProcessor = (
       const abortController = new AbortController();
       const activeCommand = { controller: abortController, canCancel: true };
       activeCommandRef.current = activeCommand;
+      const blockCancellation = () => {
+        activeCommand.canCancel = false;
+        if (activeCommandRef.current === activeCommand) {
+          setCommandCancellationBlocked(true);
+        }
+      };
+      // A shortcut can replace the active command while a typed command is
+      // running. Its submission still needs to abort the original action.
+      const cancelFromSubmission = () => {
+        if (activeCommand.canCancel)
+          abortController.abort(submissionSignal?.reason);
+      };
+      let commandPendingItem: HistoryItemWithoutId | null = null;
 
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
@@ -1019,11 +1036,15 @@ export const useSlashCommandProcessor = (
       };
 
       try {
+        submissionSignal?.addEventListener('abort', cancelFromSubmission, {
+          once: true,
+        });
         // Some built-ins invoke models directly, before normal prompt dispatch.
         const mods = getInteractiveModSession(config);
         if (mods && !isModRecoveryCommand(commandToExecute)) {
           await mods.ready;
         }
+        if (abortController.signal.aborted) return { type: 'handled' };
         // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
         const stackedResult = parseStackedSlashCommands(
           trimmed,
@@ -1144,6 +1165,11 @@ export const useSlashCommandProcessor = (
                   return commandContext.ui.history;
                 },
                 addItem: addItemWithRecording,
+                setPendingItem(item) {
+                  if (abortController.signal.aborted) return;
+                  commandPendingItem = item;
+                  setPendingItem(item);
+                },
                 // A typed command's own submission marks the session busy
                 // before its action runs, so the app-wide ref would refuse
                 // idle-only commands (/branch, /cd, /fork, ...) every time.
@@ -1178,7 +1204,7 @@ export const useSlashCommandProcessor = (
                 ) {
                   return false;
                 }
-                activeCommand.canCancel = false;
+                blockCancellation();
                 return true;
               },
             };
@@ -1206,7 +1232,7 @@ export const useSlashCommandProcessor = (
                 { once: true },
               );
             });
-            activeCommand.canCancel = commandToExecute.canCancel !== false;
+            if (commandToExecute.canCancel === false) blockCancellation();
             const result = abortController.signal.aborted
               ? undefined
               : await Promise.race([
@@ -1515,22 +1541,29 @@ export const useSlashCommandProcessor = (
                     outcome: ToolConfirmationOutcome;
                     approvedCommands?: string[];
                   }>((resolve) => {
-                    setShellConfirmationRequest({
+                    const request: ShellConfirmationRequest = {
                       commands: result.commandsToConfirm,
                       onConfirm: (
                         resolvedOutcome,
                         resolvedApprovedCommands,
                       ) => {
-                        setShellConfirmationRequest(null); // Close the dialog
+                        setShellConfirmationRequest((current) =>
+                          current === request ? null : current,
+                        );
                         resolve({
                           outcome: resolvedOutcome,
                           approvedCommands: resolvedApprovedCommands,
                         });
                       },
-                    });
+                    };
+                    setShellConfirmationRequest(request);
+                    void abortPromise.then(() =>
+                      request.onConfirm(ToolConfirmationOutcome.Cancel),
+                    );
                   });
 
                   if (
+                    abortController.signal.aborted ||
                     outcome === ToolConfirmationOutcome.Cancel ||
                     !approvedCommands ||
                     approvedCommands.length === 0
@@ -1553,21 +1586,29 @@ export const useSlashCommandProcessor = (
                     invocationItemId,
                     invocationPromptId,
                     isCurrentSubmission,
+                    submissionSignal,
                   );
                 }
                 case 'confirm_action': {
                   const { confirmed } = await new Promise<{
                     confirmed: boolean;
                   }>((resolve) => {
-                    setConfirmationRequest({
+                    const request: ConfirmationRequest = {
                       prompt: result.prompt,
                       onConfirm: (resolvedConfirmed) => {
-                        setConfirmationRequest(null);
+                        setConfirmationRequest((current) =>
+                          current === request ? null : current,
+                        );
                         resolve({ confirmed: resolvedConfirmed });
                       },
-                    });
+                    };
+                    setConfirmationRequest(request);
+                    void abortPromise.then(() => request.onConfirm(false));
                   });
 
+                  if (abortController.signal.aborted) {
+                    return { type: 'handled' };
+                  }
                   if (!confirmed) {
                     addItemWithRecording(
                       {
@@ -1587,6 +1628,7 @@ export const useSlashCommandProcessor = (
                     invocationItemId,
                     invocationPromptId,
                     isCurrentSubmission,
+                    submissionSignal,
                   );
                 }
                 case 'stream_messages': {
@@ -1627,7 +1669,6 @@ export const useSlashCommandProcessor = (
 
         return { type: 'handled' };
       } catch (e: unknown) {
-        // If cancelled via ESC, the cancelSlashCommand callback already handled cleanup
         if (abortController.signal.aborted) {
           return { type: 'handled' };
         }
@@ -1652,6 +1693,10 @@ export const useSlashCommandProcessor = (
         );
         return { type: 'handled' };
       } finally {
+        submissionSignal?.removeEventListener('abort', cancelFromSubmission);
+        if (abortController.signal.aborted && commandPendingItem) {
+          setPendingItem((item) => (item === commandPendingItem ? null : item));
+        }
         if (config?.getChatRecordingService) {
           const chatRecorder = config.getChatRecordingService();
           const primaryCommand =
@@ -1707,6 +1752,7 @@ export const useSlashCommandProcessor = (
         }
         if (activeCommandRef.current === activeCommand) {
           activeCommandRef.current = null;
+          setCommandCancellationBlocked(false);
           setIsProcessing(false);
         }
       }
@@ -1738,6 +1784,7 @@ export const useSlashCommandProcessor = (
     cancelBtw,
     cancelSlashCommand,
     isCommandCancellationBlocked,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,

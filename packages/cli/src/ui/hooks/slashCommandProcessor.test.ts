@@ -1378,7 +1378,70 @@ describe('useSlashCommandProcessor', () => {
       expect(mockSetIsProcessing).toHaveBeenCalledTimes(2);
     });
 
-    it('keeps /branch processing after Esc until the session switch settles', async () => {
+    it.each([false, true])(
+      'aborts the submitted command after a direct shortcut (new pending item: %s)',
+      async (shortcutHasPendingItem) => {
+        const submittedItem = {
+          type: MessageType.INFO,
+          text: 'Consulting advisor...',
+        } as const;
+        const shortcutItem = {
+          type: MessageType.INFO,
+          text: 'Shortcut pending',
+        } as const;
+        let commandSignal: AbortSignal | undefined;
+        const advisor = createTestCommand({
+          name: 'advisor',
+          action: (context) => {
+            commandSignal = context.abortSignal;
+            context.ui.setPendingItem(submittedItem);
+            return new Promise<void>(() => {});
+          },
+        });
+        const mcp = createTestCommand({
+          name: 'mcp',
+          action: (context) => {
+            if (shortcutHasPendingItem) context.ui.setPendingItem(shortcutItem);
+          },
+        });
+        const result = setupProcessorHook([advisor, mcp]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(2),
+        );
+        const controller = new AbortController();
+        let dispatch!: ReturnType<typeof result.current.handleSlashCommand>;
+        act(() => {
+          dispatch = result.current.handleSlashCommand(
+            '/advisor review',
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            () => true,
+            controller.signal,
+          );
+        });
+        await waitFor(() =>
+          expect(result.current.pendingHistoryItems).toContainEqual(
+            submittedItem,
+          ),
+        );
+        await act(async () => {
+          await result.current.handleSlashCommand('/mcp desc');
+        });
+        expect(commandSignal?.aborted).toBe(false);
+        await act(async () => {
+          controller.abort();
+          await dispatch;
+        });
+        expect(commandSignal?.aborted).toBe(true);
+        expect(result.current.pendingHistoryItems).toEqual(
+          shortcutHasPendingItem ? [shortcutItem] : [],
+        );
+      },
+    );
+
+    it('keeps /branch processing after cancellation until the session switch settles', async () => {
       let finishSwap!: () => void;
       mockHandleBranch.mockReturnValueOnce(
         new Promise<void>((resolve) => {
@@ -1392,6 +1455,7 @@ describe('useSlashCommandProcessor', () => {
       });
       const mcpAction = vi.fn();
       const mcp = createTestCommand({ name: 'mcp', action: mcpAction });
+      const controller = new AbortController();
       const result = setupProcessorHook(
         [branch, mcp],
         [],
@@ -1414,6 +1478,7 @@ describe('useSlashCommandProcessor', () => {
             undefined,
             undefined,
             () => true,
+            controller.signal,
           );
         });
         await waitFor(() =>
@@ -1423,9 +1488,13 @@ describe('useSlashCommandProcessor', () => {
           await result.current.handleSlashCommand('/mcp desc');
         });
         expect(mcpAction).not.toHaveBeenCalled();
-        act(() => result.current.cancelSlashCommand());
+        act(() => {
+          result.current.cancelSlashCommand();
+          controller.abort();
+        });
         expect(processing).not.toHaveBeenCalledWith(false);
         expect(result.current.isCommandCancellationBlocked()).toBe(true);
+        expect(result.current.commandCancellationBlocked).toBe(true);
       } finally {
         await act(async () => {
           finishSwap();
@@ -1434,6 +1503,7 @@ describe('useSlashCommandProcessor', () => {
       }
       expect(processing).toHaveBeenLastCalledWith(false);
       expect(result.current.isCommandCancellationBlocked()).toBe(false);
+      expect(result.current.commandCancellationBlocked).toBe(false);
       await act(async () => {
         await result.current.handleSlashCommand('/mcp desc');
       });
@@ -2926,6 +2996,40 @@ describe('useSlashCommandProcessor', () => {
       expect(result.current.shellConfirmationRequest).toBeNull();
       // Verify the action was only called the initial time.
       expect(mockCommandAction).toHaveBeenCalledTimes(1);
+    });
+
+    it('dismisses a shell confirmation when the submission is aborted', async () => {
+      const result = setupProcessorHook([shellCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      const controller = new AbortController();
+      let dispatch!: ReturnType<typeof result.current.handleSlashCommand>;
+      act(() => {
+        dispatch = result.current.handleSlashCommand(
+          '/shellcmd',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          () => true,
+          controller.signal,
+        );
+      });
+      await waitFor(() =>
+        expect(result.current.shellConfirmationRequest).not.toBeNull(),
+      );
+      const staleConfirm = result.current.shellConfirmationRequest!.onConfirm;
+
+      await act(async () => {
+        controller.abort();
+        await dispatch;
+        staleConfirm(ToolConfirmationOutcome.ProceedAlways, ['rm -rf /']);
+      });
+
+      expect(result.current.shellConfirmationRequest).toBeNull();
+      expect(mockCommandAction).toHaveBeenCalledOnce();
+      expect(
+        result.current.commandContext.session.sessionShellAllowlist.size,
+      ).toBe(0);
     });
 
     it('should re-run command with one-time allowlist on "Proceed Once"', async () => {

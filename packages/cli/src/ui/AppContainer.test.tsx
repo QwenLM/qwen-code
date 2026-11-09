@@ -5189,6 +5189,30 @@ describe('AppContainer State Management', () => {
       expect(handleSlashCommand).not.toHaveBeenCalled();
     });
 
+    it('keeps the MCP shortcut from replacing a slash command awaiting consent', () => {
+      const handleSlashCommand = vi.fn();
+      mockConfig.getMcpServers = vi.fn(() => ({
+        fixture: { command: 'fixture' },
+      }));
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        ...mockedUseSlashCommandProcessor(),
+        handleSlashCommand,
+        confirmationRequest: { prompt: 'Move?', onConfirm: vi.fn() },
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const ctrlT = { ...escKey, name: 't', ctrl: true, sequence: '\u0014' };
+      act(() => getGlobalKeypress()!(ctrlT));
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+    });
+
     it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
       // Positive counterpart to the vim-INSERT guard above: while the agent
       // is Responding and the buffer is empty, one Esc must reach the

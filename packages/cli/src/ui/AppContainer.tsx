@@ -2340,6 +2340,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setBtwItem,
     cancelBtw,
     isCommandCancellationBlocked,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -5047,6 +5048,14 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
+      if (
+        (shellConfirmationRequest || confirmationRequest) &&
+        (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key) ||
+          keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key))
+      ) {
+        return;
+      }
+
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -5277,6 +5286,8 @@ export const AppContainer = (props: AppContainerProps) => {
       ideContextState,
       handleExit,
       isCommandCancellationBlocked,
+      shellConfirmationRequest,
+      confirmationRequest,
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
@@ -5428,6 +5439,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5580,6 +5592,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,

@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { CommandKind, type SlashCommand } from './types.js';
 import { getSingleDirPathCompletions } from './directoryCommand.js';
 import { resolvePath } from '@qwen-code/qwen-code-core';
+import { FORK_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core/tools/agent/fork-subagent.js';
 import {
   isFolderTrustEnabled,
   loadTrustedFolders,
@@ -131,6 +132,26 @@ export const cdCommand: SlashCommand = {
         type: 'message' as const,
         messageType: 'info' as const,
         content: `Already in ${realTargetPath}.`,
+      };
+    }
+
+    if (
+      config
+        .getBackgroundTaskRegistry()
+        .getAll()
+        .some(
+          (task) =>
+            task.isBackgrounded &&
+            task.status === 'running' &&
+            task.subagentType === FORK_SUBAGENT_TYPE,
+        )
+    ) {
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: t(
+          'Wait for the background fork to finish or stop it in /tasks before changing directories.',
+        ),
       };
     }
 

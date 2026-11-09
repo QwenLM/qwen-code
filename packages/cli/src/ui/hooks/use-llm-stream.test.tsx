@@ -1505,8 +1505,7 @@ describe('useLlmStream', () => {
             StreamingState.Responding,
           );
           const itemsBeforeOldFs = mockAddItem.mock.calls.slice();
-          // Only LLM ownership was cancelled; the command signal stays healthy.
-          expect(oldCommandSignal.aborted).toBe(false);
+          expect(oldCommandSignal.aborted).toBe(true);
           await act(async () => {
             releaseFs();
             await pending;
@@ -1663,7 +1662,7 @@ describe('useLlmStream', () => {
     expect(observed).toEqual([[StreamingState.Responding, true]]);
   });
 
-  it('stops treating a cancelled slash dispatch as current', async () => {
+  it('aborts a cancelled slash dispatch and stops treating it as current', async () => {
     let releaseLog!: () => void;
     const heldLog = new Promise<void>((resolve) => {
       releaseLog = resolve;
@@ -1673,12 +1672,14 @@ describe('useLlmStream', () => {
       logMessage,
     } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
     let isCurrentSubmission: (() => boolean) | undefined;
+    let submissionSignal: AbortSignal | undefined;
     let releaseCommand!: () => void;
     const heldCommand = new Promise<void>((resolve) => {
       releaseCommand = resolve;
     });
     mockHandleSlashCommand.mockImplementation(async (...args: unknown[]) => {
       isCurrentSubmission = args[5] as () => boolean;
+      submissionSignal = args[6] as AbortSignal;
       await heldCommand;
       return { type: 'handled' };
     });
@@ -1691,10 +1692,12 @@ describe('useLlmStream', () => {
     });
     await waitFor(() => expect(isCurrentSubmission).toBeDefined());
     expect(isCurrentSubmission!()).toBe(true);
+    expect(submissionSignal?.aborted).toBe(false);
     await act(async () => {
       result.current.cancelOngoingRequest();
     });
     expect(isCurrentSubmission!()).toBe(false);
+    expect(submissionSignal?.aborted).toBe(true);
     await act(async () => {
       releaseCommand();
       await request;
@@ -17060,6 +17063,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
@@ -17093,6 +17097,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
 
         expect(localMockSendMessageStream).not.toHaveBeenCalledWith(
@@ -17137,6 +17142,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
         expect(localMockSendMessageStream).toHaveBeenCalledWith(
           '',
@@ -18296,6 +18302,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               expect.any(Function),
+              expect.any(AbortSignal),
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -18384,6 +18391,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               expect.any(Function),
+              expect.any(AbortSignal),
             ),
           );
 
@@ -22910,6 +22918,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
