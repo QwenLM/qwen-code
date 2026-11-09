@@ -22,6 +22,26 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
+    /**
+     * Contract tables that no entity in the 63-entity predecessor inventory maps to. The inventory
+     * records an upgrade path, so a table listed here is new surface introduced after that
+     * baseline rather than the destination of a legacy table; every other table in {@link
+     * ManagedSchemaContract#TABLES} must stay reachable from the inventory.
+     */
+    private static final Set<String> CONTRACT_TABLES_WITHOUT_PREDECESSOR =
+            Set.of(
+                    // Fresh extension domains: the predecessor schema had no extension store, and
+                    // its only extension-adjacent entity
+                    // (qwen_managed_session_extension_record) maps to ma_session_record.
+                    "ma_extension_package",
+                    "ma_extension_settings",
+                    "ma_extension_operation",
+                    // Session worktrees are a fresh domain; no legacy entity models a worktree.
+                    "ma_session_worktree",
+                    // Resident ownership row: written by the Session creation transaction, not
+                    // evolved from a legacy entity (introduced with session principal ownership).
+                    "ma_session_principal");
+
     @Test
     void sharedCatalogValidationIsExplicitAndPreservesBusinessRows() throws Exception {
         DataSource source = initialized();
@@ -613,7 +633,7 @@ class ManagedSchemaTest {
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
         Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation", "ma_session_worktree"));
+        originalTargets.removeAll(CONTRACT_TABLES_WITHOUT_PREDECESSOR);
         assertEquals(
                 originalTargets,
                 inventory.values().stream()
