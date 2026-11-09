@@ -21,15 +21,18 @@ import {
   type LoadedSettings,
 } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
 } from '../server/request-helpers.js';
 import {
+  isGenerationClosedError,
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import {
   WorkspaceGenerationClosedError,
   type WorkspaceRegistry,
@@ -59,6 +62,10 @@ export function registerWorkspaceSubscriptionRoutes(
       writes: WorkspaceSettingsWrites,
       assertGenerationOpen?: () => void,
     ) => Promise<void>;
+    syncModelProvidersRuntime: (
+      route: string,
+      scope: SettingScope,
+    ) => Promise<ServeModelProviderRuntimeSyncResult>;
     sendBridgeError: SendBridgeError;
   },
 ): void {
@@ -143,6 +150,7 @@ export function registerWorkspaceSubscriptionRoutes(
         );
         assertActive();
         const modelId = selectSubscriptionModel(models);
+        let savedScope: SettingScope | undefined;
         if (shouldPersist && persistSettings) {
           await persistSettings(
             saveCwd,
@@ -166,6 +174,7 @@ export function registerWorkspaceSubscriptionRoutes(
                   loadPolicySettings(runtime.workspaceCwd),
                 );
               }
+              savedScope = scope;
               return [
                 {
                   scope,
@@ -184,19 +193,32 @@ export function registerWorkspaceSubscriptionRoutes(
           );
           assertActive();
         }
-        if (!runtime) {
-          res.status(200).json({ modelId });
-          return;
+        let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
+        if (primary && savedScope !== undefined) {
+          try {
+            runtimeSync = await deps.syncModelProvidersRuntime(
+              route,
+              savedScope,
+            );
+          } catch (error) {
+            assertActive();
+            if (isGenerationClosedError(error)) throw error;
+            writeStderrLine(
+              `qwen serve: ${route} runtime sync failed after persistence`,
+            );
+            runtimeSync = { status: 'failed' };
+          }
+        } else if (runtime) {
+          const { workspaceCwd, workspaceService } = runtime;
+          runtimeSync = await workspaceService.reloadModelProviders(
+            createBuildWorkspaceCtx(workspaceCwd)(route, clientId),
+          );
         }
-        const { workspaceCwd, workspaceService } = runtime;
-        const runtimeSync = await workspaceService.reloadModelProviders(
-          createBuildWorkspaceCtx(workspaceCwd)(route, clientId),
-        );
         assertActive();
         res.status(200).json({
-          authType: AuthType.QWEN_SUBSCRIPTION,
+          ...(runtime ? { authType: AuthType.QWEN_SUBSCRIPTION } : {}),
           modelId,
-          runtimeSync,
+          ...(runtimeSync ? { runtimeSync } : {}),
         });
       } catch (error) {
         if (

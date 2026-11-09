@@ -63,6 +63,9 @@ function setup(trusted = true) {
     workspaceService: { reloadModelProviders },
   } as unknown as WorkspaceRuntime;
   const persistSettings = vi.fn().mockResolvedValue(undefined);
+  const syncModelProvidersRuntime = vi
+    .fn()
+    .mockResolvedValue({ status: 'applied' });
   const app = express();
   app.use(express.json());
   registerWorkspaceSubscriptionRoutes(app, {
@@ -89,11 +92,19 @@ function setup(trusted = true) {
         assertGenerationOpen,
       );
     },
+    syncModelProvidersRuntime,
     sendBridgeError: (res) => {
       res.status(409).json({ code: 'runtime_unavailable' });
     },
   });
-  return { app, guard, primaryGuard, persistSettings, reloadModelProviders };
+  return {
+    app,
+    guard,
+    primaryGuard,
+    persistSettings,
+    reloadModelProviders,
+    syncModelProvidersRuntime,
+  };
 }
 it('rejects an unregistered first-login client ID before account activation', async () => {
   const { app, persistSettings, reloadModelProviders } = setup();
@@ -175,7 +186,12 @@ it.each([
       },
       user: { settings: { modelProviders: {} } },
     }));
-    const { app, persistSettings, reloadModelProviders } = setup();
+    const {
+      app,
+      persistSettings,
+      reloadModelProviders,
+      syncModelProvidersRuntime,
+    } = setup();
     const response = await request(app)
       .post('/workspaces/secondary/auth/subscription')
       .send({
@@ -209,9 +225,18 @@ it.each([
       ],
       expect.any(Function),
     );
-    expect(reloadModelProviders).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceCwd: '/secondary' }),
-    );
+    if (settingsScope === 'provider') {
+      expect(syncModelProvidersRuntime).toHaveBeenCalledExactlyOnceWith(
+        'POST /workspaces/:workspace/auth/subscription',
+        scope,
+      );
+      expect(reloadModelProviders).not.toHaveBeenCalled();
+    } else {
+      expect(syncModelProvidersRuntime).not.toHaveBeenCalled();
+      expect(reloadModelProviders).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceCwd: '/secondary' }),
+      );
+    }
     expect(response.body).toEqual({
       authType: 'qwen-subscription',
       modelId: 'qwen3.8-max',
@@ -269,7 +294,12 @@ it.each(['catalog', 'policy'] as const)(
 );
 
 it('selects the account model using global settings only', async () => {
-  const { app, persistSettings, reloadModelProviders } = setup();
+  const {
+    app,
+    persistSettings,
+    reloadModelProviders,
+    syncModelProvidersRuntime,
+  } = setup();
   const response = await request(app).post('/auth/subscription/model');
 
   expect(response.status).toBe(200);
@@ -281,12 +311,13 @@ it('selects the account model using global settings only', async () => {
   });
   expect(persistSettings).not.toHaveBeenCalled();
   expect(reloadModelProviders).not.toHaveBeenCalled();
+  expect(syncModelProvidersRuntime).not.toHaveBeenCalled();
 });
 
 it.each([SettingScope.User, SettingScope.Workspace])(
   'saves the standalone Desktop selection using the primary settings (%s)',
   async (scope) => {
-    const { app, persistSettings, reloadModelProviders } = setup();
+    const { app, persistSettings, syncModelProvidersRuntime } = setup();
     mocks.loadSettings.mockReturnValue({
       merged: {},
       isTrusted: true,
@@ -300,7 +331,10 @@ it.each([SettingScope.User, SettingScope.Workspace])(
       .post('/auth/subscription/model')
       .send({ settingsScope: 'provider' });
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ modelId: 'qwen3.8-max' });
+    expect(response.body).toEqual({
+      modelId: 'qwen3.8-max',
+      runtimeSync: { status: 'applied' },
+    });
     expect(persistSettings).toHaveBeenCalledExactlyOnceWith(
       '/primary',
       [
@@ -318,7 +352,30 @@ it.each([SettingScope.User, SettingScope.Workspace])(
       ],
       expect.any(Function),
     );
-    expect(reloadModelProviders).not.toHaveBeenCalled();
+    expect(syncModelProvidersRuntime).toHaveBeenCalledExactlyOnceWith(
+      'POST /auth/subscription/model',
+      scope,
+    );
+  },
+);
+
+it.each([
+  '/workspaces/secondary/auth/subscription',
+  '/auth/subscription/model',
+])(
+  'reports a saved selection when provider sync fails at %s',
+  async (route) => {
+    const { app, persistSettings, syncModelProvidersRuntime } = setup();
+    syncModelProvidersRuntime.mockRejectedValue(new Error('Reload failed'));
+    const response = await request(app)
+      .post(route)
+      .send({ settingsScope: 'provider' });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      modelId: 'qwen3.8-max',
+      runtimeSync: { status: 'failed' },
+    });
+    expect(persistSettings).toHaveBeenCalledBefore(syncModelProvidersRuntime);
   },
 );
 

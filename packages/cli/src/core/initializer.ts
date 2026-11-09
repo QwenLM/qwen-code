@@ -34,6 +34,7 @@ export interface InitializeAppOptions {
    * paint; non-TUI paths leave it false so the first request keeps IDE context.
    */
   deferIdeConnection?: boolean;
+  allowSubscriptionStartupFallback?: boolean;
 }
 
 /**
@@ -71,7 +72,35 @@ export async function initializeApp(
   // Use authType from modelsConfig which respects CLI --auth-type argument
   // over settings.security.auth.selectedType
   const authType = config.getModelsConfig().getCurrentAuthType();
-  const authError = await performInitialAuth(config, authType);
+  let subscriptionFallbackModel: string | undefined;
+  if (
+    options.allowSubscriptionStartupFallback &&
+    authType === AuthType.QWEN_SUBSCRIPTION &&
+    settings.isTrusted &&
+    settings.workspaceSettingsActive
+  ) {
+    const { user, workspace, system } = settings;
+    const enforcedType = settings.merged.security?.auth?.enforcedType;
+    const projectModel = workspace.settings.model?.name;
+    if (
+      projectModel &&
+      projectModel === config.getModel() &&
+      user.settings.security?.auth?.selectedType === authType &&
+      (!enforcedType || enforcedType === authType) &&
+      workspace.settings.security?.auth?.selectedType === undefined &&
+      workspace.settings.model?.baseUrl === undefined &&
+      workspace.settings.modelProviders === undefined &&
+      system.settings.security?.auth?.selectedType === undefined &&
+      system.settings.model?.name === undefined
+    ) {
+      subscriptionFallbackModel = user.settings.model?.name;
+    }
+  }
+  const authError = await performInitialAuth(
+    config,
+    authType,
+    subscriptionFallbackModel,
+  );
   const inactiveSubscription =
     authType === AuthType.QWEN_SUBSCRIPTION && !config.getAuthType();
   const authNotice =

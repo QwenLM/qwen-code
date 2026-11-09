@@ -1025,11 +1025,12 @@ describe('subscription development entry', () => {
     },
   );
 
-  it.each(['runtime', 'model', 'catalog'] as const)(
+  it.each(['runtime', 'standalone-runtime', 'model', 'catalog'] as const)(
     'closes desktop authorization with a saved-settings warning after %s sync fails',
     async (stage) => {
       Object.assign(window, { __TAURI__: { core: { invoke: vi.fn() } } });
       try {
+        const standalone = stage === 'standalone-runtime';
         sessionState.sessionId =
           stage === 'model' ? 'current-session' : undefined;
         actions.getSubscriptionConfig.mockResolvedValue({
@@ -1045,9 +1046,14 @@ describe('subscription development entry', () => {
             member_type: 'pro',
           },
         });
-        const completion = await openAuth(true);
+        const completion = await openAuth(true, 'en', undefined, standalone);
         if (stage === 'runtime') {
           actions.activateSubscription.mockResolvedValueOnce({
+            modelId: 'qwen3.8-max',
+            runtimeSync: { status: 'failed' },
+          });
+        } else if (standalone) {
+          actions.getSubscriptionDefaultModel.mockResolvedValueOnce({
             modelId: 'qwen3.8-max',
             runtimeSync: { status: 'failed' },
           });
@@ -1079,11 +1085,20 @@ describe('subscription development entry', () => {
         ).toBeNull();
         expect(document.querySelector('[role="alert"]')).toBeNull();
         expect(actions.startSubscriptionLogin).toHaveBeenCalledOnce();
-        expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
-          workspaceCwd: '/workspace',
-          signal: expect.any(AbortSignal),
-          settingsScope: 'provider',
-        });
+        if (standalone) {
+          expect(
+            actions.getSubscriptionDefaultModel,
+          ).toHaveBeenCalledExactlyOnceWith({
+            signal: expect.any(AbortSignal),
+            settingsScope: 'provider',
+          });
+        } else {
+          expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
+            workspaceCwd: '/workspace',
+            signal: expect.any(AbortSignal),
+            settingsScope: 'provider',
+          });
+        }
       } finally {
         delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
       }

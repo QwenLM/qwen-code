@@ -6169,14 +6169,24 @@ export class Config {
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
-  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    return this.rebuildContentGenerator(authMethod, isInitialAuth, true);
+  async refreshAuth(
+    authMethod: AuthType,
+    isInitialAuth?: boolean,
+    subscriptionFallbackModel?: string,
+  ) {
+    return this.rebuildContentGenerator(
+      authMethod,
+      isInitialAuth,
+      true,
+      subscriptionFallbackModel,
+    );
   }
 
   private async rebuildContentGenerator(
     authMethod: AuthType,
     isInitialAuth: boolean | undefined,
     refreshSubscriptionModels: boolean,
+    subscriptionFallbackModel?: string,
   ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
@@ -6202,6 +6212,7 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
+    let fallbackModel: string | undefined;
     if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
       const { models } = refreshSubscriptionModels
         ? await this.refreshSubscriptionModels()
@@ -6212,12 +6223,19 @@ export class Config {
           };
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
-        throw new Error(subscriptionModelUnavailable(selected));
+        if (
+          !isInitialAuth ||
+          !subscriptionFallbackModel ||
+          !models.includes(subscriptionFallbackModel)
+        ) {
+          throw new Error(subscriptionModelUnavailable(selected));
+        }
+        fallbackModel = subscriptionFallbackModel;
       }
     }
 
     // Sync modelsConfig state for this auth refresh.
-    const modelId = this.modelsConfig.getModel();
+    const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
     // Check and consume cached credentials flag

@@ -1366,13 +1366,17 @@ export function AuthMessage({
           assertTarget();
           const desktop = isDesktopShell();
           if (standalone) {
-            const { modelId } =
+            const { modelId, runtimeSync } =
               await workspaceActions.getSubscriptionDefaultModel({
                 signal,
                 ...(desktop ? { settingsScope: 'provider' } : {}),
               });
             assertTarget();
-            if (desktop) onSettingsSaved();
+            if (desktop) {
+              onSettingsSaved();
+              if (runtimeSync?.status === 'failed')
+                throw new Error('Subscription runtime activation failed.');
+            }
             const selector = `${modelId}(qwen-subscription)`;
             if (sessionId) {
               await activateSessionSubscriptionModel(

@@ -480,6 +480,7 @@ const CAPABILITY_PREFLIGHT_TTL_MS = 60_000;
 // Provider mutations persist before their bounded runtime sync. A default
 // client deadline could report failure while the daemon still completes it.
 const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
+const SUBSCRIPTION_ACTIVATION_TIMEOUT_MS = 65_000;
 const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
 const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
@@ -7462,7 +7463,10 @@ export class DaemonClient {
 
   async getSubscriptionDefaultModel(
     opts: { signal?: AbortSignal; settingsScope?: 'provider' } = {},
-  ): Promise<{ modelId: string }> {
+  ): Promise<{
+    modelId: string;
+    runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+  }> {
     const route = '/auth/subscription/model';
     return this.fetchWithTimeout(
       `${this.baseUrl}${route}`,
@@ -7474,8 +7478,14 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, `POST ${route}`);
-        return (await res.json()) as { modelId: string };
+        return (await res.json()) as {
+          modelId: string;
+          runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+        };
       },
+      opts.settingsScope === 'provider' && !this.hasExplicitFetchTimeout
+        ? SUBSCRIPTION_ACTIVATION_TIMEOUT_MS
+        : undefined,
     );
   }
 
@@ -9641,7 +9651,7 @@ export class WorkspaceDaemonClient {
         body: { settingsScope: opts.settingsScope },
         signal: opts.signal,
         mode: 'rest',
-        timeoutMs: 65000,
+        timeoutMs: SUBSCRIPTION_ACTIVATION_TIMEOUT_MS,
       },
     );
   }

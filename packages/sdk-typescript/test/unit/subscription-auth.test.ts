@@ -109,7 +109,18 @@ describe('Subscription transport', () => {
   it('requests provider settings scope only when standalone activation opts in', async () => {
     const { client, fetch } = clientWith(200, { modelId: 'qwen3.8-max' });
     await client.getSubscriptionDefaultModel();
-    await client.getSubscriptionDefaultModel({ settingsScope: 'provider' });
+    fetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          modelId: 'qwen3.8-max',
+          runtimeSync: { status: 'failed' },
+        }),
+      ),
+    );
+    const result = await client.getSubscriptionDefaultModel({
+      settingsScope: 'provider',
+    });
+    expect(result.runtimeSync?.status).toBe('failed');
     expect(
       fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
     ).toEqual([{}, { settingsScope: 'provider' }]);

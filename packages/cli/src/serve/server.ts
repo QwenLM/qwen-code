@@ -3574,6 +3574,7 @@ export function createServeApp(
     qwenCodeVersion: deps.qwenCodeVersion,
     mutate,
     persistSettings: deps.persistSettings,
+    syncModelProvidersRuntime,
     sendBridgeError,
   });
   const stopSubscriptionAuth = registerSubscriptionAuthRoutes(

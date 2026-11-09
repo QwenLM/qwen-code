@@ -2231,7 +2231,7 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      { deferIdeConnection: false, allowSubscriptionStartupFallback: true },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       configStub,
@@ -3009,7 +3009,7 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      { deferIdeConnection: false, allowSubscriptionStartupFallback: true },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       validatedConfig,
@@ -3516,6 +3516,7 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: true,
+        allowSubscriptionStartupFallback: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3645,6 +3646,7 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3775,6 +3777,7 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3913,6 +3916,7 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: false,
       },
     );
     expect(mockRunAcpAgent).toHaveBeenCalledWith(

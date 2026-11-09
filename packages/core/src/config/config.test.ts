@@ -1215,6 +1215,38 @@ describe('Server Config (config.ts)', () => {
       return config;
     };
 
+    it.each([
+      ['old-project-model', 'qwen3.8-flash', 'qwen3.8-flash'],
+      ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.8-max'],
+      ['old-project-model', 'removed-user-model', undefined],
+    ])(
+      'resolves startup model %s with saved user fallback %s',
+      async (projectModel, fallback, expectedModel) => {
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: projectModel,
+        });
+        const refresh = config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+        );
+        if (expectedModel) {
+          await refresh;
+          expect(config.getContentGeneratorConfig()?.model).toBe(expectedModel);
+          expect(config.getWarnings()).toEqual([]);
+        } else {
+          await expect(refresh).rejects.toThrow(
+            `The selected model, ${projectModel}, is no longer available. Run /model to choose another model.`,
+          );
+          expect(config.getModel()).toBe(projectModel);
+        }
+        expect(
+          QwenSubscriptionSession.prototype.getModels,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
     it('initializes an API model when switching from a signed-out subscription', async () => {
       const config = makeConfig({
         authType: AuthType.QWEN_SUBSCRIPTION,
