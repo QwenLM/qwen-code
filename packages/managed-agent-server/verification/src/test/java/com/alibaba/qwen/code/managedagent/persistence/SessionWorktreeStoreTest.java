@@ -157,6 +157,13 @@ class SessionWorktreeStoreTest {
             assertThat(SessionWorktreeStore.descriptor(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session").state()).isEqualTo("blocked");
             assertThatThrownBy(() -> SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))
                     .hasMessageContaining("worktree_identity_conflict");
+            jdbc.update("UPDATE ma_session SET owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
+                    com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"), "tenant", "session");
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES (?,?,?,'READER')",
+                    "tenant", workspace, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "other"));
+            assertThat(store.list("tenant", "other", workspace)).isEmpty();
+            assertThatThrownBy(() -> store.get("tenant", "other", workspace, id, false)).hasMessageContaining("not found");
+            assertThat(store.list("tenant", "actor", workspace)).hasSize(1);
         }
     }
 

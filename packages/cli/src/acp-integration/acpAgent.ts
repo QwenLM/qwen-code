@@ -9574,6 +9574,11 @@ class QwenAgent implements Agent {
                 totalGenerationDurationMs: generation.totalGenerationDurationMs,
                 totalThroughputOutputTokens:
                   generation.totalThroughputOutputTokens,
+                totalTimedGenerationDurationMs:
+                  generation.totalTimedGenerationDurationMs,
+                totalOutputSpeedTokens: generation.totalOutputSpeedTokens,
+                totalOutputSpeedDurationMs:
+                  generation.totalOutputSpeedDurationMs,
               },
             }
           : {}),
