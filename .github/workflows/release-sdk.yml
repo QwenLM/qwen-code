@@ -531,6 +531,7 @@ jobs:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ needs.build-sdk.outputs.release_tag || steps.version.outputs.RELEASE_TAG }}'
         run: |-
+          set -euo pipefail
           # Only persist version bumps after a successful publish.
           git add packages/sdk-typescript/package.json
           if git diff --staged --quiet; then
@@ -551,9 +552,11 @@ jobs:
               if git push --set-upstream origin "${BRANCH_NAME}" --follow-tags; then
                 break
               fi
-              # A failed push may still have landed remotely (GitHub can time out deciding
-              # whether workflow files may be created), so reconcile before retrying; the
-              # || true keeps a transient ls-remote failure on the retry path (bash -e).
+              # The observed #16490 failure left nothing on the remote, so the bounded
+              # re-push is the remedy; the reconcile below is defence-in-depth against a
+              # partial --follow-tags push that landed despite the reported error. The
+              # || true keeps a transient ls-remote failure on the retry path
+              # (set -euo pipefail above).
               remote_sha="$(git ls-remote --heads origin "refs/heads/${BRANCH_NAME}" | cut -f1 || true)"
               if [[ -n "${remote_sha}" ]]; then
                 if [[ "${remote_sha}" == "$(git rev-parse HEAD)" ]]; then
@@ -564,6 +567,7 @@ jobs:
                 exit 1
               fi
               [[ "${attempt}" -lt 3 ]] || { echo "::error::Failed to push release branch ${BRANCH_NAME} after 3 attempts." >&2; exit 1; }
+              echo "::warning::Push attempt ${attempt}/3 of ${BRANCH_NAME} failed; retrying in $((attempt * 30))s."
               sleep $((attempt * 30))
             done
           fi
