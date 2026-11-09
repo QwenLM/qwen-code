@@ -9,6 +9,7 @@ import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { createShowMemoryAction } from '../hooks/useShowMemoryCommand.js';
 import { MessageType } from '../types.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
 
 export const memoryCommand: SlashCommand = {
   name: 'memory',
@@ -37,7 +38,7 @@ export const memoryCommand: SlashCommand = {
           context.ui.addItem(
             {
               type: message.type,
-              text: message.content,
+              text: sanitizeTerminalText(message.content),
             },
             message.timestamp.getTime(),
           );

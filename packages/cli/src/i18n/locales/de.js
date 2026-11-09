@@ -211,6 +211,16 @@ export default {
   'open full Qwen Code documentation in your browser':
     'Vollständige Qwen Code Dokumentation im Browser öffnen',
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
+  'Configuration not available. Cannot show memory.':
+    'Konfiguration nicht verfügbar. Speicher kann nicht angezeigt werden.',
+  'Loaded memory from {{count}} {{name}} file{{plural}}.':
+    'Speicher aus {{count}} {{name}}-Datei(en) geladen.',
+  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
+    'Aktueller kombinierter Speicherinhalt:\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
+    'Hierarchischer Speicher (QWEN.md oder andere Kontextdateien) wurde geladen, ist aber leer.',
+  'No hierarchical memory (QWEN.md or other context files) is currently loaded.':
+    'Derzeit ist kein hierarchischer Speicher (QWEN.md oder andere Kontextdateien) geladen.',
   'Connect an LLM provider': 'LLM-Anbieter verbinden',
   'Copy the last AI response to clipboard (/copy N for Nth-latest)':
     'Letzte KI-Antwort in die Zwischenablage kopieren (/copy N für die N-letzte)',

@@ -234,6 +234,16 @@ export default {
   'open full Qwen Code documentation in your browser':
     'obre la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
+  'Configuration not available. Cannot show memory.':
+    'La configuració no està disponible. No es pot mostrar la memòria.',
+  'Loaded memory from {{count}} {{name}} file{{plural}}.':
+    'Memòria carregada de {{count}} fitxer(s) {{name}}.',
+  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
+    'Contingut de memòria combinat actual:\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
+    'La memòria jeràrquica (QWEN.md o altres fitxers de context) s’ha carregat però és buida.',
+  'No hierarchical memory (QWEN.md or other context files) is currently loaded.':
+    'Actualment no hi ha memòria jeràrquica carregada (QWEN.md o altres fitxers de context).',
   'Connect an LLM provider': "Connecta un proveïdor d'LLM",
   // ============================================================================
   // Ordres - Agents

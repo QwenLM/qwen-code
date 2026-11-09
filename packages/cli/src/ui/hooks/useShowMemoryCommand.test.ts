@@ -18,6 +18,9 @@ const { mockDebugLogger } = vi.hoisted(() => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
+vi.mock('@qwen-code/qwen-code-core/utils/memory-constants.js', () => ({
+  getAllMemoryFilenames: () => ['QWEN.md', 'AGENTS.md'],
+}));
 
 import { createShowMemoryAction } from './useShowMemoryCommand.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -47,6 +50,10 @@ function createMockConfig({
 
 const mockSettings = {
   merged: { context: { fileName: 'QWEN.md' } },
+} as unknown as LoadedSettings;
+
+const mockSettingsWithoutContextFileName = {
+  merged: { context: {} },
 } as unknown as LoadedSettings;
 
 describe('createShowMemoryAction', () => {
@@ -132,6 +139,33 @@ describe('createShowMemoryAction', () => {
           m.content.includes('No hierarchical memory'),
       ),
     ).toBe(true);
+  });
+
+  it('falls back to the default memory filenames when no filename is configured', async () => {
+    const config = createMockConfig({
+      userMemory: 'project guidance',
+      fileCount: 1,
+    });
+
+    await createShowMemoryAction(
+      config,
+      mockSettingsWithoutContextFileName,
+      addMessage,
+    )();
+
+    expect(messages.some((m) => m.content.includes(' context file'))).toBe(true);
+    expect(messages.every((m) => !m.content.includes('undefined'))).toBe(true);
+  });
+
+  it('reports a clear error when configuration is unavailable', async () => {
+    await createShowMemoryAction(null, mockSettings, addMessage)();
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        content: 'Configuration not available. Cannot show memory.',
+      }),
+    ]);
   });
 });
 

@@ -235,6 +235,16 @@ export default {
   'open full Qwen Code documentation in your browser':
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
+  'Configuration not available. Cannot show memory.':
+    'Конфигурация недоступна. Невозможно показать память.',
+  'Loaded memory from {{count}} {{name}} file{{plural}}.':
+    'Память загружена из {{count}} файла(ов) {{name}}.',
+  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
+    'Текущее объединённое содержимое памяти:\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
+    'Иерархическая память (QWEN.md или другие контекстные файлы) загружена, но пуста.',
+  'No hierarchical memory (QWEN.md or other context files) is currently loaded.':
+    'Иерархическая память (QWEN.md или другие контекстные файлы) сейчас не загружена.',
   'Connect an LLM provider': 'Подключить провайдера LLM',
   'Copy the last AI response to clipboard (/copy N for Nth-latest)':
     'Копировать последний ответ ИИ в буфер обмена (/copy N для N-го с конца)',
