@@ -23,6 +23,14 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    PUBLIC_SESSION_RESOURCES(Method.GET, "/v1/agents/sessions/{sessionId}/resources",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_RESOURCES)),
+    WEBSHELL_SESSION_RESOURCES(Method.POST, "/api/agent/web-shell/v1/session-resources/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_RESOURCES)),
+    PUBLIC_SESSION_AGENT_TRACE(Method.GET, "/v1/agents/sessions/{sessionId}/agent-trace",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
+    WEBSHELL_SESSION_AGENT_TRACE(Method.POST, "/api/agent/web-shell/v1/session-agent-trace/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
     WEBSHELL_WORKTREE_OPTIONS(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/options",
             Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
     WEBSHELL_WORKTREE_QUERY(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/query",
@@ -467,6 +475,10 @@ public enum SurfaceRegistry {
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_APPROVAL_QUERY)),
+    INTERNAL_MODEL_CONFIG_QUERY(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/model-config:query",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_MODEL_CONFIG_QUERY)),
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/execution:authorize",
@@ -699,6 +711,7 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
@@ -777,6 +790,7 @@ public enum SurfaceRegistry {
         AUTOMATION_RUN,
         AUTOMATION_RUN_LIST,
         STORE_APPROVAL_QUERY,
+        STORE_MODEL_CONFIG_QUERY,
         STORE_EXECUTION_AUTHORIZE,
         STORE_LIFECYCLE_AUTHORIZE,
         STORE_WRITER_ACQUIRE,

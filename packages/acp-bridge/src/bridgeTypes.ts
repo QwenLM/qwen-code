@@ -878,7 +878,15 @@ export interface BridgeRestoredSession extends BridgeSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at some point, so
+   * Publish-time summary/unverified-seed boundary in eventEpoch, captured
+   * with a full in-memory load snapshot. A suffix starting after this ID
+   * excludes those sources, but may still be partial, truncated or degraded.
+   * Zero places the boundary before the first event; absence is not zero.
+   * Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed at some point, so
    * `compactedReplay`/`liveJournal` may silently miss events. Clients
    * should prefer the full transcript over this replay.
    */
@@ -1217,6 +1225,9 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
   createdAt: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1309,6 +1320,12 @@ export interface SessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * The job this session does for the PR (role-aware bound delivery);
+   * assigned by the command-position backfill or the metadata route.
+   * Absent means untyped.
+   */
+  role?: 'review' | 'verify' | 'fix';
   /** Issues the PR closes, snapshotted by the daemon refresh; optional. */
   issues?: SessionPrIssueInfo[];
 }
@@ -1770,6 +1787,7 @@ export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
+  eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
   /**
    * Per-session BASELINE journal caps. A session's effective caps can be
@@ -1807,6 +1825,12 @@ export interface BridgeDaemonSessionDiagnostic {
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   lastEventId: number;
+  eventRingCount: number;
+  eventRingBytes: number;
+  eventRingEarliestEventId?: number;
+  eventRingEvictedEvents: number;
+  eventRingEvictedBytes: number;
+  availableCommandsSnapshotBytes: number;
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
@@ -2154,10 +2178,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
-   * pre-aborted signals throw synchronously so HTTP routes can reject
-   * before returning 202. Deferred failures such as `SessionNotFoundError`
-   * may be returned as rejected promises.
+   * failures — `InvalidClientIdError`, `PromptQueueFullError`, pre-aborted
+   * signals, `SessionNotFoundError` (unknown or closing session), and the
+   * reserved standalone working-directory check — throw synchronously so
+   * HTTP routes can reject before returning 202. A rejected promise
+   * normally represents a turn that WAS admitted and then failed. The one
+   * pre-enqueue check that still rejects deferred (prompt-shape validation,
+   * which the HTTP routes pre-validate) is an admission failure too:
+   * `onPromptAdmitted` has not fired for it, and callers that dedupe retries
+   * must drop the idempotency key when a rejection arrives without the
+   * admission signal.
    *
    * Reserved contract (not yet implemented): promptId admission dedup — a
    * `PromptIdConflictError` admission failure class, and a rule that a
@@ -2801,6 +2831,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setUserLanguage(params: {
     language: string;
     syncOutputLanguage: boolean;
+    /** Reload workspace settings too after a workspace-owned UI language write. */
+    scope?: 'workspace';
   }): Promise<{
     language: string;
     sessions: number;

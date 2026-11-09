@@ -102,6 +102,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   unstable_session_resume: LEGACY_ONLY('deprecated alias of the legacy resume'),
   session_list: { standing: 'managed', evidence: 'surface:SESSION_LIST' },
+  session_last_user_prompt_sort: LEGACY_ONLY(
+    'no question-time sorting in Managed',
+  ),
   session_catalog_batch: LEGACY_ONLY('no batched catalog route in Managed'),
   session_info: LEGACY_ONLY('aggregate counts are a legacy disk scan'),
   session_source_metadata: NO_MANAGED_EQUIVALENT(
@@ -226,7 +229,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   session_tasks: { standing: 'managed', evidence: 'surface:TASK_LIST' },
   session_agents: NO_MANAGED_EQUIVALENT('no Managed session agent listing'),
-  session_agent_trace: NO_MANAGED_EQUIVALENT('no Managed agent trace route'),
+  session_agent_trace: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_AGENT_TRACE',
+  },
   scheduled_task_session_reuse: {
     standing: 'managed',
     evidence: 'surface:AUTOMATION_RUN',
@@ -245,9 +251,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   },
   session_stats: NO_MANAGED_EQUIVALENT('no Managed session statistics route'),
   session_lsp: NO_MANAGED_EQUIVALENT('no LSP in the Managed execution profile'),
-  session_resources: NO_MANAGED_EQUIVALENT(
-    'no Managed session resources route',
-  ),
+  session_resources: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_RESOURCES',
+  },
   session_status: NO_MANAGED_EQUIVALENT(
     'Managed Sessions are read, not status-probed',
   ),
@@ -338,6 +345,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_skill_settings_batch_toggle: NO_MANAGED_EQUIVALENT(
     'no Managed skill settings mutation',
   ),
+  user_skill_activation: NO_MANAGED_EQUIVALENT(
+    'no Managed user skill settings mutation',
+  ),
   workspace_session_refresh: NO_MANAGED_EQUIVALENT(
     'no Managed session refresh route',
   ),
@@ -349,6 +359,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   workspace_skill_manage: NO_MANAGED_EQUIVALENT(
     'no Managed skill management route',
+  ),
+  skill_archive_install: NO_MANAGED_EQUIVALENT(
+    'no Managed native Skill archive installation or receipt route',
+  ),
+  skill_zip_file_source: NO_MANAGED_EQUIVALENT(
+    'no Managed daemon-local Skill ZIP source or receipt route',
   ),
   web_shell_brand: {
     standing: 'managed',
@@ -376,6 +392,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_github_prs: NO_MANAGED_EQUIVALENT('no Managed GitHub PRs route'),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
+  ),
+  workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
+    'no Managed Git ignore query route',
   ),
   workspace_mcp_restart: {
     standing: 'managed',
@@ -467,6 +486,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_display_name: NO_MANAGED_EQUIVALENT(
     'Workspace identity is the registered directory',
   ),
+  workspace_order: NO_MANAGED_EQUIVALENT(
+    'daemon-local workspace presentation order',
+  ),
   scratch_workspace_registration: {
     standing: 'managed',
     evidence: 'surface:WORKSPACE_CREATE',
@@ -528,6 +550,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed archived export route',
   ),
   workspace_session_live_state: NO_MANAGED_EQUIVALENT(
+    'no Managed live-state snapshot',
+  ),
+  workspace_session_live_state_batch: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
   workspace_session_metadata: NO_MANAGED_EQUIVALENT(
@@ -614,6 +639,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'PUB_STREAM_PREFIX',
   'PUB_STREAM_SEAL',
   'STORE_APPROVAL_QUERY',
+  'STORE_MODEL_CONFIG_QUERY',
   'STORE_USER_MESSAGE_CLAIM',
   'STORE_EXECUTION_AUTHORIZE',
   'STORE_LIFECYCLE_AUTHORIZE',

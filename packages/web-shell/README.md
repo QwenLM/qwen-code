@@ -3,6 +3,48 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## 宿主已有 Managed Session
+
+`ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略它时必须同时传 `baseUrl`，
+由它创建内置 Java provider。两者都给不出时渲染的是 shell 自己的错误回退界面（守卫
+的错误信息只打到 `console.error`，不会抛给宿主），不会把请求解析到
+`<origin>/undefined`。恢复需要宿主重新提供 `baseUrl` 或新的 provider：边界只通过
+`resetKeys` 清除错误，回退界面自带的「重试」会用相同 props 重渲染并再次落到同一错误。
+宿主传 `hostSessionOnly: true` 时只打开显式给定的 `sessionId`，隐藏内部会话列表、
+New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建。官方消息列表和 composer
+沿用 provider 的真实 capabilities；四 API 宿主应设置 `canCancel: false`、省略不支持的
+可选 API，并按单轮/运行状态提供 `capabilities.canSend`。
+
+非 React 宿主可使用本地 ESM 入口：
+
+```ts
+// 相对于产物目录根（dist-managed-host/）；该目录已整体提供给宿主。
+import { renderManagedAgentWebShell } from './index.js';
+
+const shell = renderManagedAgentWebShell(container, {
+  managedAgentProvider: provider,
+  hostSessionOnly: true,
+  sessionId: existingSessionId,
+  language: 'zh-CN',
+  theme: 'dark',
+});
+// update 接受完整的新 props；宿主销毁时调用 shell.unmount()。
+```
+
+在包内执行 `npm run build:managed-host`，输出
+`dist-managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
+复用原有 scoped CSS 注入，无需单独 CSS 或 import map。需提供整个输出目录。
+该模式**不在**包的 `build` 里，避免给每次本地构建和全新克隆的 `prepare` 增加一次完整
+打包；防腐坏由独立 CI 任务 `Web Shell Managed Host Build` 承担，只在入口、构建配置或
+锁文件变化时触发。产物目录在 `dist/` 之外，普通应用构建清空 `dist/` 不会删掉它。
+入口仍未接入 `exports` 和 `files`，不随 npm 包发布（`dist/types/managed-host.d.ts`
+也在发布产物之外）。
+`navigationTarget` / `archivedNavigationTarget` 指向 shell 容器之外的宿主插槽时，
+入口会把列表包进带作用域标记的容器并同步主题变量，宿主无需自行引入 CSS。
+自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与
+storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
+[宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。
+
 ## Managed 工作区与模型
 
 完整 Web Shell 在配置 `managedAgentProvider` 后，在同一个工作区列表中同时显示本地和托管工作区，不再使用本地/托管 tab。名称旁的标志显示所属服务，工作区的新建会话使用统一的书写图标；顶部“新建会话”继承当前会话或草稿的服务。新会话的工作区菜单可双向选择两类服务已有的工作区，保留原身份和独立草稿，提交前不创建工作区或会话。添加工作区时可明确选择本地（daemon）或托管（Managed Agent），切换表单或取消不会改变当前会话。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。完整行为与边界见[统一工作区导航设计](../../docs/design/2026-10-21-unified-workspace-navigation.zh-CN.md)。
@@ -141,6 +183,9 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 `true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
 未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
 该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+提供该回调时，managed 存储产物（仅有 managedId、无 workspace 路径或 URL）的
+卡片动作会标为 Preview，因为宿主可能自行渲染其内容；未提供回调时，这类产物
+在默认面板只有元信息，卡片保持 Open。
 
 `filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
 产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。
@@ -686,7 +731,8 @@ daemon 参数的完整含义和配置方式见
 | `onLanguageResolved`           | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                                                     |
 | `brand`                        | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                                                    |
 | `onBrandResolved`              | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon                               |
-| `onSlashCommand`               | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                                                           |
+| `onModelChange`                | `(modelId: string \| undefined, authType: string \| undefined) => void`                                                               | 当前模型连接变化时通知宿主；同名模型切换 provider 也会触发，可用于取消依赖旧连接的宿主操作。                                                                                 |
+| `onSlashCommand`               | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为。内置 `/logout`、`/upgrade` 先检查 Qwen 登录态与当前订阅模型，再交给宿主。                                |
 | `onSessionArtifactsChange`     | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                                                |
 | `onAssistantTurnSettled`       | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                                                   |
 | `settings`                     | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                                                    |

@@ -260,6 +260,7 @@ export type HistoryItemLlmThoughtContent = HistoryItemBase & {
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
+  presentation?: 'subscription-success';
   linkUrl?: string;
   linkText?: string;
 };
@@ -527,6 +528,7 @@ export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
  */
 export type ContextThresholds = CompactionThresholds;
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -539,14 +541,15 @@ export interface ContextCategoryBreakdown {
   /** Startup prelude outside the skill listing: environment context, MCP server instructions, deferred-tools reminder. */
   startupContext?: number;
   /**
-   * Content estimate of the conversation after the startup prelude. With no
+   * Independent content estimate of the conversation after the startup prelude.
+   * It is never derived from or capped by totalTokens. With no
    * provider total (`totalTokens` 0, e.g. after `/model`, `/restore` or a
    * resume) it is nonzero, and it is only *part* of the local estimate that
    * drives the tier: the tier then keys on the request overhead plus this
    * value, not on this value or on `totalTokens` alone.
    */
   messages: number;
-  /** Provider total not accounted for by any category estimate. Categories plus this sum to `totalTokens`. */
+  /** @deprecated Legacy residual; accepted in old history but no longer emitted or displayed. */
   unattributed?: number;
   /** Provider-reported cached prefix. An annotation, not a category: the cached prefix spans several categories. */
   cachedTokens?: number;
@@ -575,6 +578,13 @@ export interface ContextToolDetail {
 export interface ContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and for instruction files outside that readable
+   * scope (parent-directory or extension files), which stay non-interactive.
+   */
+  absolutePath?: string;
 }
 
 export interface ContextSkillDetail {

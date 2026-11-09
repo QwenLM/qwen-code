@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.model;
 
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
+import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -73,7 +74,13 @@ public final class ApiModels {
             Boolean stream,
             JsonNode workspace,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
-            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree) {
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree,
+            @JsonProperty("model_config") JsonNode modelConfig) {
+        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
+                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
+                List<Pin> extensionPins, JsonNode worktree) {
+            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, worktree, null);
+        }
         public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
                 Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
                 List<Pin> extensionPins) {
@@ -183,6 +190,11 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
+        @JsonProperty("diagnostics")
+        public boolean diagnostics() {
+            return tasks;
+        }
+
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
@@ -266,7 +278,7 @@ public final class ApiModels {
                     compactionRevision, contextCompressionOperationId, value, worktree);
         }
 
-        public PublicSession withWorktree(com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor value) {
+        public PublicSession withWorktree(SessionWorktreeStore.Descriptor value) {
             return new PublicSession(id, object, agentId, agentRevision,
                     agentDefinitionDigest, status, createdAt, updatedAt,
                     metadata, activeTurn, lastEventId, replayFloorSequence,
@@ -454,7 +466,13 @@ public final class ApiModels {
             Map<String, Object> metadata,
             JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
-            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree) {
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree, JsonNode modelConfig) {
+        public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
+                Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins, JsonNode worktree) {
+            this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode,
+                    planMode, modelId, skills, extensionPins, worktree, null);
+        }
         public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
                 List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
                 Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins) {
@@ -685,7 +703,7 @@ public final class ApiModels {
             Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported,
             Long compactionRevision, String contextCompressionOperationId,
             WebShellLifecycleOperation lifecycleOperation, SessionRecovery recovery,
-            com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor worktree) {
+            SessionWorktreeStore.Descriptor worktree) {
         public WebShellSession(String sessionId, String title, String agentId, String status,
                 long createdAt, long updatedAt, WebShellTurn activeTurn, Object environment,
                 long lastSequence, WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
@@ -748,7 +766,7 @@ public final class ApiModels {
                     lifecycleOperation, value, worktree);
         }
 
-        public WebShellSession withWorktree(com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor value) {
+        public WebShellSession withWorktree(SessionWorktreeStore.Descriptor value) {
             return new WebShellSession(sessionId, title, agentId, status,
                     createdAt, updatedAt, activeTurn, environment, lastSequence,
                     workspace, capabilities, approvalMode, modelContext,
@@ -920,26 +938,75 @@ public final class ApiModels {
             Integer limit) {
     }
 
+    @JsonDeserialize(using = PermissionResponseDeserializer.class)
     public record PermissionResponse(
             @NotBlank String kind,
             @JsonProperty("input_revision") JsonNode inputRevision,
             @JsonProperty("policy_revision") @NotBlank @Size(max = 128) String policyRevision,
-            @JsonProperty("option_id") @NotBlank @Size(max = 128) String optionId) {
+            @JsonProperty("option_id") @Size(max = 128) String optionId,
+            JsonNode answers) {
+        public PermissionResponse(String kind, JsonNode inputRevision, String policyRevision, String optionId) {
+            this(kind, inputRevision, policyRevision, optionId, null);
+        }
         @JsonAnySetter
         public void rejectUnknown(String name, JsonNode value) {
             throw new IllegalArgumentException("Unknown Action request field: " + name);
         }
     }
 
+    @JsonDeserialize(using = WebShellPermissionResponseDeserializer.class)
     public record WebShellPermissionResponse(
             @NotBlank String kind,
             JsonNode inputRevision,
             @NotBlank @Size(max = 128) String policyRevision,
-            @NotBlank @Size(max = 128) String optionId) {
+            @Size(max = 128) String optionId,
+            JsonNode answers) {
+        public WebShellPermissionResponse(String kind, JsonNode inputRevision, String policyRevision, String optionId) {
+            this(kind, inputRevision, policyRevision, optionId, null);
+        }
         @JsonAnySetter
         public void rejectUnknown(String name, JsonNode value) {
             throw new IllegalArgumentException("Unknown Action request field: " + name);
         }
+    }
+
+    public static final class PermissionResponseDeserializer extends StdDeserializer<PermissionResponse> {
+        public PermissionResponseDeserializer() { super(PermissionResponse.class); }
+
+        @Override
+        public PermissionResponse deserialize(JsonParser parser, DeserializationContext context) throws IOException {
+            JsonNode node = actionResponse(parser, context, false);
+            return new PermissionResponse(node.get("kind").textValue(), node.get("input_revision"),
+                    node.get("policy_revision").textValue(), node.path("option_id").textValue(), node.get("answers"));
+        }
+    }
+
+    public static final class WebShellPermissionResponseDeserializer extends StdDeserializer<WebShellPermissionResponse> {
+        public WebShellPermissionResponseDeserializer() { super(WebShellPermissionResponse.class); }
+
+        @Override
+        public WebShellPermissionResponse deserialize(JsonParser parser, DeserializationContext context) throws IOException {
+            JsonNode node = actionResponse(parser, context, true);
+            return new WebShellPermissionResponse(node.get("kind").textValue(), node.get("inputRevision"),
+                    node.get("policyRevision").textValue(), node.path("optionId").textValue(), node.get("answers"));
+        }
+    }
+
+    private static JsonNode actionResponse(JsonParser parser, DeserializationContext context, boolean web) throws IOException {
+        JsonNode node = parser.getCodec().readTree(parser);
+        String revision = web ? "inputRevision" : "input_revision";
+        String policy = web ? "policyRevision" : "policy_revision";
+        String option = web ? "optionId" : "option_id";
+        String kind = node.path("kind").textValue();
+        String value = "question".equals(kind) ? "answers" : option;
+        Set<String> fields = Set.of("kind", revision, policy, value);
+        if (!node.isObject() || node.size() != fields.size() || !fields.stream().allMatch(node::has)
+                || !("permission".equals(kind) || "question".equals(kind))
+                || !node.path(policy).isTextual()
+                || ("permission".equals(kind) ? !node.path(option).isTextual() : !node.path("answers").isArray())) {
+            throw context.weirdStringException(kind, PermissionResponse.class, "Invalid Action response fields");
+        }
+        return node;
     }
 
     public record WebShellActionQueryRequest(
@@ -1002,6 +1069,14 @@ public final class ApiModels {
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {
+    }
+
+    public record WebShellDiagnosticTraceRequest(@NotBlank String sessionId,
+            @Size(max = 256) String cursor, @Min(1) @Max(100) Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown diagnostic trace request field: " + name);
+        }
     }
 
     public record WebShellTaskGetRequest(@NotBlank String sessionId,

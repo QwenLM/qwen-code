@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -13,10 +14,12 @@ import { createServer, request as httpRequest, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { inspect } from 'node:util';
+import { prepareManagedExtensionPackage } from '../packages/core/src/extension/managed-package.js';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
+import { SseObserver } from '../integration-tests/helpers/hosted-sse-observer.js';
 import { isDeepStrictEqual } from 'node:util';
 
 const root = process.cwd();
@@ -33,12 +36,26 @@ interface SavedApprovalOptions {
   createdAt: number;
   expiresAt: number;
   continuationRef: { resourceId: string };
+  inputRef?: { resourceId: string };
 }
 interface SavedApprovalPlan {
-  calls: { prepareKey: string; requestDigest: string }[];
+  calls: {
+    prepareKey: string;
+    requestDigest: string;
+    runtimeCallId?: string;
+    partIndex?: number;
+    actionId?: string | null;
+  }[];
   actionId: string;
+  approvalOrdinal?: number;
   stage: string;
   batchId: string;
+  commandStep?: {
+    toolStageId: string;
+    toolName: string;
+    inputRef: { resourceId: string };
+    configRevision: number;
+  };
   runtime: {
     runtimeSessionId: string;
     bindingId: string;
@@ -48,13 +65,29 @@ interface SavedApprovalPlan {
 }
 let originalApprovalOptions: SavedApprovalOptions | undefined;
 let originalApprovalPlan: SavedApprovalPlan | undefined;
+// A3: the pending second sibling's Action, captured at the crash barrier and
+// re-decided by the recovery generation.
+let siblingApprovalId: string | undefined;
+let siblingApprovalOptions: SavedApprovalOptions | undefined;
+let siblingCommandStageId: string | undefined;
+// B3: tool B's new Action, detected after Allow A and decided by the runner's
+// second Allow; both earlier Actions must end decided under their original IDs.
+let secondApprovalId: string | undefined;
 let verifiedOriginalTerminal: string | undefined;
-function saveEvidence(name: string, body: unknown): void {
-  if (!verificationMode) return;
+function writeEvidenceFile(
+  directory: string,
+  name: string,
+  body: unknown,
+): void {
+  mkdirSync(directory, { recursive: true });
   writeFileSync(
-    path.join(verificationDirectory, name),
+    path.join(directory, name),
     JSON.stringify(body, null, 2) + '\n',
   );
+}
+function saveEvidence(name: string, body: unknown): void {
+  if (!verificationMode) return;
+  writeEvidenceFile(verificationDirectory, name, body);
 }
 
 const argumentsList = process.argv.slice(2);
@@ -79,6 +112,9 @@ const approvalFaults = [
   'after-prepare',
   'after-result',
   'finished-before-commit',
+  'sibling-approval',
+  'command-rewrite',
+  'after-earlier-tools',
   'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
@@ -125,7 +161,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|command-rewrite|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -148,6 +184,7 @@ const approvalRecovery =
 const approvalFault = (g3FaultArgument ?? process.env['G3_FAULT']) as
   | ApprovalFault
   | undefined;
+const commandRewriteRecovery = approvalFault === 'command-rewrite';
 if (approvalFault && !approvalFaults.includes(approvalFault)) {
   throw new Error(
     `--g3-fault (or G3_FAULT) must be ${approvalFaults.join(', ')}`,
@@ -158,10 +195,25 @@ if (approvalFault && verificationMode !== 'allow') {
     '--g3-fault requires --g3-verify allow: Deny, Cancel and expiry have no approved execution to crash into',
   );
 }
+if (commandRewriteRecovery && process.platform !== 'linux') {
+  throw new Error('--g3-fault command-rewrite requires Linux cgroup v2');
+}
+const commandRewriteCgroupRoot = commandRewriteRecovery
+  ? requiredCommandRewriteCgroupRoot(
+      process.env['QWEN_E2E_EXTENSION_CGROUP_ROOT'],
+    )
+  : undefined;
 const verificationDirectory = path.resolve(
   root,
   process.env['G3_VERIFY_REPORT_DIR'] ??
     `.qwen/investigations/g3-step3-implementation/packaged-${verificationMode}-${Date.now()}`,
+);
+// The model-round arm has no gate mode; name its evidence explicitly instead
+// of borrowing a packaged-undefined-<epoch> directory (R1-10).
+const modelRoundEvidenceDirectory = path.resolve(
+  root,
+  process.env['G3_VERIFY_REPORT_DIR'] ??
+    `.qwen/investigations/g3-step3-implementation/model-round-${Date.now()}`,
 );
 
 if (
@@ -329,6 +381,652 @@ const trustedActor = 'e2e-actor';
 const inflightSideEffectName = 'managed-inflight-side-effect.txt';
 const inflightSideEffect = path.join(workspaceMount, inflightSideEffectName);
 const inflightSideEffectContent = 'MANAGED_INFLIGHT_TOOL_EXECUTED\n';
+// A3 mixed-sibling arm: the second sibling writes a distinct file so each
+// sibling's single execution has its own physical effect.
+const siblingSideEffectName = 'managed-sibling-side-effect.txt';
+const siblingSideEffect = path.join(workspaceMount, siblingSideEffectName);
+const siblingSideEffectContent = 'MANAGED_SIBLING_TOOL_EXECUTED\n';
+let commandRewriteExtensionId = 'ext_11111111-1111-4111-8111-111111111111';
+const commandRewriteOriginalFirst =
+  'printf ORIGINAL_FIRST > managed-a3-first.txt';
+const commandRewriteOriginalSecond =
+  'printf ORIGINAL_SECOND > managed-a3-second.txt';
+const commandRewriteRewrittenFirst =
+  'printf REWRITTEN_FIRST > managed-a3-first.txt';
+const commandRewriteRewrittenSecond =
+  'printf REWRITTEN_SECOND > managed-a3-second.txt';
+const commandRewriteFirstEffect = path.join(
+  workspaceMount,
+  'managed-a3-first.txt',
+);
+const commandRewriteSecondEffect = path.join(
+  workspaceMount,
+  'managed-a3-second.txt',
+);
+const commandRewriteHookLog = path.join(temporary, 'managed-a3-hooks.jsonl');
+const commandRewriteExtensionArtifacts = path.join(
+  temporary,
+  'extension-artifacts',
+);
+const commandRewriteExtensionCache = path.join(temporary, 'extension-cache');
+const commandRewriteExtensionSource = path.join(temporary, 'extension-source');
+const commandRewriteExtensionDestination = path.join(
+  temporary,
+  'extension-package',
+);
+
+interface CommandRewriteActionEvidence {
+  id: string;
+  state: string;
+  createdAt: number;
+  expiresAt: number;
+  inputRef: { resourceId: string };
+  command: string;
+  timeout: number;
+}
+interface CommandRewriteStageEvidence {
+  toolStageId: string;
+  stepIndex: number;
+  runState: string;
+  resultRef: { resourceId: string } | null;
+  inputRef: { resourceId: string };
+  command: string;
+  timeout: number;
+}
+interface CommandRewriteHookEvidence {
+  hookExecutionId: string;
+  occurrenceId: string;
+  toolUseId: string;
+  eventName: string;
+  hookId: string;
+  registrationId: string;
+  ordinal: number;
+  runState: string;
+  resultRef: { resourceId: string } | null;
+}
+interface CommandRewritePhysicalHook {
+  hook_event_name: string;
+  tool_use_id: string;
+  tool_input: { command?: string };
+}
+interface CommandRewriteReceipt {
+  operationId: string;
+  fingerprint: string;
+  state: string;
+}
+interface CommandRewriteEvidence {
+  actions: CommandRewriteActionEvidence[];
+  checkpoint: { phase: string; requestId: string };
+  stages: CommandRewriteStageEvidence[];
+  durableHooks: CommandRewriteHookEvidence[];
+  physicalHooks: CommandRewritePhysicalHook[];
+  effects: [string | null, string | null];
+  receipts: CommandRewriteReceipt[];
+  modelRequests?: { initial: number; afterResults: number };
+}
+interface CommandRewriteIdentity {
+  runtimeSessionId: string;
+  harnessSessionId: string;
+  revision: number;
+}
+
+function requiredCommandRewriteCgroupRoot(value: string | undefined): string {
+  if (!value || !path.isAbsolute(value))
+    throw new Error(
+      'QWEN_E2E_EXTENSION_CGROUP_ROOT must name a delegated absolute cgroup v2 root',
+    );
+  if (!existsSync(path.join(value, 'cgroup.kill')))
+    throw new Error(`Delegated cgroup v2 root is not ready: ${value}`);
+  return value;
+}
+
+function commandRewriteSpringEnvironment(
+  cgroupRoot: string,
+  artifactDirectory: string,
+  cacheDirectory: string,
+): Record<string, string> {
+  return {
+    QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED: 'true',
+    QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY: artifactDirectory,
+    QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS: trustedActor,
+    QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED: 'true',
+    QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE: 'linux-cgroup',
+    QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY: cacheDirectory,
+    QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT: cgroupRoot,
+    QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED: 'true',
+    QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+    QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED: 'true',
+  };
+}
+
+async function prepareCommandRewriteExtensionPackage(
+  sourceDirectory: string,
+  destination: string,
+  hookLog: string,
+) {
+  mkdirSync(path.join(sourceDirectory, 'commands'), { recursive: true });
+  const hookCommand = [
+    JSON.stringify(process.execPath),
+    '"${extensionPath}/hook.cjs"',
+    JSON.stringify(hookLog),
+  ].join(' ');
+  writeFileSync(
+    path.join(sourceDirectory, 'qwen-extension.json'),
+    JSON.stringify({
+      name: 'a3-recovery',
+      version: '1.0.0',
+      hooks: Object.fromEntries(
+        ['PreToolUse', 'PostToolUse'].map((event) => [
+          event,
+          [
+            {
+              matcher: 'run_shell_command',
+              hooks: [{ type: 'command', command: hookCommand }],
+            },
+          ],
+        ]),
+      ),
+    }),
+  );
+  writeFileSync(
+    path.join(sourceDirectory, 'commands', 'two-step.md'),
+    `---\ndescription: Run two approval-bound commands\n---\n!{${commandRewriteOriginalFirst}}\n!{${commandRewriteOriginalSecond}}\n`,
+  );
+  writeFileSync(
+    path.join(sourceDirectory, 'hook.cjs'),
+    `void (async () => {\n` +
+      `const fs = require('node:fs');\n` +
+      `const originals = ${JSON.stringify([commandRewriteOriginalFirst, commandRewriteOriginalSecond])};\n` +
+      `const rewritten = ${JSON.stringify([commandRewriteRewrittenFirst, commandRewriteRewrittenSecond])};\n` +
+      `let input = '';\n` +
+      `for await (const chunk of process.stdin) input += chunk;\n` +
+      `const value = JSON.parse(input);\n` +
+      `const fd = fs.openSync(process.argv[2], 'a');\n` +
+      `try {\n` +
+      `  fs.writeSync(fd, JSON.stringify({ hook_event_name: value.hook_event_name, tool_use_id: value.tool_use_id, tool_input: value.tool_input }) + '\\n');\n` +
+      `  fs.fsyncSync(fd);\n` +
+      `} finally { fs.closeSync(fd); }\n` +
+      `const index = originals.indexOf(value.tool_input?.command);\n` +
+      `const output = value.hook_event_name === 'PreToolUse' && index >= 0\n` +
+      `  ? { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { command: rewritten[index], timeout: 120000 } } }\n` +
+      `  : {};\n` +
+      `process.stdout.write(JSON.stringify(output));\n` +
+      `})().catch((error) => { console.error(error); process.exitCode = 1; });\n`,
+  );
+  return prepareManagedExtensionPackage(
+    { type: 'local', source: sourceDirectory },
+    { target: { platform: 'linux', arch: 'any' }, destination },
+  );
+}
+
+async function publishPreparedCommandRewriteExtension(
+  springUrl: string,
+  tenant: string,
+  prepared: Awaited<ReturnType<typeof prepareManagedExtensionPackage>>,
+) {
+  const manifest = Buffer.from(JSON.stringify(prepared.manifest)).toString(
+    'base64url',
+  );
+  const response = await fetch(
+    `${springUrl}/v1/agents/workspaces/${boundWorkspaceId}/extensions?packageDigest=${prepared.packageDigest}&manifest=${manifest}`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'idempotency-key': `a3-extension-${prepared.packageDigest}`,
+        ...tenantHeaders(tenant),
+      },
+      body: readFileSync(prepared.archivePath),
+    },
+  );
+  const operation = (await response.json()) as { extensionId?: unknown };
+  if (![200, 202].includes(response.status))
+    throw new Error(
+      `A3 extension publish returned ${response.status}: ${JSON.stringify(operation)}`,
+    );
+  if (
+    typeof operation.extensionId !== 'string' ||
+    !operation.extensionId.startsWith('ext_')
+  )
+    throw new Error('A3 extension publish returned no extensionId');
+  commandRewriteExtensionId = operation.extensionId;
+  return {
+    extensionId: commandRewriteExtensionId,
+    packageRevision: 1,
+    packageDigest: prepared.packageDigest,
+  };
+}
+
+function commandRewriteCanonicalDigest(value: unknown): string {
+  const canonical = (item: unknown): unknown =>
+    Array.isArray(item)
+      ? item.map(canonical)
+      : item && typeof item === 'object'
+        ? Object.fromEntries(
+            Object.entries(item)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([key, child]) => [key, canonical(child)]),
+          )
+        : item;
+  return createHash('sha256')
+    .update(JSON.stringify(canonical(value)))
+    .digest('hex');
+}
+
+function commandRewriteReceiptFingerprint(
+  identity: CommandRewriteIdentity,
+  stage: CommandRewriteStageEvidence,
+): string {
+  return commandRewriteCanonicalDigest({
+    runtimeSessionId: identity.runtimeSessionId,
+    harnessSessionId: identity.harnessSessionId,
+    operationId: stage.toolStageId,
+    toolName: 'shell',
+    input: { command: stage.command, timeout: stage.timeout },
+    revision: identity.revision,
+    extensionId: commandRewriteExtensionId,
+  });
+}
+
+function commandRewritePhysicalHookCount(
+  hooks: CommandRewritePhysicalHook[],
+  event: string,
+  stageId: string,
+): number {
+  return hooks.filter(
+    (hook) => hook.hook_event_name === event && hook.tool_use_id === stageId,
+  ).length;
+}
+
+function commandRewriteExpectedCommand(stepIndex: number): string {
+  return stepIndex === 0
+    ? commandRewriteRewrittenFirst
+    : commandRewriteRewrittenSecond;
+}
+
+function assertCommandRewriteStages(
+  stages: CommandRewriteStageEvidence[],
+  count: number,
+): void {
+  if (
+    stages.length !== count ||
+    stages.some(
+      (stage, index) =>
+        stage.stepIndex !== index ||
+        stage.runState !== 'settled' ||
+        !stage.resultRef ||
+        stage.command !== commandRewriteExpectedCommand(index) ||
+        stage.timeout !== 120000 ||
+        !stage.inputRef.resourceId,
+    ) ||
+    new Set(stages.map((stage) => stage.toolStageId)).size !== count
+  )
+    throw new Error(
+      `A3 command stage evidence differs: ${JSON.stringify(stages)}`,
+    );
+}
+
+function assertCommandRewriteReceipts(
+  receipts: CommandRewriteReceipt[],
+  stages: CommandRewriteStageEvidence[],
+  identity: CommandRewriteIdentity,
+): void {
+  if (
+    receipts.length !== stages.length ||
+    receipts.some(
+      (receipt) =>
+        receipt.state !== 'settled' ||
+        !stages.some(
+          (stage) =>
+            stage.toolStageId === receipt.operationId &&
+            commandRewriteReceiptFingerprint(identity, stage) ===
+              receipt.fingerprint,
+        ),
+    )
+  )
+    throw new Error(
+      `A3 extension command receipts differ: ${JSON.stringify(receipts)}`,
+    );
+}
+
+function assertCommandRewriteDurableHook(
+  hooks: CommandRewriteHookEvidence[],
+  event: string,
+  stageId: string,
+): void {
+  const matches = hooks.filter(
+    (hook) =>
+      hook.eventName === event &&
+      hook.toolUseId === stageId &&
+      hook.hookId !== '__plan__',
+  );
+  if (
+    matches.length !== 1 ||
+    matches[0].runState !== 'settled' ||
+    !matches[0].resultRef
+  )
+    throw new Error(
+      `A3 durable ${event} Hook evidence differs for ${stageId}: ${JSON.stringify(matches)}`,
+    );
+}
+
+function assertCommandRewriteDecision(
+  decision: {
+    optionId: string;
+    inputRevision: number;
+    policyRevision: string;
+  },
+  options: { inputRevision: number; policyRevision: string },
+  actionId: string,
+): void {
+  if (
+    decision.optionId !== 'allow' ||
+    decision.inputRevision !== options.inputRevision ||
+    decision.policyRevision !== options.policyRevision
+  )
+    throw new Error(
+      `A3 command decision differs from the chosen option: ${JSON.stringify({ actionId, decision })}`,
+    );
+}
+
+function assertCommandRewriteCrashBarrier(
+  evidence: CommandRewriteEvidence,
+  identity: CommandRewriteIdentity,
+): void {
+  const [first, second] = evidence.actions;
+  if (
+    evidence.actions.length !== 2 ||
+    first.id === second.id ||
+    !first.id.startsWith('command_approval_') ||
+    !second.id.startsWith('command_approval_') ||
+    first.state !== 'decided' ||
+    second.state !== 'requested' ||
+    evidence.checkpoint.phase !== 'await_action' ||
+    evidence.checkpoint.requestId !== second.id
+  )
+    throw new Error(
+      `A3 crash did not land between its two command Actions: ${JSON.stringify(evidence.actions)}`,
+    );
+  for (const [index, action] of evidence.actions.entries()) {
+    if (
+      action.command !== commandRewriteExpectedCommand(index) ||
+      action.timeout !== 120000 ||
+      !action.inputRef.resourceId ||
+      !Number.isSafeInteger(action.createdAt) ||
+      !Number.isSafeInteger(action.expiresAt) ||
+      action.expiresAt <= action.createdAt
+    )
+      throw new Error(
+        `A3 crash Action ${index + 1} has the wrong rewritten input: ${JSON.stringify(action)}`,
+      );
+  }
+  assertCommandRewriteStages(evidence.stages, 1);
+  const stageId = evidence.stages[0].toolStageId;
+  assertCommandRewriteDurableHook(evidence.durableHooks, 'PreToolUse', stageId);
+  assertCommandRewriteDurableHook(
+    evidence.durableHooks,
+    'PostToolUse',
+    stageId,
+  );
+  if (
+    commandRewritePhysicalHookCount(
+      evidence.physicalHooks,
+      'PreToolUse',
+      stageId,
+    ) !== 1 ||
+    commandRewritePhysicalHookCount(
+      evidence.physicalHooks,
+      'PostToolUse',
+      stageId,
+    ) !== 1 ||
+    evidence.physicalHooks.filter(
+      (hook) => hook.hook_event_name === 'PostToolUse',
+    ).length !== 1 ||
+    evidence.effects[0] !== 'REWRITTEN_FIRST' ||
+    evidence.effects[1] !== null
+  )
+    throw new Error('A3 crash physical Hook/effect boundary differs');
+  assertCommandRewriteReceipts(evidence.receipts, evidence.stages, identity);
+}
+
+function assertCommandRewriteFinalEvidence(
+  evidence: CommandRewriteEvidence,
+  identity: CommandRewriteIdentity,
+): void {
+  if (
+    evidence.actions.length !== 2 ||
+    evidence.actions[0].id === evidence.actions[1].id ||
+    evidence.actions.some(
+      (action, index) =>
+        action.state !== 'decided' ||
+        action.command !== commandRewriteExpectedCommand(index) ||
+        action.timeout !== 120000 ||
+        !action.inputRef.resourceId,
+    )
+  )
+    throw new Error('A3 final Action identities or rewritten inputs differ');
+  assertCommandRewriteStages(evidence.stages, 2);
+  for (const stage of evidence.stages) {
+    for (const event of ['PreToolUse', 'PostToolUse']) {
+      assertCommandRewriteDurableHook(
+        evidence.durableHooks,
+        event,
+        stage.toolStageId,
+      );
+      if (
+        commandRewritePhysicalHookCount(
+          evidence.physicalHooks,
+          event,
+          stage.toolStageId,
+        ) !== 1
+      )
+        throw new Error(
+          `A3 physical ${event} count differs for ${stage.toolStageId}`,
+        );
+    }
+  }
+  if (
+    evidence.effects[0] !== 'REWRITTEN_FIRST' ||
+    evidence.effects[1] !== 'REWRITTEN_SECOND' ||
+    evidence.modelRequests?.initial !== 1 ||
+    evidence.modelRequests?.afterResults !== 1
+  )
+    throw new Error('A3 final physical effects or model traffic differ');
+  assertCommandRewriteReceipts(evidence.receipts, evidence.stages, identity);
+}
+
+function readCommandRewritePhysicalHooks(
+  logPath: string,
+): CommandRewritePhysicalHook[] {
+  if (!existsSync(logPath)) return [];
+  const text = readFileSync(logPath, 'utf8').trim();
+  return text ? text.split('\n').map((line) => JSON.parse(line)) : [];
+}
+
+function commandRewriteReceiptDirectory(
+  cacheDirectory: string,
+  tenant: string,
+  workspaceId: string,
+  workspaceGeneration: string,
+): string {
+  const key = createHash('sha256')
+    .update(`${tenant}\0${workspaceId}\0${workspaceGeneration}`)
+    .digest('hex');
+  return path.join(cacheDirectory, key, 'command-receipts');
+}
+
+function readCommandRewriteReceipts(
+  directory: string,
+): CommandRewriteReceipt[] {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map(
+      (name) =>
+        JSON.parse(
+          readFileSync(path.join(directory, name), 'utf8'),
+        ) as CommandRewriteReceipt,
+    );
+}
+
+function readCommandRewriteDomainRecords(
+  mysqlPort: number,
+  sessionFilter: string,
+  domain: 'tool_stage' | 'hook_execution',
+): Array<Record<string, unknown>> {
+  const rows = runMysql(
+    mysqlPort,
+    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.session_scope_key=sr.session_scope_key AND r.resource_id=sr.record_resource_id WHERE sr.session_scope_key=(SELECT session_scope_key FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_key`,
+  );
+  return rows
+    ? rows
+        .split('\n')
+        .map((row) => JSON.parse(Buffer.from(row, 'hex').toString('utf8')))
+    : [];
+}
+
+function readCommandRewriteResource<T>(
+  mysqlPort: number,
+  sessionFilter: string,
+  ref: { resourceId: string },
+  kind?: 'managed-extension-command-input',
+): T {
+  const hex = runMysql(
+    mysqlPort,
+    `SELECT HEX(inline_bytes) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(ref.resourceId)}${kind ? ` AND kind=${sqlString(kind)}` : ''}`,
+  );
+  if (!hex || hex === 'NULL')
+    throw new Error(`A3 resource is unavailable: ${ref.resourceId}`);
+  return JSON.parse(Buffer.from(hex, 'hex').toString('utf8')) as T;
+}
+
+function readCommandRewriteActionEvidence(
+  mysqlPort: number,
+  sessionFilter: string,
+  actionId: string,
+): CommandRewriteActionEvidence {
+  const row = runMysql(
+    mysqlPort,
+    `SELECT state, options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(actionId)}`,
+  );
+  const [state, optionsJson] = row.split('\t');
+  const options = JSON.parse(optionsJson) as SavedApprovalOptions & {
+    inputRef: { resourceId: string };
+  };
+  const input = readCommandRewriteResource<{
+    command: string;
+    timeout: number;
+  }>(
+    mysqlPort,
+    sessionFilter,
+    options.inputRef,
+    'managed-extension-command-input',
+  );
+  return {
+    id: actionId,
+    state,
+    createdAt: options.createdAt,
+    expiresAt: options.expiresAt,
+    inputRef: options.inputRef,
+    command: input.command,
+    timeout: input.timeout,
+  };
+}
+
+function collectCommandRewriteEvidence(
+  mysqlPort: number,
+  sessionFilter: string,
+  actions: CommandRewriteActionEvidence[],
+  checkpoint: { phase: string; requestId: string },
+  receiptDirectory: string,
+  modelRequests?: { initial: number; afterResults: number },
+): CommandRewriteEvidence {
+  const stages = readCommandRewriteDomainRecords(
+    mysqlPort,
+    sessionFilter,
+    'tool_stage',
+  ).map((value) => {
+    const stage = value as unknown as {
+      toolStageId: string;
+      stepIndex: number;
+      run: { state: string };
+      resultRef: { resourceId: string } | null;
+      inputRef: { resourceId: string };
+    };
+    const input = readCommandRewriteResource<{
+      command: string;
+      timeout: number;
+    }>(
+      mysqlPort,
+      sessionFilter,
+      stage.inputRef,
+      'managed-extension-command-input',
+    );
+    return {
+      toolStageId: stage.toolStageId,
+      stepIndex: stage.stepIndex,
+      runState: stage.run.state,
+      resultRef: stage.resultRef,
+      inputRef: stage.inputRef,
+      command: input.command,
+      timeout: input.timeout,
+    };
+  });
+  const durableHooks = readCommandRewriteDomainRecords(
+    mysqlPort,
+    sessionFilter,
+    'hook_execution',
+  ).map((value) => {
+    const hook = value as unknown as CommandRewriteHookEvidence & {
+      run: { state: string };
+      inputRef: { resourceId: string };
+    };
+    const input = readCommandRewriteResource<{ tool_use_id?: unknown }>(
+      mysqlPort,
+      sessionFilter,
+      hook.inputRef,
+    );
+    return {
+      hookExecutionId: hook.hookExecutionId,
+      occurrenceId: hook.occurrenceId,
+      toolUseId: typeof input.tool_use_id === 'string' ? input.tool_use_id : '',
+      eventName: hook.eventName,
+      hookId: hook.hookId,
+      registrationId: hook.registrationId,
+      ordinal: hook.ordinal,
+      runState: hook.run.state,
+      resultRef: hook.resultRef,
+    };
+  });
+  return {
+    actions,
+    checkpoint,
+    stages,
+    durableHooks,
+    physicalHooks: readCommandRewritePhysicalHooks(commandRewriteHookLog),
+    effects: [
+      existsSync(commandRewriteFirstEffect)
+        ? readFileSync(commandRewriteFirstEffect, 'utf8')
+        : null,
+      existsSync(commandRewriteSecondEffect)
+        ? readFileSync(commandRewriteSecondEffect, 'utf8')
+        : null,
+    ],
+    receipts: readCommandRewriteReceipts(receiptDirectory),
+    ...(modelRequests ? { modelRequests } : {}),
+  };
+}
+
+// B3 after-earlier-tools arm: a second, later tool round writes its own file so
+// each earlier round's single execution has its own physical effect. The +Nk
+// budget directive makes the TurnBudget snapshot non-null so its restoration is
+// numerically assertable (the default null budget hides a ledger reset). A round
+// reset is caught by the exactly-once / deep-equal / round-continuity assertions.
+const b3SecondSideEffectName = 'managed-b3-second-side-effect.txt';
+const b3SecondSideEffect = path.join(workspaceMount, b3SecondSideEffectName);
+const b3SecondSideEffectContent = 'MANAGED_B3_SECOND_TOOL_EXECUTED\n';
+const b3BudgetDirective = '+500k';
 const workspaceId = createHash('sha256')
   .update(workspace)
   .digest('hex')
@@ -346,6 +1044,9 @@ try {
     workspaceMount,
     path.join(runtimeHome, '.qwen'),
     runtimeState,
+    ...(commandRewriteRecovery
+      ? [commandRewriteExtensionArtifacts, commandRewriteExtensionCache]
+      : []),
     ...(frozenControlPlane ? [replacementRuntimeState] : []),
     mysqlData,
   ]) {
@@ -354,6 +1055,12 @@ try {
     mkdirSync(directory, {
       recursive: true,
       ...(directory === runtimeState && workspaceTurns ? { mode: 0o700 } : {}),
+      ...(commandRewriteRecovery &&
+      [commandRewriteExtensionArtifacts, commandRewriteExtensionCache].includes(
+        directory,
+      )
+        ? { mode: 0o700 }
+        : {}),
     });
   }
   if (durableFailover) {
@@ -1220,37 +1927,13 @@ function finishedBeforeCommitWindow(
   sessionFilter: string,
   promptId: string,
 ): { attemptId: string; attemptSequence: number } {
-  const rows = runMysql(
-    port,
-    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
-  ).split('\n');
-  const events: Array<{
-    kind: unknown;
-    sequence: number;
-    payload: Record<string, unknown>;
-  }> = [];
-  for (const row of rows) {
-    if (!row || row === 'NULL') continue;
-    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
-      if (!line) continue;
-      const record = JSON.parse(line) as {
-        subtype?: unknown;
-        managedSession?: {
-          kind?: unknown;
-          sequence?: unknown;
-          payload?: Record<string, unknown>;
-        };
-      };
-      if (record.subtype !== 'managed_session_event_v1') continue;
-      const event = record.managedSession;
-      if (!event || typeof event.sequence !== 'number') continue;
-      events.push({
-        kind: event.kind,
-        sequence: event.sequence,
-        payload: event.payload ?? {},
-      });
-    }
-  }
+  const events = readJournalManagedEvents(port, sessionFilter)
+    .filter((event) => typeof event.sequence === 'number')
+    .map((event) => ({
+      kind: event.kind,
+      sequence: event.sequence as number,
+      payload: event.payload ?? {},
+    }));
   events.sort((a, b) => a.sequence - b.sequence);
   const mainAttempts = events.filter(
     (event) =>
@@ -1281,6 +1964,494 @@ function finishedBeforeCommitWindow(
     attemptId: latestAttempt.payload['attemptId'] as string,
     attemptSequence: latestAttempt.sequence,
   };
+}
+
+// A3: read the recovered final batch plan the way recovery does — the latest
+// hosted.batch.planned link for the batch, then its continuation resource —
+// so the sibling order/identity assertion runs on the same durable plan the
+// next generation resumed from, not on the execution store's row order.
+interface SiblingFinalPlan {
+  stage: string;
+  calls: Array<{
+    runtimeCallId: string;
+    partIndex: number;
+    prepareKey: string;
+    requestDigest: string;
+    actionId: string | null;
+  }>;
+}
+function siblingFinalPlan(
+  port: number,
+  sessionFilter: string,
+  batchId: string,
+): SiblingFinalPlan {
+  let planRef: { resourceId?: string } | undefined;
+  let planSequence = -1;
+  for (const event of readJournalManagedEvents(port, sessionFilter)) {
+    if (
+      typeof event.sequence !== 'number' ||
+      event.kind !== 'hosted.batch.planned'
+    )
+      continue;
+    const payload = event.payload ?? {};
+    if (payload['batchId'] !== batchId) continue;
+    if (event.sequence > planSequence) {
+      planSequence = event.sequence;
+      planRef = payload['planRef'] as { resourceId?: string } | undefined;
+    }
+  }
+  if (!planRef?.resourceId)
+    throw new Error(
+      `Sibling recovery has no final batch plan link: batchId=${batchId}`,
+    );
+  const plan = JSON.parse(
+    runMysql(
+      port,
+      `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(planRef.resourceId)}`,
+    ),
+  );
+  if (plan.stage !== 'final' || !Array.isArray(plan.calls))
+    throw new Error(
+      `Sibling recovered plan is not a final batch plan: stage=${String(plan.stage)}`,
+    );
+  return plan;
+}
+
+// B3: read the durable round and cost ledger the way recovery restores them.
+// The round comes from the latest hosted-model-request (model.attempt.recoveryRef);
+// the budget snapshot and per-model token metrics are reverse-scanned from the
+// route/usage resources exactly as bindBudget does on a cold load.
+interface B3RoundBudget {
+  round: number;
+  budget: unknown;
+  models: unknown;
+}
+function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
+  const attempts = readJournalManagedEvents(port, sessionFilter)
+    .filter(
+      (event) =>
+        event.kind === 'model.attempt' && typeof event.sequence === 'number',
+    )
+    .map((event) => ({
+      sequence: event.sequence as number,
+      payload: event.payload ?? {},
+    }));
+  attempts.sort((a, b) => a.sequence - b.sequence);
+  if (attempts.length === 0) throw new Error('B3 window has no model attempt');
+  const readResource = (ref: unknown): Record<string, unknown> | undefined => {
+    const resourceId = (ref as { resourceId?: string } | null)?.resourceId;
+    if (!resourceId) return undefined;
+    // HEX + decode avoids the mysql --batch backslash escaping that would
+    // corrupt the JSON's \" sequences — the saved request carries the full
+    // system prompt, unlike the small approval-continuation plan.
+    const hex = runMysql(
+      port,
+      `SELECT HEX(inline_bytes) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(resourceId)}`,
+    );
+    if (!hex || hex === 'NULL') return undefined;
+    return JSON.parse(Buffer.from(hex, 'hex').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+  };
+  let round = -1;
+  for (let i = attempts.length - 1; i >= 0; i -= 1) {
+    const req = readResource(attempts[i].payload['recoveryRef']);
+    if (req && typeof req['round'] === 'number') {
+      round = req['round'];
+      break;
+    }
+  }
+  let budget: unknown;
+  let models: unknown;
+  for (let i = attempts.length - 1; i >= 0; i -= 1) {
+    for (const field of ['usageRef', 'routeRef']) {
+      const saved = readResource(attempts[i].payload[field]);
+      if (!saved) continue;
+      if (budget === undefined && 'budget' in saved) budget = saved['budget'];
+      if (models === undefined && saved['models']) models = saved['models'];
+    }
+    if (budget !== undefined && models !== undefined) break;
+  }
+  if (round < 0) throw new Error('B3 window has no saved model-request round');
+  return { round, budget: budget ?? null, models: models ?? null };
+}
+
+// B3: the turn cost snapshot and per-model token ledger must survive the
+// replacement. The snapshot's NUMERIC budget must be present: a non-null
+// snapshot with budget: null is a legal production state (no +Nk directive
+// parsed), and an object-truthy guard would let null == null pass vacuously.
+// The ledger may grow as the held round completes, but every crash-boundary
+// model's output-token total must survive; an unrestored ledger is a truthy
+// {}, so a null check alone would let a zeroed restore pass too.
+function assertB3CostContinuity(
+  before: B3RoundBudget,
+  after: B3RoundBudget,
+): void {
+  const b3Budget = (before.budget as { budget?: number | null } | null)?.budget;
+  if (b3Budget === null || b3Budget === undefined)
+    throw new Error(
+      `B3 crash-boundary turn budget was not exercised: ${JSON.stringify(before.budget)}`,
+    );
+  if (!isDeepStrictEqual(after.budget, before.budget))
+    throw new Error(
+      `B3 recovery reset the turn budget snapshot: before=${JSON.stringify(before.budget)} after=${JSON.stringify(after.budget)}`,
+    );
+  const b3ModelsBefore = (before.models ?? {}) as Record<
+    string,
+    { tokens?: { candidates?: number } }
+  >;
+  const b3ModelsAfter = (after.models ?? {}) as Record<
+    string,
+    { tokens?: { candidates?: number } }
+  >;
+  const b3LedgerEntries = Object.entries(b3ModelsBefore);
+  if (
+    b3LedgerEntries.length === 0 ||
+    b3LedgerEntries.every(
+      ([, metric]) => (metric.tokens?.candidates ?? 0) === 0,
+    )
+  )
+    throw new Error(
+      'B3 crash-boundary per-model token ledger is empty: the fixture did not exercise the ledger',
+    );
+  for (const [model, metric] of b3LedgerEntries) {
+    const beforeTokens = metric.tokens?.candidates ?? 0;
+    const afterTokens = b3ModelsAfter[model]?.tokens?.candidates ?? 0;
+    if (afterTokens < beforeTokens)
+      throw new Error(
+        `B3 recovery wiped the per-model token ledger: model=${model} before=${beforeTokens} after=${afterTokens}`,
+      );
+  }
+}
+
+// The text-delta selector shared by deltaSequences (which throws on an empty
+// match) and b2DeltaIdentity (which tolerates it): one filter, two policies.
+function textDeltas(events: PublicEvent[], text: string): PublicEvent[] {
+  return events.filter(
+    (event) =>
+      event.type === 'item.output_text.delta' &&
+      eventText(event).includes(text),
+  );
+}
+
+// B2: one identity group per prefix text — the item/part ids the public deltas
+// carried while that prefix was live. After retraction the reload view blanks
+// those deltas, so the dead generations' identities survive only in the live
+// SSE capture; that is what makes the live view load-bearing.
+function b2DeltaIdentity(
+  events: PublicEvent[],
+  text: string,
+): { itemIds: string[]; partIds: string[]; sequences: number[] } {
+  const deltas = textDeltas(events, text);
+  const distinct = (values: Array<string | null | undefined>): string[] => [
+    ...new Set(values.filter((id): id is string => typeof id === 'string')),
+  ];
+  return {
+    itemIds: distinct(deltas.map((event) => event.item_id)),
+    partIds: distinct(deltas.map((event) => event.content_part_id)),
+    sequences: deltas.map((event) => event.sequence),
+  };
+}
+
+// The journal HEX decode shared by every window/identity reader: --batch text
+// would escape backslashes and corrupt the JSON, so rows are read as HEX and
+// decoded here, once.
+function readJournalManagedEvents(
+  port: number,
+  sessionFilter: string,
+): Array<{
+  kind?: unknown;
+  sequence?: unknown;
+  payload?: Record<string, unknown>;
+}> {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  const events: Array<{
+    kind?: unknown;
+    sequence?: unknown;
+    payload?: Record<string, unknown>;
+  }> = [];
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      if (record.managedSession) events.push(record.managedSession);
+    }
+  }
+  return events;
+}
+
+// B2: the original prompt's model attempts, oldest first. Each streaming
+// generation must open a new attemptId.
+function b2ModelAttempts(
+  port: number,
+  sessionFilter: string,
+  promptId: string,
+): Array<{ attemptId: string; state: string; sequence: number }> {
+  const attempts: Array<{
+    attemptId: string;
+    state: string;
+    sequence: number;
+  }> = [];
+  for (const event of readJournalManagedEvents(port, sessionFilter)) {
+    if (event.kind !== 'model.attempt' || typeof event.sequence !== 'number')
+      continue;
+    const attemptId = event.payload?.['attemptId'];
+    if (
+      typeof attemptId !== 'string' ||
+      !attemptId.startsWith(`${promptId}:main:`)
+    )
+      continue;
+    attempts.push({
+      attemptId,
+      state: String(event.payload?.['state'] ?? ''),
+      sequence: event.sequence,
+    });
+  }
+  return attempts.sort((a, b) => a.sequence - b.sequence);
+}
+
+interface B2SseCapture {
+  events: PublicEvent[];
+  lastId: string;
+}
+
+// Open SSE observers must not hold the process open when the arm fails early:
+// the main finally aborts whatever is still pending.
+const b2SseObservers = new Set<SseObserver>();
+
+// B2: read the public SSE view through the shared SseObserver (wire-format
+// assertions included). One connection stays open across the Harness crashes
+// (the stream is control-plane-owned and reconciles from after=0 on connect).
+// `until` is a PROGRESS signal, not the exit: after it first holds, a bounded
+// drain window keeps reading so a double-projected terminal is still observed
+// (R1-2). SseObserver and waitUntil are free identifiers so behavioural tests
+// inject stubs.
+async function readPublicSse(
+  storeUrl: string,
+  sessionId: string,
+  options: {
+    tenantId: string;
+    after?: number;
+    lastEventId?: string;
+    until: (events: PublicEvent[]) => boolean;
+    timeoutMs: number;
+    drainMs?: number;
+  },
+): Promise<B2SseCapture> {
+  const observer = new SseObserver({
+    surface: 'public',
+    sessionId,
+    storeUrl,
+    tenantId: options.tenantId,
+    timeoutMs: options.timeoutMs,
+  });
+  b2SseObservers.add(observer);
+  const snapshot = (): PublicEvent[] =>
+    observer.frames.map((frame) => frame.data as unknown as PublicEvent);
+  const fail = (): void => {
+    if (observer.failure)
+      throw new Error(`B2 live SSE failed: ${String(observer.failure)}`);
+  };
+  try {
+    await observer.start(
+      options.lastEventId !== undefined
+        ? Number(options.lastEventId)
+        : options.after,
+    );
+    await waitUntil(
+      'B2 SSE capture progress',
+      () => {
+        fail();
+        return options.until(snapshot());
+      },
+      options.timeoutMs,
+    );
+    const drainMs = options.drainMs ?? 2_000;
+    const drainEnd = Date.now() + drainMs;
+    await waitUntil(
+      'B2 SSE capture drain',
+      () => {
+        fail();
+        return Date.now() >= drainEnd;
+      },
+      drainMs + 1_000,
+    );
+    fail();
+    const events = snapshot();
+    return { events, lastId: String(observer.frames.at(-1)?.id ?? '') };
+  } catch (error) {
+    if (observer.failure)
+      throw new Error(`B2 live SSE failed: ${String(observer.failure)}`);
+    if (observer.controller.signal.aborted)
+      throw new Error(
+        `B2 live SSE aborted (budget or teardown): ${String(error)}`,
+      );
+    throw new Error(`B2 live SSE capture incomplete: ${String(error)}`);
+  } finally {
+    observer.controller.abort();
+    await observer.task?.catch(() => undefined);
+    b2SseObservers.delete(observer);
+  }
+}
+
+// B2: the stream-view audit, lifted out of the arm's try block so behavioural
+// tests execute it (R1-6). The live capture holds the dead generations'
+// original identities; reload/replay hold the blanked prefixes and the
+// surviving answer. item_id is the Turn's ONE assistant item (stable across
+// the repair); the content Part is the stream identity — a delta continues the
+// previous Part only while that delta keeps its identity, so every retraction
+// must force a new Part (pairwise distinct Parts; every group must actually
+// carry the assistant item, R1-3; the replay compares Parts too, R1-4).
+function assertB2StreamViews(input: {
+  live: PublicEvent[];
+  reload: PublicEvent[];
+  replay: PublicEvent[];
+  partials: string[];
+  answer: string;
+  firstPrefixSequence: number;
+  secondPrefixSequence: number;
+  originalTurnId?: string;
+}): {
+  livePartial1: ReturnType<typeof b2DeltaIdentity>;
+  livePartial2: ReturnType<typeof b2DeltaIdentity>;
+  liveAnswer: ReturnType<typeof b2DeltaIdentity>;
+  reloadAnswer: ReturnType<typeof b2DeltaIdentity>;
+  replayAnswer: ReturnType<typeof b2DeltaIdentity>;
+} {
+  // The public stream.reconciled frame carries no payload: a client seeing one
+  // reloads. The converged view is the deltas after the LAST retraction.
+  const converged = (events: PublicEvent[]): string => {
+    const reconciled = events.filter(
+      (event) => event.type === 'stream.reconciled',
+    );
+    const last = reconciled.length
+      ? Math.max(...reconciled.map((event) => event.sequence))
+      : 0;
+    return events
+      .filter(
+        (event) =>
+          event.type === 'item.output_text.delta' && event.sequence > last,
+      )
+      .map(eventText)
+      .join('');
+  };
+  const terminalsOf = (events: PublicEvent[]): PublicEvent[] =>
+    events.filter(
+      (event) =>
+        event.terminal &&
+        (input.originalTurnId === undefined ||
+          event.turn_id === input.originalTurnId),
+    );
+  const livePartial1 = b2DeltaIdentity(input.live, input.partials[0]);
+  const livePartial2 = b2DeltaIdentity(input.live, input.partials[1]);
+  const liveAnswer = b2DeltaIdentity(input.live, input.answer);
+  const liveTerminals = terminalsOf(input.live);
+  const liveRetractions = input.live.filter(
+    (event) => event.type === 'stream.reconciled',
+  );
+  if (
+    converged(input.live) !== input.answer ||
+    liveTerminals.length !== 1 ||
+    liveTerminals[0].type !== 'turn.completed' ||
+    livePartial1.sequences.length === 0 ||
+    livePartial2.sequences.length === 0 ||
+    liveAnswer.sequences.length === 0 ||
+    liveRetractions.length < 2 ||
+    !reconciledBetween(
+      input.live,
+      Math.min(...livePartial1.sequences),
+      Math.min(...livePartial2.sequences),
+    ) ||
+    !reconciledBetween(
+      input.live,
+      Math.min(...livePartial2.sequences),
+      Math.min(...liveAnswer.sequences),
+    )
+  )
+    throw new Error(
+      `B2 live SSE: text=${JSON.stringify(converged(input.live))} terminals=${liveTerminals.length} partial1=${livePartial1.sequences.length} partial2=${livePartial2.sequences.length} answer=${liveAnswer.sequences.length} retractions=${liveRetractions.length} frames=${input.live.length}`,
+    );
+  const reloadAnswer = b2DeltaIdentity(input.reload, input.answer);
+  // F5: the live answer's identity is load-bearing — the persisted views being
+  // correct does not excuse a live stream that delivers the surviving answer
+  // under a dead Part, no identity, or a foreign item.
+  if (liveAnswer.itemIds.length === 0 || liveAnswer.partIds.length === 0)
+    throw new Error(
+      `B2 live SSE: the live answer carries no identity: ${JSON.stringify(liveAnswer)}`,
+    );
+  if (
+    liveAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
+    liveAnswer.partIds.join(',') !== reloadAnswer.partIds.join(',')
+  )
+    throw new Error(
+      `B2 live SSE: the live answer identity differs from reload: live=${JSON.stringify(liveAnswer)} reload=${JSON.stringify(reloadAnswer)}`,
+    );
+  const groups = [livePartial1, livePartial2, reloadAnswer];
+  const itemIds = new Set(groups.flatMap((group) => group.itemIds));
+  if (
+    groups.some(
+      (group) => group.partIds.length === 0 || group.itemIds.length === 0,
+    ) ||
+    itemIds.size !== 1
+  )
+    throw new Error(
+      `B2 stream identities: expected one shared assistant item and a Part per generation: ${JSON.stringify(groups)}`,
+    );
+  for (let i = 0; i < groups.length; i += 1) {
+    for (let j = i + 1; j < groups.length; j += 1) {
+      if (groups[i].partIds.some((id) => groups[j].partIds.includes(id)))
+        throw new Error(
+          `B2 stream identities: generations ${i + 1} and ${j + 1} share a content Part (retraction did not break the continuation): ${JSON.stringify(groups)}`,
+        );
+    }
+  }
+  const blanked = (events: PublicEvent[], sequence: number): boolean => {
+    const delta = events.find((event) => event.sequence === sequence);
+    return (
+      !!delta &&
+      delta.type === 'item.output_text.delta' &&
+      eventText(delta) === '' &&
+      delta.item_id == null &&
+      delta.content_part_id == null
+    );
+  };
+  if (
+    !blanked(input.reload, input.firstPrefixSequence) ||
+    !blanked(input.reload, input.secondPrefixSequence)
+  )
+    throw new Error(
+      `B2 stream identities: retracted prefixes not blanked in reload at ${input.firstPrefixSequence}/${input.secondPrefixSequence}`,
+    );
+  const replayAnswer = b2DeltaIdentity(input.replay, input.answer);
+  const replayTerminals = terminalsOf(input.replay);
+  if (
+    converged(input.replay) !== input.answer ||
+    replayTerminals.length !== 1 ||
+    // F6: a reconnecting client shown a failure terminal while live/reload
+    // show success is not a passing B2.
+    replayTerminals[0].type !== 'turn.completed' ||
+    !blanked(input.replay, input.firstPrefixSequence) ||
+    !blanked(input.replay, input.secondPrefixSequence) ||
+    replayAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
+    replayAnswer.partIds.join(',') !== reloadAnswer.partIds.join(',')
+  )
+    throw new Error(
+      `B2 replay view: text=${JSON.stringify(converged(input.replay))} terminals=${replayTerminals.length} answerIds=${replayAnswer.itemIds.join(',')} answerParts=${replayAnswer.partIds.join(',')} reloadIds=${reloadAnswer.itemIds.join(',')} reloadParts=${reloadAnswer.partIds.join(',')} frames=${input.replay.length}`,
+    );
+  return { livePartial1, livePartial2, liveAnswer, reloadAnswer, replayAnswer };
 }
 
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
@@ -1322,6 +2493,9 @@ interface PublicEvent {
   sequence: number;
   terminal: boolean;
   type: string;
+  turn_id?: string | null;
+  item_id?: string | null;
+  content_part_id?: string | null;
   data?: unknown;
 }
 
@@ -1365,13 +2539,7 @@ async function publicTranscript(
 }
 
 function deltaSequences(events: PublicEvent[], text: string): number[] {
-  const sequences = events
-    .filter(
-      (event) =>
-        event.type === 'item.output_text.delta' &&
-        eventText(event).includes(text),
-    )
-    .map((event) => event.sequence);
+  const sequences = textDeltas(events, text).map((event) => event.sequence);
   // An empty list would turn Math.min into Infinity and every "before"
   // check into a vacuous pass.
   if (sequences.length === 0) {
@@ -1554,7 +2722,113 @@ try {
       }
 
       if (continuationFailover && serialized.includes(continuationMarker)) {
+        // B3: two earlier tool rounds, then a held post-tool round. The fake
+        // model decides by the number of tool results already in the history:
+        // 0 -> tool A (round 0), 1 -> tool B (round 1), >=2 -> the held final
+        // answer (round 2). The crash lands on the round-2 request so recovery
+        // must resume the saved round and cost ledger, not restart them.
+        if (approvalFault === 'after-earlier-tools') {
+          const toolResultCount = (serialized.match(/"role":"tool"/g) ?? [])
+            .length;
+          // Non-zero usage makes the token ledger numerically observable (the
+          // fake's default usage is all zeros). The earlier rounds outweigh the
+          // final round so a zeroed restore totals less than the crash-boundary
+          // ledger, not just the same sum re-counted.
+          if (toolResultCount === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: inflightSideEffectName,
+                    content: inflightSideEffectContent,
+                  },
+                  'call_managed_b3_first',
+                ),
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 300,
+                total_tokens: 300,
+              },
+            };
+          }
+          if (toolResultCount === 1) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: b3SecondSideEffectName,
+                    content: b3SecondSideEffectContent,
+                  },
+                  'call_managed_b3_second',
+                ),
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 300,
+                total_tokens: 300,
+              },
+            };
+          }
+          if (approvalResultHold) {
+            return {
+              contentChunks: [continuationPartial],
+              holdAfterChunks: 1,
+              holdUntil: approvalResultHold,
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 100,
+                total_tokens: 100,
+              },
+            };
+          }
+          return {
+            content: continuationResponse,
+            usage: {
+              prompt_tokens: 0,
+              completion_tokens: 100,
+              total_tokens: 100,
+            },
+          };
+        }
         if (!serialized.includes('"role":"tool"')) {
+          if (commandRewriteRecovery) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'skill',
+                  { skill: 'a3-recovery:two-step' },
+                  'call_managed_a3_command_rewrite',
+                ),
+              ],
+            };
+          }
+          // A3: a two-call batch so the replacement can be crashed in the
+          // approval gap between a decided sibling and a pending one.
+          if (approvalFault === 'sibling-approval') {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: inflightSideEffectName,
+                    content: inflightSideEffectContent,
+                  },
+                  'call_managed_continuation_failover',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: siblingSideEffectName,
+                    content: siblingSideEffectContent,
+                  },
+                  'call_managed_continuation_sibling',
+                ),
+              ],
+            };
+          }
           return {
             toolCalls: [
               fakeToolCall(
@@ -1748,6 +3022,13 @@ try {
           : {}),
         QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
+        ...(commandRewriteRecovery
+          ? commandRewriteSpringEnvironment(
+              commandRewriteCgroupRoot!,
+              commandRewriteExtensionArtifacts,
+              commandRewriteExtensionCache,
+            )
+          : {}),
         ...(runtimeTakeover
           ? {
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
@@ -1849,6 +3130,17 @@ try {
       );
     }
   }
+  const commandRewritePin = commandRewriteRecovery
+    ? await publishPreparedCommandRewriteExtension(
+        springUrl,
+        tenant,
+        await prepareCommandRewriteExtensionPackage(
+          commandRewriteExtensionSource,
+          commandRewriteExtensionDestination,
+          commandRewriteHookLog,
+        ),
+      )
+    : undefined;
   if (inflightFailover) {
     heldStartProxy = await startHeldExecutionStartProxy(
       `http://127.0.0.1:${brokerPort}`,
@@ -1930,7 +3222,9 @@ try {
           {
             type: 'text',
             text: continuationFailover
-              ? `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
+              ? approvalFault === 'after-earlier-tools'
+                ? `${continuationMarker}. ${b3BudgetDirective} Execute the requested tools and reply exactly ${continuationResponse}.`
+                : `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
               : inflightFailover
                 ? `${inflightMarker}. Execute the requested tool once and reply exactly ${inflightResponse}.`
                 : modelRoundFailover
@@ -1940,9 +3234,10 @@ try {
                     : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
           },
         ],
-        ...(workspaceTurns
+        ...(workspaceTurns || commandRewriteRecovery
           ? { workspace: { workspace_id: boundWorkspaceId } }
           : {}),
+        ...(commandRewritePin ? { extensionPins: [commandRewritePin] } : {}),
         metadata: {
           title: continuationFailover
             ? 'Managed continuation owner failover E2E'
@@ -1967,6 +3262,11 @@ try {
     let firstTurnLastSequence = 0;
     let formerDispatchOwner = '';
     let firstPrefixSequence = 0;
+    // B2: the live SSE capture stays open across both Harness crashes; the
+    // second prefix's sequence is hoisted so the audit can check its blanking.
+    let b2LiveCapture: Promise<B2SseCapture> | undefined;
+    let b2SecondPrefixSequence = 0;
+    let b2AttemptIds: string[] = [];
     let heldExecutionStartPath: string | undefined;
     let originalExecutionCallId: string | undefined;
     let originalRuntimeSessionId: string | undefined;
@@ -2030,7 +3330,9 @@ try {
           );
           if (requested.length !== 1) return false;
           originalApprovalId = String(requested[0].id);
-          return originalApprovalId.startsWith('tool_approval_');
+          return originalApprovalId.startsWith(
+            commandRewriteRecovery ? 'command_approval_' : 'tool_approval_',
+          );
         },
         120_000,
         harness,
@@ -2059,14 +3361,32 @@ try {
           `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(originalApprovalOptions.continuationRef.resourceId)}`,
         ),
       );
+      const expectedOriginalPlanCalls =
+        approvalFault === 'sibling-approval' ? 2 : 1;
+      const originalCommandInput = commandRewriteRecovery
+        ? readCommandRewriteResource<{ command: string; timeout: number }>(
+            mysqlPort,
+            `tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+            originalApprovalOptions.inputRef!,
+            'managed-extension-command-input',
+          )
+        : undefined;
       if (
         !originalApprovalPlan ||
-        originalApprovalPlan.calls?.length !== 1 ||
         originalApprovalPlan.actionId !== originalApprovalId ||
-        originalApprovalPlan.stage !== 'approval'
+        originalApprovalPlan.stage !== 'approval' ||
+        (commandRewriteRecovery
+          ? originalApprovalPlan.commandStep?.toolName !== 'shell' ||
+            originalApprovalPlan.commandStep.inputRef.resourceId !==
+              originalApprovalOptions.inputRef?.resourceId ||
+            originalCommandInput?.command !== commandRewriteRewrittenFirst ||
+            originalCommandInput?.timeout !== 120000
+          : originalApprovalPlan.calls?.length !== expectedOriginalPlanCalls ||
+            (approvalFault === 'sibling-approval' &&
+              originalApprovalPlan.approvalOrdinal !== 0))
       ) {
         throw new Error(
-          'Original saved approval plan does not identify exactly one original call',
+          `Original saved approval plan does not identify the original ${commandRewriteRecovery ? 'rewritten command step' : `${expectedOriginalPlanCalls} call(s)`} at the first approval`,
         );
       }
       originalRuntimeSessionId = originalApprovalPlan.runtime.runtimeSessionId;
@@ -2134,7 +3454,13 @@ try {
           'SELECT COUNT(*) FROM qwen_managed_agent.ma_tool_execution',
         ),
       );
-      if (executionCount !== 0 || existsSync(inflightSideEffect))
+      if (
+        executionCount !== 0 ||
+        existsSync(inflightSideEffect) ||
+        (commandRewriteRecovery &&
+          (existsSync(commandRewriteFirstEffect) ||
+            existsSync(commandRewriteSecondEffect)))
+      )
         throw new Error('Tool ran before the original approval');
       saveEvidence('original-approval.json', {
         actionId: originalApprovalId,
@@ -2192,6 +3518,25 @@ try {
       // The crash point is the first model round of a Session with no
       // Workspace: the provider already streamed a prefix the public feed
       // shows, and nothing but the saved model request can continue it.
+      if (harnessOnly) {
+        // B2: subscribe to the live public view before the first prefix. The
+        // stream is control-plane-owned, so this one connection survives both
+        // Harness crashes; Spring reconciles from after=0 on connect, so a
+        // slightly late subscribe still sees every frame. The terminal is a
+        // progress signal; the drain window keeps reading so a double
+        // projection is observed (R1-2).
+        b2LiveCapture = readPublicSse(springUrl, session.id, {
+          tenantId: tenant,
+          after: 0,
+          until: (events) => events.some((event) => event.terminal),
+          timeoutMs: 240_000,
+        });
+        // Awaited only at the audit; without this observer a capture that
+        // fails — or that the teardown aborts on an early arm failure — is an
+        // unhandled rejection that exits before the children are stopped
+        // (R1-1). The audit's await still sees the real rejection.
+        b2LiveCapture.catch(() => undefined);
+      }
       await waitUntil(
         'First model round partial text',
         async () =>
@@ -2551,6 +3896,7 @@ try {
     const startReplacementHarness = async (
       name: string,
       crashBeforeAssistantCommit = false,
+      holdPendingSiblingApproval = false,
     ): Promise<Child> => {
       const next = start(
         process.execPath,
@@ -2602,6 +3948,13 @@ try {
             ...(crashBeforeAssistantCommit
               ? { QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id }
               : {}),
+            // A3: only the generation that must crash carries this flag; it
+            // holds the first sibling approval it asks (the pending sibling
+            // after the decided one). The recovery generation must not inherit
+            // it, or it would hold the same approval forever.
+            ...(holdPendingSiblingApproval
+              ? { QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session.id }
+              : {}),
           },
         },
         name,
@@ -2623,6 +3976,7 @@ try {
     let replacementHarness = await startReplacementHarness(
       'Replacement Hosted Harness',
       approvalFault === 'finished-before-commit',
+      approvalFault === 'sibling-approval',
     );
 
     if (approvalRecovery) {
@@ -2698,7 +4052,10 @@ try {
           policy_revision: originalApprovalOptions!.policyRevision,
           option_id: verificationMode,
         });
-        if (approvalFault === 'after-result') {
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
+        ) {
           approvalResultHold = new Promise<void>((resolve) => {
             releaseApprovalResultHold = resolve;
           });
@@ -2738,6 +4095,60 @@ try {
               `Lost decision reply produced ${operations} ACTION_RESPONSE operations, not one`,
             );
         }
+        if (approvalFault === 'after-earlier-tools') {
+          // The first Allow drives tool A (round 0); the model then asks approval
+          // for tool B (round 1) under a NEW Action. Detect that requested Action
+          // and allow it so both earlier rounds execute before the held round 2.
+          await waitUntil(
+            'Second earlier-tool approval requested',
+            () => {
+              const rows = runMysql(
+                mysqlPort,
+                `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+              );
+              const requested = (rows ? rows.split('\n') : [])
+                .map((row) => row.split('\t'))
+                .filter(
+                  ([id, state]) =>
+                    state === 'requested' && id !== originalApprovalId,
+                );
+              if (requested.length === 1) {
+                secondApprovalId = requested[0][0];
+                return true;
+              }
+              return false;
+            },
+            120_000,
+            replacementHarness,
+          );
+          const secondOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(secondApprovalId!)}`,
+            ),
+          );
+          const secondResponse = await fetch(
+            `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${secondApprovalId}/responses`,
+            {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'idempotency-key': `g3-answer-${secondApprovalId}`,
+                ...tenantHeaders(tenant),
+              },
+              body: JSON.stringify({
+                kind: 'permission',
+                input_revision: secondOptions.inputRevision,
+                policy_revision: secondOptions.policyRevision,
+                option_id: 'allow',
+              }),
+            },
+          );
+          if (secondResponse.status !== 202)
+            throw new Error(
+              `Second earlier-tool response returned ${secondResponse.status}: ${await secondResponse.text()}`,
+            );
+        }
       } else if (verificationMode === 'cancel') {
         const response = await fetch(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
@@ -2761,11 +4172,15 @@ try {
       }
       let publishedPrefixSequences: number[] = [];
       let terminalAcceptsAtBarrier = 0;
+      let b3Before: B3RoundBudget | undefined;
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
         approvalFault === 'after-result' ||
         approvalFault === 'finished-before-commit' ||
+        approvalFault === 'sibling-approval' ||
+        commandRewriteRecovery ||
+        approvalFault === 'after-earlier-tools' ||
         approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
         approvalFault === 'terminal-write-failed'
@@ -2827,6 +4242,45 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (approvalFault === 'after-earlier-tools') {
+          // Both earlier tool rounds must have committed their results and the
+          // round-2 post-tool request must be held with its prefix published, so
+          // the crash lands after the earlier tools but before the final output
+          // commits. Recovery must then resume the saved round and cost ledger.
+          await waitUntil(
+            'Earlier tools settled and the later round held',
+            async () => {
+              const rows = runMysql(
+                mysqlPort,
+                'SELECT execution_state, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id',
+              );
+              const execs = rows ? rows.split('\n') : [];
+              if (execs.length !== 2 || execs.some((r) => r !== 'SETTLED\t1'))
+                return false;
+              const heldLaterRequest = (fake?.requests ?? []).some(
+                ({ body }) => {
+                  const messages = JSON.stringify(body['messages']);
+                  return (
+                    messages.includes(continuationMarker) &&
+                    (messages.match(/"role":"tool"/g) ?? []).length >= 2
+                  );
+                },
+              );
+              if (!heldLaterRequest) return false;
+              const view = await publicTranscript(
+                replacementSpringUrl,
+                tenant,
+                session.id,
+              );
+              return view.text.includes(continuationPartial);
+            },
+            120_000,
+            replacementHarness,
+          );
+          // Capture the durable round and cost ledger at the crash boundary so
+          // recovery can be proven to resume them rather than restart them.
+          b3Before = b3RoundAndBudget(mysqlPort, sessionFilter);
+          saveEvidence('b3-round-budget-before.json', b3Before);
         } else if (
           approvalFault === 'terminal-reply-lost' ||
           approvalFault === 'terminal-write-failed'
@@ -2896,6 +4350,197 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (commandRewriteRecovery) {
+          await waitUntil(
+            'Second rewritten command approval requested',
+            () => {
+              const rows = runMysql(
+                mysqlPort,
+                `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+              );
+              const actions = rows
+                ? rows.split('\n').map((row) => row.split('\t'))
+                : [];
+              return (
+                actions.length === 2 &&
+                actions.some(
+                  ([id, state]) =>
+                    id === originalApprovalId && state === 'decided',
+                ) &&
+                actions.some(
+                  ([id, state]) =>
+                    id !== originalApprovalId && state === 'requested',
+                )
+              );
+            },
+            120_000,
+            replacementHarness,
+          );
+          const pending = runMysql(
+            mysqlPort,
+            `SELECT action_id FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND state='requested'`,
+          );
+          siblingApprovalId = pending;
+          siblingApprovalOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(pending)}`,
+            ),
+          ) as SavedApprovalOptions;
+          const siblingPlan = readCommandRewriteResource<SavedApprovalPlan>(
+            mysqlPort,
+            sessionFilter,
+            siblingApprovalOptions.continuationRef,
+          );
+          if (
+            !siblingApprovalOptions.inputRef ||
+            siblingPlan.commandStep?.inputRef.resourceId !==
+              siblingApprovalOptions.inputRef.resourceId ||
+            siblingPlan.commandStep.toolStageId ===
+              originalApprovalPlan!.commandStep!.toolStageId ||
+            siblingPlan.commandStep.configRevision !==
+              originalApprovalPlan!.commandStep!.configRevision
+          )
+            throw new Error(
+              'A3 second Action changed its commandStep identity or inputRef',
+            );
+          siblingCommandStageId = siblingPlan.commandStep.toolStageId;
+          const checkpointId = runMysql(
+            mysqlPort,
+            `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+          );
+          const checkpoint = readCommandRewriteResource<{
+            continuation?: { phase?: string };
+            approval?: { requestId?: string };
+          }>(mysqlPort, sessionFilter, { resourceId: checkpointId });
+          const identity = {
+            runtimeSessionId: originalRuntimeSessionId!,
+            harnessSessionId: session.id,
+            revision: siblingPlan.commandStep.configRevision,
+          };
+          const evidence = collectCommandRewriteEvidence(
+            mysqlPort,
+            sessionFilter,
+            [
+              readCommandRewriteActionEvidence(
+                mysqlPort,
+                sessionFilter,
+                originalApprovalId!,
+              ),
+              readCommandRewriteActionEvidence(
+                mysqlPort,
+                sessionFilter,
+                siblingApprovalId,
+              ),
+            ],
+            {
+              phase: String(checkpoint.continuation?.phase),
+              requestId: String(checkpoint.approval?.requestId),
+            },
+            commandRewriteReceiptDirectory(
+              commandRewriteExtensionCache,
+              tenant,
+              boundWorkspaceId,
+              originalApprovalPlan!.runtime.workspaceGeneration,
+            ),
+          );
+          assertCommandRewriteCrashBarrier(evidence, identity);
+          if (
+            evidence.stages[0].toolStageId !==
+            originalApprovalPlan!.commandStep!.toolStageId
+          )
+            throw new Error('A3 crash replaced the first toolStageId');
+          saveEvidence('command-rewrite-crash-barrier.json', evidence);
+        } else if (approvalFault === 'sibling-approval') {
+          // A3: the replacement decided sibling[0] (Allow[0]) and now holds
+          // the first approval it asks — the pending sibling[1]. The barrier
+          // line proves the hook fired; the durable shape proves the crash
+          // lands in the approval gap (sibling[0] decided, sibling[1] still
+          // requested), not after the whole batch finished approving.
+          await waitUntil(
+            'Pending sibling approval held',
+            () =>
+              replacementHarness
+                .log()
+                .includes('E2E holding pending sibling approval'),
+            120_000,
+            replacementHarness,
+          );
+          const siblingActionRows = runMysql(
+            mysqlPort,
+            `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
+          );
+          const siblingActions = siblingActionRows
+            ? siblingActionRows.split('\n').map((row) => row.split('\t'))
+            : [];
+          const decidedSibling = siblingActions.find(
+            ([id]) => id === originalApprovalId,
+          );
+          const pendingSibling = siblingActions.find(
+            ([id]) => id !== originalApprovalId,
+          );
+          if (
+            siblingActions.length !== 2 ||
+            decidedSibling?.[1] !== 'decided' ||
+            pendingSibling?.[1] !== 'requested'
+          ) {
+            throw new Error(
+              `Sibling-approval crash did not land in the approval gap: ${siblingActionRows}`,
+            );
+          }
+          siblingApprovalId = pendingSibling![0];
+          siblingApprovalOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId)}`,
+            ),
+          );
+          const siblingPlan = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(siblingApprovalOptions!.continuationRef.resourceId)}`,
+            ),
+          ) as SavedApprovalPlan;
+          if (
+            siblingPlan.stage !== 'approval' ||
+            siblingPlan.approvalOrdinal !== 1 ||
+            siblingPlan.calls?.length !== 2 ||
+            siblingPlan.actionId !== siblingApprovalId
+          ) {
+            throw new Error(
+              `Sibling-approval crash plan is not the pending second sibling: ${JSON.stringify(siblingPlan)}`,
+            );
+          }
+          // The per-call Action ID may be null before the crash, so anchor each
+          // member to the first approval's saved call identities and reject any
+          // Action ID that is already present on the wrong member.
+          const expectedActionIds = [originalApprovalId!, siblingApprovalId!];
+          for (const [
+            ordinal,
+            originalCall,
+          ] of originalApprovalPlan!.calls.entries()) {
+            const siblingCall = siblingPlan.calls[ordinal];
+            if (
+              !siblingCall ||
+              siblingCall.runtimeCallId !== originalCall.runtimeCallId ||
+              siblingCall.partIndex !== originalCall.partIndex ||
+              siblingCall.prepareKey !== originalCall.prepareKey ||
+              siblingCall.requestDigest !== originalCall.requestDigest ||
+              (siblingCall.actionId != null &&
+                siblingCall.actionId !== expectedActionIds[ordinal])
+            ) {
+              throw new Error(
+                `Sibling-approval crash plan changed call/action binding at ordinal ${ordinal}: ${JSON.stringify(siblingCall)} != ${JSON.stringify(originalCall)}`,
+              );
+            }
+          }
+          saveEvidence('sibling-approval-barrier.json', {
+            fault: approvalFault,
+            decidedAction: decidedSibling,
+            pendingAction: pendingSibling,
+            approvalOrdinal: siblingPlan.approvalOrdinal,
+            calls: siblingPlan.calls,
+          });
         } else {
           // The enclosing condition lists every crash-type fault. A new one
           // added without a barrier here must fail loudly instead of
@@ -2936,7 +4581,8 @@ try {
               )
             : undefined;
         const publishedPrefix =
-          approvalFault === 'after-result'
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
             ? await publicTranscript(replacementSpringUrl, tenant, session.id)
             : undefined;
         publishedPrefixSequences = (publishedPrefix?.events ?? [])
@@ -2968,7 +4614,8 @@ try {
               }
             : undefined,
           publishedPrefix:
-            approvalFault === 'after-result'
+            approvalFault === 'after-result' ||
+            approvalFault === 'after-earlier-tools'
               ? {
                   sequences: publishedPrefixSequences,
                   text: publishedPrefix?.text,
@@ -2979,7 +4626,10 @@ try {
           replacementHarness.child,
           'Replacement Hosted Harness (fault barrier)',
         );
-        if (approvalFault === 'after-result') {
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
+        ) {
           releaseApprovalResultHold();
           approvalResultHold = undefined;
         }
@@ -3053,6 +4703,79 @@ try {
           );
         }
       }
+      if (approvalFault === 'sibling-approval' || commandRewriteRecovery) {
+        // The recovery generation must re-hang the ORIGINAL pending sibling
+        // Action (same ID, same deadline) and still require its own decision:
+        // it must not auto-allow sibling[1] from sibling[0]'s earlier Allow,
+        // nor re-ask the already-decided sibling[0]. Assert the preserved
+        // identity/deadline before answering, then decide the pending sibling.
+        // Read the decided sibling HERE, before answering the pending one: a
+        // recovery that resumes at the wrong ordinal and re-asks sibling[0]
+        // would flip it back to requested, and a post-terminal check could not
+        // tell "never touched" from "re-decided" once the state reconverges.
+        const decidedBefore = await fetchJson<Record<string, unknown>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
+          { headers: tenantHeaders(tenant) },
+        );
+        if (
+          decidedBefore.id !== originalApprovalId ||
+          decidedBefore.state !== 'decided' ||
+          decidedBefore.created_at !== originalApprovalOptions!.createdAt ||
+          decidedBefore.expires_at !== originalApprovalOptions!.expiresAt
+        ) {
+          throw new Error(
+            `Recovery re-touched the decided sibling Action/deadline: ${JSON.stringify(decidedBefore)}`,
+          );
+        }
+        const siblingBefore = await fetchJson<Record<string, unknown>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}`,
+          { headers: tenantHeaders(tenant) },
+        );
+        const recoveredCommandAction = commandRewriteRecovery
+          ? readCommandRewriteActionEvidence(
+              mysqlPort,
+              sessionFilter,
+              siblingApprovalId!,
+            )
+          : undefined;
+        if (
+          siblingBefore.id !== siblingApprovalId ||
+          siblingBefore.state !== 'requested' ||
+          siblingBefore.created_at !== siblingApprovalOptions!.createdAt ||
+          siblingBefore.expires_at !== siblingApprovalOptions!.expiresAt ||
+          (recoveredCommandAction &&
+            (recoveredCommandAction.inputRef.resourceId !==
+              siblingApprovalOptions!.inputRef?.resourceId ||
+              recoveredCommandAction.command !==
+                commandRewriteRewrittenSecond ||
+              recoveredCommandAction.timeout !== 120000))
+        ) {
+          throw new Error(
+            `Recovery did not preserve the pending sibling Action/deadline: ${JSON.stringify(siblingBefore)}`,
+          );
+        }
+        const siblingResponse = await fetch(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}/responses`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `g3-answer-${siblingApprovalId}`,
+              ...tenantHeaders(tenant),
+            },
+            body: JSON.stringify({
+              kind: 'permission',
+              input_revision: siblingApprovalOptions!.inputRevision,
+              policy_revision: siblingApprovalOptions!.policyRevision,
+              option_id: 'allow',
+            }),
+          },
+        );
+        if (siblingResponse.status !== 202)
+          throw new Error(
+            `Pending sibling response returned ${siblingResponse.status}: ${await siblingResponse.text()}`,
+          );
+      }
       const recovered = await waitForTerminal(
         replacementSpringUrl,
         tenant,
@@ -3076,7 +4799,11 @@ try {
       // a compensation that only projects a terminal would pass. The
       // result-commit arm already owns the same check with its retraction
       // diagnostic, so it keeps that message.
-      if (verificationMode === 'allow' && approvalFault !== 'after-result') {
+      if (
+        verificationMode === 'allow' &&
+        approvalFault !== 'after-result' &&
+        approvalFault !== 'after-earlier-tools'
+      ) {
         const transcript = await publicTranscript(
           replacementSpringUrl,
           tenant,
@@ -3087,7 +4814,10 @@ try {
             `Approval recovery answer differs: ${JSON.stringify(transcript.text)}`,
           );
       }
-      if (approvalFault === 'after-result') {
+      if (
+        approvalFault === 'after-result' ||
+        approvalFault === 'after-earlier-tools'
+      ) {
         // The reissue must retract the held prefix: only the recovered
         // answer may remain in the public transcript.
         const transcript = await publicTranscript(
@@ -3113,290 +4843,582 @@ try {
             'Result-commit recovery did not reconcile the published prefix before the recovered answer',
           );
       }
-      const rows = runMysql(
-        mysqlPort,
-        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
-      );
-      const executions = rows
-        ? rows.split('\n').map((row) => row.split('\t'))
-        : [];
-      const expectedExecutions = verificationMode === 'allow' ? 1 : 0;
-      if (executions.length !== expectedExecutions)
-        throw new Error(
-          `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
-        );
-      if (executions.length === 1) {
-        const execution = executions[0];
-        const plan = originalApprovalPlan!;
-        if (
-          execution[1] !== plan.calls[0].prepareKey ||
-          execution[2] !== plan.runtime.bindingId ||
-          execution[3] !== plan.runtime.generation ||
-          execution[4] !== plan.runtime.runtimeSessionId ||
-          execution[5] !== 'SETTLED' ||
-          execution[6] !== '1' ||
-          execution[7] !== plan.calls[0].requestDigest
-        ) {
-          throw new Error(
-            `Replacement changed the original prepared execution identity: ${execution.join(',')}`,
-          );
-        }
-      }
-      const bytes = existsSync(inflightSideEffect)
-        ? readFileSync(inflightSideEffect, 'utf8')
-        : '';
-      if (
-        verificationMode === 'allow'
-          ? bytes !== inflightSideEffectContent
-          : existsSync(inflightSideEffect)
-      ) {
-        throw new Error(
-          `Approval physical file assertion failed for ${verificationMode}`,
-        );
-      }
-      const actionRows = runMysql(
-        mysqlPort,
-        `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
-      );
-      const expectedActionState =
-        verificationMode === 'expiry'
-          ? 'expired'
-          : verificationMode === 'cancel'
-            ? 'cancelled'
-            : 'decided';
-      if (actionRows !== `${originalApprovalId}\t${expectedActionState}`)
-        throw new Error(
-          `Original approval identity/state differs: ${actionRows}`,
-        );
-      // State alone proves a decision was committed, not which option won.
-      // Read the committed decision resource back for the browser-facing
-      // intent, and hold it to the revision and policy the browser answered.
-      const decisionOption =
-        verificationMode === 'allow' || verificationMode === 'deny'
-          ? JSON.parse(
-              runMysql(
-                mysqlPort,
-                `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}) AND r.kind='managed-action-decision'`,
-              ),
-            )
-          : undefined;
-      if (
-        decisionOption &&
-        (decisionOption.optionId !== verificationMode ||
-          decisionOption.inputRevision !==
-            originalApprovalOptions!.inputRevision ||
-          decisionOption.policyRevision !==
-            originalApprovalOptions!.policyRevision)
-      ) {
-        throw new Error(
-          `Stored approval decision differs from the chosen option: ${JSON.stringify(decisionOption)}`,
-        );
-      }
-      // Expiry may only close the wait at or after the deadline it was
-      // given; an early terminal would mean the replacement invented one.
-      const expiryTerminalAt =
-        verificationMode === 'expiry'
-          ? Number(
-              runMysql(
-                mysqlPort,
-                `SELECT gmt_create FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE ORDER BY sequence_id DESC LIMIT 1`,
-              ),
-            )
-          : undefined;
-      if (
-        expiryTerminalAt !== undefined &&
-        (!Number.isSafeInteger(expiryTerminalAt) ||
-          expiryTerminalAt < originalApprovalOptions!.expiresAt)
-      ) {
-        throw new Error(
-          `Expiry closed before the original deadline: terminalAt=${expiryTerminalAt} expiresAt=${originalApprovalOptions!.expiresAt}`,
-        );
-      }
-      const requestBodies = (fake?.requests ?? []).filter((request) =>
-        JSON.stringify(request.body.messages).includes(continuationMarker),
-      );
-      const initialRequests = requestBodies.filter(
-        (request) =>
-          !JSON.stringify(request.body.messages).includes('"role":"tool"'),
-      );
-      const modelAfterResults = requestBodies.filter((request) =>
-        JSON.stringify(request.body.messages).includes('"role":"tool"'),
-      );
-      const expectedModelsAfterResults =
-        approvalFault === 'after-result' ||
-        approvalFault === 'finished-before-commit'
-          ? 2
-          : ['allow', 'deny'].includes(verificationMode)
-            ? 1
-            : 0;
-      if (
-        initialRequests.length !== 1 ||
-        modelAfterResults.length !== expectedModelsAfterResults
-      )
-        throw new Error(
-          `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
-        );
-      if (
-        approvalFault === 'after-result' ||
-        approvalFault === 'finished-before-commit'
-      ) {
-        const parity = isDeepStrictEqual(
-          modelAfterResults[0]?.body,
-          modelAfterResults[1]?.body,
-        );
-        saveEvidence('model-request-parity.json', {
-          requests: modelAfterResults.map((request) => request.body),
-          equal: parity,
-        });
-        if (!parity)
-          throw new Error(
-            'Result-commit recovery changed the saved model request',
-          );
-      }
-      if (responseOperation) {
-        await waitUntil(
-          'Approval response command completion',
-          async () => {
-            const operation = await fetchJson<Record<string, unknown>>(
-              `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${responseOperation!.id}`,
-              { headers: tenantHeaders(tenant) },
-            );
-            if (operation.status === 'failed')
-              throw new Error(
-                `Approval response operation failed: ${JSON.stringify(operation)}`,
-              );
-            return operation.status === 'completed';
-          },
-          30_000,
-          replacementSpring,
-        );
-      }
-      await waitUntil(
-        'Original Runtime cleanup confirmed',
-        () => {
-          const state = runMysql(
-            mysqlPort,
-            `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
-          );
-          const confirmed = runMysql(
-            mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
-          );
-          return state === 'RELEASED' && confirmed === '1';
-        },
-        30_000,
-        replacementHarness,
-      );
-      const runtimeAfter = runMysql(
-        mysqlPort,
-        `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
-      ).split('\t');
-      const cleanupConfirmed = Number(
-        runMysql(
-          mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
-        ),
-      );
-      if (
-        runtimeAfter[0] !== originalApprovalPlan!.runtime.bindingId ||
-        runtimeAfter[1] !== originalApprovalPlan!.runtime.generation ||
-        runtimeAfter[2] !== originalApprovalPlan!.runtime.workspaceGeneration ||
-        runtimeAfter[3] !== 'RELEASED' ||
-        cleanupConfirmed !== 1
-      )
-        throw new Error(
-          `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
-        );
-      if (approvalFault === 'terminal-reply-lost') {
-        if (
-          storeFaultProxy?.terminalFaulted() !== true ||
-          terminalAcceptsAtBarrier < 1
-        )
-          throw new Error(
-            `Terminal reply loss did not commit the terminal before recovery: barrierAccepts=${terminalAcceptsAtBarrier} observations=${storeFaultProxy?.observations().join(' | ')}`,
-          );
-      }
-      if (approvalFault === 'terminal-write-failed') {
-        if (
-          (storeFaultProxy?.terminalRejectCount() ?? 0) < 1 ||
-          (storeFaultProxy?.terminalAcceptCount() ?? 0) < 1
-        )
-          throw new Error(
-            `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
-          );
-      }
-      if (approvalFault === 'cleanup-failed') {
-        const failures = replacementBrokerProxy?.releaseFailureCount() ?? 0;
-        const successes = replacementBrokerProxy?.releaseSuccessCount() ?? 0;
-        // The debt projection is the scan's input; a confirmed cleanup
-        // removes it. A surviving row here means only the Turn's own driver
-        // (or an operator) could still pay it — exactly the gap this arm
-        // exists to keep closed.
-        const debt = Number(
+      if (commandRewriteRecovery) {
+        const actionCount = Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource_ref WHERE ${sessionFilter} AND owner_kind='HOSTED_CLEANUP'`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
           ),
         );
-        if (failures < 1 || successes < 1 || debt !== 0)
+        if (actionCount !== 2)
+          throw new Error(`A3 recovery created a third Action: ${actionCount}`);
+        const requestBodies = (fake?.requests ?? []).filter((request) =>
+          JSON.stringify(request.body.messages).includes(continuationMarker),
+        );
+        const initialRequests = requestBodies.filter(
+          (request) =>
+            !JSON.stringify(request.body.messages).includes('"role":"tool"'),
+        ).length;
+        const afterResults = requestBodies.filter((request) =>
+          JSON.stringify(request.body.messages).includes('"role":"tool"'),
+        ).length;
+        const checkpointId = runMysql(
+          mysqlPort,
+          `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+        );
+        const checkpoint = readCommandRewriteResource<{
+          continuation?: { phase?: string };
+          approval?: { requestId?: string };
+        }>(mysqlPort, sessionFilter, { resourceId: checkpointId });
+        const evidence = collectCommandRewriteEvidence(
+          mysqlPort,
+          sessionFilter,
+          [
+            readCommandRewriteActionEvidence(
+              mysqlPort,
+              sessionFilter,
+              originalApprovalId!,
+            ),
+            readCommandRewriteActionEvidence(
+              mysqlPort,
+              sessionFilter,
+              siblingApprovalId!,
+            ),
+          ],
+          {
+            phase: String(checkpoint.continuation?.phase),
+            requestId: String(checkpoint.approval?.requestId),
+          },
+          commandRewriteReceiptDirectory(
+            commandRewriteExtensionCache,
+            tenant,
+            boundWorkspaceId,
+            originalApprovalPlan!.runtime.workspaceGeneration,
+          ),
+          { initial: initialRequests, afterResults },
+        );
+        assertCommandRewriteFinalEvidence(evidence, {
+          runtimeSessionId: originalRuntimeSessionId!,
+          harnessSessionId: session.id,
+          revision: originalApprovalPlan!.commandStep!.configRevision,
+        });
+        if (
+          evidence.actions[0].inputRef.resourceId !==
+            originalApprovalOptions!.inputRef?.resourceId ||
+          evidence.actions[1].inputRef.resourceId !==
+            siblingApprovalOptions!.inputRef?.resourceId ||
+          evidence.stages[0].toolStageId !==
+            originalApprovalPlan!.commandStep!.toolStageId ||
+          evidence.stages[1].toolStageId !== siblingCommandStageId
+        )
           throw new Error(
-            `Cleanup fault was not retried after the replacement: failures=${failures} successes=${successes} debt=${debt}`,
+            'A3 recovery changed an Action inputRef or toolStageId',
           );
-      }
-      const faultObservations = {
-        releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
-        releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
-        terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
-        terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
-        terminalAcceptsAtBarrier,
-        postCrashTerminalAccepts: Math.max(
-          0,
-          (storeFaultProxy?.terminalAcceptCount() ?? 0) -
-            terminalAcceptsAtBarrier,
-        ),
-      };
-      originalFaultObservations = faultObservations;
-      saveEvidence('approval-result.json', {
-        mode: verificationMode,
-        fault: approvalFault ?? null,
-        faultObservations,
-        sessionId: session.id,
-        actionId: originalApprovalId,
-        replacementActionBeforeResponse: actionBeforeResponse,
-        chosenOption: decisionOption?.optionId,
-        savedDeadline: {
-          createdAt: originalApprovalOptions!.createdAt,
-          expiresAt: originalApprovalOptions!.expiresAt,
-        },
-        recoveredDeadline: {
-          createdAt: optionsAfterReplacement.createdAt,
-          expiresAt: optionsAfterReplacement.expiresAt,
-        },
-        expiryTerminalAt: expiryTerminalAt ?? null,
-        expectedTerminal,
-        terminalCount: terminals.length,
-        executions,
-        physicalFileExists: existsSync(inflightSideEffect),
-        physicalFileBytes: bytes,
-        modelRequests: initialRequests.length + modelAfterResults.length,
-        initialRequests: initialRequests.length,
-        modelAfterResults: modelAfterResults.length,
-        runtimeAfter,
-        cleanupConfirmed,
-      });
-      approvalResultJson = JSON.stringify(
-        {
+        // State alone proves a decision was committed, not which option won.
+        // Read each command Allow's committed decision back and hold it to the
+        // revisions the browser answered; the generic else-branch read-back is
+        // arm-agnostic and must not be skipped by the command-rewrite split.
+        for (const [actionId, options] of [
+          [originalApprovalId!, originalApprovalOptions!],
+          [siblingApprovalId!, siblingApprovalOptions!],
+        ] as const) {
+          const decisionHex = runMysql(
+            mysqlPort,
+            `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(actionId)}) AND r.kind='managed-action-decision'`,
+          );
+          if (!decisionHex || decisionHex === 'NULL')
+            throw new Error(`A3 command decision is unavailable: ${actionId}`);
+          const decision = JSON.parse(
+            Buffer.from(decisionHex, 'hex').toString('utf8'),
+          ) as {
+            optionId: string;
+            inputRevision: number;
+            policyRevision: string;
+          };
+          assertCommandRewriteDecision(decision, options, actionId);
+        }
+        saveEvidence('command-rewrite-result.json', evidence);
+        approvalResultJson = JSON.stringify(
+          {
+            mode: verificationMode,
+            fault: approvalFault,
+            originalAction: originalApprovalId,
+            recoveredAction: siblingApprovalId,
+            toolStages: evidence.stages.map((stage) => stage.toolStageId),
+            commandReceipts: evidence.receipts.length,
+            terminal: expectedTerminal,
+          },
+          null,
+          2,
+        );
+      } else {
+        const rows = runMysql(
+          mysqlPort,
+          `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
+        );
+        const executions = rows
+          ? rows.split('\n').map((row) => row.split('\t'))
+          : [];
+        const expectedExecutions =
+          verificationMode === 'allow'
+            ? approvalFault === 'sibling-approval' ||
+              approvalFault === 'after-earlier-tools'
+              ? 2
+              : 1
+            : 0;
+        if (executions.length !== expectedExecutions)
+          throw new Error(
+            `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
+          );
+        // Every approved call keeps its own original prepare key/digest and the
+        // original Runtime identity, settled once. Match by prepare key so the
+        // model's call order is checked, not the SQL row order; the A3 arm has
+        // two siblings and B3 two earlier rounds, every other allow arm has one.
+        if (approvalFault === 'after-earlier-tools') {
+          // B3's two earlier tools live in separate rounds, so the first approval
+          // plan carries only tool A. Assert both executions' Runtime identity and
+          // settled-once directly; the two physical file effects give per-tool
+          // evidence, and a re-run of either earlier tool reds the count above.
+          for (const [ordinal, execution] of executions.entries()) {
+            if (
+              execution[2] !== originalApprovalPlan!.runtime.bindingId ||
+              execution[3] !== originalApprovalPlan!.runtime.generation ||
+              execution[4] !== originalApprovalPlan!.runtime.runtimeSessionId ||
+              execution[5] !== 'SETTLED' ||
+              execution[6] !== '1'
+            ) {
+              throw new Error(
+                `B3 earlier execution ${ordinal} changed its identity or re-ran: ${execution.join(',')}`,
+              );
+            }
+          }
+        } else if (verificationMode === 'allow') {
+          const plan = originalApprovalPlan!;
+          const settledAtByOrdinal: number[] = [];
+          for (const [ordinal, call] of plan.calls.entries()) {
+            const execution = executions.find(
+              (row) => row[1] === call.prepareKey,
+            );
+            if (
+              !execution ||
+              execution[2] !== plan.runtime.bindingId ||
+              execution[3] !== plan.runtime.generation ||
+              execution[4] !== plan.runtime.runtimeSessionId ||
+              execution[5] !== 'SETTLED' ||
+              execution[6] !== '1' ||
+              execution[7] !== call.requestDigest
+            ) {
+              throw new Error(
+                `Replacement changed the original prepared execution identity for call ${ordinal}: ${(execution ?? []).join(',')}`,
+              );
+            }
+            settledAtByOrdinal.push(Number(execution[8]));
+          }
+          // The siblings must SETTLE in plan order, not merely exist with the
+          // right identities: a recovery that dispatches the batch in reverse
+          // keeps every identity assertion green. settled_at is epoch millis;
+          // require it non-decreasing along the plan so a reverse dispatch reds.
+          for (
+            let ordinal = 1;
+            ordinal < settledAtByOrdinal.length;
+            ordinal += 1
+          ) {
+            if (
+              !Number.isFinite(settledAtByOrdinal[ordinal]) ||
+              settledAtByOrdinal[ordinal] < settledAtByOrdinal[ordinal - 1]
+            ) {
+              throw new Error(
+                `Replacement settled the siblings out of plan order: settledAt=${settledAtByOrdinal.join(',')}`,
+              );
+            }
+          }
+        }
+        const bytes = existsSync(inflightSideEffect)
+          ? readFileSync(inflightSideEffect, 'utf8')
+          : '';
+        if (
+          verificationMode === 'allow'
+            ? bytes !== inflightSideEffectContent
+            : existsSync(inflightSideEffect)
+        ) {
+          throw new Error(
+            `Approval physical file assertion failed for ${verificationMode}`,
+          );
+        }
+        if (approvalFault === 'sibling-approval') {
+          const siblingBytes = existsSync(siblingSideEffect)
+            ? readFileSync(siblingSideEffect, 'utf8')
+            : '';
+          if (siblingBytes !== siblingSideEffectContent)
+            throw new Error(
+              `Sibling physical file assertion failed: ${JSON.stringify(siblingBytes)}`,
+            );
+        }
+        if (approvalFault === 'after-earlier-tools') {
+          const b3Bytes = existsSync(b3SecondSideEffect)
+            ? readFileSync(b3SecondSideEffect, 'utf8')
+            : '';
+          if (b3Bytes !== b3SecondSideEffectContent)
+            throw new Error(
+              `B3 second physical file assertion failed: ${JSON.stringify(b3Bytes)}`,
+            );
+          // Round + cost ledger continuity: recovery must resume the saved round
+          // and restore the budget snapshot / token ledger, not restart them.
+          if (!b3Before)
+            throw new Error('B3 crash-boundary round/budget was not captured');
+          const b3After = b3RoundAndBudget(mysqlPort, sessionFilter);
+          saveEvidence('b3-round-budget-after.json', b3After);
+          if (b3After.round !== b3Before.round || b3After.round < 2)
+            throw new Error(
+              `B3 recovery reset the logical round: before=${b3Before.round} after=${b3After.round}`,
+            );
+          assertB3CostContinuity(b3Before, b3After);
+        }
+        const actionRows = runMysql(
+          mysqlPort,
+          `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
+        );
+        const expectedActionState =
+          verificationMode === 'expiry'
+            ? 'expired'
+            : verificationMode === 'cancel'
+              ? 'cancelled'
+              : 'decided';
+        if (approvalFault === 'sibling-approval') {
+          // Both siblings end decided under their ORIGINAL Action IDs: the
+          // decided one was not re-asked, the pending one earned its own Allow.
+          const expectedSiblingActions = [
+            `${originalApprovalId}\t${expectedActionState}`,
+            `${siblingApprovalId}\t${expectedActionState}`,
+          ].sort();
+          if (actionRows !== expectedSiblingActions.join('\n'))
+            throw new Error(
+              `Sibling approval identities/states differ: ${actionRows}`,
+            );
+        } else if (approvalFault === 'after-earlier-tools') {
+          // Both earlier tools end decided under their ORIGINAL Action IDs: A by
+          // the first Allow, B by the runner's second Allow. Recovery must resume
+          // the saved model round, not re-ask either approval.
+          const expectedB3Actions = [
+            `${originalApprovalId}\t${expectedActionState}`,
+            `${secondApprovalId}\t${expectedActionState}`,
+          ].sort();
+          if (actionRows !== expectedB3Actions.join('\n'))
+            throw new Error(
+              `B3 approval identities/states differ: ${actionRows}`,
+            );
+        } else if (
+          actionRows !== `${originalApprovalId}\t${expectedActionState}`
+        ) {
+          throw new Error(
+            `Original approval identity/state differs: ${actionRows}`,
+          );
+        }
+        // State alone proves a decision was committed, not which option won.
+        // Read the committed decision resource back for the browser-facing
+        // intent, and hold it to the revision and policy the browser answered.
+        const decisionOption =
+          verificationMode === 'allow' || verificationMode === 'deny'
+            ? JSON.parse(
+                runMysql(
+                  mysqlPort,
+                  `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}) AND r.kind='managed-action-decision'`,
+                ),
+              )
+            : undefined;
+        if (
+          decisionOption &&
+          (decisionOption.optionId !== verificationMode ||
+            decisionOption.inputRevision !==
+              originalApprovalOptions!.inputRevision ||
+            decisionOption.policyRevision !==
+              originalApprovalOptions!.policyRevision)
+        ) {
+          throw new Error(
+            `Stored approval decision differs from the chosen option: ${JSON.stringify(decisionOption)}`,
+          );
+        }
+        if (approvalFault === 'sibling-approval') {
+          // The pending sibling carries its OWN Allow decision bound to its own
+          // revisions — it was not auto-allowed from sibling[0]'s earlier Allow.
+          const siblingDecision = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId!)}) AND r.kind='managed-action-decision'`,
+            ),
+          );
+          if (
+            siblingDecision.optionId !== 'allow' ||
+            siblingDecision.inputRevision !==
+              siblingApprovalOptions!.inputRevision ||
+            siblingDecision.policyRevision !==
+              siblingApprovalOptions!.policyRevision
+          ) {
+            throw new Error(
+              `Stored sibling decision differs from the chosen option: ${JSON.stringify(siblingDecision)}`,
+            );
+          }
+          // Clause 2: the recovered final plan preserves the saved sibling
+          // order and identities, and each sibling keeps its original Action
+          // ID. Compare by position so a reordered or dropped sibling reds
+          // here, not only in the execution count.
+          const finalPlan = siblingFinalPlan(
+            mysqlPort,
+            sessionFilter,
+            originalApprovalPlan!.batchId,
+          );
+          const savedCalls = originalApprovalPlan!.calls;
+          if (finalPlan.calls.length !== savedCalls.length)
+            throw new Error(
+              `Sibling recovery changed the batch size: ${finalPlan.calls.length} != ${savedCalls.length}`,
+            );
+          for (const [ordinal, saved] of savedCalls.entries()) {
+            const recovered = finalPlan.calls[ordinal];
+            if (
+              recovered.runtimeCallId !== saved.runtimeCallId ||
+              recovered.partIndex !== saved.partIndex ||
+              recovered.prepareKey !== saved.prepareKey ||
+              recovered.requestDigest !== saved.requestDigest
+            ) {
+              throw new Error(
+                `Sibling recovery reordered or rewrote call ${ordinal}: ${JSON.stringify(recovered)} != ${JSON.stringify(saved)}`,
+              );
+            }
+          }
+          if (
+            finalPlan.calls[0].actionId !== originalApprovalId ||
+            finalPlan.calls[1].actionId !== siblingApprovalId
+          ) {
+            throw new Error(
+              `Sibling recovery changed the original Action IDs: ${JSON.stringify(finalPlan.calls.map((call) => call.actionId))}`,
+            );
+          }
+        }
+        // Expiry may only close the wait at or after the deadline it was
+        // given; an early terminal would mean the replacement invented one.
+        const expiryTerminalAt =
+          verificationMode === 'expiry'
+            ? Number(
+                runMysql(
+                  mysqlPort,
+                  `SELECT gmt_create FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE ORDER BY sequence_id DESC LIMIT 1`,
+                ),
+              )
+            : undefined;
+        if (
+          expiryTerminalAt !== undefined &&
+          (!Number.isSafeInteger(expiryTerminalAt) ||
+            expiryTerminalAt < originalApprovalOptions!.expiresAt)
+        ) {
+          throw new Error(
+            `Expiry closed before the original deadline: terminalAt=${expiryTerminalAt} expiresAt=${originalApprovalOptions!.expiresAt}`,
+          );
+        }
+        const requestBodies = (fake?.requests ?? []).filter((request) =>
+          JSON.stringify(request.body.messages).includes(continuationMarker),
+        );
+        const initialRequests = requestBodies.filter(
+          (request) =>
+            !JSON.stringify(request.body.messages).includes('"role":"tool"'),
+        );
+        const modelAfterResults = requestBodies.filter((request) =>
+          JSON.stringify(request.body.messages).includes('"role":"tool"'),
+        );
+        const expectedModelsAfterResults =
+          approvalFault === 'after-earlier-tools'
+            ? 3
+            : approvalFault === 'after-result' ||
+                approvalFault === 'finished-before-commit'
+              ? 2
+              : ['allow', 'deny'].includes(verificationMode)
+                ? 1
+                : 0;
+        if (
+          initialRequests.length !== 1 ||
+          modelAfterResults.length !== expectedModelsAfterResults
+        )
+          throw new Error(
+            `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
+          );
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'finished-before-commit'
+        ) {
+          const parity = isDeepStrictEqual(
+            modelAfterResults[0]?.body,
+            modelAfterResults[1]?.body,
+          );
+          saveEvidence('model-request-parity.json', {
+            requests: modelAfterResults.map((request) => request.body),
+            equal: parity,
+          });
+          if (!parity)
+            throw new Error(
+              'Result-commit recovery changed the saved model request',
+            );
+        }
+        if (approvalFault === 'after-earlier-tools') {
+          // The held round-2 request (index 1) must be reissued deep-equal by the
+          // recovery generation (index 2); index 0 is the earlier round-1 request.
+          const parity = isDeepStrictEqual(
+            modelAfterResults[1]?.body,
+            modelAfterResults[2]?.body,
+          );
+          saveEvidence('model-request-parity.json', {
+            requests: modelAfterResults.map((request) => request.body),
+            equal: parity,
+          });
+          if (!parity)
+            throw new Error(
+              'B3 recovery changed the saved later-round model request',
+            );
+        }
+        if (responseOperation) {
+          await waitUntil(
+            'Approval response command completion',
+            async () => {
+              const operation = await fetchJson<Record<string, unknown>>(
+                `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${responseOperation!.id}`,
+                { headers: tenantHeaders(tenant) },
+              );
+              if (operation.status === 'failed')
+                throw new Error(
+                  `Approval response operation failed: ${JSON.stringify(operation)}`,
+                );
+              return operation.status === 'completed';
+            },
+            30_000,
+            replacementSpring,
+          );
+        }
+        await waitUntil(
+          'Original Runtime cleanup confirmed',
+          () => {
+            const state = runMysql(
+              mysqlPort,
+              `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+            );
+            const confirmed = runMysql(
+              mysqlPort,
+              `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+            );
+            return state === 'RELEASED' && confirmed === '1';
+          },
+          30_000,
+          replacementHarness,
+        );
+        const runtimeAfter = runMysql(
+          mysqlPort,
+          `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+        ).split('\t');
+        const cleanupConfirmed = Number(
+          runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+          ),
+        );
+        if (
+          runtimeAfter[0] !== originalApprovalPlan!.runtime.bindingId ||
+          runtimeAfter[1] !== originalApprovalPlan!.runtime.generation ||
+          runtimeAfter[2] !==
+            originalApprovalPlan!.runtime.workspaceGeneration ||
+          runtimeAfter[3] !== 'RELEASED' ||
+          cleanupConfirmed !== 1
+        )
+          throw new Error(
+            `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
+          );
+        if (approvalFault === 'terminal-reply-lost') {
+          if (
+            storeFaultProxy?.terminalFaulted() !== true ||
+            terminalAcceptsAtBarrier < 1
+          )
+            throw new Error(
+              `Terminal reply loss did not commit the terminal before recovery: barrierAccepts=${terminalAcceptsAtBarrier} observations=${storeFaultProxy?.observations().join(' | ')}`,
+            );
+        }
+        if (approvalFault === 'terminal-write-failed') {
+          if (
+            (storeFaultProxy?.terminalRejectCount() ?? 0) < 1 ||
+            (storeFaultProxy?.terminalAcceptCount() ?? 0) < 1
+          )
+            throw new Error(
+              `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
+            );
+        }
+        if (approvalFault === 'cleanup-failed') {
+          const failures = replacementBrokerProxy?.releaseFailureCount() ?? 0;
+          const successes = replacementBrokerProxy?.releaseSuccessCount() ?? 0;
+          // The debt projection is the scan's input; a confirmed cleanup
+          // removes it. A surviving row here means only the Turn's own driver
+          // (or an operator) could still pay it — exactly the gap this arm
+          // exists to keep closed.
+          const debt = Number(
+            runMysql(
+              mysqlPort,
+              `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource_ref WHERE ${sessionFilter} AND owner_kind='HOSTED_CLEANUP'`,
+            ),
+          );
+          if (failures < 1 || successes < 1 || debt !== 0)
+            throw new Error(
+              `Cleanup fault was not retried after the replacement: failures=${failures} successes=${successes} debt=${debt}`,
+            );
+        }
+        const faultObservations = {
+          releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
+          releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
+          terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
+          terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
+          terminalAcceptsAtBarrier,
+          postCrashTerminalAccepts: Math.max(
+            0,
+            (storeFaultProxy?.terminalAcceptCount() ?? 0) -
+              terminalAcceptsAtBarrier,
+          ),
+        };
+        originalFaultObservations = faultObservations;
+        saveEvidence('approval-result.json', {
           mode: verificationMode,
-          originalAction: originalApprovalId,
-          originalBatch: originalApprovalPlan!.batchId,
-          originalBinding: originalApprovalPlan!.runtime.bindingId,
-          executions: executions.length,
-          terminal: expectedTerminal,
+          fault: approvalFault ?? null,
+          faultObservations,
+          sessionId: session.id,
+          actionId: originalApprovalId,
+          replacementActionBeforeResponse: actionBeforeResponse,
+          chosenOption: decisionOption?.optionId,
+          savedDeadline: {
+            createdAt: originalApprovalOptions!.createdAt,
+            expiresAt: originalApprovalOptions!.expiresAt,
+          },
+          recoveredDeadline: {
+            createdAt: optionsAfterReplacement.createdAt,
+            expiresAt: optionsAfterReplacement.expiresAt,
+          },
+          expiryTerminalAt: expiryTerminalAt ?? null,
+          expectedTerminal,
+          terminalCount: terminals.length,
+          executions,
+          physicalFileExists: existsSync(inflightSideEffect),
+          physicalFileBytes: bytes,
+          modelRequests: initialRequests.length + modelAfterResults.length,
+          initialRequests: initialRequests.length,
+          modelAfterResults: modelAfterResults.length,
+          runtimeAfter,
           cleanupConfirmed,
-        },
-        null,
-        2,
-      );
+        });
+        approvalResultJson = JSON.stringify(
+          {
+            mode: verificationMode,
+            originalAction: originalApprovalId,
+            originalBatch: originalApprovalPlan!.batchId,
+            originalBinding: originalApprovalPlan!.runtime.bindingId,
+            executions: executions.length,
+            terminal: expectedTerminal,
+            cleanupConfirmed,
+          },
+          null,
+          2,
+        );
+      }
     } else if (inflightFailover) {
       const recoveredTurn = await waitForTerminal(
         replacementSpringUrl,
@@ -3432,7 +5454,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
@@ -3546,7 +5568,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
@@ -3739,7 +5761,7 @@ try {
         const awakeTerminalCount = Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
           ),
         );
         if (
@@ -3770,7 +5792,7 @@ try {
         Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
           ),
         );
       const currentBoot = () =>
@@ -3821,6 +5843,7 @@ try {
             secondPrefixSequence,
           );
         previousPrefixSequence = secondPrefixSequence;
+        b2SecondPrefixSequence = secondPrefixSequence;
         boots.push(currentBoot());
         heads.push(currentHead());
         await crashChild(
@@ -3916,6 +5939,24 @@ try {
           `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND kind='managed-admission'`,
         ),
       );
+      // B2: attempt identities are checked BEFORE the shared audit — a reused
+      // attemptId collides the journal command ids, dedups the later
+      // generations' attempts and breaks recovery routing itself; naming the
+      // identity root cause first keeps the diagnosis specific.
+      if (harnessOnly) {
+        const b2Attempts = b2ModelAttempts(
+          mysqlPort,
+          sessionFilter,
+          firstPromptId,
+        );
+        b2AttemptIds = [
+          ...new Set(b2Attempts.map((attempt) => attempt.attemptId)),
+        ];
+        if (b2AttemptIds.length !== modelRoundPartials.length + 1)
+          throw new Error(
+            `B2 attempt identities: expected ${modelRoundPartials.length + 1} distinct attempts, got ${b2AttemptIds.length}: ${b2Attempts.map((attempt) => `${attempt.attemptId}:${attempt.state}`).join(',')}`,
+          );
+      }
       if (
         recovered.terminals.length !== 1 ||
         recovered.terminals[0].type !== 'turn.completed' ||
@@ -3948,6 +5989,47 @@ try {
         );
       }
 
+      if (harnessOnly) {
+        // B2: the live SSE view captured across both crashes (drained past the
+        // terminal so a double projection is observed) and a Last-Event-ID: 0
+        // replay; the shared view audit owns the identity/blanking/terminal
+        // assertions so behavioural tests execute them.
+        if (!b2LiveCapture)
+          throw new Error('B2 live SSE capture was not started');
+        const b2Live = await b2LiveCapture;
+        const b2Replay = await readPublicSse(replacementSpringUrl, session.id, {
+          tenantId: tenant,
+          lastEventId: '0',
+          until: (events) => events.some((event) => event.terminal),
+          timeoutMs: 60_000,
+        });
+        const b2Views = assertB2StreamViews({
+          live: b2Live.events,
+          reload: recovered.events,
+          replay: b2Replay.events,
+          partials: modelRoundPartials,
+          answer: modelRoundResponse,
+          firstPrefixSequence,
+          secondPrefixSequence: b2SecondPrefixSequence,
+          originalTurnId: recovered.terminals[0]?.turn_id ?? undefined,
+        });
+        writeEvidenceFile(modelRoundEvidenceDirectory, 'b2-identities.json', {
+          attemptIds: b2AttemptIds,
+          live: {
+            partial1: b2Views.livePartial1,
+            partial2: b2Views.livePartial2,
+            answer: b2Views.liveAnswer,
+            frames: b2Live.events.length,
+            lastId: b2Live.lastId,
+          },
+          reloadAnswer: b2Views.reloadAnswer,
+          replay: {
+            answer: b2Views.replayAnswer,
+            frames: b2Replay.events.length,
+          },
+        });
+      }
+
       if (frozenControlPlane) {
         // Q2's binding half: the former control plane is alive, its claim
         // expired and its Session binding was moved by the replacement. On
@@ -3968,14 +6050,14 @@ try {
             ),
             turns: runMysql(
               mysqlPort,
-              `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
+              `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, is_submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
               probeMs,
             ),
             // Row by row: a retraction rewrites delta payloads and identities
             // in place, which no count or maximum would notice.
             events: runMysql(
               mysqlPort,
-              `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
+              `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, is_terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
               probeMs,
             ),
             // Every Spring also sweeps expired operation claims on a timer, so
@@ -4388,7 +6470,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       if (
@@ -4431,22 +6513,26 @@ try {
     }
     if (verificationMode) {
       // These assertions run after every A/B primary gate, never in place of it.
-      await waitUntil(
-        'Runtime cleanup before next Turn',
-        () => {
-          const state = runMysql(
-            mysqlPort,
-            `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
-          );
-          const confirmed = runMysql(
-            mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
-          );
-          return state === 'RELEASED' && confirmed === '1';
-        },
-        30_000,
-        replacementHarness,
-      );
+      // Hook Sessions keep their component Runtime mounted between Turns; the
+      // native hosted-cleanup receipt is not their release contract. The relief
+      // Turn below still proves that the Session accepts more work.
+      if (!commandRewriteRecovery)
+        await waitUntil(
+          'Runtime cleanup before next Turn',
+          () => {
+            const state = runMysql(
+              mysqlPort,
+              `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+            );
+            const confirmed = runMysql(
+              mysqlPort,
+              `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+            );
+            return state === 'RELEASED' && confirmed === '1';
+          },
+          30_000,
+          replacementHarness,
+        );
       const originalPage = await fetchJson<PublicList<PublicEvent>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
         { headers: tenantHeaders(tenant) },
@@ -4534,7 +6620,7 @@ try {
       const finalTerminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       if (finalTerminalCount !== 2)
@@ -4577,7 +6663,16 @@ try {
         },
         60_000,
         replacementSpring,
-      );
+      ).catch((cause: unknown) => {
+        const runtime = runMysql(
+          mysqlPort,
+          `SELECT runtime_session_id, session_state, binding_id, runtime_generation FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+        );
+        throw new Error(
+          `Reliable close operation completion failed; runtime sessions: ${runtime}`,
+          { cause },
+        );
+      });
       const closedSession = await fetchJson<Record<string, unknown>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}`,
         { headers: tenantHeaders(tenant) },
@@ -4757,7 +6852,7 @@ try {
     }
     const durable = runMysql(
       mysqlPort,
-      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
+      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(is_terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
     ).split('\t');
     if (
       durable.length !== 3 ||
@@ -4792,7 +6887,7 @@ try {
   if (dumpPort !== undefined) {
     try {
       console.error(
-        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.ma_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT stream_kind, HEX(stream_id), sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.ma_public_event ORDER BY stream_kind, stream_id, sequence_id')}\nsessions:\n${runMysql(dumpPort, 'SELECT session_id, harness_boot_id, harness_event_epoch, harness_last_event_id FROM qwen_managed_agent.ma_session')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head')}`,
+        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, is_submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.ma_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT stream_kind, HEX(stream_id), sequence_id, turn_id, event_type, is_terminal, source_key FROM qwen_managed_agent.ma_public_event ORDER BY stream_kind, stream_id, sequence_id')}\nsessions:\n${runMysql(dumpPort, 'SELECT session_id, harness_boot_id, harness_event_epoch, harness_last_event_id FROM qwen_managed_agent.ma_session')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head')}`,
       );
     } catch (dumpError) {
       console.error(`Durable state dump failed: ${String(dumpError)}`);
@@ -4812,6 +6907,9 @@ try {
     );
   }
 } finally {
+  // Abort any pending B2 SSE capture so an early arm failure exits promptly
+  // instead of waiting out the capture's budget on an open socket.
+  for (const observer of b2SseObservers) observer.controller.abort();
   // A frozen Harness holds SIGTERM pending from stopChild; wake it before
   // teardown so teardown does not burn the 10-second stall on every path,
   // failure or success. `harness` is try-block scoped, so reach it through

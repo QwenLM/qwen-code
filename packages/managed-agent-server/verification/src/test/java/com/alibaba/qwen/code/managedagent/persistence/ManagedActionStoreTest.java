@@ -47,6 +47,7 @@ class ManagedActionStoreTest {
     private static final String ACTION = "tool_approval_" + "a".repeat(32);
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private ManagedActionStore actions;
     private AgentStateStore agents;
     private TransactionTemplate transactions;
@@ -55,7 +56,8 @@ class ManagedActionStoreTest {
     @BeforeEach
     void initialize() throws Exception {
         fixture = ConsolidatedStoreFixture.open("action_store");
-        var source = fixture.source();
+        var source = new StoreLockTrace(fixture.source());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(
@@ -431,15 +433,21 @@ class ManagedActionStoreTest {
     void planExitUsesItsActiveTurnAfterLivePolicyChanges(String turnStatus, String option,
             boolean expectedPlan, long expectedRevision) {
         jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
-                + " approval_revision=2, plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
         jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
-                        + "status,approval_mode,approval_revision,plan_enabled,gmt_create,gmt_modified)"
+                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
                         + " VALUES (?,?,'turn','turn','[]','digest',?,'default',1,TRUE,0,0)",
                 TENANT, SESSION, turnStatus);
         ObjectNode options = planExitOptions();
+        trace.clear();
         project("requested", null, 1, options);
         project("decided", response(option), 2, options);
-        assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+        if (option.equals("allow")) {
+            trace.assertSessionBeforeTurn(TENANT, SESSION);
+        } else {
+            assertThat(trace.successful(TENANT, SESSION)).noneMatch(StoreLockTrace.Event::turn);
+        }
+        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Boolean.class, TENANT, SESSION)).isEqualTo(expectedPlan);
         assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Long.class, TENANT, SESSION)).isEqualTo(expectedRevision);
@@ -497,6 +505,31 @@ class ManagedActionStoreTest {
         } else {
             assertThatThrownBy(() -> project("requested", null, 1, options)).isInstanceOf(ManagedAgentException.class);
         }
+    }
+
+    @Test
+    void projectsAndFindsCommandStepApproval() throws Exception {
+        String id = "command_approval_" + "b".repeat(48);
+        ObjectNode options = planExitOptions();
+        options.put("requestId", id).put("toolName", "run_shell_command");
+        ObjectNode inputRef = storeBody("command-input", "managed-extension-command-input",
+                JSON.createObjectNode().put("command", "printf rewritten").put("timeout", 120000));
+        options.set("inputRef", inputRef);
+        ObjectNode continuation = (ObjectNode) JSON.readTree(jdbc.queryForObject(
+                "SELECT inline_bytes FROM ma_resource WHERE resource_key=?",
+                byte[].class, ManagedSchemaKeys.key(scope, "continuation")));
+        continuation.put("actionId", id);
+        ObjectNode call = (ObjectNode) continuation.withArray("calls").get(0);
+        call.put("actionId", id);
+        ((ObjectNode) call.path("call")).put("name", "skill");
+        ObjectNode step = continuation.putObject("commandStep").put("toolStageId", "command-stage")
+                .put("toolName", "shell").put("configRevision", 1);
+        step.set("inputRef", inputRef);
+        options.set("continuationRef", storeBody("command-continuation", "hosted-approval-continuation", continuation));
+
+        project("requested", null, 1, options);
+
+        assertThat(actions.find(TENANT, SESSION, id).orElseThrow().options()).isEqualTo(options);
     }
 
     private OperationAdmission admitAs(String actor, String key, String digest, JsonNode body, long now) {
@@ -582,7 +615,8 @@ class ManagedActionStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:" + sequence)
                 .put("kind", "action.changed").put("occurredAt", sequence);
         envelope.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", "workspace").put("sessionId", SESSION);
-        ObjectNode payload = envelope.putObject("payload").put("requestId", ACTION).put("kind", "permission").put("source", "tool_call")
+        ObjectNode payload = envelope.putObject("payload").put("requestId", options.path("requestId").asText())
+                .put("kind", "permission").put("source", "tool_call")
                 .put("inputRevision", 1).put("state", state);
         payload.set("optionsRef", optionsRef);
         if (decision == null) {

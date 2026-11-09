@@ -5,16 +5,19 @@
  */
 
 import { describe, expect, it, vi, onTestFinished } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createServer, preview } from 'vite';
+import { preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
+  createDevelopmentMiddleware,
   MANAGED_AGENT_JAVA_ROUTE_PROXY,
   MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
+  probeHostname,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
 } from '../vite.config';
@@ -29,28 +32,49 @@ function loadConfig(): UserConfig {
   });
 }
 
-it('serves the settings page without claiming the settings source module', async ({
-  onTestFinished,
-}) => {
-  const server = await createServer({
-    ...loadConfig(),
-    configFile: false,
-    server: { host: '127.0.0.1', port: 0 },
-  });
-  onTestFinished(() => server.close());
-  await server.listen();
-  const baseUrl = server.resolvedUrls!.local[0];
-  for (const path of ['settings', 'settings?theme=dark', 'settings/']) {
-    const response = await fetch(`${baseUrl}${path}`, {
-      headers: { accept: 'text/html' },
-    });
-    expect(response.status).toBe(200);
-    expect(response.headers.get('content-type')).toContain('text/html');
-    expect(await response.text()).toContain('/main.tsx');
+describe('Web Shell settings development route', () => {
+  function runMiddleware(method: string, url: string, accept?: string) {
+    const req = {
+      method,
+      url,
+      headers: accept ? { accept } : {},
+    } as unknown as IncomingMessage;
+    const res = { setHeader: vi.fn() } as unknown as ServerResponse;
+    const next = vi.fn();
+
+    createDevelopmentMiddleware()(req, res, next);
+    return { req, res, next };
   }
-  const source = await fetch(`${baseUrl}settings.ts`);
-  expect(source.status).toBe(200);
-  expect(source.headers.get('content-type')).toContain('javascript');
+
+  it.each(['/settings', '/settings?theme=dark', '/settings/'])(
+    'rewrites %s to the SPA document',
+    (url) => {
+      const { req, res, next } = runMiddleware('GET', url, 'text/html');
+
+      expect(req.url).toBe('/index.html');
+      expect(res.setHeader).toHaveBeenCalledWith(
+        'Content-Security-Policy',
+        expect.stringContaining("default-src 'self'"),
+      );
+      expect(next).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not claim the settings source module', () => {
+    const { req, next } = runMiddleware('GET', '/settings.ts', 'text/html');
+
+    expect(req.url).toBe('/settings.ts');
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['POST', '/settings', 'text/html'],
+    ['GET', '/settings', '*/*'],
+  ])('leaves non-document requests untouched', (method, url, accept) => {
+    const { req } = runMiddleware(method, url, accept);
+
+    expect(req.url).toBe(url);
+  });
 });
 
 it.each([
@@ -223,14 +247,21 @@ describe('Web Shell client source proxy bypass', () => {
 });
 
 describe('Web Shell daemon API proxy coverage', () => {
-  it.each(['/standalone', '/live'])('proxies %s API routes', (prefix) => {
+  // Without its own entry the SPA fallback answers these with index.html in
+  // dev and the page fails JSON parsing on open.
+  it.each([
+    { prefix: '/standalone', url: '/standalone/status' },
+    { prefix: '/live', url: '/live/status' },
+    // The only unqualified route in this namespace is the watches listing.
+    { prefix: '/autofix-pr', url: '/autofix-pr/watches' },
+  ])('proxies $prefix API routes', ({ prefix, url }) => {
     const proxy = loadConfig().server?.proxy?.[prefix];
     expect(proxy).not.toBeTypeOf('string');
     expect(proxy).toBeDefined();
     const options = proxy as ProxyOptions;
     const request = {
       method: 'GET',
-      url: `${prefix}/status`,
+      url,
       headers: { accept: '*/*' },
     } as unknown as IncomingMessage;
 
@@ -284,5 +315,75 @@ describe('Web Shell launcher-supplied open path', () => {
     onTestFinished(() => vi.unstubAllEnvs());
 
     expect(loadConfig().server?.open).toBeUndefined();
+  });
+});
+
+describe('Web Shell daemon proxy failure', () => {
+  function emitProxyError(res: unknown) {
+    const options = loadConfig().server?.proxy?.['/session'] as ProxyOptions;
+    const proxy = new EventEmitter();
+    (options.configure as (proxy: EventEmitter) => void)(proxy);
+    proxy.emit(
+      'error',
+      new Error('connect ECONNREFUSED 127.0.0.1:4170'),
+      {} as IncomingMessage,
+      res,
+    );
+  }
+
+  it('answers an unreachable daemon with a labeled 502 instead of an empty 500', () => {
+    const res = {
+      headersSent: false,
+      writableEnded: false,
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+
+    emitProxyError(res);
+
+    expect(res.writeHead).toHaveBeenCalledWith(502, {
+      'content-type': 'application/json',
+    });
+    const body = JSON.parse(String(res.end.mock.calls[0]?.[0]));
+    expect(body.code).toBe('daemon_unreachable');
+    // readDaemonError surfaces `error` to the operator; the sentence with
+    // the target and errno must live there, not under a machine token.
+    expect(body.error).toContain('ECONNREFUSED');
+    expect(body.error).toContain('4170');
+  });
+
+  it('leaves an already-answered response alone', () => {
+    const res = {
+      headersSent: true,
+      writableEnded: false,
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+
+    emitProxyError(res);
+
+    expect(res.writeHead).not.toHaveBeenCalled();
+    expect(res.end).not.toHaveBeenCalled();
+  });
+
+  it('does not write an HTTP response onto a websocket upgrade socket', () => {
+    const res = { destroy: vi.fn() };
+
+    expect(() => emitProxyError(res)).not.toThrow();
+  });
+});
+
+describe('Web Shell daemon probe hostname', () => {
+  // The launcher's `--hostname ::1` exports QWEN_DAEMON_URL=http://[::1]:<port>.
+  // WHATWG URL keeps the brackets, so a raw `.hostname` hands net the literal
+  // "[::1]", which fails name resolution instead of connecting.
+  it.each([
+    ['http://[::1]:51840', '::1'],
+    // Node compresses an explicit long form to `[::1]` before it reaches us.
+    ['http://[0:0:0:0:0:0:0:1]:51840', '::1'],
+    ['http://127.0.0.1:4170', '127.0.0.1'],
+    ['http://daemon.internal:8080', 'daemon.internal'],
+  ])('probes %s as host %s', (target, expected) => {
+    expect(probeHostname(new URL(target).hostname)).toBe(expected);
   });
 });

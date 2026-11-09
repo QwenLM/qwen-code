@@ -27,6 +27,8 @@ import {
   getDeepSeekReasoningState,
 } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -81,6 +83,13 @@ const MODEL_CONFIGURATIONS: Readonly<
     },
   },
   'qwen3.8-max': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
+    },
+  },
+  'qwen3.8-flash': {
     reasoning: {
       thinking: true,
       efforts: ['low', 'medium', 'xhigh'],
@@ -317,8 +326,26 @@ export function getModelConfiguration(
           },
         }
       : modelId
-        ? MODEL_CONFIGURATIONS[modelId]
+        ? (MODEL_CONFIGURATIONS[modelId] ??
+          (isTieredEffortQwenPrefix(modelId)
+            ? MODEL_CONFIGURATIONS['qwen3.8-max']
+            : undefined))
         : undefined;
+}
+
+/**
+ * Routed (opaque) selectors keep their effort controls when the manifest
+ * carries a tiered contract for the model: the new Qwen prefixes and the
+ * stable tiered family they inherit their ladder from. Toggle-only manifest
+ * entries stay on the generic route guard.
+ */
+export function hasTieredManifestReasoning(
+  modelId: string | undefined,
+): boolean {
+  if (!modelId) return false;
+  if (isTieredEffortQwenPrefix(modelId)) return true;
+  const entry = MODEL_CONFIGURATIONS[modelId]?.reasoning;
+  return !!entry && !entry.toggleOnly;
 }
 
 export function getConfiguredModelReasoning(
@@ -398,16 +425,17 @@ export function isReasoningSelectionSupported(
 
 export function clearReasoningRequestOverrides(
   generation: ContentGeneratorConfig,
+  config?: Pick<Config, 'getResolvedModelConfig'>,
 ): void {
   const deepSeek = getDeepSeekReasoningState(
     generation,
-    resolveReasoningForModel(undefined, generation),
+    resolveReasoningForModel(config, generation),
   );
   if (
     getGptReasoningCapabilities(getRequestModel(generation)) ||
     getGptReasoningOverrideState(
       generation,
-      resolveReasoningForModel(undefined, generation),
+      resolveReasoningForModel(config, generation),
     )?.blocksTierChange
   )
     return;
@@ -666,10 +694,19 @@ export function buildModelReasoningRoutePreview(
   const model = getRequestModel(generation);
   const thinkingMandatory =
     model === generation.model && generation.thinkingMandatory === true;
+  const qwenManifest =
+    reasoning === undefined && hasTieredManifestReasoning(model)
+      ? (getModelConfiguration(model)?.reasoning as
+          | ResolvedReasoning
+          | undefined)
+      : undefined;
+  const routeReasoning = reasoning ?? qwenManifest;
   if (
     opaqueRoute &&
-    !reasoning?.profile &&
-    !getDeepSeekReasoningState(generation, reasoning)
+    generation.authType !== AuthType.QWEN_SUBSCRIPTION &&
+    !routeReasoning?.profile &&
+    !qwenManifest &&
+    !getDeepSeekReasoningState(generation, routeReasoning)
   )
     return undefined;
   const parsedSelection = parseReasoningSelection(selection);
@@ -680,7 +717,7 @@ export function buildModelReasoningRoutePreview(
       model,
       parsedSelection,
       thinkingMandatory,
-      reasoning,
+      routeReasoning,
     );
   const deepSeekState = usesConfiguredState
     ? getDeepSeekReasoningState(
@@ -695,7 +732,7 @@ export function buildModelReasoningRoutePreview(
               }
             : {}),
         },
-        reasoning,
+        routeReasoning,
       )
     : undefined;
   return buildModelReasoningConfigPreview(
@@ -707,11 +744,11 @@ export function buildModelReasoningRoutePreview(
         model,
         selection,
         thinkingMandatory,
-        reasoning,
+        routeReasoning,
       ),
       ...deepSeekState,
     },
-    reasoning,
+    routeReasoning,
     generation,
   );
 }

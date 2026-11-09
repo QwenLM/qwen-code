@@ -693,6 +693,74 @@ class ManagedExtensionRecordStoreTest {
                 .required("state").textValue()).isEqualTo("consumed");
     }
 
+    // FG10b: the relay can classify its ledger row after acceptance but
+    // before the parent's wake Turn reads the result, leaving the mirror
+    // `pending`. The consuming revision must correct that row in the same
+    // transaction, and never touch another run's row.
+    @Test
+    void correctsAClassifiedChildResultMirrorWhenConsumptionCommits()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-m",
+                "managed-input", "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-m",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-m",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        ObjectNode accepted = childAgent(sessionId, "sent", "settled",
+                "settled", "binding-1", inputResource);
+        accepted.withObject("/run").put("dispatchId", "dispatch-1");
+        accepted.put("childSessionId", "session-child");
+        accepted.put("stopReason", "completed");
+        accepted.set("resultRef", hookRef(resultResource));
+        accepted.set("terminalReceiptRef", hookRef(receiptResource));
+        accepted.withObject("/run").withObject("/delivery").put("state",
+                "accepted");
+        commitDomain(journal, "agent-5", "child_run", accepted, List.of());
+        String scope = com.alibaba.qwen.code.managedagent.repository
+                .ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        for (String run : List.of("run-x", "run-other")) {
+            jdbc.update("INSERT INTO ma_delivery (delivery_key,"
+                            + " delivery_kind, tenant_id, source_scope_key,"
+                            + " source_session_id, target_session_id,"
+                            + " delivery_id, creation_key, payload_json,"
+                            + " transport_state, reception_state,"
+                            + " consumption_state, gmt_create, gmt_modified)"
+                            + " VALUES (?, 'CHILD_RESULT', ?, ?, 'session-child',"
+                            + " ?, ?, 'creation', '{}', 'delivered', 'accepted',"
+                            + " 'pending', 1, 1)",
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
+                            .key("delivery", "CHILD_RESULT", scope, run),
+                    TENANT, scope, sessionId, run);
+        }
+        ObjectNode consumed = accepted.deepCopy();
+        consumed.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        commitDomain(journal, "agent-6", "child_run", consumed, List.of());
+        assertThat(mirror(sessionId, "run-x"))
+                .isEqualTo("delivered/accepted/consumed");
+        assertThat(mirror(sessionId, "run-other"))
+                .isEqualTo("delivered/accepted/pending");
+    }
+
+    private String mirror(String sessionId, String run) {
+        return jdbc.queryForObject("SELECT CONCAT(transport_state, '/',"
+                        + " reception_state, '/', consumption_state) FROM"
+                        + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
+                        + " 'CHILD_RESULT' AND source_scope_key = ? AND"
+                        + " delivery_id = ?", String.class, TENANT,
+                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
+                        .sessionScopeKey(TENANT, sessionId), run);
+    }
+
     /** Commits a child agent through its settled result. */
     // H4f: a child task's cancel is advertised from its projection, its
     // committed stop request is what the cancel delivery reads back, and
@@ -1784,6 +1852,33 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void filtersChildInvocationsBeforeApplyingTheKeysetPage() throws Exception {
+        String sessionId = agents.createSession(TENANT, "child-pages-" + UUID.randomUUID(),
+                "qwen-code", null, "children", Map.of(), List.of()).sessionId();
+        ExtensionRecordJournal journal = journal(sessionId);
+        CommitResource input = hookResource("child-page-input", "managed-input", "{}".getBytes(StandardCharsets.UTF_8));
+        for (int index = 0; index < 2; index++) {
+            ObjectNode child = childAgent(sessionId, "sent", "admitted", "intent", null, input);
+            child.put("childRunId", "child-page-" + index);
+            child.withObject("/run").put("executionCallId", "child-page-call-" + index);
+            commitDomain(journal, "child-page-" + index, "child_run", child, index == 0 ? List.of(input) : List.of());
+        }
+        ObjectNode monitor = chain().get(0).required("monitorRun").deepCopy();
+        journal.commitMonitor("newer-monitor", monitor.put("monitorId", "newer-monitor"), 2000);
+        var first = records.listChildTasks(TENANT, sessionId, null, null, 1);
+        assertThat(first.tasks()).hasSize(1);
+        assertThat(first.hasMore()).isTrue();
+        assertThat(first.tasks().getFirst().kind()).isEqualTo("child_agent");
+        var cursor = first.tasks().getFirst();
+        var last = records.listChildTasks(TENANT, sessionId, cursor.projection().createdAt(), cursor.taskId(), 1);
+        assertThat(last.tasks()).hasSize(1);
+        assertThat(last.tasks().getFirst().kind()).isEqualTo("child_agent");
+        assertThat(last.tasks().getFirst().taskId()).isNotEqualTo(cursor.taskId());
+        assertThat(last.hasMore()).isFalse();
+        assertThat(records.listChildTasks("other-tenant", sessionId, null, null, 1).tasks()).isEmpty();
+    }
+
+    @Test
     void pagesTasksNewestFirstThenByTaskId() throws Exception {
         String sessionId = agents.createSession(TENANT, "pages-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
@@ -1864,6 +1959,12 @@ class ManagedExtensionRecordStoreTest {
         commitDomain(journal, "configure-result", "mcp_configuration", configured, List.of(data));
         assertThat(records.listRecords(TENANT, sessionId, "mcp_configuration"))
                 .containsExactly(configured);
+        var diagnosticRefs = records.diagnosticMcpRecordRefs(TENANT, sessionId, 1);
+        assertThat(diagnosticRefs).hasSize(1);
+        assertThat(records.readRecordResource(TENANT, sessionId, diagnosticRefs.getFirst())).isEqualTo(configured);
+        assertThat(records.diagnosticReadRevision(TENANT, sessionId)).isNotNull();
+        assertThat(records.diagnosticMcpRecordRefs("other-tenant", sessionId, 1)).isEmpty();
+        assertThat(records.diagnosticReadRevision("other-tenant", sessionId)).isNull();
         assertThat(records.readRecordResource(TENANT, sessionId, ref).isEmpty()).isTrue();
         assertThat(records.listRecords("other-tenant", sessionId, "mcp_configuration")).isEmpty();
         assertThatThrownBy(() -> records.readRecordResource("other-tenant", sessionId, ref))

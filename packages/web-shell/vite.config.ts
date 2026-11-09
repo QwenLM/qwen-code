@@ -1,14 +1,46 @@
 import { pierreResources } from './pierre-build';
+import { createConnection } from 'node:net';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
+import type { Connect, PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
 import { getAllowedDaemonOrigin } from './client/config/daemon';
 
+const daemonTarget = process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170';
+
+// WHATWG URL keeps the brackets an IPv6 literal needs inside a URL, but a TCP
+// probe takes the bare address; `[::1]` reaches DNS and fails with ENOTFOUND.
+export function probeHostname(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
+// One probe per dev server, not per request: an unreachable daemon is not
+// fatal (the E2E suites mock it per page), but the operator learns about it
+// at startup instead of through a suite of slow browser timeouts.
+function probeDaemonTarget(): void {
+  const url = new URL(daemonTarget);
+  const probe = createConnection(
+    { host: probeHostname(url.hostname), port: Number(url.port || 4170) },
+    () => probe.destroy(),
+  );
+  const unreachable = () => {
+    probe.destroy();
+    console.warn(
+      `[web-shell] no daemon is listening at ${daemonTarget}; proxied ` +
+        'daemon routes answer 502 until one is started (page-level E2E ' +
+        'mocks are unaffected)',
+    );
+  };
+  probe.setTimeout(2_000, unreachable);
+  probe.once('error', unreachable);
+}
+
 const daemonProxy: ProxyOptions = {
-  target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
+  target: daemonTarget,
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
@@ -35,6 +67,25 @@ const daemonProxy: ProxyOptions = {
     return undefined;
   },
   configure: (proxy) => {
+    // Vite's own listener already answers a dead daemon with an empty 500;
+    // the lost tests in run 42460891896 were the client's retry cadence, not
+    // a hung response. This handler runs first and replaces that empty 500
+    // with a labeled 502, so the failure is correctly attributed.
+    proxy.on('error', (error, _req, res) => {
+      if (!('writeHead' in res) || res.headersSent || res.writableEnded) return;
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(
+        // Same shape as the daemon's own errors: human text in `error`,
+        // machine token in `code`. readDaemonError prefers `error`, so the
+        // operator-facing sentence must live there.
+        JSON.stringify({
+          code: 'daemon_unreachable',
+          error:
+            `No daemon answered at ${daemonTarget} (${error.message}). ` +
+            'Start the daemon or install the page-level mock before this request.',
+        }),
+      );
+    });
     proxy.on('proxyReq', (proxyReq) => {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
@@ -109,10 +160,8 @@ function developmentCsp(requestUrl: string): string {
   ].join('; ');
 }
 
-function configureDevelopmentMiddleware(
-  server: ViteDevServer | PreviewServer,
-): void {
-  server.middlewares.use((req, res, next) => {
+export function createDevelopmentMiddleware(): Connect.NextHandleFunction {
+  return (req, res, next) => {
     res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
     // Vite resolves the extensionless settings page to settings.ts before SPA fallback.
     if (
@@ -123,7 +172,14 @@ function configureDevelopmentMiddleware(
       req.url = '/index.html';
     }
     next();
-  });
+  };
+}
+
+function configureDevelopmentMiddleware(
+  server: ViteDevServer | PreviewServer,
+): void {
+  probeDaemonTarget();
+  server.middlewares.use(createDevelopmentMiddleware());
 }
 
 export default defineConfig(({ command }) => ({
@@ -235,6 +291,7 @@ export default defineConfig(({ command }) => ({
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/remote-access': daemonProxy,
       '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
@@ -262,6 +319,10 @@ export default defineConfig(({ command }) => ({
       // Goals page (`GET /goals`). Without it the SPA fallback returns
       // index.html in dev and the page fails JSON parsing on open.
       '/goals': daemonProxy,
+      // PR watches page (`GET /autofix-pr/watches`). Same reason as the routes
+      // above. The workspace-qualified form is already reached by the
+      // `/workspace` prefix; only the primary's unqualified route needs this.
+      '/autofix-pr': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.

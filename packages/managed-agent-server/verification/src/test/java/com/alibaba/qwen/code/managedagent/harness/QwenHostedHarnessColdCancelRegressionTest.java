@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -91,10 +92,16 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        var admission = store.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest",
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", "."));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var admission = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build());
         String session = admission.sessionId();
         String turn = store.insertTurnCommand(tenant, "SUBMIT", "submit", "digest", session,
                 List.of(Map.of("type", "text", "text", "go")), "payload").turnId();
@@ -219,10 +226,16 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        String session = store.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest",
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", "."))
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
         store.insertTurnCommand(tenant, "SUBMIT", "submit", "digest", session,
                 List.of(Map.of("type", "text", "text", "go")), "payload");
@@ -314,8 +327,14 @@ class QwenHostedHarnessColdCancelRegressionTest {
             if ("tenant".equals(missing)) {
                 tenant = "another-" + tenant;
             } else if ("session".equals(missing)) {
-                session = fixture.store().insertWorkspaceSessionCommand(tenant, "actor-a", "other-create", "digest",
-                        "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", "."))
+                session = fixture.store().insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor-a")
+                        .idempotencyKey("other-create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("ws-a", "."))
+                        .build())
                         .sessionId();
             } else if ("turn".equals(missing)) {
                 turn = "another-turn";
@@ -401,10 +420,16 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        String session = store.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest", "qwen-code",
-                null, null, List.of(), null, new WorkspaceSelection("ws-a", ".")).sessionId();
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build()).sessionId();
         String turn = store.insertTurnCommand(tenant, "SUBMIT", "submit", "digest", session,
                 List.of(Map.of("type", "text", "text", "go")), "payload").turnId();
         HostedHarnessClient client = mock(HostedHarnessClient.class);

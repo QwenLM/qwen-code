@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -16,7 +16,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -82,15 +81,20 @@ class ManagedWorkspaceRolesMigrationTest {
                 + " 'workspace', ?, 'OPERATOR')", CREATOR);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
         String sessionId = transactions.execute(ignored -> store
-                .insertWorkspaceSessionCommand("tenant", "creator", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", "."))
+                .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId("tenant")
+                        .actorId("creator")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())
                 .sessionId());
         assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
                 + " ma_session WHERE session_id = ?",

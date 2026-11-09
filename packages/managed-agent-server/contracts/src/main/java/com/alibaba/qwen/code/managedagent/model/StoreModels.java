@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.model;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.EventIdentity;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
@@ -23,7 +24,17 @@ public final class StoreModels {
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
             String approvalMode, String toolProfile,
-            String agentDefinitionDigest, int publicChildAgentsVersion) {
+            String agentDefinitionDigest, int publicChildAgentsVersion, String modelConfigDigest) {
+        public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
+                String title, String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence, long replayFloorSequence,
+                long createdAt, long updatedAt, Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile, String agentDefinitionDigest, int publicChildAgentsVersion) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence, replayFloorSequence,
+                    createdAt, updatedAt, deletedAt, version, workspace, approvalMode, toolProfile,
+                    agentDefinitionDigest, publicChildAgentsVersion, null);
+        }
         public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
                 String title, String status, String harnessBootId, String harnessEventEpoch,
                 long harnessLastEventId, long lastSequence, long replayFloorSequence,
@@ -64,7 +75,7 @@ public final class StoreModels {
                     harnessEventEpoch, harnessLastEventId, lastSequence,
                     replayFloorSequence, createdAt, updatedAt, deletedAt,
                     version, workspace, approvalMode, toolProfile,
-                    agentDefinitionDigest, publicChildAgentsVersion);
+                    agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest);
         }
     }
 
@@ -116,7 +127,7 @@ public final class StoreModels {
             }
             try {
                 return Arrays.equals(actorKey,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
             } catch (IllegalArgumentException error) {
                 return false;
             }

@@ -177,7 +177,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["queryWebShellActions"];
         delete?: never;
         options?: never;
@@ -194,7 +194,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["getWebShellAction"];
         delete?: never;
         options?: never;
@@ -211,7 +211,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
+        /** @description Serves Hosted permission and structured question Actions. Question answers preserve the original question and option IDs, allow one to four answers, and are bounded to 32 KiB of canonical UTF-8 JSON. vote_recorded remains planned. Reads follow Session authorization; the Session's recorded owner or any caller holding OPERATOR on the bound Workspace may respond; a Shell Session's Actions may be answered only by its recorded owner (an unbound Session with no recorded creator and no recorded create command answers to any caller in its tenant, matching its read ACL; a bound Session without an owner record answers through the create-command actor recorded for it, or through the Workspace role arm). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["respondWebShellAction"];
         delete?: never;
         options?: never;
@@ -1147,6 +1147,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-resources/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticResources"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-agent-trace/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticAgentTrace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1200,6 +1234,24 @@ export interface components {
             prompts: "complete" | "partial" | "failed" | "stale";
         };
         InputBlock: components["schemas"]["InputTextBlock"] | components["schemas"]["InputFileBlock"] | components["schemas"]["InputImageBlock"];
+        /** @description Immutable Session connection. Requires session-model-config/1, encrypted storage and an endpoint in the control-plane allowlist. UTF-8 limits: model 512 bytes, base_url 2048 bytes, api_key 4096 bytes, complete canonical JSON 8192 bytes. Secrets are never returned in public Session responses. Child Sessions inherit the configuration. Cannot be combined with modelId. */
+        SessionModelConfig: {
+            /** @enum {string} */
+            protocol: "openai" | "openai-responses" | "anthropic" | "gemini";
+            model: string;
+            /** @description Exact allowlisted HTTP(S) base URL without userinfo, query or fragment. */
+            base_url: string;
+            api_key: string;
+            generation_config?: {
+                temperature?: number;
+                top_p?: number;
+                top_k?: number;
+                max_tokens?: number;
+                presence_penalty?: number;
+                frequency_penalty?: number;
+                seed?: number;
+            };
+        };
         PublicArtifact: {
             /** @constant */
             object: "agent.artifact";
@@ -1261,6 +1313,7 @@ export interface components {
             agentId: string;
             /** @description Optional host-catalog model for a bound built-in qwen-code Session. Requires modelSelectionSupported. Persisted atomically before the first Turn and included in creation idempotency; omission preserves the default model and old digest. */
             modelId?: string;
+            modelConfig?: components["schemas"]["SessionModelConfig"];
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
             /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
@@ -1445,6 +1498,11 @@ export interface components {
              * @default false
              */
             childAgents?: boolean;
+            /**
+             * @description Passive persisted context, model statistics, resource inventory and direct child invocation queries are available. Each response declares its observation coverage independently of Runtime readiness or fresh Turn admission.
+             * @default false
+             */
+            diagnostics?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1648,7 +1706,7 @@ export interface components {
             questionId: string;
             optionIds?: string[];
             text?: string;
-        } | unknown | unknown;
+        } & (unknown | unknown);
         WebShellActionQuestion: {
             id: string;
             prompt: string;
@@ -1695,6 +1753,9 @@ export interface components {
             /** Format: int64 */
             expiresAt: number;
             decisionReceiptId?: string;
+            turnId?: string;
+            functionCallId: string;
+            toolName: string;
             questions: components["schemas"]["WebShellActionQuestion"][];
         } & unknown;
         /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. A requested native-tool Action may carry a bounded input preview when the producer supplies an input reference. Version 1 Actions and unavailable inputs omit it. Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
@@ -1762,7 +1823,7 @@ export interface components {
             /** @default 20 */
             limit?: number;
             /**
-             * @description Include pending permission Actions of this public root Session and its direct children; each Action retains its actual owning sessionId.
+             * @description Include pending Actions of this public root Session and its direct children; each Action retains its actual owning sessionId.
              * @default false
              */
             includeChildren?: boolean;
@@ -2678,6 +2739,112 @@ export interface components {
             workspaceId: string;
             worktreeId: string;
             idempotencyKey: string;
+        };
+        ManagedDiagnosticSkill: {
+            name: string;
+            description: string;
+            /** @enum {string} */
+            kind: "skill" | "command";
+            /** @enum {string} */
+            origin: "base" | "extension";
+            extensionId: string | null;
+            modelInvocable: boolean;
+            userInvocable: boolean;
+        };
+        ManagedDiagnosticMcpServer: {
+            serverId: string;
+            serverRevision: number;
+            /** @enum {string} */
+            origin: "base" | "extension" | "independent";
+            extensionId: string | null;
+            /** @enum {string} */
+            selectionState: "enabled" | "disabled" | "removed" | "unknown";
+            /** @constant */
+            liveState: "unknown";
+            catalogRevision: number | null;
+            catalogServerRevision: number | null;
+            attemptRevision: number | null;
+            attemptServerRevision: number | null;
+            /** @description Last persisted configuration attempt state, distinct from physical execution evidence. */
+            lastAttemptState: string | null;
+            lastExecutionState: string | null;
+            releaseState: string | null;
+            historical: boolean;
+            discovery: {
+                /** @enum {string} */
+                tools: "complete" | "partial" | "failed" | "stale" | "unknown";
+                /** @enum {string} */
+                resources: "complete" | "partial" | "failed" | "stale" | "unknown";
+                /** @enum {string} */
+                prompts: "complete" | "partial" | "failed" | "stale" | "unknown";
+            };
+            tools: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+            resources: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+            prompts: {
+                name: string;
+                description?: string;
+                uri?: string;
+                mimeType?: string;
+            }[];
+        };
+        ManagedDiagnosticResources: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @enum {string} */
+            configCoverage: "complete" | "partial";
+            /** @enum {string} */
+            historyCoverage: "complete" | "partial";
+            activeConfigRevision: number | null;
+            activeOperationPhase: string | null;
+            outputTruncated: boolean;
+            skills: components["schemas"]["ManagedDiagnosticSkill"][];
+            servers: components["schemas"]["ManagedDiagnosticMcpServer"][];
+        };
+        ManagedDiagnosticAgentInvocation: {
+            taskId: string;
+            parentSessionId: string;
+            childSessionId: string | null;
+            description: string | null;
+            state: string;
+            runtimeState: string | null;
+            createdAt: number;
+            startedAt: number | null;
+            settledAt: number | null;
+        };
+        ManagedDiagnosticAgentTrace: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            scope: "direct-invocations";
+            items: components["schemas"]["ManagedDiagnosticAgentInvocation"][];
+            nextCursor: string | null;
+            hasMore: boolean;
+        };
+        WebShellDiagnosticTraceRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string | null;
+            limit?: number | null;
         };
     };
     responses: {
@@ -5058,6 +5225,68 @@ export interface operations {
             409: components["responses"]["MessageProjectionChanged"];
             413: components["responses"]["MessagePageTooLarge"];
             503: components["responses"]["MessageProjectionPending"];
+        };
+    };
+    querySessionDiagnosticResources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Persisted Skills and MCP selection and bounded discovery history. This does not probe live connectivity; partial history remains explicit. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticResources"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionDiagnosticAgentTrace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellDiagnosticTraceRequest"];
+            };
+        };
+        responses: {
+            /** @description Direct child-agent invocations, filtered before pagination. A child link is returned only after verifying the relationship and child read access. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticAgentTrace"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
 }
