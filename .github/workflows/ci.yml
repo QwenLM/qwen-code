@@ -1198,14 +1198,14 @@ jobs:
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      # Four shards pull this same artifact at once, so the cap has to clear
-      # the slow tail rather than the median: on main four shards finished
-      # inside a minute, three needed between 2m40s and just under five
-      # minutes, and one exceeded the old five-minute cap on two consecutive
-      # runs, which skipped the unpack and failed the required check. Fifteen
-      # minutes leaves that measured tail about three times the headroom.
-      # The eight-to-four reduction halves the concurrent fetches, which is
-      # the fix the earlier tail recommended.
+      # Four shards now pull this same artifact at once, down from eight, so
+      # the cap has to clear the slow tail rather than the median. Under that
+      # earlier eight-way split four shards finished inside a minute, three
+      # needed between 2m40s and just under five minutes, and one exceeded the
+      # old five-minute cap on two consecutive runs, which skipped the unpack
+      # and failed the required check. Fifteen minutes leaves that measured
+      # tail about three times the headroom; halving the concurrent fetches
+      # only shortens the tail further.
       - name: 'Download the built tree'
         id: 'download_tree'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -2226,8 +2226,11 @@ jobs:
       matrix:
         shard: [1, 2]
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
-    # the smoke tests and artifact cleanup after installation.
-    timeout-minutes: 60
+    # the smoke tests and artifact cleanup after installation. Two shards run
+    # half the suite each (~23-24 min observed per shard) rather than a
+    # quarter, so the cap rises from 60 to 75 to keep the headroom the
+    # four-way split had for a slow install or download tail.
+    timeout-minutes: 75
     permissions:
       contents: 'read'
     steps:

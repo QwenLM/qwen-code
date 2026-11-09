@@ -83,7 +83,7 @@ flowchart LR
 | bundle 检查放进 `test_build`，不新开 job  | 新 job 要复制约 150 行 checkout 前的 prelude；这段在 checkout 之前执行，没法写成本地 composite action                              |
 | 缓存 key 去掉架构，而不是给主机重新打标签 | 混合 pool 是有意的；唯一的 native 产物重新拷一次成本很低                                                                           |
 | 按 base 提交恢复，而不是 merge-base       | `pull_request.base.sha` 就在事件 payload 里，而且 `main` push 正是用这个 key 保存的；merge-base 要么需要拉历史，要么需要额外调 API |
-| 集成测试分 3 片                           | 约 17 分钟的串行执行变成每片约 6 分钟，和单测 lane 持平                                                                            |
+| 集成测试分 3 片                           | 约 17 分钟的串行执行变成每片约 6 分钟；单测 lane 后来已 8→4 重新分片，不再与之持平                                                 |
 
 ## 风险
 
@@ -104,4 +104,4 @@ flowchart LR
 - 每个非草稿 pull request 上，4 个 required check 名称都会上报结果。
 - no-AK 集成测试和 web-shell smoke 不再执行构建。
 - `Lint & Static` 不再构建或打包。
-- `main` 保存了 `v2` 缓存条目之后，取 20 次 run，required 路径中位数低于 15 分钟。
+- `main` 保存了 `v2` 缓存条目之后，取 20 次 run，required 路径中位数低于 15 分钟。此目标已被后续出于车道可靠性的分片缩减（单测 8→4、smoke 4→2）取代：两分片的 smoke lane 如今是最长杆，约 25–30 分钟，关键路径目标让位于可靠性。

@@ -309,7 +309,7 @@ const runnerOn = (job, runner) => {
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The unsharded suite outgrew 60 minutes on hosted runners: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
-  // Each shard runs an eighth of it, beside one build of the tree.
+  // Each shard runs a quarter of it, beside one build of the tree.
   for (const runner of [ECS_RUNNER, HOSTED_RUNNER, '']) {
     expect(timeoutMinutesOn('test_build', runner)).toBe(45);
     expect(timeoutMinutesOn('test', runner)).toBe(60);
@@ -406,6 +406,12 @@ it('reports the required Linux check only when the build and every shard pass', 
   );
   expect(run.env.UNIT_TEST_SHARD).toBe(
     `\${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length}`,
+  );
+  // The per-shard job names publish the same denominator to the check list,
+  // the developer docs and the autofix evidence lane. Derive it from the
+  // matrix so a retune cannot widen the matrix while the name stays behind.
+  expect(ci.jobs.test.name).toBe(
+    `Linux unit tests (shard \${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length})`,
   );
 });
 
@@ -560,6 +566,11 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   );
   expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([1, 2]);
   expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
+  // Same denominator contract as the unit lane: the per-shard name must
+  // track the matrix, not sit behind it on the next retune.
+  expect(ci.jobs.web_shell_e2e_smoke.name).toBe(
+    `web-shell E2E Smoke (shard \${{ matrix.shard }}/${ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard.length})`,
+  );
   const result = ci.jobs.web_shell_e2e_smoke_result;
   expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
   expect(result.needs).toEqual([
@@ -594,11 +605,12 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
   expect(transcript.if).toBe('${{ matrix.shard == 1 }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
-  // 60-minute job for transcript/smoke tests and artifact upload, while the
-  // install step itself stays bounded.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  // 75-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded. Two shards run half the suite each,
+  // so the cap carries the headroom the four-way split had at 60.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(75);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(75);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(75);
   const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
   );

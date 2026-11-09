@@ -127,7 +127,7 @@ host.
 | Run the bundle checks in `test_build`, not in a new job       | A new job would duplicate the ~150-line pre-checkout prelude, which cannot be a local composite action because it runs before checkout |
 | Drop the arch from the cache key instead of relabelling hosts | The mixed pool is intentional; the one native output is cheap to recopy                                                                |
 | Restore by base commit, not merge-base                        | `pull_request.base.sha` is in the event payload and its `main` push saved exactly that key; merge-base needs history or an API call    |
-| Three integration shards                                      | ~17 minutes of serial files become about 6 per shard, matching the unit lane                                                           |
+| Three integration shards                                      | ~17 minutes of serial files become about 6 per shard; the unit lane was since re-sharded 8→4, so it no longer matches this             |
 
 ## Risks
 
@@ -163,4 +163,6 @@ host.
 - The no-AK integration gate and the web-shell smoke no longer run a build.
 - `Lint & Static` no longer builds or bundles.
 - After `main` has saved `v2` entries, the required-path median drops below 15
-  minutes over 20 runs.
+  minutes over 20 runs. Superseded by the later shard reduction (unit 8→4,
+  smoke 4→2) for lane reliability: the two-shard smoke lane is now the longest
+  pole at ~25–30 minutes, so the critical-path target yields to reliability.
