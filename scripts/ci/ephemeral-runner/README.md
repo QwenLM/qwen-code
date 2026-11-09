@@ -191,13 +191,17 @@ recovery matches registrations under both the bare display name written by
 older versions and the current suffixed one; an ambiguous match still blocks
 the slot rather than deleting anything. A label-recovered match (no recorded
 registration name or id) is only deleted when GitHub explicitly reports it
-offline; an online or status-less match keeps the slot blocked and retries,
-because it may belong to a live runner outside this host's view.
-A runner deletion GitHub rejects (for example while it still reports the runner
-busy) keeps the slot state and is retried, instead of dropping the only record
+offline; an online, status-less or unknown-status match blocks the slot
+instead, because it may belong to a live runner outside this host's view. That
+refusal happens before the resources are removed: nothing about a
+label-recovered identity is written to a state file, so the leftover container
+or network is the only thing that brings the slot back into cleanup on the next
+cycle. A runner deletion GitHub rejects (for example while it still reports the
+runner busy) keeps either the slot state or, for a label-recovered identity,
+the retained resources, and is retried, instead of dropping the only record
 that can remove the registration. The identity-less sweep deletes
-registrations before removing the resources, so a rejected deletion is still
-retried on the next cycle while the pile remains.
+registrations before removing the resources for the same reason: a rejected
+deletion is still retried on the next cycle while the pile remains.
 
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service

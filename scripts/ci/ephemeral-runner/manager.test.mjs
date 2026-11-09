@@ -1573,30 +1573,85 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
   );
 });
 
-test('label recovery never deletes an online or status-less registration', async (t) => {
+test('a rejected label-recovered deletion retries from the retained resources', async (t) => {
+  // Nothing about a label-recovered identity is persisted, so a rejected
+  // DELETE can only be retried if the resources survive the throw. Cycle 2
+  // rebuilds nothing and must retry the same registration from the pile cycle
+  // 1 left behind.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  f.setFailDelete(true, 422);
+  const manager = createManager(f.config, { command: f.command });
+  const deletes = () =>
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ).length;
+  await assert.rejects(
+    manager.cycle(1),
+    /Runner 77 deletion was rejected \(HTTP 422\)/,
+    'cycle 1 reports the rejected deletion it cannot complete yet',
+  );
+  assert.equal(deletes(), 1, 'cycle 1 attempted this registration once');
+  assert.equal(
+    f.runnerList().length,
+    1,
+    'the rejected registration survives cycle 1',
+  );
+  assert.ok(
+    !f.calls.some((c) => c.program === 'docker' && c.args[0] === 'rm'),
+    'the container is retained so the next cycle still reaches the retry',
+  );
+  f.setFailDelete(false);
+  await manager.cycle(1);
+  assert.equal(deletes(), 2, 'cycle 2 retries the same registration');
+  assert.deepEqual(
+    f
+      .runnerList()
+      .map((entry) => entry.id)
+      .filter((id) => id === 77),
+    [],
+    'the registration is gone once the retry succeeds',
+  );
+});
+
+test('label recovery never deletes an online or unconfirmed registration', async (t) => {
   // A label-recovered identity is not state-recorded: an online match may
-  // belong to a live runner outside this host's view, and a record with no
-  // status must fail closed. The first cycle removes the orphan resources
-  // but must not touch the registration or replenish; a later cycle with
-  // the registration still present must keep blocking, never delete it.
-  for (const status of ['online', undefined]) {
+  // belong to a live runner outside this host's view, and a missing, null or
+  // unknown status must fail closed. The gate runs before the resources are
+  // removed, so the leftover container alone — never a rebuilt pile and never
+  // a persisted state file — keeps the next cycle reaching the gate.
+  for (const status of ['online', undefined, null, 'busy']) {
+    const label = status === undefined ? 'status-less' : `status ${status}`;
     const f = await fixture(t);
-    const orphanLabels = {
+    f.addOrphanContainer({
       'qwen.pool': 'trial',
       'qwen.slot': '1',
       'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
-    };
-    f.addOrphanContainer(orphanLabels);
+    });
     f.setRunner({
       id: 77,
       name: 'ecs-qwen-trial-01-cafe1234',
       status,
     });
     const manager = createManager(f.config, { command: f.command });
-    await assert.rejects(manager.cycle(1), /not reported offline/);
-    // Re-create the pile so the second cycle still reaches label recovery.
-    f.addOrphanContainer(orphanLabels);
-    await assert.rejects(manager.cycle(1), /not reported offline/);
+    await assert.rejects(
+      manager.cycle(1),
+      /not reported offline/,
+      `cycle 1 refuses to delete a ${label} registration`,
+    );
+    await assert.rejects(
+      manager.cycle(1),
+      /not reported offline/,
+      `cycle 2 reaches the gate again with no pile rebuilt (${label})`,
+    );
     assert.ok(
       !f.calls.some(
         (c) =>
@@ -1604,13 +1659,38 @@ test('label recovery never deletes an online or status-less registration', async
           c.args.includes('DELETE') &&
           c.args.includes('/repos/owner/repo/actions/runners/77'),
       ),
-      `a ${status ?? 'status-less'} registration survives label recovery`,
+      `a ${label} registration is never deleted`,
+    );
+    assert.equal(
+      f.calls.filter(
+        (c) =>
+          c.program === 'gh' &&
+          c.args.includes(
+            '/repos/owner/repo/actions/runners/generate-jitconfig',
+          ),
+      ).length,
+      0,
+      `no JIT request while a ${label} registration survives`,
     );
     assert.equal(
       f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
         .length,
       0,
-      'no replacement while the unconfirmed registration survives',
+      `no replacement while a ${label} registration survives`,
+    );
+    assert.ok(
+      !f.calls.some(
+        (c) =>
+          c.program === 'docker' &&
+          c.args[0] === 'rm' &&
+          c.args.includes('container-orphan-0'),
+      ),
+      `the gate refuses before the orphan container is removed (${label})`,
+    );
+    await assert.rejects(
+      readFile(join(f.config.stateDir, 'slot-1.json')),
+      { code: 'ENOENT' },
+      `no slot state is persisted to carry a ${label} identity`,
     );
   }
 });

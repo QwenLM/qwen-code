@@ -487,6 +487,105 @@ export function createManager(config, dependencies = {}) {
         }
       }
     }
+    // Reconcile the slot's GitHub registration. Both call sites below use it,
+    // but they run at different points: an identity that exists only in the
+    // resource labels is reconciled while its resources still exist, a
+    // state-anchored identity after the container is stopped and removed. A
+    // refused or rejected deletion throws, so the call site decides what
+    // survives to retry — see `resourceAnchoredIdentity`.
+    const reconcileRegistration = async () => {
+      const all = await listRunners();
+      // A recorded runnerName is exact. A label-recovered identity carries
+      // only the instance name: main registered under the bare display name,
+      // this version under a suffixed one, so match either form and let the
+      // runnerId checks below reject anything ambiguous. This is the third
+      // copy of the naming scheme (`validRunnerName` in the slot-state
+      // validation is the reference); the three change together.
+      const matches = state.runnerName
+        ? (runner) => runner.name === state.runnerName
+        : (runner) =>
+            runner.name === state.name ||
+            runner.name === runnerName(slot) ||
+            (typeof runner.name === 'string' &&
+              runner.name.startsWith(`${runnerName(slot)}-`) &&
+              /^[0-9a-f]{8}$/.test(
+                runner.name.slice(runnerName(slot).length + 1),
+              ));
+      const runners = all.filter(matches);
+      if (
+        state.runnerId &&
+        (runners.some((runner) => runner.id !== state.runnerId) ||
+          all.some(
+            (runner) => runner.id === state.runnerId && !matches(runner),
+          ))
+      )
+        throw new Error(
+          'Runner identity mismatch; manual reconciliation required',
+        );
+      if (
+        runners.length > 1 ||
+        runners.some(
+          (runner) => !Number.isSafeInteger(runner.id) || runner.id < 1,
+        )
+      )
+        throw new Error(
+          'Ambiguous runner identity; manual reconciliation required',
+        );
+      if (state.uncertain && !runners.length)
+        throw new Error(
+          'JIT response was lost; runner not found, manual reconciliation required',
+        );
+      for (const runner of runners) {
+        // A label-recovered identity (no recorded runnerName or runnerId) is
+        // not state-anchored: an online match may belong to a live runner
+        // outside this host's view, and a missing or unknown status must fail
+        // closed. Nothing about this identity is persisted, so the check only
+        // retries because the call below runs before the resources are
+        // removed: the leftover pile is what brings the next cycle back here.
+        // Identity checks above still see every match, so a mismatch stays
+        // blocking.
+        if (!state.runnerName && !state.runnerId && runner.status !== 'offline')
+          throw new Error(
+            `Runner ${runner.id} is not reported offline; keeping the recovered resources to retry`,
+          );
+        try {
+          await gh([
+            '-X',
+            'DELETE',
+            `/repos/${config.repo}/actions/runners/${runner.id}`,
+          ]);
+        } catch (error) {
+          if (error.status === 404) continue;
+          // GitHub rejects deletion while it still considers the runner busy.
+          // Fail the cycle instead of dropping the identity: the retained slot
+          // state — or, for a label-recovered identity, the retained resources
+          // — comes back to this same check on the next cycle, instead of
+          // orphaning a registration that blocks its own replacement. Carry
+          // the status through the rewrap: the retry loop picks the
+          // rate-limit ladder from it, and a 403/429 DELETE is exactly the
+          // shape a rate-limit storm produces here.
+          const rejected = new Error(
+            `Runner ${runner.id} deletion was rejected${
+              error.status ? ` (HTTP ${error.status})` : ''
+            }; retrying on the next cycle`,
+            { cause: error },
+          );
+          rejected.status = error.status;
+          throw rejected;
+        }
+      }
+    };
+    // A label-recovered identity lives only in the resource labels, never in a
+    // slot state file. Once the container and network are gone the next cycle
+    // finds nothing to clean up and just replenishes the slot, leaking the
+    // registration for good. Reconcile it while the resources still exist, so
+    // a refusal or a rejected deletion leaves the pile that keeps this slot
+    // re-entering cleanup(). A state-anchored identity stays on the later
+    // call site: deleting its registration before the container is stopped
+    // would hit GitHub's "runner is busy" rejection for every watchdog kill.
+    const resourceAnchoredIdentity =
+      Boolean(state?.name) && !state.runnerName && !state.runnerId;
+    if (resourceAnchoredIdentity) await reconcileRegistration();
     // A container whose storage layer is gone (dockerd restart left
     // `RWLayer ... is unexpectedly nil`) can never yield logs or a `_diag`
     // archive, and it may vanish from under us mid-cleanup. Detect that
@@ -564,84 +663,7 @@ export function createManager(config, dependencies = {}) {
       throw new Error(
         'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
       );
-    if (state?.name) {
-      const all = await listRunners();
-      // A recorded runnerName is exact. A label-recovered identity carries
-      // only the instance name: main registered under the bare display name,
-      // this version under a suffixed one, so match either form and let the
-      // runnerId checks below reject anything ambiguous. This is the third
-      // copy of the naming scheme (`validRunnerName` in the slot-state
-      // validation is the reference); the three change together.
-      const matches = state.runnerName
-        ? (runner) => runner.name === state.runnerName
-        : (runner) =>
-            runner.name === state.name ||
-            runner.name === runnerName(slot) ||
-            (typeof runner.name === 'string' &&
-              runner.name.startsWith(`${runnerName(slot)}-`) &&
-              /^[0-9a-f]{8}$/.test(
-                runner.name.slice(runnerName(slot).length + 1),
-              ));
-      const runners = all.filter(matches);
-      if (
-        state.runnerId &&
-        (runners.some((runner) => runner.id !== state.runnerId) ||
-          all.some(
-            (runner) => runner.id === state.runnerId && !matches(runner),
-          ))
-      )
-        throw new Error(
-          'Runner identity mismatch; manual reconciliation required',
-        );
-      if (
-        runners.length > 1 ||
-        runners.some(
-          (runner) => !Number.isSafeInteger(runner.id) || runner.id < 1,
-        )
-      )
-        throw new Error(
-          'Ambiguous runner identity; manual reconciliation required',
-        );
-      if (state.uncertain && !runners.length)
-        throw new Error(
-          'JIT response was lost; runner not found, manual reconciliation required',
-        );
-      for (const runner of runners) {
-        // A label-recovered identity (no recorded runnerName or runnerId)
-        // is not state-anchored: an online match may belong to a live
-        // runner outside this host's view, and a missing or unknown status
-        // must fail closed. Keep the resources and state so the next cycle
-        // retries, exactly like a rejected deletion. Identity checks
-        // above still see every match, so a mismatch stays blocking.
-        if (!state.runnerName && !state.runnerId && runner.status !== 'offline')
-          throw new Error(
-            `Runner ${runner.id} is not reported offline; keeping slot state to retry`,
-          );
-        try {
-          await gh([
-            '-X',
-            'DELETE',
-            `/repos/${config.repo}/actions/runners/${runner.id}`,
-          ]);
-        } catch (error) {
-          if (error.status === 404) continue;
-          // GitHub rejects deletion while it still considers the runner busy.
-          // Keep the state so the next cycle retries the same identity instead
-          // of orphaning a registration that blocks its own replacement.
-          // Carry the status through the rewrap: the retry loop picks the
-          // rate-limit ladder from it, and a 403/429 DELETE is exactly the
-          // shape a rate-limit storm produces here.
-          const rejected = new Error(
-            `Runner ${runner.id} deletion was rejected${
-              error.status ? ` (HTTP ${error.status})` : ''
-            }; retaining slot state to retry`,
-            { cause: error },
-          );
-          rejected.status = error.status;
-          throw rejected;
-        }
-      }
-    }
+    if (state?.name && !resourceAnchoredIdentity) await reconcileRegistration();
     await rm(slotPath(slot), { force: true });
     log(`slot ${slot}: cleaned`);
   }
