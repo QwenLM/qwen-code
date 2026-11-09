@@ -47,7 +47,47 @@ const BROWSER_NOTIFICATION_KEYS = [
   'temporary',
 ].map((suffix) => `browserNotifications.${suffix}`);
 
+const SCHEDULED_TASK_DELIVERY_KEYS = [
+  'channel',
+  'off',
+  'hint',
+  'unavailable',
+  'discardChanges',
+  'perRun',
+  'required',
+  'whitespace',
+  'trimWhitespace',
+  'loading',
+  'loadingContacts',
+  'channelsFailed',
+  'noChannels',
+  'targetUnavailable',
+  'notObserved',
+  'suggestion',
+  'manual',
+  'contactsFailed',
+  'suggestionsHint',
+  'type',
+  'id',
+  'user',
+  'chat',
+  'cardPrefix',
+].map((suffix) => `scheduledTasks.delivery.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('keeps every scheduled-task delivery translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of SCHEDULED_TASK_DELIVERY_KEYS) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(en(key));
+    }
+    expect(zh('scheduledTasks.delivery.perRun')).toContain(
+      '每次新会话不支持频道投递',
+    );
+  });
+
   it('keeps every browser notification translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

@@ -42,6 +42,15 @@ export interface JavaManagedAgentProviderOptions
   saveArtifact?: ManagedArtifactSave;
 }
 
+function requireDiagnosticSnapshot<
+  T extends { schemaVersion: 1; sessionId: string },
+>(snapshot: T, sessionId: string): T {
+  if (snapshot?.schemaVersion !== 1 || snapshot.sessionId !== sessionId) {
+    throw new Error('Managed diagnostics identity mismatch');
+  }
+  return snapshot;
+}
+
 type JavaCommandOperation = Awaited<
   ReturnType<JavaManagedAgentClient['respondAction']>
 >;
@@ -389,6 +398,23 @@ export function createJavaManagedAgentProvider(
         return snapshot;
       },
     },
+    diagnostics: {
+      async getResources(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticResources(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listAgentTrace(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listDiagnosticAgentTrace(
+            { sessionId, cursor: request.cursor, limit: request.limit },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
+    },
     tasks: {
       list: (sessionId, request) =>
         client.listTasks(
@@ -409,221 +435,206 @@ export function createJavaManagedAgentProvider(
           { sessionId, taskId, after: request.after, limit: request.limit },
           request.signal,
         ),
-      ...(options.productScope?.trim()
-        ? {
-            cancel: {
-              async submit(sessionId, taskId, command) {
-                return requireTaskCancelOperation(
-                  await client.cancelTask(
-                    {
-                      sessionId,
-                      taskId,
-                      idempotencyKey: command.idempotencyKey,
-                      requestId: managedRequestId(),
-                    },
-                    command.signal,
-                  ),
-                  sessionId,
-                  taskId,
-                );
+      cancel: {
+        async submit(sessionId, taskId, command) {
+          return requireTaskCancelOperation(
+            await client.cancelTask(
+              {
+                sessionId,
+                taskId,
+                idempotencyKey: command.idempotencyKey,
+                requestId: managedRequestId(),
               },
-              async query(sessionId, taskId, operationId, request) {
-                const operation = requireTaskCancelOperation(
-                  await client.queryOperation(
-                    { sessionId, operationId },
-                    request.signal,
-                  ),
-                  sessionId,
-                  taskId,
-                );
-                if (operation.operationId !== operationId)
-                  throw new Error('Task cancel operation identity mismatch');
-                return operation;
-              },
-            },
-          }
-        : {}),
+              command.signal,
+            ),
+            sessionId,
+            taskId,
+          );
+        },
+        async query(sessionId, taskId, operationId, request) {
+          const operation = requireTaskCancelOperation(
+            await client.queryOperation(
+              { sessionId, operationId },
+              request.signal,
+            ),
+            sessionId,
+            taskId,
+          );
+          if (operation.operationId !== operationId)
+            throw new Error('Task cancel operation identity mismatch');
+          return operation;
+        },
+      },
     },
-    ...(options.productScope?.trim()
-      ? {
-          approvalChange: {
-            async queryOptions(sessionId, request) {
-              const result = await client.getSessionApproval(
-                sessionId,
-                request.signal,
-              );
-              if (
-                !isManagedApprovalMode(result.approvalMode) ||
-                !Number.isSafeInteger(result.approvalRevision) ||
-                result.approvalRevision < 0 ||
-                typeof result.supported !== 'boolean' ||
-                !Array.isArray(result.availableApprovalModes) ||
-                !result.availableApprovalModes.every(isManagedApprovalMode) ||
-                !result.availableApprovalModes.includes(result.approvalMode) ||
-                (result.permissionRulesSupported !== undefined &&
-                  typeof result.permissionRulesSupported !== 'boolean')
-              )
-                throw new Error('Invalid Session approval options');
-              return {
-                approvalMode: result.approvalMode,
-                approvalRevision: result.approvalRevision,
-                availableApprovalModes: result.availableApprovalModes,
-                supported: result.supported,
-                ...(result.permissionRulesSupported === true
-                  ? { permissionRulesSupported: true }
-                  : {}),
-                ...(result.permissionRules === undefined
-                  ? {}
-                  : {
-                      permissionRules: parseManagedPermissionRules(
-                        result.permissionRules,
-                      ),
-                    }),
-                ...(result.liveSupported === true
-                  ? { liveSupported: true }
-                  : {}),
-                ...(typeof result.planMode === 'boolean'
-                  ? { planMode: result.planMode }
-                  : {}),
-                ...(typeof result.planModeSupported === 'boolean'
-                  ? { planModeSupported: result.planModeSupported }
-                  : {}),
-              };
-            },
-            async submit(sessionId, request, command) {
-              const { permissionRules, ...selection } = request;
-              const result = await client.changeApproval(
-                {
-                  ...selection,
-                  ...(permissionRules === undefined
-                    ? {}
-                    : {
-                        permissionRules: {
-                          allow: [...permissionRules.allow],
-                          ask: [...permissionRules.ask],
-                          deny: [...permissionRules.deny],
-                        },
-                      }),
-                  sessionId,
-                  idempotencyKey: command.idempotencyKey,
-                  requestId: command.requestId,
-                },
-                command.signal,
-              );
-              if (
-                result.sessionId !== sessionId ||
-                result.approvalMode !== request.approvalMode ||
-                !Number.isSafeInteger(result.approvalRevision) ||
-                result.approvalRevision <= request.expectedRevision ||
-                typeof result.replayed !== 'boolean'
-              )
-                throw new Error('Approval change identity mismatch');
-              return {
-                sessionId: result.sessionId,
-                approvalMode: result.approvalMode,
-                approvalRevision: result.approvalRevision,
-                replayed: result.replayed,
-                ...(result.permissionRules === undefined
-                  ? {}
-                  : {
-                      permissionRules: parseManagedPermissionRules(
-                        result.permissionRules,
-                      ),
-                    }),
-                ...(typeof result.planMode === 'boolean'
-                  ? { planMode: result.planMode }
-                  : {}),
-              };
-            },
-          },
-          modelChange: {
-            async queryOptions(sessionId, request) {
-              const result = await client.getSessionModels(
-                sessionId,
-                request.signal,
-              );
-              const selection = modelSelection(result.modelSelection);
-              if (
-                !selection ||
-                typeof result.supported !== 'boolean' ||
-                !Array.isArray(result.models) ||
-                result.models.some(
-                  (item) =>
-                    !modelId(item.modelId) ||
-                    typeof item.label !== 'string' ||
-                    !item.label.trim(),
-                ) ||
-                new Set(result.models.map((item) => item.modelId)).size !==
-                  result.models.length
-              )
-                throw new Error('Invalid Session model options');
-              return {
-                supported: result.supported,
-                modelSelection: selection,
-                models: result.models.map(({ modelId, label }) => ({
-                  modelId,
-                  label,
-                })),
-              };
-            },
-            async submit(sessionId, request, command) {
-              const result = await client.changeModel(
-                {
-                  ...request,
-                  sessionId,
-                  idempotencyKey: command.idempotencyKey,
-                  requestId: managedRequestId(),
-                },
-                command.signal,
-              );
-              const selection = modelSelection(result.modelSelection);
-              if (
-                result.sessionId !== sessionId ||
-                !selection ||
-                selection.modelId !== request.modelId ||
-                selection.revision <= request.expectedRevision ||
-                typeof result.replayed !== 'boolean'
-              )
-                throw new Error('Model change identity mismatch');
-              return {
-                sessionId,
-                modelSelection: selection,
-                replayed: result.replayed,
-              };
-            },
-          },
-          contextCompression: {
-            async submit(sessionId, request, command) {
-              return requireContextCompressionOperation(
-                await client.compressContext(
-                  {
-                    ...request,
-                    sessionId,
-                    idempotencyKey: command.idempotencyKey,
-                    requestId: managedRequestId(),
+    approvalChange: {
+      async queryOptions(sessionId, request) {
+        const result = await client.getSessionApproval(
+          sessionId,
+          request.signal,
+        );
+        if (
+          !isManagedApprovalMode(result.approvalMode) ||
+          !Number.isSafeInteger(result.approvalRevision) ||
+          result.approvalRevision < 0 ||
+          typeof result.supported !== 'boolean' ||
+          !Array.isArray(result.availableApprovalModes) ||
+          !result.availableApprovalModes.every(isManagedApprovalMode) ||
+          !result.availableApprovalModes.includes(result.approvalMode) ||
+          (result.permissionRulesSupported !== undefined &&
+            typeof result.permissionRulesSupported !== 'boolean')
+        )
+          throw new Error('Invalid Session approval options');
+        return {
+          approvalMode: result.approvalMode,
+          approvalRevision: result.approvalRevision,
+          availableApprovalModes: result.availableApprovalModes,
+          supported: result.supported,
+          ...(result.permissionRulesSupported === true
+            ? { permissionRulesSupported: true }
+            : {}),
+          ...(result.permissionRules === undefined
+            ? {}
+            : {
+                permissionRules: parseManagedPermissionRules(
+                  result.permissionRules,
+                ),
+              }),
+          ...(result.liveSupported === true ? { liveSupported: true } : {}),
+          ...(typeof result.planMode === 'boolean'
+            ? { planMode: result.planMode }
+            : {}),
+          ...(typeof result.planModeSupported === 'boolean'
+            ? { planModeSupported: result.planModeSupported }
+            : {}),
+        };
+      },
+      async submit(sessionId, request, command) {
+        const { permissionRules, ...selection } = request;
+        const result = await client.changeApproval(
+          {
+            ...selection,
+            ...(permissionRules === undefined
+              ? {}
+              : {
+                  permissionRules: {
+                    allow: [...permissionRules.allow],
+                    ask: [...permissionRules.ask],
+                    deny: [...permissionRules.deny],
                   },
-                  command.signal,
-                ),
-                sessionId,
-              );
-            },
-            async query(sessionId, operationId, request) {
-              const operation = requireContextCompressionOperation(
-                await client.queryOperation(
-                  { sessionId, operationId },
-                  request.signal,
-                ),
-                sessionId,
-              );
-              if (operation.operationId !== operationId)
-                throw new Error(
-                  'Context compression operation identity mismatch',
-                );
-              return operation;
-            },
+                }),
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: command.requestId,
           },
-        }
-      : {}),
+          command.signal,
+        );
+        if (
+          result.sessionId !== sessionId ||
+          result.approvalMode !== request.approvalMode ||
+          !Number.isSafeInteger(result.approvalRevision) ||
+          result.approvalRevision <= request.expectedRevision ||
+          typeof result.replayed !== 'boolean'
+        )
+          throw new Error('Approval change identity mismatch');
+        return {
+          sessionId: result.sessionId,
+          approvalMode: result.approvalMode,
+          approvalRevision: result.approvalRevision,
+          replayed: result.replayed,
+          ...(result.permissionRules === undefined
+            ? {}
+            : {
+                permissionRules: parseManagedPermissionRules(
+                  result.permissionRules,
+                ),
+              }),
+          ...(typeof result.planMode === 'boolean'
+            ? { planMode: result.planMode }
+            : {}),
+        };
+      },
+    },
+    modelChange: {
+      async queryOptions(sessionId, request) {
+        const result = await client.getSessionModels(sessionId, request.signal);
+        const selection = modelSelection(result.modelSelection);
+        if (
+          !selection ||
+          typeof result.supported !== 'boolean' ||
+          !Array.isArray(result.models) ||
+          result.models.some(
+            (item) =>
+              !modelId(item.modelId) ||
+              typeof item.label !== 'string' ||
+              !item.label.trim(),
+          ) ||
+          new Set(result.models.map((item) => item.modelId)).size !==
+            result.models.length
+        )
+          throw new Error('Invalid Session model options');
+        return {
+          supported: result.supported,
+          modelSelection: selection,
+          models: result.models.map(({ modelId, label }) => ({
+            modelId,
+            label,
+          })),
+        };
+      },
+      async submit(sessionId, request, command) {
+        const result = await client.changeModel(
+          {
+            ...request,
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: managedRequestId(),
+          },
+          command.signal,
+        );
+        const selection = modelSelection(result.modelSelection);
+        if (
+          result.sessionId !== sessionId ||
+          !selection ||
+          selection.modelId !== request.modelId ||
+          selection.revision <= request.expectedRevision ||
+          typeof result.replayed !== 'boolean'
+        )
+          throw new Error('Model change identity mismatch');
+        return {
+          sessionId,
+          modelSelection: selection,
+          replayed: result.replayed,
+        };
+      },
+    },
+    contextCompression: {
+      async submit(sessionId, request, command) {
+        return requireContextCompressionOperation(
+          await client.compressContext(
+            {
+              ...request,
+              sessionId,
+              idempotencyKey: command.idempotencyKey,
+              requestId: managedRequestId(),
+            },
+            command.signal,
+          ),
+          sessionId,
+        );
+      },
+      async query(sessionId, operationId, request) {
+        const operation = requireContextCompressionOperation(
+          await client.queryOperation(
+            { sessionId, operationId },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (operation.operationId !== operationId)
+          throw new Error('Context compression operation identity mismatch');
+        return operation;
+      },
+    },
     actions: {
       async listPending(sessionId, request) {
         const actions: ManagedAgentPendingAction[] = [];
@@ -1067,6 +1078,9 @@ function toSessionSummary(
         : {}),
       ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
+      ...(session.capabilities?.diagnostics === true
+        ? { diagnostics: true }
+        : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
         sessionActive &&

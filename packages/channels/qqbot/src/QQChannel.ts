@@ -90,6 +90,25 @@ import {
 /** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
 const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
 
+/**
+ * Marks a forwarded bot's message as machine-authored: `[bot] ` goes into the
+ * self-prefixed sender line, and the same word rides on the envelope
+ * (`senderTag`) so ChannelBase renders it on the paths where it owns the
+ * prefix (message routes, DM without a prefix). One definition, both carriers.
+ */
+const QQ_BOT_SENDER_TAG = 'bot';
+const QQ_BOT_TAG = `[${QQ_BOT_SENDER_TAG}] `;
+
+/**
+ * The two prompt lines that tell the model what `[bot]` means and how to stop
+ * replying. One definition: the default prompt embeds them, and an operator's
+ * own `instructions` gets them appended (connect() re-runs, so the append is
+ * idempotent per line).
+ */
+const FORWARD_BOT_INSTRUCTION =
+  '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。';
+const NOREPLY_INSTRUCTION = '不想回复时只输出 <noreply> 即可，消息不会发出。';
+
 export type DeliveryErrorCode =
   | 'RATE_LIMITED'
   | 'RETRY_EXHAUSTED'
@@ -473,6 +492,8 @@ export class QQChannel extends ChannelBase {
   private _keywordTriggerCache: RegExp[] | null = null;
   /** Rate-limit timestamps for keyword non-match log entries (chatId → last log ms). */
   private _lastKeywordNoMatchLog: Map<string, number> = new Map();
+  /** Rate-limit timestamps for forwarded-bot notices (chatId → last log ms). */
+  private _lastForwardedBotLog: Map<string, number> = new Map();
 
   /** Accumulation buffer for cron/non-prompt textChunk events. */
   private cronBuffer: Map<string, CronBufferEntry> = new Map();
@@ -1088,7 +1109,10 @@ export class QQChannel extends ChannelBase {
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
         '支持 Markdown 格式，回复自然流畅即可。',
         '消息前缀 [atMention=true] 表示该消息 @了你，[atMention=false] 表示未 @你。',
-        '不想回复时只输出 <noreply> 即可，消息不会发出。',
+        ...(this.qqConfig.forwardBotMessages === true
+          ? [FORWARD_BOT_INSTRUCTION]
+          : []),
+        NOREPLY_INSTRUCTION,
         '',
         '以下规则仅适用于群聊消息。C2C 私聊中请始终正常回复。',
         '## 群聊唤醒与静默规则',
@@ -1132,6 +1156,17 @@ export class QQChannel extends ChannelBase {
         );
       }
       this.config.instructions = parts.join('\n');
+    } else if (this.qqConfig.forwardBotMessages === true) {
+      // Operator-supplied instructions replace the default prompt wholesale,
+      // which would drop the feature's own brake (what `[bot]` means and how to
+      // stay silent). Attach it to the operator text. Per-line `includes` guard
+      // makes the append idempotent: connect() re-runs on every reconnect.
+      const supplements = [FORWARD_BOT_INSTRUCTION, NOREPLY_INSTRUCTION];
+      const existing = this.config.instructions;
+      const missing = supplements.filter((line) => !existing.includes(line));
+      if (missing.length > 0) {
+        this.config.instructions = [existing, ...missing].join('\n');
+      }
     }
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -1731,6 +1766,7 @@ export class QQChannel extends ChannelBase {
     }
     this.cronBuffer.clear();
     this._lastKeywordNoMatchLog.clear();
+    this._lastForwardedBotLog.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.readyTimeout) {
@@ -5978,6 +6014,27 @@ export class QQChannel extends ChannelBase {
     }
     return false;
   }
+
+  /**
+   * One rate-limited stderr line per chat per minute when a forwarded bot
+   * message is handed to the base channel. Forwarding is the one enabled path
+   * whose only brake is the model's own judgement, so an operator needs to see
+   * it is live; the line carries no sender name or payload, only the sanitized
+   * chat id.
+   *
+   * Worded as "dispatched", not "forwarded": the base channel still runs its
+   * own gates (e.g. `requireMention`) after this point, so a dispatched message
+   * is not necessarily one the model saw.
+   */
+  private logForwardedBotMessage(chatId: string): void {
+    const now = Date.now();
+    if (now - (this._lastForwardedBotLog.get(chatId) ?? 0) < 60_000) return;
+    this._lastForwardedBotLog.set(chatId, now);
+    process.stderr.write(
+      `[QQ:${this.name}] forwardBotMessages: bot-authored message in ${sanitizeLogText(chatId, 64)} dispatched\n`,
+    );
+  }
+
   /**
    * Extract common group-message fields shared by handleGroup and handleGroupAll.
    * Returns null when the message has no meaningful text after @-tag stripping.
@@ -5996,6 +6053,7 @@ export class QQChannel extends ChannelBase {
     body: string;
     text: string;
     senderName: string;
+    forwardedBot: boolean;
   } | null {
     // Keep identity values out of the display-name position. In particular,
     // falling back to member_openid would expose a full mentionable OPENID
@@ -6039,19 +6097,27 @@ export class QQChannel extends ChannelBase {
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
     const rawCommandText = safeCleanText.replace(/<@[^>]{1,64}>/g, '').trim();
-    const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
+    // A forwarded bot message must reach the model instead of the channel's
+    // local command table: a peer bot's `/clear` or `!cmd` is another bot
+    // talking, not this channel being commanded.
+    // Same truthiness predicate as the three drop guards above, so a malformed
+    // non-boolean `author.bot` can never be forwarded untagged.
+    const forwardedBot =
+      Boolean(event.author?.bot) && this.qqConfig.forwardBotMessages === true;
+    const isSlash =
+      effectiveIsAtBot && !forwardedBot && rawCommandText.startsWith('/');
     const commandText = sanitizePromptText(rawCommandText);
 
-    // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
-    // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
-    // model can judge relevance and decide whether to respond. Hard-blocking
-    // would prevent intentional bot-to-bot interactions that the operator
-    // explicitly configures. The [bot] prefix gives the model enough context
-    // to ignore irrelevant bot traffic.
-    // NOTE: Both callers (handleGroup, handleGroupAll) guard against bot
-    // messages before reaching prepareGroupMessage, so isBot is always false
-    // here. The check is retained as defense-in-depth in case a future
-    // caller skips the guard.
+    // Bot-authored messages are a feature when the operator opts in, and the
+    // switch is the whole tradeoff. This traffic is another bot talking in the
+    // group: QQ delivers message events for user-authored messages only, and a
+    // bot's own sends come back in the send API's response (a message the bot
+    // itself sent is referenced through the response's ext_info.ref_idx, not
+    // through a message event), so a self-echo cannot reach this handler. No
+    // automatic rate cap follows the switch — the group's human members and the
+    // model's own silence rules are the guard. Dropping them is the default. A
+    // user-supplied `[bot]` is stripped above, so the tag cannot be forged.
+    const botTag = forwardedBot ? QQ_BOT_TAG : '';
 
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix =
@@ -6106,7 +6172,7 @@ export class QQChannel extends ChannelBase {
       : senderIdentity
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
-    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
+    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderTag}]: `;
     const body = sanitizePromptText(
       this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
     );
@@ -6124,6 +6190,7 @@ export class QQChannel extends ChannelBase {
       body,
       text,
       senderName,
+      forwardedBot,
     };
   }
 
@@ -6249,7 +6316,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(`[QQ:${this.name}] Bot C2C message dropped\n`);
       return;
     }
@@ -6273,35 +6340,46 @@ export class QQChannel extends ChannelBase {
     // resolved and would consume the ring's shared 256-chat budget.
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
+    // Same truthiness predicate as the drop guard above (see prepareGroupMessage).
+    const forwardedBot =
+      Boolean(event.author.bot) && this.qqConfig.forwardBotMessages === true;
+    const botTag = forwardedBot ? QQ_BOT_TAG : '';
     const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
     const safeContent = cleanText
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
-    const isSlash = safeContent.startsWith('/');
+    // Same rule as the group path: a forwarded bot's slash/bang text is a
+    // model prompt, not a command for this channel to execute locally.
+    const isSlash = !forwardedBot && safeContent.startsWith('/');
     const body = sanitizePromptText(safeContent);
     const mediaOnly = !body && media.length > 0;
     const text = mediaOnly
       ? mediaPlaceholder(media)
       : isSlash || this.config.messageRoutes
         ? body
-        : `[atMention=true] [${safeName}]: ${body}`;
+        : `[atMention=true] ${botTag}[${safeName}]: ${body}`;
     const envelope: Envelope = {
       channelName: this.name,
       senderId: chatId,
       senderName,
       chatId,
       text,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // (and keeps it when a failed download replaces the placeholder).
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6322,7 +6400,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(
         `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
@@ -6349,8 +6427,15 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, commandText, routeText, senderName, safeName } =
-      result;
+    const {
+      isSlash,
+      text,
+      commandText,
+      routeText,
+      senderName,
+      safeName,
+      forwardedBot,
+    } = result;
     const media = this.inboundMedia(event);
     const mediaOnly = result.body === '' && media.length > 0;
 
@@ -6391,15 +6476,20 @@ export class QQChannel extends ChannelBase {
         : this.config.messageRoutes
           ? routeText
           : text,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: true,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // attribution. Every other self-prefixed path keeps the flag.
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6420,7 +6510,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(
         `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
@@ -6456,6 +6546,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       isAtBot,
       safeName,
+      forwardedBot,
     } = result;
     const media = this.inboundMedia(event);
     const mediaOnly = result.body === '' && media.length > 0;
@@ -6563,15 +6654,20 @@ export class QQChannel extends ChannelBase {
           : text,
       senderId,
       senderName,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: true,
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // attribution. Every other self-prefixed path keeps the flag.
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6647,6 +6743,7 @@ export class QQChannel extends ChannelBase {
     }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
+    this._lastForwardedBotLog.delete(groupId);
     this.recentInbound.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
