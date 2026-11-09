@@ -11952,10 +11952,13 @@ exit 1
     expect(reviewScanJob).toContain('FLEET_FILE="${WORKDIR}/fleet.tsv"');
     expect(reviewScanJob).not.toContain('FLEET_FILE="$(mktemp)"');
     // The EXIT trap is the in-step cleanup twin of the always() step; it
-    // must remove both the fleet file and the per-run dir.
+    // must remove the fleet file, the per-run dir AND the gh config dir.
+    // bash keeps one EXIT handler per shell, so af-162's cleanup joins this
+    // line instead of a second `trap … EXIT` that would replace it.
     expect(reviewScanJob).toContain(
-      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"\' EXIT',
+      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"; rm -rf "${GH_CONFIG_DIR}"\' EXIT',
     );
+    expect(reviewScanJob.match(/trap [^\n]*EXIT/g) ?? []).toHaveLength(1);
     // Pin the cleanup step's command inside its own slice, not job-wide: a
     // no-op cleanup with the right name and if: shipped green before.
     const scanCleanupStep =
@@ -12793,19 +12796,30 @@ exit 1
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
-    // The command lane's three preambles are hand-copied, and the per-step
-    // loop above only pins that four tokens are present and ordered — a
-    // later hardening edit (a reworded abort, one more unset) could land on
-    // one copy and leave the other two behind with every assertion green.
-    // Pin the copies byte-identical, the way the sanitize lane already
-    // does. The block runs through the EXIT trap so the cleanup is covered
-    // too, and the non-empty guard matters: three empty slices would also
-    // collapse to a Set of size 1.
-    const commandPreambles = commandSteps.map(
-      (step) =>
+    // These four preambles are hand-copied, and the per-step loop above only
+    // pins that four tokens are present and ordered — a later hardening edit
+    // (a reworded abort, one more unset) could land on one copy and leave the
+    // others behind with every assertion green. Pin them identical, the way
+    // the sanitize lane already does. route joins the command lane here
+    // (R2-1): it mints the same dir on the same pool, so leaving it out of
+    // the pin was the drift channel one lane over. The block runs through
+    // the EXIT trap so the cleanup is covered too, and the non-empty guard
+    // matters: four empty slices would also collapse to a Set of size 1.
+    // review-scan is deliberately NOT in this family — its cleanup rides the
+    // merged fleet/WORKDIR trap pinned above, a different shape by necessity.
+    // Compare CODE with comment lines stripped: route explains the mint
+    // guard inline where the command steps explain it above the block, and
+    // that prose is not behaviour. Every drift this pin exists to catch —
+    // a reworded abort, an extra unset, the guard, the trap — is code.
+    const commandPreambles = [routeStep, ...commandSteps].map((step) =>
+      (
         step.match(
           /export GH_HOST=github\.com[\s\S]*?trap 'rm -rf "\$\{GH_CONFIG_DIR\}"' EXIT\n/,
-        )?.[0] ?? '',
+        )?.[0] ?? ''
+      )
+        .split('\n')
+        .filter((line) => line.trim() && !line.trimStart().startsWith('#'))
+        .join('\n'),
     );
     expect(commandPreambles[0]).toBeTruthy();
     expect(new Set(commandPreambles).size).toBe(1);
@@ -13293,6 +13307,76 @@ exit 1
         }
       }
     }
+  });
+
+  it('makes every gh config mint site either self-cleaning or a recorded leak', () => {
+    // af-162 / R2-1: the cleanup rule started on the three jobs this lane
+    // moved, which left six other sites leaking behind wording that reads
+    // file-wide. Pin the WHOLE census instead: every mint site
+    // must either remove its dir or appear in the leak list below, so a new
+    // site cannot join silently and a fixed one cannot leave the list stale.
+    // The four remaining leaks are the heavy agent jobs' PAT steps — they
+    // predate this lane and are a follow-up, not an accident.
+    const MINT = 'mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX"';
+    const jobStarts = [...workflow.matchAll(/\n {2}([a-z][a-z0-9-]*):\n/g)];
+    const stepStarts = [...workflow.matchAll(/\n {6}- name: '([^']+)'/g)];
+    const ownerOf = (starts, pos) => {
+      let current = '(none)';
+      for (const m of starts) {
+        if (m.index <= pos) current = m[1];
+        else break;
+      }
+      return current;
+    };
+    const cleaned = [];
+    const leaking = [];
+    for (
+      let pos = workflow.indexOf(MINT);
+      pos !== -1;
+      pos = workflow.indexOf(MINT, pos + MINT.length)
+    ) {
+      const before = stepStarts.filter((m) => m.index <= pos);
+      expect(
+        before.length,
+        `mint at ${pos} has no enclosing step`,
+      ).toBeGreaterThan(0);
+      const start = before[before.length - 1].index;
+      const after = [...stepStarts, ...jobStarts]
+        .map((m) => m.index)
+        .filter((i) => i > pos);
+      const body = workflow.slice(
+        start,
+        after.length ? Math.min(...after) : workflow.length,
+      );
+      const key = `${ownerOf(jobStarts, pos)} · ${ownerOf(stepStarts, pos)}`;
+      // Step-scoped EXIT trap, or the heartbeat's per-call wrapper.
+      if (
+        body.includes('rm -rf "${GH_CONFIG_DIR}"') ||
+        body.includes('rm -rf "${cfg}"')
+      ) {
+        cleaned.push(key);
+      } else {
+        leaking.push(key);
+      }
+    }
+    expect(cleaned.sort()).toEqual(
+      [
+        'route · Decide phases',
+        'takeover-command · Toggle takeover label',
+        'retry-command · Post re-arm marker',
+        'takeover-ack · Acknowledge takeover state change',
+        'review-scan · Scan for PRs with new feedback',
+        'review-address · Post autofix status comment',
+      ].sort(),
+    );
+    expect(leaking.sort()).toEqual(
+      [
+        'issue-autofix · Publish PR',
+        'review-address · Prepare branch and feedback',
+        'review-address · Report dry-run / failure',
+        'review-address · Finalize autofix status comment',
+      ].sort(),
+    );
   });
 
   it('runs both verification gates under a throwaway global git config', () => {

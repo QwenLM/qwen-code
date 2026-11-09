@@ -221,6 +221,10 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # Nothing reclaims RUNNER_TEMP on this pool and these steps return
+          # early on several paths, so cleanup rides EXIT, not a tail rm. It
+          # stays step-scoped: every gh call below reuses this same dir.
+          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
@@ -2168,7 +2172,9 @@ jobs:
           # jobs' autofix* age sweep reclaim what this step leaves — neither
           # can reach a tmp.* name.
           FLEET_FILE="${WORKDIR}/fleet.tsv"
-          trap 'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"' EXIT
+          # One EXIT handler per shell, so the gh config dir joins this trap
+          # rather than a second one that would silently replace it (af-162).
+          trap 'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"; rm -rf "${GH_CONFIG_DIR}"' EXIT
           fleet_row() {
             printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
           }

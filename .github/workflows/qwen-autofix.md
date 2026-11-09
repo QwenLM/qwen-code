@@ -5007,6 +5007,30 @@ path. They call gh and jq, both already used by route on
 this pool; they run no node, docker or tmux, so they get no
 'Check runner environment' capability preflight.
 
+The rule is file-wide, so it is pinned file-wide (R2-1). Ten
+steps mint this dir; only the three moved jobs and the
+heartbeat cleaned up, leaving six leaks behind a rule that
+reads file-wide. Two of those six are fixed here: route — up
+to 144 cron runs a day — and review-scan. review-scan
+cannot carry a second `trap … EXIT`: bash keeps one handler
+per shell, so its removal joins the existing fleet/WORKDIR
+trap, and that merged line is pinned verbatim. The remaining
+four are the heavy agent jobs' PAT steps (issue-autofix's
+publish, review-address's prepare, dry-run report and
+finalize). They predate this lane and stay a follow-up — but
+a RECORDED one: a census test walks every mint site and
+requires each to be either self-cleaning or on an explicit
+leak list, so a new site cannot join unnoticed and a fixed
+one cannot leave the list stale. The heartbeat's per-call
+wrapper is the tenth site and already cleans up after itself.
+
+One bound on all of this: an EXIT trap covers bash's own
+exits, not a SIGKILLed shell. That is why the scan lane also
+puts WORKDIR where the age sweep can reach it. The gh config
+dir has no second net, so a hard-killed run leaves one
+behind — empty and owner-only, a directory inode rather than
+a live reroute channel.
+
 The pool's price is the one af-148 paid: gh reads its
 config from the shared, attacker-writable $HOME, and every
 gh call in these three jobs carries CI_DEV_BOT_PAT. A
