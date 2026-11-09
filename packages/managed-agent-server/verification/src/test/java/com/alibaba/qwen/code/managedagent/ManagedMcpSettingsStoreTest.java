@@ -63,6 +63,10 @@ class ManagedMcpSettingsStoreTest {
         journal.committed(disable);
         assertThat(ManagedMcpSettings.find(new JdbcTemplate(jdbc.getDataSource()), "tenant", id)).isEqualTo(json.readTree(disabled.toString()));
         assertThat(ManagedMcpSettings.find(jdbc, "other-tenant", id)).isNull();
+        var diagnostics = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc, sessions);
+        JsonNode configRef = diagnostics.diagnosticConfigRef("tenant", id).orElseThrow();
+        assertThat(diagnostics.readRecordResource("tenant", id, configRef)).isEqualTo(json.readTree(disabled.toString()));
+        assertThat(diagnostics.diagnosticConfigRef("other-tenant", id)).isEmpty();
         SessionRecord session = mock(SessionRecord.class);
         when(session.tenantId()).thenReturn("tenant");
         when(session.sessionId()).thenReturn(id);
