@@ -782,9 +782,10 @@ describe('modelConfigResolver', () => {
 describe('Qwen Subscription model resolution', () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
-    'uses confirmed subscription modalities for %s without inheriting provider settings',
+  it.each(['qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus', 'qwen-vl-fixture'])(
+    'resolves subscription modalities for %s without inheriting provider settings',
     (model) => {
+      vi.stubEnv('QWEN_CODE_MODELS_DEV', 'off');
       for (const selection of [
         {},
         { cli: { model } },
