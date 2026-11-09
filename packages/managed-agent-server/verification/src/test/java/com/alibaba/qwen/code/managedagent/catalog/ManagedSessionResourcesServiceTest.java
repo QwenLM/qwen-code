@@ -163,6 +163,28 @@ class ManagedSessionResourcesServiceTest {
     }
 
     @Test
+    void readsThirtyTwoLiveSelectionsPlusRetainedTombstonesAndRejectsAnOverfilledLiveCount() throws Exception {
+        ObjectNode settings = JSON.createObjectNode().put("kind", "hosted-mcp-settings");
+        ArrayNode servers = settings.putArray("servers");
+        for (int index = 0; index < 32; index++) {
+            servers.add(pin("live-" + index).put("state", "disabled"));
+        }
+        servers.add(pin("tombstone").put("state", "removed"));
+        latest(settings);
+        var accepted = get();
+        assertThat(accepted.path("availability").asText()).isEqualTo("available");
+        assertThat(accepted.path("servers")).hasSize(33);
+
+        servers.add(pin("live-32").put("state", "disabled"));
+        latest(settings);
+        var rejected = get();
+        assertThat(rejected.path("availability").asText()).isEqualTo("partial");
+        assertThat(rejected.path("configCoverage").asText()).isEqualTo("partial");
+        assertThat(rejected.path("coverageReasons").toString()).contains("invalid_resource");
+        assertThat(rejected.path("servers")).isEmpty();
+    }
+
+    @Test
     void marksAHistoryWindowHistoricalAndDoesNotReadTheSentinel() throws Exception {
         selection(pin("server").put("state", "enabled"));
         ObjectNode published = configuration(1, resource("managed-mcp-catalog", catalog(1)));

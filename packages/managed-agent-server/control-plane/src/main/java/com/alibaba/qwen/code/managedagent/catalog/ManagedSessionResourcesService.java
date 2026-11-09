@@ -267,10 +267,17 @@ public class ManagedSessionResourcesService {
         }
 
         private void select(JsonNode pins) {
-            require(pins.isArray() && pins.size() <= 32, "Invalid MCP selections");
+            require(pins.isArray(), "Invalid MCP selections");
+            int live = 0;
             for (JsonNode pin : pins) {
                 pin(pin);
                 require(Set.of("enabled", "disabled", "removed").contains(pin.path("state").asText()), "Invalid MCP selection state");
+                if (!"removed".equals(pin.path("state").asText())) {
+                    live++;
+                }
+            }
+            require(live <= 32, "Invalid MCP selections");
+            for (JsonNode pin : pins) {
                 selected.put(pin.path("serverId").asText(), pin);
             }
         }

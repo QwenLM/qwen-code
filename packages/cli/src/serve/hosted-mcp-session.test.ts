@@ -2172,7 +2172,7 @@ it('refuses a durable record whose live selections exceed the reader capacity', 
   const previous = Array.from({ length: 32 }, (_, index) => ({
     ...pin,
     serverId: `live-${index}`,
-    state: 'disabled' as const,
+    state: 'disabled' as 'disabled' | 'removed',
   }));
   const command = managementCommand('add', 'live-32', 0, {
     ...pin,
@@ -2180,7 +2180,11 @@ it('refuses a durable record whose live selections exceed the reader capacity', 
   });
   const overfilled = [
     ...previous,
-    { ...pin, serverId: 'live-32', state: 'disabled' as const },
+    {
+      ...pin,
+      serverId: 'live-32',
+      state: 'disabled' as 'disabled' | 'removed',
+    },
   ];
   expect(overfilled.filter((entry) => entry.state !== 'removed')).toHaveLength(
     33,
