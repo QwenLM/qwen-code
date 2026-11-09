@@ -744,14 +744,14 @@ export function WorkspaceBindingCreator({
       : undefined;
   const composerFooterModel =
     pending?.modelId ?? pending?.agentId ?? selectedModel;
-  // One predicate for the editor, the host footer and the placeholder: the
-  // creation screen has no turn, so every preparing/blocked window disables
-  // the composer and reads as "processing" for the host override map.
+  // Background list/options/@-file fetches stay soft: hard-disabling the
+  // editor during them would drop keystrokes (createOrRead does not gate on
+  // these flags). Only the creation request itself is "processing" work for
+  // the host override map — this screen has no turn and no queue.
   const composerPreparing =
     busy || loading || optionsLoading || fileReferences.busy;
   const composerBlocked =
     !interactive ||
-    composerPreparing ||
     workspaceSelectionBlocked ||
     workspaceCreating ||
     Boolean(pending) ||
@@ -2042,13 +2042,13 @@ export function WorkspaceBindingCreator({
                     // read the same classifier App applies.
                     composerPlaceholders?.[
                       getComposerPlaceholderState({
-                        isPreparingPrompt: composerPreparing,
+                        isPreparingPrompt: workspaceCreating,
                         isStreaming: false,
                       })
                     ]?.trim() ||
                     t(
                       getComposerPlaceholderKey({
-                        isPreparingPrompt: composerPreparing,
+                        isPreparingPrompt: workspaceCreating,
                         isStreaming: false,
                       }),
                     )

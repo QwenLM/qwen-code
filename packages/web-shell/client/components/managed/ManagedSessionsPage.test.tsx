@@ -4697,6 +4697,27 @@ describe('ManagedSessionsPage', () => {
     ).toBe('Working on it…');
   });
 
+  it('does not promise queueing without the queue API when no override is set', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { phase: 'running' }),
+    );
+    // Without the user-messages API submit() sends a fresh prompt, so the
+    // aligned default must not render the queueing copy.
+    provider.userMessages = undefined as never;
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      { alignManagedChatWithHost: true },
+    );
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Message the managed agent');
+  });
+
   it('hides the managed session header when the host already shows identity', async () => {
     const target = document.createElement('div');
     // Default: the header row carries the session identity.
@@ -5167,14 +5188,53 @@ describe('ManagedSessionsPage', () => {
       hostSessionOnly: true,
     });
     expect(container.textContent).toContain('may already have been submitted');
-    // The failed restore holds `busy` until Discard, but the pane is still an
-    // empty home — the marker (and the centring/overflow rule it drives) must
-    // not disappear while the banner is up.
+    // The failed restore keeps the composer blocked until Discard, but the
+    // pane is still an empty home — the marker (and the centring/overflow
+    // rule it drives) must not disappear while the banner is up.
     expect(
       container
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBe('true');
+  });
+
+  it('holds the empty-state marker back until the pending restore settles', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    let settle!: (value: unknown) => void;
+    const restore = vi
+      .spyOn(pendingStorage, 'readManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+      );
+    try {
+      await render('s1', 'en', provider, undefined, true, {
+        hostSessionOnly: true,
+      });
+      // The restore window is not an empty home yet: a pending record may
+      // still land and fill the pane.
+      expect(
+        container
+          .querySelector('[data-managed-home]')
+          ?.getAttribute('data-managed-empty'),
+      ).toBeNull();
+      await act(async () => {
+        settle(undefined);
+        await flush();
+      });
+      expect(
+        container
+          .querySelector('[data-managed-home]')
+          ?.getAttribute('data-managed-empty'),
+      ).toBe('true');
+    } finally {
+      restore.mockRestore();
+    }
   });
 
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {

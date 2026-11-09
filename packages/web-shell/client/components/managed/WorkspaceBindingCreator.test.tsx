@@ -3159,6 +3159,50 @@ describe('WorkspaceBindingCreator', () => {
     await expectWorkingDirectory('other-project');
   });
 
+  it('keeps the composer editable and idle while another Workspace page loads', async () => {
+    directCreation();
+    let loadPage!: (value: {
+      data: (typeof workspace)[];
+      supported: boolean;
+    }) => void;
+    vi.mocked(provider.workspaceBinding!.list)
+      .mockReset()
+      .mockResolvedValueOnce({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        nextCursor: 'next-page',
+        supported: true,
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            loadPage = resolve;
+          }),
+      );
+    await render(true, false, undefined, {
+      alignManagedChatWithHost: true,
+    });
+    // First paint after the initial list resolves: no turn, no queue, so the
+    // aligned placeholder must be the idle copy, not "processing".
+    expect(editorMocks.props?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
+    await workspaceAction('Load more');
+    // The background page fetch is soft preparation: hard-disabling the
+    // editor here would drop keystrokes typed while the page is in flight.
+    expect(editorMocks.props?.disabled).toBe(false);
+    expect(editorMocks.props?.isPreparing).toBe(true);
+    expect(editorMocks.props?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
+    await act(async () => {
+      loadPage({ data: [workspace], supported: true });
+      await flush();
+    });
+    expect(editorMocks.props?.disabled).toBe(false);
+    expect(editorMocks.props?.isPreparing).toBe(false);
+  });
+
   it('freezes the initial prompt and choices, then retries only read-back after creation', async () => {
     const createSession = directCreation();
     createSession.mockRejectedValueOnce(new TypeError('Lost response'));

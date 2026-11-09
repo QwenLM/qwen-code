@@ -1880,9 +1880,10 @@ function ManagedSessionsContent({
             home &&
             messages.length === 0 &&
             !detail.loading &&
-            // A failed restore keeps `busy` until the user discards, and the
-            // pane is still empty then (the base marker ignored `busy`).
-            (!busy || pendingRestoreFailed) &&
+            // The restore window (`restoreBusy`) is not empty-state yet; a
+            // failed restore keeps the marker because the pane stays empty
+            // until the user discards the pending record.
+            ((!busy && !restoreBusy) || pendingRestoreFailed) &&
             !summary?.failure
               ? true
               : undefined
@@ -2741,10 +2742,10 @@ function ManagedSessionsContent({
                     ? (() => {
                         // Resolve exactly like the ordinary composer in App:
                         // the host override map wins per state, otherwise the
-                        // localized default for that state. Both halves read
-                        // the same classifier, so a running turn without the
-                        // user-messages API and the mount restore window are
-                        // "processing" for the override too.
+                        // localized default for that state. The default keeps
+                        // the queue-support gate: without the user-messages
+                        // API a running turn submits a fresh prompt, so it
+                        // must not promise queueing.
                         const input = {
                           isPreparingPrompt: busy || restoreBusy,
                           isStreaming: Boolean(active),
@@ -2755,7 +2756,9 @@ function ManagedSessionsContent({
                           ];
                         return custom?.trim()
                           ? custom
-                          : t(getComposerPlaceholderKey(input));
+                          : active && !userMessages.supported
+                            ? t('managed.prompt')
+                            : t(getComposerPlaceholderKey(input));
                       })()
                     : active && userMessages.supported
                       ? 'managed.queue.placeholder'
