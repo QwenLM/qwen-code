@@ -162,6 +162,14 @@ describe('forkCommand', () => {
     );
   });
 
+  it('does not launch a fork when its command can no longer commit', async () => {
+    const context = { ...mockContext, beginCommit: () => false };
+
+    expect(await forkCommand.action!(context, 'do something')).toBeUndefined();
+    expect(mockBuild).not.toHaveBeenCalled();
+    expect(mockAddHistory).not.toHaveBeenCalled();
+  });
+
   it('launches a background fork via the Agent tool and returns immediately', async () => {
     const result = await forkCommand.action!(
       mockContext,

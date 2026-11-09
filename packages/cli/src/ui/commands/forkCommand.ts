@@ -129,12 +129,14 @@ export const forkCommand: SlashCommand = {
       run_in_background: true,
     };
 
+    if (context.beginCommit?.() === false) {
+      return;
+    }
+
     let result;
     try {
-      // The background path registers the agent and starts it detached, then
-      // resolves promptly — it does not block on the fork finishing. The
-      // background run owns its own AbortController; this signal only covers
-      // the synchronous launch/registration, so a fresh one is sufficient.
+      // Hold the dispatch through asynchronous launch and registration. The
+      // background run owns its own AbortController once it starts.
       result = await agentTool
         .build(params)
         .execute(new AbortController().signal);
