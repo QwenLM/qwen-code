@@ -1551,3 +1551,58 @@ test('the shipped example config pins the documented stall threshold', async () 
   // keep passing the manager's own validation.
   assert.doesNotThrow(() => createManager(example));
 });
+
+test('a slot that keeps stalling after the alert never alerts again', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0);
+  let cycles = 0;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      cycles += 1;
+      return Promise.reject(new Error('docker unavailable'));
+    }
+    return f.command(program, args, options);
+  };
+  const alerts = () =>
+    messages.filter((message) => message.includes('STALL ALERT'));
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 20 },
+    {
+      command,
+      sleep: async (ms) => {
+        now += ms;
+        // Stay wedged for ten minutes: far past the alert, so a per-cycle
+        // alert would fire many times before the slot is stopped.
+        if (now >= 1_000_000 + 600_000) manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  const found = alerts();
+  assert.equal(
+    found.length,
+    1,
+    `a slot that stays stalled alerted ${found.length} times instead of once`,
+  );
+  assert.ok(
+    cycles >= 10,
+    `only ${cycles} failing cycles ran; the scenario needs a sustained stall`,
+  );
+  assert.match(found[0], /across \d+ consecutive identical failures/);
+});
