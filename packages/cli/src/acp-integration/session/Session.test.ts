@@ -66,10 +66,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import {
-  getApiHistoryPromptId,
-  markApiHistoryPrompt,
-} from '@qwen-code/qwen-code-core/services/session-api-history.js';
-import {
   userContentPushSnapshotKey,
   userContentPushAcceptedKey,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';

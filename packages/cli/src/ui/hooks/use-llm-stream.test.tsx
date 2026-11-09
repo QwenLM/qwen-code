@@ -26456,12 +26456,16 @@ describe('useLlmStream', () => {
             requests.map((request) => ({
               ...completedCall(request),
               status: 'cancelled' as const,
+              response: {
+                ...completedCall(request).response,
+                executionStatus: 'success' as const,
+              },
             })),
           );
         },
       );
 
-    it('counts a cancelled call as the current path does: not when history already answered it', async () => {
+    it('records cancelled completions and marks history-answered results as non-model-facing', async () => {
       cancelBatches();
       rounds([toolRequest('read_a'), toolRequest('read_b')]);
       const client = mockConfig.getLlmClient();
@@ -26475,11 +26479,20 @@ describe('useLlmStream', () => {
       });
 
       await waitFor(() => {
-        expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+        expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(2);
       });
-      expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
-        file_path: '/test/dir/read_b.txt',
-      });
+      for (const callId of ['read_a', 'read_b']) {
+        expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+          'read_file',
+          { file_path: `/test/dir/${callId}.txt` },
+          {
+            ...completedCall(toolRequest(callId).value).response,
+            executionStatus: 'success',
+            status: 'cancelled',
+            ...(callId === 'read_a' ? { modelFacing: false } : {}),
+          },
+        );
+      }
     });
 
     it('commits the tool group when the scheduler completes the batch and keeps its results in that session', async () => {

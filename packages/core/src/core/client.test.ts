@@ -11729,9 +11729,13 @@ Other open files:
         expect(client['experienceSignals'].userSteer).toBe(false);
       });
 
-      it.each([undefined, 100])(
-        'counts only surviving inline-repaired results, including hoisted results (budget=%s)',
-        async (budget) => {
+      it.each([
+        [undefined, 'read_file', false],
+        [100, 'read_file', false],
+        [100, 'grep_search', true],
+      ] as const)(
+        'counts only surviving inline-repaired results, including hoisted results (budget=%s, tool=%s)',
+        async (budget, freshToolName, rewritten) => {
           mockConfig.getAutoCompactThreshold = vi
             .fn()
             .mockReturnValue(undefined);
@@ -11745,7 +11749,7 @@ Other open files:
           };
           const late = responsePart('late');
           const fresh = fnResponse(
-            'read_file',
+            freshToolName,
             { output: 'x'.repeat(1000) },
             'fresh',
           );
@@ -11755,7 +11759,11 @@ Other open files:
             {
               role: 'model',
               parts: ['late', 'fresh'].map((id) => ({
-                functionCall: { id, name: 'read_file', args: {} },
+                functionCall: {
+                  id,
+                  name: id === 'fresh' ? freshToolName : 'read_file',
+                  args: {},
+                },
               })),
             },
             { role: 'user', parts: [synthetic] },
@@ -11766,7 +11774,7 @@ Other open files:
             error: new Error('late real failure'),
           });
           client.recordCompletedToolCall(
-            'read_file',
+            freshToolName,
             undefined,
             completedOutcome('fresh'),
           );
@@ -11797,8 +11805,16 @@ Other open files:
           expect(responses).toHaveLength(2);
           expect(responses[0]).toEqual(synthetic);
           expect(responses[1]?.functionResponse?.id).toBe('fresh');
-          if (budget) expect(responses[1]).not.toEqual(fresh);
-          else expect(responses[1]).toEqual(fresh);
+          if (rewritten) {
+            expect(responses[1]).not.toEqual(fresh);
+            expect(
+              String(responses[1]?.functionResponse?.response?.['output'])
+                .length,
+            ).toBeLessThan(1000);
+          } else {
+            // Reads without a historical file path preserve their cached text.
+            expect(responses[1]).toEqual(fresh);
+          }
           expect(client['toolCallCount']).toBe(1);
           expect([...client['pendingExperienceOutcomes'].keys()]).toEqual([
             'late',
