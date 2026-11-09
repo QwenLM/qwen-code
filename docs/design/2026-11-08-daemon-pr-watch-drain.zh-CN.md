@@ -47,27 +47,27 @@ drain 经注入的 `wakeSession(sessionId, workspaceCwd)` 恢复休眠接收者�
 
 ### drain 编排
 
-新模块 `packages/cli/src/serve/server/pr-watch-drain.ts` 暴露每 tick drain 与每 PR drain 步骤。tick 仅在持有 owner 记录时 drain（非 owner 什么都不 drain）。对每个被 watch 的 PR，在一次 PR `PathMutexRegistry` 锁持有内重读 watch 文件并最旧优先 drain `pending`：跳过已在 `delivered` 或已标 in-flight 的键；解析接收者；置内存 in-flight 标记；准入；然后把条目键写入 `delivered`（并把组写入 `served`），在所有匹配组都被 served 后从 `pending` 移除条目。标记在该写之后清除，或在准入被直接拒绝时清除。若记录写失败，保留标记，后续 drain 只重试该写，绝不重新解析或重新准入。超过 7 天的 pending 条目记日志后丢弃。只有休眠接收者的 restore 在锁外运行且其键标 in-flight；其准入重新取锁、重读文件，若键已在 `delivered` 则跳过。这给出主 §5 崩溃窗口：写前重新检测、写后 drain、以及准入与记录写之间重启后的至少一次重新准入。
+新模块 `packages/cli/src/serve/server/pr-watch-drain.ts` 暴露每 tick drain 与每 PR drain 步骤。tick 仅在持有 owner 记录时 drain（非 owner 什么都不 drain）。对每个被 watch 的 PR，在一次 PR `PathMutexRegistry` 锁持有内重读 watch 文件并最旧优先 drain `pending`：跳过已在 `delivered` 或已标 in-flight 的键；解析接收者；置内存 in-flight 标记；准入；然后把条目键写入 `delivered`（并把组写入 `served`），在所有匹配组都被 served 后从 `pending` 移除条目。标记在该写之后清除，或在准入被直接拒绝时清除。若记录写失败，保留标记，后续 drain 只重试该写，绝不重新解析或重新准入。超过 7 天的 pending 条目记日志后丢弃。只有休眠接收者的 restore 在锁外运行且其键标 in-flight；其准入重新取锁、重读文件，若键已在 `delivered` 则跳过。这给出主 §5 崩溃窗口：写前重新检测、写后 drain、以及准入与记录写之间重启后的至少一次重新准入。单个 PR 的 drain 失败按文件隔离（记日志后处理下一个 PR），因此一个不可读或不可删的文件不会饿死 `readdir` 顺序中其后的所有 PR；`DaemonDrainingError` 继续上抛以中止 tick。tick 外完成的 restore 从磁盘上的条目合并 `served` 标记，而不是用派发时的快照，因此期间被 served 的兄弟组不会丢失，期间已完成的条目也不会被复活。
 
 ### 接收者解析
 
-接收者来自对扫描覆盖 workspace（trusted 加 primary）的进程内绑定扫描。排除 channel 拥有的会话（`sourceType: 'channel'`）；archived 与 hidden-catalog 会话已被扫描归因排除。无 actions 时接收者是单个最近活跃的绑定者（`updatedAt`，扫描的 recency 规则）；有 actions 时每角色组解析其模板链匹配的最近活跃绑定者。partial 扫描时，从上一次列出它的扫描保留未被列出的行（有界、最旧先丢，镜像 adapter 的 `MAX_PARTIAL_RETAINED`），并在完整扫描省略它时丢弃保留行；无法触达的保留赢家使条目保持 pending。检测与 drain 之间被归档或被超越的接收者不损失什么——drain 重新解析下一个绑定者。不再注册、不再被覆盖、或 generation 已退役的 workspace 记日志跳过，并在 dispatch 前立即重新解析。
+接收者来自对扫描覆盖 workspace（trusted 加 primary）的进程内绑定扫描。channel 拥有的会话（`sourceType: 'channel'`）绝不作为接收者，但其行保留在覆盖图中：观测也会 watch 它们的 PR，若在此丢弃，完整扫描就会删掉观测不断写回的文件。archived 与 hidden-catalog 会话已被扫描归因排除。解析按 recency 顺序（`updatedAt`，扫描的 recency 规则）返回每个匹配组的全部候选者——无 actions 时为单一组——drain 投递给第一个可用候选者，因此被排除的领先者会重解析到下一个绑定者，而不是丢失转换。partial 扫描时，从上一次列出它的扫描保留未被列出的行（有界、最旧先丢，镜像 adapter 的 `MAX_PARTIAL_RETAINED`），并在完整扫描省略它时丢弃保留行；无法触达的保留赢家使条目保持 pending。检测与 drain 之间被归档或被超越的接收者不损失什么——drain 重新解析下一个绑定者。不再注册、不再被覆盖、或 generation 已退役的 workspace 记日志跳过，并在 dispatch 前立即重新解析。
 
 ### 休眠 restore
 
-非 live 的绑定会话经注入的 `wakeSession` 恢复，然后投递。restore 绝不在 tick 上运行：drain 启动休眠接收者的 restore 与准入而不等待（至多四个并发；其余等待后续 drain），键保持 in-flight 直到它们落定，restore 超时绝不拉长 tick。`wakeDormant` 默认开，使重启不搁浅事件；关闭时条目保持 pending 直到会话下一次 live turn（drain 它的 resume 钩子随启用增量落地）。restore 结果按 channel 划分：永久 Gone（404 会话记录丢失，或 409 `session_archived`/`worktree_session_superseded`/`worktree_marker_missing`/`worktree_reset_interrupted`）排除该会话，drain 在其余绑定者中重新解析，仅当完整扫描无候选时记日志丢弃转换；临时结果（超时、503、429、409 `restore_in_progress`/`session_busy`、`session_writer_conflict`）使条目在下一 drain 仍为同一接收者保持 pending。drain 的 restore 错误分类把 `session_writer_conflict` 纳入临时（channel accessor 的 `deliverPrompt` 409 白名单目前漏了它；drain 不复用该白名单）。
+非 live 的绑定会话经注入的 `wakeSession` 恢复，然后投递。restore 绝不在 tick 上运行：drain 启动休眠接收者的 restore 与准入而不等待（至多四个并发；其余等待后续 drain），键保持 in-flight 直到它们落定，restore 超时绝不拉长 tick。`wakeDormant` 默认开，使重启不搁浅事件；关闭时条目保持 pending 直到会话下一次 live turn（drain 它的 resume 钩子随启用增量落地）。休眠的领先者始终等待它自己的 restore 或 live turn：drain 绝不改投次优先绑定者，否则会消耗掉领先者应得的转换；没有空闲 restore 槽位、或领先者已在 restore 时同理。restore 结果按 channel 划分：永久 Gone（404 会话记录丢失，或 409 `session_archived`/`worktree_session_superseded`/`worktree_marker_missing`/`worktree_reset_interrupted`）排除该会话，drain 在其余绑定者中重新解析，仅当完整扫描无候选时记日志丢弃转换；临时结果（超时、503、429、409 `restore_in_progress`/`session_busy`、`session_writer_conflict`）使条目在下一 drain 仍为同一接收者保持 pending。drain 的 restore 错误分类把 `session_writer_conflict` 纳入临时（channel accessor 的 `deliverPrompt` 409 白名单目前漏了它；drain 不复用该白名单）。
 
 ### 自推 head 抑制
 
-仅对 `head_change`，自身推送 head 账本含新 head 的候选被排除，drain 重新解析下一个绑定者（有 actions 时在其角色组内，无则单赢家）。账本是 autofix-pr watch 状态里的 `pushedShas`，经 helper 自身的单 git 调用发现解析（从候选的 clone——bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`——跑 `cloneWorktreesOf`，然后 `vouchedScanRoots` 与 regular-file 检查），经 `readRegularFile`/`readState` 读取，且仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 仅用坐标（其检出里不跑 git）。任何拒绝（缺失、非常规、不可读、不匹配）意味着无账本、转换照常投递。`lastKnownHeadSha` 刻意不属于账本。`ci_failure`、`merge_conflict`、`state_change` 永不被抑制。
+仅对 `head_change`，自身推送 head 账本含该条目被检测时的 head（`pending[].headSha`，由观测写入）的候选被排除，drain 重新解析下一个绑定者（有 actions 时在其角色组内，无则单赢家）。判定用条目自己的 head，而不是文件当前 head——后者可能已被更晚的观测推进。所有候选都被自推（或 Gone）排除的条目，走与无绑定者相同的无候选规则：完整扫描记日志丢弃，部分扫描等待。未注册或已退役的工作区则属临时状态，仍算候选、条目继续等待，以免丢失转换。账本是 autofix-pr watch 状态里的 `pushedShas`，经 helper 自身的单 git 调用发现解析（从候选的 clone——bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`——跑 `cloneWorktreesOf`，然后 `vouchedScanRoots` 与 regular-file 检查），经 `readRegularFile`/`readState` 读取，且仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 仅用坐标（其检出里不跑 git）。任何拒绝（缺失、非常规、不可读、不匹配）意味着无账本、转换照常投递。`lastKnownHeadSha` 刻意不属于账本。`ci_failure`、`merge_conflict`、`state_change` 永不被抑制。
 
 ### role-aware 动作与 prompt 构造
 
-设置 actions 时，投递使用共享 channel-base 契约。`deps.actions` 作为**已校验**的 map 被消费：对四个裸转换类型（无 lane）的封闭键词表与 2,000 code-point 模板上限，由 `validateBoundActionEntries` 在 daemon 构造该 map 处（§6 配置，PR B）强制，而非由 drain 强制。投递随后每角色组跑 `resolveBoundActionTemplate`（`<role>:<type>` → `<role>:default` → `<type>` → `default`；untyped 只解析裸链），用各值（`%repo%`/`%pr%`/`%url%`/`%title%`/`%event%`/`%sender%`/`%role%`，`%event%` 为裸类型）跑 `renderBoundActionTemplate`。每个匹配组有自己的赢家、自己在组后缀键下的准入、以及由 `buildBoundEventPrompt` 构造、在带标签可信指令块中携带渲染指令的 prompt；每转换至多四次投递。无合格绑定者的匹配组在完整扫描被跳过、在 partial 扫描等待。无 actions 时投递是单赢家与通用 prompt（有角色时用内置角色指导）。prompt 的 GitHub 派生行经 `sanitizePromptText`，正文保持 6,000 code-point 上限。不设置 display text；回复留在会话内。
+设置 actions 时，投递使用共享 channel-base 契约。`deps.actions` 作为**已校验**的 map 被消费：对四个裸转换类型（无 lane）的封闭键词表与 2,000 code-point 模板上限，由 `validateBoundActionEntries` 在 daemon 构造该 map 处（§6 配置，PR B）强制，而非由 drain 强制。投递随后每角色组跑 `resolveBoundActionTemplate`（`<role>:<type>` → `<role>:default` → `<type>` → `default`；untyped 只解析裸链），用各值（`%repo%`/`%pr%`/`%url%`/`%title%`/`%event%`/`%sender%`/`%role%`，`%event%` 为裸类型）跑 `renderBoundActionTemplate`。每个匹配组有自己的赢家、自己在组后缀键下的准入、以及由 `buildBoundEventPrompt` 构造、在带标签可信指令块中携带渲染指令的 prompt；每转换至多四次投递。无合格绑定者的匹配组在完整扫描被跳过、在 partial 扫描等待。若该事件类型根本解析不出任何模板，则没有任何组能被 served，条目记日志丢弃（模板 map 是配置而非扫描覆盖）；空 map 视作无 actions，避免瞬时为空的配置搁浅仍在进行的转换。无 actions 时投递给第一个可用候选者与通用 prompt，后者带上该绑定角色的 `DEFAULT_BOUND_ROLE_GUIDANCE`——一旦解析出操作者指令即惰性。`%repo%`、`%url%` 与 `Repo:`/`URL:` 行按赢家绑定 URL 的拼写渲染 owner/repo；小写化的 watch 标识只对匹配与文件命名保持权威。prompt 的 GitHub 派生行经 `sanitizePromptText`，正文保持 6,000 code-point 上限。不设置 display text；回复留在会话内。
 
 ### 扫描完整性：lastBoundAt 与删除
 
-drain 在完整或 partial 扫描列出 PR 的绑定者（或保留行命名它）时，在 PR 锁内刷新 `lastBoundAt`。完整扫描发现无绑定者时删除 watch 文件，否则自 `lastBoundAt` 起 7 天后删除；未投递条目记日志丢弃。partial 扫描只适用 7 天规则。absent/invalid 以外的读错使该 PR 本 tick 跳过（无 drain 步骤、无删除、无记录写）。删除后再次绑定的 PR 静默初始化；删除前再次绑定则从其上次观测恢复。
+drain 在完整或 partial 扫描列出 PR 的绑定者（或保留行命名它）时，在 PR 锁内刷新 `lastBoundAt`；仅由 channel 绑定也算绑定中。完整性既是扫描的信号也是调用方的信号：任一 registry 条目非 active 或没有 runtime 时，timer 传入 `coveragePartial`，因为 `listAll()` 会整体略过这些条目，其绑定是未知而非不存在。空工作区列表本身即 partial。完整扫描发现无绑定者时删除 watch 文件，否则自 `lastBoundAt` 起 7 天后删除；未投递条目记日志丢弃。partial 扫描只适用 7 天规则。absent/invalid 以外的读错使该 PR 本 tick 跳过（无 drain 步骤、无删除、无记录写）。删除后再次绑定的 PR 静默初始化；删除前再次绑定则从其上次观测恢复。
 
 ### lifecycle close 重排（延后到启用）
 
@@ -79,14 +79,17 @@ drain 在与观测相同的门控 timer 块内、`runPrWatchObservationTick` 之
 
 ## 涉及文件
 
-| 文件                                                         | 改动                                                                                             |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `packages/cli/src/serve/server/pr-watch-drain.ts`（新）      | 每 tick + 每 PR drain、接收者解析、in-flight 标记、自推抑制、role-aware 投递、删除/`lastBoundAt` |
-| `packages/cli/src/serve/server/pr-watch-drain.test.ts`（新） | drain 语义、崩溃窗口、接收者/保留、restore 划分、自推、角色组、删除                              |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`        | 门控块内观测之后跑 drain；加 `getPrDrainDeps` 接缝                                               |
-| `packages/cli/src/serve/routes/session.ts`（延后）           | 从 `restoreSessionHandler` 抽取共享 restore；加 resume-drain 钩子（启用）                        |
-| `packages/cli/src/serve/serve-app-lifecycle.ts`（延后）      | 移除 owner 记录前停止 watch（启用）                                                              |
-| `packages/cli/src/serve/run-qwen-serve.ts`（延后）           | 随启用增量填充 watch/drain deps                                                                  |
+| 文件                                                                  | 改动                                                                                             |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `packages/cli/src/serve/server/pr-watch-drain.ts`（新）               | 每 tick + 每 PR drain、接收者解析、in-flight 标记、自推抑制、role-aware 投递、删除/`lastBoundAt` |
+| `packages/cli/src/serve/server/pr-watch-drain.test.ts`（新）          | drain 语义、崩溃窗口、接收者/保留、restore 划分、自推、角色组、删除                              |
+| `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`（新） | 真实场景覆盖：真实 `gh` 子进程、观测、绑定扫描、store 与准入                                     |
+| `packages/cli/src/serve/server/pr-watch-store.ts`                     | `pending[].headSha`，使投递按条目自己的 head 判自推                                              |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`               | 为检测到的 `head_change` 写入 `headSha`                                                          |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`                 | 门控块内观测之后跑 drain；加 `getPrDrainDeps` 接缝与 registry 覆盖信号                           |
+| `packages/cli/src/serve/routes/session.ts`（延后）                    | 从 `restoreSessionHandler` 抽取共享 restore；加 resume-drain 钩子（启用）                        |
+| `packages/cli/src/serve/serve-app-lifecycle.ts`（延后）               | 移除 owner 记录前停止 watch（启用）                                                              |
+| `packages/cli/src/serve/run-qwen-serve.ts`（延后）                    | 随启用增量填充 watch/drain deps                                                                  |
 
 ## 关键设计决策
 
@@ -110,6 +113,11 @@ drain 在与观测相同的门控 timer 块内、`runPrWatchObservationTick` 之
 - 单元（自推）：账本含该 head 的候选其 `head_change` 被抑制并重新解析到下一个绑定者；其他转换永不抑制；账本拒绝则投递；untrusted primary 用坐标。
 - 单元（role-aware/prompt）：组后缀键；每组 `served`；所有匹配组 served 后条目离开 pending；无 actions 通用 prompt；sanitize 与上限。
 - 单元（删除/`lastBoundAt`）：完整扫描无绑定者删除；partial 的 7 天规则；读错跳过；再绑定静默初始化。
+- 单元（覆盖）：空工作区列表与调用方的 `coveragePartial` 各自阻止完整扫描删除；仅 channel 绑定保持绑定中但绝不作为接收者。
+- 单元（隔离）：单 PR 失败后下一个 PR 仍投递；`DaemonDrainingError` 中止 tick；准入被拒清标记，使后续 drain 能投递。
+- 单元（无模板）：匹配不到任何模板的事件类型记日志丢弃；空 actions map 等同无 actions。
+- 单元（prompt）：无 actions 时的内置角色指引；按绑定 URL 大小写渲染 repo。
+- 真实场景（POSIX）：真实 `gh` 子进程经观测进入 drain 与真实准入；真实 EACCES 崩溃窗口；真实损坏 sidecar 的 partial 扫描；真实 autofix-pr 账本；清空准入环的重启；两工作区解析单接收者。
 - 关闭开关 parity：refresh/timer 不变；关闭时绝不读 drain 接缝。
 
 ## 验收标准

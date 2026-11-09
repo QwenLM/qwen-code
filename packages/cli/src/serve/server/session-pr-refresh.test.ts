@@ -40,6 +40,10 @@ import {
 import * as sessionListModule from './session-list.js';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
+  readPrWatchStateSync,
+  writePrWatchStateSync,
+} from './pr-watch-store.js';
+import {
   refreshWorkspaceSessionPrStates,
   resolveSessionPrRefreshIntervalMs,
   startSessionPrRefreshTimer,
@@ -2059,6 +2063,132 @@ describe('startSessionPrRefreshTimer', () => {
     // no restore, no deletion), exactly like the observation seam.
     expect(getPrDrainDeps).not.toHaveBeenCalled();
     handle?.dispose();
+  });
+
+  it('drains the tick transitions behind the same gate, only for covered workspaces', async () => {
+    const untrustedPrimary = timerRuntime('up', untrustedCwd, false, true);
+    const trustedNonPrimary = timerRuntime('tn', trustedCwd, true, false);
+    const unCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-timer-un-'),
+    );
+    const untrustedNonPrimary = timerRuntime('un', unCwd, false, false);
+    const registry = createWorkspaceRegistry([
+      untrustedPrimary,
+      trustedNonPrimary,
+      untrustedNonPrimary,
+    ]);
+    await seedPendingBinding(trustedNonPrimary, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-timer-'),
+    );
+    const clock = Date.parse('2026-11-08T00:00:00.000Z');
+    const now = () => clock;
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    // The transition the observation queues; the view below reports the same
+    // head, so the observation preserves it and the drain delivers it.
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      observedAt: new Date(clock).toISOString(),
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      pending: [
+        {
+          type: 'ci_failure',
+          key: 'k-timer-drain',
+          summary: 'CI failing',
+          detectedAt: new Date(clock).toISOString(),
+        },
+      ],
+    });
+    const locks = new PathMutexRegistry();
+    const view = vi.fn(async (url: string) => ({
+      kind: 'ok' as const,
+      view: {
+        url,
+        title: 'PR 42',
+        headSha: 'a'.repeat(40),
+        state: 'open' as const,
+        checks: 'passing' as const,
+        failingChecks: [] as string[],
+      },
+    }));
+    const scanBindings = vi.fn(async (runtime: WorkspaceRuntime) => ({
+      bindings: runtime.trusted
+        ? [
+            {
+              sessionId: SESSION_A,
+              workspaceCwd: runtime.workspaceCwd,
+              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+            },
+          ]
+        : [],
+      partial: false,
+    }));
+    const admitPrompt = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _promptText: string,
+        _idempotencyKey: string,
+      ) => ({ deduplicated: false }),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks,
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now,
+      }),
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks,
+        scanBindings,
+        resolveRuntime: (cwd: string) =>
+          [untrustedPrimary, trustedNonPrimary].find(
+            (r) => r.workspaceCwd === cwd,
+          ),
+        isSessionLive: () => true,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt,
+        readPushedHeads: async () => undefined,
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(admitPrompt).toHaveBeenCalledTimes(1);
+      });
+      expect(admitPrompt.mock.calls[0][3]).toBe('k-timer-drain');
+      // The drain sees the covered list (trusted plus primary), never the
+      // untrusted non-primary workspace the timer filters out.
+      const scannedCwds = scanBindings.mock.calls.map((c) => c[0].workspaceCwd);
+      expect(scannedCwds).toContain(trustedCwd);
+      expect(scannedCwds).toContain(untrustedCwd);
+      expect(scannedCwds).not.toContain(unCwd);
+      const stored = readPrWatchStateSync(watchDir, identity);
+      expect(stored.kind).toBe('state');
+      if (stored.kind === 'state') {
+        expect(stored.state.pending).toBeUndefined();
+        expect(stored.state.delivered).toContain('k-timer-drain');
+      }
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+      await removeTempTree(unCwd);
+    }
   });
 
   it('observes before a slow refresh consumes the tick deadline', async () => {

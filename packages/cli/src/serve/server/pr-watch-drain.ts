@@ -7,6 +7,7 @@
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
+  DEFAULT_BOUND_ROLE_GUIDANCE,
   resolveBoundActionTemplate,
   renderBoundActionTemplate,
   buildBoundEventPrompt,
@@ -16,6 +17,7 @@ import type { SessionPrBindingSummary } from '../routes/session-pr-bindings.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import { prWatchIdentityFromUrl } from './pr-watch-observation.js';
+import { DaemonDrainingError } from './session-archive.js';
 import {
   claimPrWatchOwnershipSync,
   deletePrWatchStateSync,
@@ -139,7 +141,9 @@ function sameWatchIdentity(a: PrWatchIdentity, b: PrWatchIdentity): boolean {
  * Merge the aggregated scan rows with the retained rows. On a partial scan,
  * sessions the scan does not list keep their last row (bounded, oldest
  * dropped first); on a complete scan a retained row the scan omits is dropped.
- * Channel-owned sessions are never recipients.
+ * Channel-owned rows are kept: the observation watches their PRs too, so
+ * dropping them here would make a complete scan delete a file the observation
+ * keeps rewriting. They are excluded from recipients, not from coverage.
  */
 export function mergeBindingRows(
   scanned: readonly SessionPrBindingSummary[],
@@ -149,7 +153,6 @@ export function mergeBindingRows(
 ): Map<string, SessionPrBindingSummary> {
   const rows = new Map<string, SessionPrBindingSummary>();
   for (const summary of scanned) {
-    if (summary.sourceType === 'channel') continue;
     rows.set(summary.sessionId, summary);
   }
   if (partial) {
@@ -216,9 +219,10 @@ function toRecipient(binder: Binder): PrWatchRecipient {
 }
 
 /**
- * Resolve the recipients of one PR for one transition type: the single
- * most-recently-active binder without actions, or one winner per matched role
- * group with actions. `matchedGroups` lists the groups whose template chain
+ * Resolve the recipients of one PR for one transition type: every candidate
+ * of each matched role group in recency order (one group without actions), so
+ * the drain can re-resolve past an excluded leader. Channel-owned sessions are
+ * never recipients. `matchedGroups` lists the groups whose template chain
  * resolves, so the drain knows when every group has been served.
  */
 export function resolvePrRecipients(
@@ -227,7 +231,9 @@ export function resolvePrRecipients(
   actions: ReadonlyMap<string, string> | undefined,
   eventType: string,
 ): { recipients: PrWatchRecipient[]; matchedGroups: PrWatchRoleGroup[] } {
-  const binders = bindersOf(rows, identity);
+  const binders = bindersOf(rows, identity).filter(
+    (b) => b.summary.sourceType !== 'channel',
+  );
   // Candidates are returned in recency order so the drain can re-resolve to
   // the next binder when the leader is excluded (self-push or Gone); the
   // single winner is the first eligible candidate it delivers to.
@@ -248,14 +254,33 @@ export function resolvePrRecipients(
   return { recipients, matchedGroups };
 }
 
-function displayUrl(bindingUrl: string, identity: PrWatchIdentity): string {
+/**
+ * The owner/repo as the winner's bound URL spells it. The watch identity is
+ * lowercased for matching and file naming, so it must not drive display
+ * (master §4: `%repo%` keeps the binding URL's case).
+ */
+function displayRepo(bindingUrl: string, identity: PrWatchIdentity): string {
+  try {
+    const segments = new URL(bindingUrl).pathname.split('/').filter(Boolean);
+    if (segments.length >= 2) return `${segments[0]}/${segments[1]}`;
+  } catch {
+    // An unparsable binding URL falls back to the watch identity below.
+  }
+  return identity.repo;
+}
+
+function displayUrl(
+  bindingUrl: string,
+  identity: PrWatchIdentity,
+  repo: string,
+): string {
   try {
     const parsed = new URL(bindingUrl);
     const host = parsed.hostname.replace(/^www\./, '');
     const port = parsed.port ? `:${parsed.port}` : '';
-    return `${parsed.protocol}//${host}${port}/${identity.repo}/pull/${identity.number}`;
+    return `${parsed.protocol}//${host}${port}/${repo}/pull/${identity.number}`;
   } catch {
-    return `https://github.com/${identity.repo}/pull/${identity.number}`;
+    return `https://github.com/${repo}/pull/${identity.number}`;
   }
 }
 
@@ -266,9 +291,10 @@ export function buildDrainPrompt(
   actions: ReadonlyMap<string, string> | undefined,
 ): string {
   const identity = state.pr;
-  const url = displayUrl(recipient.url, identity);
+  const repo = displayRepo(recipient.url, identity);
+  const url = displayUrl(recipient.url, identity, repo);
   const values: BoundActionValues = {
-    repo: identity.repo,
+    repo,
     pr: `${identity.number}`,
     url,
     title: state.title ?? '',
@@ -281,7 +307,7 @@ export function buildDrainPrompt(
       ? resolveBoundActionTemplate(actions, recipient.role, entry.type)
       : undefined;
   const dataLines = [
-    `Repo: ${identity.repo}`,
+    `Repo: ${repo}`,
     `PR: #${identity.number}`,
     ...(state.title ? [`Title: ${state.title}`] : []),
     `URL: ${url}`,
@@ -300,7 +326,15 @@ export function buildDrainPrompt(
         }
       : {}),
     dataLines,
-    ...(recipient.role !== undefined ? { role: recipient.role } : {}),
+    // Inert once an operator instruction resolved; without actions it keeps a
+    // reviewer from being told to "handle the event with your normal workflow"
+    // and pushing to the PR branch (master §4).
+    ...(recipient.role !== undefined
+      ? {
+          role: recipient.role,
+          roleGuidance: DEFAULT_BOUND_ROLE_GUIDANCE[recipient.role],
+        }
+      : {}),
     body: entry.summary,
   });
 }
@@ -347,10 +381,18 @@ function listWatchedFiles(
   return out;
 }
 
+/**
+ * One delivery drain tick. `coveragePartial` carries the caller's knowledge
+ * that the workspace list itself is incomplete: the registry's `listAll()`
+ * omits every non-active entry, so a draining or transitioning workspace's
+ * bindings are unknown, not absent. Without it a complete-looking scan would
+ * delete the watch file of a PR whose only binder lives there.
+ */
 export async function runPrWatchDrainTick(
   workspaces: readonly WorkspaceRuntime[],
   deps: PrWatchDrainDeps,
   state: PrWatchDrainState,
+  coveragePartial = false,
 ): Promise<PrWatchDrainResult> {
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
@@ -365,9 +407,11 @@ export async function runPrWatchDrainTick(
     if (now() - at >= PR_WATCH_GONE_REJOIN_MS) state.gone.delete(sessionId);
   }
 
-  // Aggregate every covered workspace's scan, then merge retention once.
+  // Aggregate every covered workspace's scan, then merge retention once. An
+  // empty list is a degenerate coverage signal (a primary replacement leaves
+  // it momentarily empty), never evidence that every PR is unbound.
   const scanned: SessionPrBindingSummary[] = [];
-  let partial = false;
+  let partial = coveragePartial || workspaces.length === 0;
   for (const runtime of workspaces) {
     try {
       const result = await deps.scanBindings(runtime);
@@ -386,18 +430,28 @@ export async function runPrWatchDrainTick(
   let dropped = 0;
   let deleted = 0;
   for (const file of listWatchedFiles(deps.watchDir, log)) {
-    const outcome = await drainOnePr(
-      file.identity,
-      rows,
-      partial,
-      deps,
-      state,
-      now,
-      log,
-    );
-    delivered += outcome.delivered;
-    dropped += outcome.dropped;
-    if (outcome.deleted) deleted += 1;
+    try {
+      const outcome = await drainOnePr(
+        file.identity,
+        rows,
+        partial,
+        deps,
+        state,
+        now,
+        log,
+      );
+      delivered += outcome.delivered;
+      dropped += outcome.dropped;
+      if (outcome.deleted) deleted += 1;
+    } catch (error) {
+      // A draining daemon aborts the whole tick; any other failure (an
+      // EACCES delete, a dependency throw) is contained per PR so one bad
+      // file cannot starve every PR after it in readdir order.
+      if (error instanceof DaemonDrainingError) throw error;
+      log(
+        `PR watch drain: ${file.identity.repo}#${file.identity.number} failed; continuing with the next PR: ${String(error)}`,
+      );
+    }
   }
   return { claimed: true, delivered, dropped, deleted };
 }
@@ -497,7 +551,10 @@ async function drainEntry(
   log: (message: string) => void,
 ): Promise<{ delivered: number; done: boolean; entry: PrWatchPendingEntry }> {
   const identity = current.pr;
-  const roleAware = deps.actions !== undefined;
+  // An empty map is not a subscription: treat it as no actions so a
+  // momentarily empty configuration cannot strand live transitions.
+  const actions = deps.actions?.size ? deps.actions : undefined;
+  const roleAware = actions !== undefined;
   const deliveredKeys = new Set(current.delivered ?? []);
   const isGone = (sessionId: string): boolean => {
     const at = state.gone.get(sessionId);
@@ -506,9 +563,17 @@ async function drainEntry(
   const { recipients, matchedGroups } = resolvePrRecipients(
     rows,
     identity,
-    deps.actions,
+    actions,
     entry.type,
   );
+  if (roleAware && matchedGroups.length === 0) {
+    // No template resolves for this event type, so no group can ever be
+    // served. The template map is config, not scan coverage, so this drop
+    // does not wait for a complete scan; without it the entry would be
+    // rewritten every tick until it ages out, with no log line.
+    log(`PR watch drain: no template for ${entry.key}; dropping`);
+    return { delivered: 0, done: true, entry };
+  }
   const served = new Set<PrWatchRoleGroup>(entry.served ?? []);
   let delivered = 0;
   let pendingInFlight = false;
@@ -543,14 +608,28 @@ async function drainEntry(
         : recipients.filter((r) => roleGroupOf(r.role) === group)
     ).filter((r) => !isGone(r.sessionId));
     let handled = false;
+    // Candidates left after the self-push exclusion (Gone is already filtered
+    // out of `candidates`). Self-push is permanent for this head, so an entry
+    // whose only binder pushed it reaches the no-candidate drop instead of
+    // being rewritten every tick for the whole age horizon. An unregistered or
+    // retired workspace is transient by contrast: it stays a candidate and the
+    // entry waits, so a transition is not lost while the workspace comes back.
+    let eligible = candidates.length;
     for (const recipient of candidates) {
-      if (entry.type === 'head_change' && current.headSha) {
-        const ledger = await deps.readPushedHeads(recipient);
-        if (ledger?.has(current.headSha)) {
-          log(
-            `PR watch drain: self-pushed head suppressed for ${recipient.sessionId}`,
-          );
-          continue;
+      if (entry.type === 'head_change') {
+        // Judge against the head this entry was detected for: a later
+        // observation may have moved the file's head on, and that newer head
+        // says nothing about who pushed this one.
+        const head = entry.headSha ?? current.headSha;
+        if (head) {
+          const ledger = await deps.readPushedHeads(recipient);
+          if (ledger?.has(head)) {
+            log(
+              `PR watch drain: self-pushed head suppressed for ${recipient.sessionId}`,
+            );
+            eligible -= 1;
+            continue;
+          }
         }
       }
       const runtime = deps.resolveRuntime(recipient.workspaceCwd);
@@ -567,11 +646,20 @@ async function drainEntry(
         continue;
       }
       if (!deps.isSessionLive(runtime, recipient.sessionId)) {
-        if (deps.wakeDormant === false) continue;
-        if (state.restoring.has(recipient.sessionId)) continue;
+        // A dormant leader waits for its own restore (or its next live turn
+        // with wakeDormant off). Falling through to a lower-priority binder
+        // would consume the transition the leader is owed.
+        if (deps.wakeDormant === false) {
+          pendingInFlight = true;
+          break;
+        }
+        if (state.restoring.has(recipient.sessionId)) {
+          pendingInFlight = true;
+          break;
+        }
         if (state.restoring.size >= PR_WATCH_MAX_CONCURRENT_RESTORES) {
           pendingInFlight = true;
-          continue;
+          break;
         }
         state.restoring.add(recipient.sessionId);
         state.inFlight.set(key, {
@@ -593,12 +681,7 @@ async function drainEntry(
         ).finally(() => state.restoring.delete(recipient.sessionId));
         break;
       }
-      const promptText = buildDrainPrompt(
-        current,
-        entry,
-        recipient,
-        deps.actions,
-      );
+      const promptText = buildDrainPrompt(current, entry, recipient, actions);
       state.inFlight.set(key, {
         sessionId: recipient.sessionId,
         admitted: false,
@@ -627,16 +710,17 @@ async function drainEntry(
       handled = true;
       break;
     }
-    if (!handled && !partial && candidates.length === 0 && group !== null) {
-      // Matched group with no eligible binder on a complete scan: skip it.
-      served.add(group);
-    }
-    if (!handled && !partial && candidates.length === 0 && group === null) {
-      // No candidate at all on a complete scan: drop the transition.
-      log(
-        `PR watch drain: no candidate for ${entry.key}; dropping on complete scan`,
-      );
-      return { delivered, done: true, entry };
+    if (!handled && !pendingInFlight && !partial && eligible === 0) {
+      if (group !== null) {
+        // Matched group with no eligible binder on a complete scan: skip it.
+        served.add(group);
+      } else {
+        // No candidate at all on a complete scan: drop the transition.
+        log(
+          `PR watch drain: no candidate for ${entry.key}; dropping on complete scan`,
+        );
+        return { delivered, done: true, entry };
+      }
     }
   }
 
@@ -703,11 +787,19 @@ async function restoreAndAdmit(
           state.inFlight.delete(key);
           return;
         }
+        // A later tick may have served a sibling group and written its marks
+        // after this restore was dispatched. Merge from the entry on disk, not
+        // from the dispatch-time snapshot, or those marks are lost; an entry
+        // that completed meanwhile must not be resurrected either.
+        const liveEntry = (current.pending ?? []).find(
+          (p) => p.key === entry.key,
+        );
+        const actions = deps.actions?.size ? deps.actions : undefined;
         const promptText = buildDrainPrompt(
           current,
-          entry,
+          liveEntry ?? entry,
           recipient,
-          deps.actions,
+          actions,
         );
         try {
           await deps.admitPrompt(runtime, recipient.sessionId, promptText, key);
@@ -724,18 +816,19 @@ async function restoreAndAdmit(
           group,
         });
         recordKey(current, groupKey(entry.key, group));
-        const served = new Set<PrWatchRoleGroup>(entry.served ?? []);
+        const served = new Set<PrWatchRoleGroup>(liveEntry?.served ?? []);
         if (group !== null) served.add(group);
         const { matchedGroups } = resolvePrRecipients(
           state.retained,
           identity,
-          deps.actions,
+          actions,
           entry.type,
         );
         const servedAll =
-          deps.actions === undefined
+          liveEntry === undefined ||
+          (actions === undefined
             ? true
-            : matchedGroups.every((g) => served.has(g));
+            : matchedGroups.every((g) => served.has(g)));
         const others = (current.pending ?? []).filter(
           (p) => p.key !== entry.key,
         );
@@ -746,7 +839,10 @@ async function restoreAndAdmit(
         } else {
           next.pending = [
             ...others,
-            { ...entry, ...(served.size > 0 ? { served: [...served] } : {}) },
+            {
+              ...(liveEntry ?? entry),
+              ...(served.size > 0 ? { served: [...served] } : {}),
+            },
           ];
         }
         try {

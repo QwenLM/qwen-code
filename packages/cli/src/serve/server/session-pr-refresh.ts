@@ -589,8 +589,21 @@ export function startSessionPrRefreshTimer(deps: {
           // the enablement increment. Restores run off-tick inside the drain.
           const drainDeps = deps.getPrDrainDeps?.();
           if (drainDeps) {
+            // `listAll()` omits every non-active entry, so a draining or
+            // transitioning workspace's bindings are unknown, not absent.
+            // Tell the drain before it makes a complete-scan deletion.
+            const coveragePartial = deps.workspaceRegistry
+              .listAllEntries()
+              .some(
+                (entry) => entry.state !== 'active' || !entry.current?.runtime,
+              );
             try {
-              await runPrWatchDrainTick(ordered, drainDeps, prDrainState);
+              await runPrWatchDrainTick(
+                ordered,
+                drainDeps,
+                prDrainState,
+                coveragePartial,
+              );
             } catch (error) {
               if (error instanceof DaemonDrainingError) return;
               process.stderr.write(

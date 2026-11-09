@@ -20,6 +20,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -100,6 +101,12 @@ let extraRuntimes: WorkspaceRuntime[];
 let drainDeps: PrWatchDrainDeps;
 /** Runs just before each real admission: the fault-injection point. */
 let beforeAdmit: (() => void) | undefined;
+/**
+ * The admission entry point the harness calls. A real-restart scenario
+ * replaces it with a freshly imported module, whose process-global
+ * idempotency ring is empty — what a new process actually starts with.
+ */
+let admitImpl: typeof admitSessionPrompt;
 
 function allRuntimes(): WorkspaceRuntime[] {
   return [runtime, ...extraRuntimes];
@@ -221,12 +228,20 @@ function drain(): ReturnType<typeof runPrWatchDrainTick> {
   return runPrWatchDrainTick(allRuntimes(), drainDeps, drainState);
 }
 
-function stored() {
-  const read = readPrWatchStateSync(watchDir, {
+/**
+ * The discriminated read: absence assertions must branch on `kind`, or a
+ * corrupt/unreadable file would satisfy "the file was deleted" too.
+ */
+function storedRead() {
+  return readPrWatchStateSync(watchDir, {
     host: 'github.com',
     repo: REPO,
     number: PR,
   });
+}
+
+function stored() {
+  const read = storedRead();
   return read.kind === 'state' ? read.state : undefined;
 }
 
@@ -320,7 +335,11 @@ function addWorkspace(
 }
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(os.tmpdir(), 'pr-watch-scenario-'));
+  // Canonicalise at the source: the gh child reports its physical cwd, and on
+  // macOS os.tmpdir() (/var/folders/…) is a symlink to /private/var/folders/…
+  root = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), 'pr-watch-scenario-')),
+  );
   runtimeDir = path.join(root, 'runtime');
   mkdirSync(runtimeDir, { recursive: true });
   process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
@@ -353,6 +372,7 @@ beforeEach(() => {
   enqueued = [];
   logs = [];
   beforeAdmit = undefined;
+  admitImpl = admitSessionPrompt;
   extraRuntimes = [];
   runtime = makeRuntime(ws);
   drainDeps = {
@@ -369,7 +389,7 @@ beforeEach(() => {
     wakeSession: async () => ({ kind: 'unavailable' }),
     admitPrompt: async (target, sessionId, promptText, idempotencyKey) => {
       beforeAdmit?.();
-      const admission = admitSessionPrompt(
+      const admission = admitImpl(
         { archiveCoordinator: {} as SessionArchiveCoordinator },
         {
           runtime: target,
@@ -516,7 +536,7 @@ describe.skipIf(process.platform === 'win32')(
       unbind(bound);
       const partial = await drain();
       expect(partial.deleted).toBe(0);
-      expect(stored()).toBeDefined();
+      expect(storedRead().kind).toBe('state');
       expect(admissions).toHaveLength(0);
 
       // Once the corrupt sidecar is a readable tombstone the scan is complete
@@ -524,7 +544,7 @@ describe.skipIf(process.platform === 'win32')(
       unbind(corrupt);
       const complete = await drain();
       expect(complete.deleted).toBe(1);
-      expect(stored()).toBeUndefined();
+      expect(storedRead().kind).toBe('absent');
     });
 
     it('retries only the recording write after a real EACCES at the crash window', async () => {
@@ -708,7 +728,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(ghCalls()).toHaveLength(2);
     });
 
-    it('deduplicates the re-admission through the real ring after a restart', async () => {
+    it('deduplicates a re-admission after an in-process drain-state reset', async () => {
       await seedSession();
       writeView(HEAD_A, { checks: 'passing' });
       await observe();
@@ -722,15 +742,47 @@ describe.skipIf(process.platform === 'win32')(
       expect(stored()?.pending).toHaveLength(2);
       chmodSync(watchDir, 0o700);
 
-      // A restart loses the in-flight marks: the still-pending entries are
-      // admitted again, and the real idempotency ring turns each into a dedupe
-      // instead of a second turn.
+      // Losing only the drain state (the ring stays warm, as within one
+      // process): the still-pending entries are admitted again and the real
+      // idempotency ring turns each into a dedupe instead of a second turn.
       drainState = createPrWatchDrainState();
       const retried = await drain();
       expect(retried.delivered).toBe(2);
       expect(enqueued).toHaveLength(2);
       expect(admissions).toHaveLength(4);
       expect(admissions.slice(2).every((a) => a.deduplicated)).toBe(true);
+      expect(stored()?.pending).toBeUndefined();
+      expect(stored()?.delivered).toHaveLength(2);
+    });
+
+    it('re-admits as a fresh turn after a restart clears the admission ring', async () => {
+      await seedSession();
+      writeView(HEAD_A, { checks: 'passing' });
+      await observe();
+      await drain();
+      writeView(HEAD_B, { checks: 'failing' });
+      await observe();
+      beforeAdmit = () => chmodSync(watchDir, 0o500);
+      await drain();
+      beforeAdmit = undefined;
+      expect(enqueued).toHaveLength(2);
+      expect(stored()?.pending).toHaveLength(2);
+      chmodSync(watchDir, 0o700);
+
+      // A real restart loses BOTH the drain state and the process-global
+      // idempotency ring (never persisted). Re-importing the admission module
+      // gives the empty ring a new process starts with, so the crash window
+      // re-admits as a fresh turn — the design's at-least-once guarantee.
+      vi.resetModules();
+      admitImpl = (await import('../routes/session-prompt-admission.js'))
+        .admitSessionPrompt;
+      drainState = createPrWatchDrainState();
+      const retried = await drain();
+      expect(retried.delivered).toBe(2);
+      expect(admissions).toHaveLength(4);
+      expect(admissions.slice(2).every((a) => !a.deduplicated)).toBe(true);
+      expect(enqueued).toHaveLength(4);
+      expect(storedRead().kind).toBe('state');
       expect(stored()?.pending).toBeUndefined();
       expect(stored()?.delivered).toHaveLength(2);
     });
@@ -791,14 +843,17 @@ describe.skipIf(process.platform === 'win32')(
       await observe();
       expect(stored()?.pending).toHaveLength(2);
       await drain();
-      // The conflict reaches the binder; the self-pushed head change stays
-      // pending (its only candidate is the pusher).
+      // The conflict reaches the binder. The self-pushed head change has no
+      // eligible candidate left, so a complete scan drops it with a log line
+      // instead of rewriting it every tick for the whole age horizon.
       expect(admissions).toHaveLength(1);
       expect(admissions[0]?.text).toContain('merge conflict detected');
       expect(enqueued).toHaveLength(1);
-      const pending = stored()?.pending ?? [];
-      expect(pending).toHaveLength(1);
-      expect(pending[0]?.type).toBe('head_change');
+      expect(storedRead().kind).toBe('state');
+      expect(stored()?.pending).toBeUndefined();
+      expect(
+        logs.some((line) => line.includes('dropping on complete scan')),
+      ).toBe(true);
     });
 
     it('delivers to a recipient in an untrusted primary workspace', async () => {

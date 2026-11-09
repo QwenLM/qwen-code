@@ -8,7 +8,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_BOUND_ROLE_GUIDANCE } from '@qwen-code/channel-base';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
+import { DaemonDrainingError } from './session-archive.js';
 import type { SessionPrBindingSummary } from '../routes/session-pr-bindings.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import {
@@ -17,6 +19,7 @@ import {
   mergeBindingRows,
   resolvePrRecipients,
   runPrWatchDrainTick,
+  PR_WATCH_GONE_REJOIN_MS,
   PR_WATCH_MAX_CONCURRENT_RESTORES,
   PR_WATCH_MAX_PARTIAL_RETAINED,
   type PrWatchDrainDeps,
@@ -24,6 +27,7 @@ import {
   type PrWatchRecipient,
 } from './pr-watch-drain.js';
 import {
+  PR_WATCH_DELIVERED_CAP,
   readPrWatchStateSync,
   writePrWatchStateSync,
   type PrWatchIdentity,
@@ -87,7 +91,7 @@ function pendingState(overrides: Partial<PrWatchState> = {}): PrWatchState {
 }
 
 describe('mergeBindingRows', () => {
-  it('excludes channel-owned sessions', () => {
+  it('keeps channel-owned rows for coverage but never as recipients', () => {
     const state = createPrWatchDrainState();
     const rows = mergeBindingRows(
       [summary('s1'), summary('chan', { sourceType: 'channel' })],
@@ -95,7 +99,16 @@ describe('mergeBindingRows', () => {
       state,
       () => {},
     );
-    expect([...rows.keys()]).toEqual(['s1']);
+    // The observation watches channel-bound PRs too, so dropping the row here
+    // would make a complete scan delete a file the observation keeps writing.
+    expect([...rows.keys()]).toEqual(['s1', 'chan']);
+    const { recipients } = resolvePrRecipients(
+      rows,
+      identity,
+      undefined,
+      'ci_failure',
+    );
+    expect(recipients.map((r) => r.sessionId)).toEqual(['s1']);
   });
 
   it('retains unlisted rows on a partial scan and drops them on a complete scan', () => {
@@ -161,7 +174,7 @@ describe('resolvePrRecipients', () => {
     expect(recipients).toEqual([]);
   });
 
-  it('resolves one winner per matched role group with actions', () => {
+  it('returns every candidate of each matched group in recency order', () => {
     const rows = new Map([
       ['rev', summary('rev', { role: 'review', updatedAt: T0 })],
       ['fix', summary('fix', { role: 'fix', updatedAt: T0 })],
@@ -178,6 +191,31 @@ describe('resolvePrRecipients', () => {
     );
     expect(matchedGroups.sort()).toEqual(['fix', 'review']);
     expect(recipients.map((r) => r.sessionId).sort()).toEqual(['fix', 'rev']);
+  });
+
+  it('keeps both binders of one role group so the drain can re-resolve', () => {
+    // Two sessions may bind one PR with the same role: the scan appends one
+    // row per sidecar with no per-role uniqueness. Returning only the leader
+    // would leave a Gone or self-pushed leader with an empty candidate list.
+    const rows = new Map([
+      ['older', summary('older', { role: 'review', updatedAt: T0 })],
+      [
+        'newer',
+        summary('newer', {
+          role: 'review',
+          updatedAt: '2026-11-08T01:00:00.000Z',
+        }),
+      ],
+    ]);
+    const actions = new Map([['review:ci_failure', 'review it']]);
+    const { recipients, matchedGroups } = resolvePrRecipients(
+      rows,
+      identity,
+      actions,
+      'ci_failure',
+    );
+    expect(matchedGroups).toEqual(['review']);
+    expect(recipients.map((r) => r.sessionId)).toEqual(['newer', 'older']);
   });
 
   it('skips a role group whose chain does not resolve', () => {
@@ -409,11 +447,24 @@ describe('runPrWatchDrainTick', () => {
 
   it('leaves the entry pending when wakeDormant is off and the session is dormant', async () => {
     writePrWatchStateSync(dir, identity, pendingState());
-    const deps = makeDeps({ isSessionLive: () => false, wakeDormant: false });
+    // A live lower-priority binder must NOT receive the transition the dormant
+    // leader is owed: with wakeDormant off the entry waits for that session.
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [
+          summary('dormant-leader', { updatedAt: '2026-11-08T02:00:00.000Z' }),
+          summary('live-follower', { updatedAt: T0 }),
+        ],
+        partial: false,
+      }),
+      isSessionLive: (_runtime, sessionId) => sessionId === 'live-follower',
+      wakeDormant: false,
+    });
     const result = await runPrWatchDrainTick([runtime()], deps, state);
     expect(result.delivered).toBe(0);
     expect(deps.admitPrompt).not.toHaveBeenCalled();
     const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
     if (stored.kind === 'state') expect(stored.state.pending).toHaveLength(1);
   });
 
@@ -444,7 +495,15 @@ describe('runPrWatchDrainTick', () => {
     });
     expect(release).toHaveBeenCalled();
     const stored = readPrWatchStateSync(dir, identity);
-    expect(stored.kind === 'state' && stored.state.pending).toBeUndefined();
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') {
+      expect(stored.state.pending).toBeUndefined();
+      // The restored delivery is recorded, so a later observation cannot
+      // re-deliver the same key.
+      expect(stored.state.delivered).toContain(
+        'pr-state:owner/repo#42:ci_failure:aaa',
+      );
+    }
   });
 
   it('leaves the entry pending when a restore is temporarily unavailable', async () => {
@@ -468,6 +527,7 @@ describe('runPrWatchDrainTick', () => {
     });
     expect(admit).not.toHaveBeenCalled();
     const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
     if (stored.kind === 'state') expect(stored.state.pending).toHaveLength(1);
   });
 
@@ -675,5 +735,516 @@ describe('runPrWatchDrainTick', () => {
     expect(result.claimed).toBe(true);
     expect(result.delivered).toBe(1);
     expect(deps.admitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an empty workspace list as partial, never as every PR unbound', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const deps = makeDeps({
+      scanBindings: async () => ({ bindings: [], partial: false }),
+    });
+    const result = await runPrWatchDrainTick([], deps, state);
+    expect(result.deleted).toBe(0);
+    expect(readPrWatchStateSync(dir, identity).kind).toBe('state');
+  });
+
+  it('honours the caller coverage flag over a complete-looking scan', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const deps = makeDeps({
+      scanBindings: async () => ({ bindings: [], partial: false }),
+    });
+    // A draining workspace the registry omitted from the list: its bindings
+    // are unknown, so the file must survive even though the scan looks complete.
+    const result = await runPrWatchDrainTick([runtime()], deps, state, true);
+    expect(result.deleted).toBe(0);
+    expect(readPrWatchStateSync(dir, identity).kind).toBe('state');
+  });
+
+  it('keeps a channel-only binding bound without ever delivering to it', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [summary('chan', { sourceType: 'channel' })],
+        partial: false,
+      }),
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.deleted).toBe(0);
+    expect(result.delivered).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+    expect(readPrWatchStateSync(dir, identity).kind).toBe('state');
+  });
+
+  it('drops a self-pushed head with no eligible candidate on a complete scan', async () => {
+    const logs: string[] = [];
+    writePrWatchStateSync(
+      dir,
+      identity,
+      pendingState({
+        pending: [
+          {
+            type: 'head_change',
+            key: 'k-head',
+            summary: 'head changed',
+            detectedAt: T0,
+            headSha: 'a'.repeat(40),
+          },
+        ],
+      }),
+    );
+    const deps = makeDeps({
+      readPushedHeads: async () => new Set(['a'.repeat(40)]),
+      log: (message) => logs.push(message),
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') expect(stored.state.pending).toBeUndefined();
+    expect(logs.some((l) => l.includes('dropping on complete scan'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps a self-pushed head pending on a partial scan', async () => {
+    writePrWatchStateSync(
+      dir,
+      identity,
+      pendingState({
+        pending: [
+          {
+            type: 'head_change',
+            key: 'k-head',
+            summary: 'head changed',
+            detectedAt: T0,
+            headSha: 'a'.repeat(40),
+          },
+        ],
+      }),
+    );
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [summary('s1')],
+        partial: true,
+      }),
+      readPushedHeads: async () => new Set(['a'.repeat(40)]),
+    });
+    await runPrWatchDrainTick([runtime()], deps, state);
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') expect(stored.state.pending).toHaveLength(1);
+  });
+
+  it('keeps the entry waiting when the only candidate workspace is unregistered', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    // Unlike self-push, an unregistered workspace is transient: dropping here
+    // would lose a transition the workspace can still receive when it returns.
+    const deps = makeDeps({ resolveRuntime: () => undefined });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') expect(stored.state.pending).toHaveLength(1);
+  });
+
+  it('judges self-push against the entry head, not the file current head', async () => {
+    writePrWatchStateSync(
+      dir,
+      identity,
+      pendingState({
+        // A later observation moved the file on to head C.
+        headSha: 'c'.repeat(40),
+        pending: [
+          {
+            type: 'head_change',
+            key: 'k-head',
+            summary: 'head changed',
+            detectedAt: T0,
+            headSha: 'b'.repeat(40),
+          },
+        ],
+      }),
+    );
+    const deps = makeDeps({
+      // The binder pushed C, not the B this entry was detected for.
+      readPushedHeads: async () => new Set(['c'.repeat(40)]),
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(1);
+    expect(deps.admitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a transition no action template matches, with a log line', async () => {
+    const logs: string[] = [];
+    writePrWatchStateSync(
+      dir,
+      identity,
+      pendingState({
+        pending: [
+          {
+            type: 'head_change',
+            key: 'k-head',
+            summary: 'head changed',
+            detectedAt: T0,
+          },
+        ],
+      }),
+    );
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [summary('rev', { role: 'review' })],
+        partial: false,
+      }),
+      actions: new Map([['review:ci_failure', 'review it']]),
+      log: (message) => logs.push(message),
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') expect(stored.state.pending).toBeUndefined();
+    expect(logs.some((l) => l.includes('no template for k-head'))).toBe(true);
+  });
+
+  it('treats an empty actions map as no actions', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const deps = makeDeps({ actions: new Map() });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(1);
+    expect(deps.admitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('contains a per-PR failure so the next PR still delivers', async () => {
+    const other: PrWatchIdentity = { ...identity, number: 43 };
+    // PR 42 is unbound (its delete throws); PR 43 has a pending transition.
+    writePrWatchStateSync(dir, identity, pendingState());
+    writePrWatchStateSync(
+      dir,
+      other,
+      pendingState({
+        pr: other,
+        pending: [
+          {
+            type: 'ci_failure',
+            key: 'k-43',
+            summary: 'CI failing',
+            detectedAt: T0,
+          },
+        ],
+      }),
+    );
+    const store = await import('./pr-watch-store.js');
+    vi.spyOn(store, 'deletePrWatchStateSync').mockImplementation(() => {
+      throw new Error('EACCES');
+    });
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [summary('s43', { number: 43 })],
+        partial: false,
+      }),
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(1);
+    expect(deps.admitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates DaemonDrainingError out of the per-PR containment', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const store = await import('./pr-watch-store.js');
+    vi.spyOn(store, 'deletePrWatchStateSync').mockImplementation(() => {
+      throw new DaemonDrainingError();
+    });
+    const deps = makeDeps({
+      scanBindings: async () => ({ bindings: [], partial: false }),
+    });
+    await expect(runPrWatchDrainTick([runtime()], deps, state)).rejects.toThrow(
+      DaemonDrainingError,
+    );
+  });
+
+  it('clears the in-flight mark when admission is rejected, so a later drain delivers', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const key = 'pr-state:owner/repo#42:ci_failure:aaa';
+    const admit = vi
+      .fn<
+        (
+          runtime: WorkspaceRuntime,
+          sessionId: string,
+          promptText: string,
+          idempotencyKey: string,
+        ) => Promise<{ deduplicated: boolean }>
+      >()
+      .mockRejectedValueOnce(new Error('queue full'))
+      .mockResolvedValue({ deduplicated: false });
+    const deps = makeDeps({ admitPrompt: admit });
+    const first = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(first.delivered).toBe(0);
+    expect(state.inFlight.has(key)).toBe(false);
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') expect(stored.state.pending).toHaveLength(1);
+    const second = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(second.delivered).toBe(1);
+    expect(admit).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for a restore slot instead of delivering to the next binder', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    for (let i = 0; i < PR_WATCH_MAX_CONCURRENT_RESTORES; i += 1) {
+      state.restoring.add(`busy-${i}`);
+    }
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [
+          summary('dormant-leader', { updatedAt: '2026-11-08T02:00:00.000Z' }),
+          summary('live-follower', { updatedAt: T0 }),
+        ],
+        partial: false,
+      }),
+      isSessionLive: (_runtime, sessionId) => sessionId === 'live-follower',
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') expect(stored.state.pending).toHaveLength(1);
+  });
+
+  it('waits when the leader is already restoring instead of using the next binder', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    state.restoring.add('dormant-leader');
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [
+          summary('dormant-leader', { updatedAt: '2026-11-08T02:00:00.000Z' }),
+          summary('live-follower', { updatedAt: T0 }),
+        ],
+        partial: false,
+      }),
+      isSessionLive: (_runtime, sessionId) => sessionId === 'live-follower',
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('preserves a sibling group served mark when a restore completes', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const admit = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _promptText: string,
+        _idempotencyKey: string,
+      ) => ({ deduplicated: false }),
+    );
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [
+          summary('rev', { role: 'review' }),
+          summary('fix', { role: 'fix' }),
+        ],
+        partial: false,
+      }),
+      actions: new Map([
+        ['review:ci_failure', 'review it'],
+        ['fix:ci_failure', 'fix it'],
+      ]),
+      isSessionLive: (_runtime, sessionId) => sessionId === 'rev',
+      wakeSession: () =>
+        gate.then(() => ({
+          kind: 'restored' as const,
+          release: async () => {},
+        })),
+      admitPrompt: admit,
+    });
+    // The tick serves the live review group and writes served:['review'] while
+    // the fix restore is still in flight.
+    await runPrWatchDrainTick([runtime()], deps, state);
+    const mid = readPrWatchStateSync(dir, identity);
+    expect(mid.kind).toBe('state');
+    if (mid.kind === 'state') {
+      expect(mid.state.pending?.[0]?.served).toEqual(['review']);
+    }
+    openGate();
+    await vi.waitFor(() => {
+      expect(state.restoring.size).toBe(0);
+    });
+    const after = readPrWatchStateSync(dir, identity);
+    expect(after.kind).toBe('state');
+    if (after.kind === 'state') {
+      // Both groups served: the entry completes instead of being re-appended
+      // with the review mark lost.
+      expect(after.state.pending).toBeUndefined();
+      expect(after.state.delivered).toHaveLength(2);
+    }
+  });
+
+  it('refreshes lastBoundAt while a binder is present', async () => {
+    writePrWatchStateSync(dir, identity, pendingState({ lastBoundAt: T0 }));
+    const deps = makeDeps();
+    await runPrWatchDrainTick([runtime()], deps, state);
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') {
+      expect(stored.state.lastBoundAt).toBe(
+        new Date(Date.parse(T0) + 60_000).toISOString(),
+      );
+    }
+  });
+
+  it('lets a Gone recipient rejoin after the horizon', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const now = Date.parse(T0) + 60_000;
+    state.gone.set('s1', now - PR_WATCH_GONE_REJOIN_MS - 1);
+    const deps = makeDeps();
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(state.gone.has('s1')).toBe(false);
+    expect(result.delivered).toBe(1);
+  });
+
+  it('completes the entry when a matched group has no binder on a complete scan', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [summary('rev', { role: 'review' })],
+        partial: false,
+      }),
+      actions: new Map([
+        ['review:ci_failure', 'review it'],
+        ['fix:ci_failure', 'fix it'],
+      ]),
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(1);
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') expect(stored.state.pending).toBeUndefined();
+  });
+
+  it('skips a group already marked served without re-admitting it', async () => {
+    const key = 'pr-state:owner/repo#42:ci_failure:aaa';
+    writePrWatchStateSync(
+      dir,
+      identity,
+      pendingState({
+        pending: [
+          {
+            type: 'ci_failure',
+            key,
+            summary: 'CI failing',
+            detectedAt: T0,
+            served: ['review'],
+          },
+        ],
+      }),
+    );
+    const admit = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _promptText: string,
+        _idempotencyKey: string,
+      ) => ({ deduplicated: false }),
+    );
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: [
+          summary('rev', { role: 'review' }),
+          summary('fix', { role: 'fix' }),
+        ],
+        partial: false,
+      }),
+      actions: new Map([
+        ['review:ci_failure', 'review it'],
+        ['fix:ci_failure', 'fix it'],
+      ]),
+      admitPrompt: admit,
+    });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(1);
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(admit.mock.calls[0][3]).toBe(`${key}:fix`);
+  });
+
+  it('bounds the delivered ledger at the cap, dropping the oldest key', async () => {
+    const old = Array.from(
+      { length: PR_WATCH_DELIVERED_CAP },
+      (_, i) => `old-${i}`,
+    );
+    writePrWatchStateSync(dir, identity, pendingState({ delivered: old }));
+    const deps = makeDeps();
+    await runPrWatchDrainTick([runtime()], deps, state);
+    const stored = readPrWatchStateSync(dir, identity);
+    expect(stored.kind).toBe('state');
+    if (stored.kind === 'state') {
+      expect(stored.state.delivered).toHaveLength(PR_WATCH_DELIVERED_CAP);
+      expect(stored.state.delivered).toContain(
+        'pr-state:owner/repo#42:ci_failure:aaa',
+      );
+      expect(stored.state.delivered).not.toContain('old-0');
+    }
+  });
+
+  it('skips a PR whose under-lock read errors, leaving the file untouched', async () => {
+    const logs: string[] = [];
+    writePrWatchStateSync(dir, identity, pendingState());
+    const store = await import('./pr-watch-store.js');
+    vi.spyOn(store, 'readPrWatchStateSync').mockReturnValue({
+      kind: 'error',
+      filePath: 'x',
+      error: new Error('EACCES'),
+    });
+    const deps = makeDeps({ log: (message) => logs.push(message) });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(0);
+    expect(result.deleted).toBe(0);
+    expect(deps.admitPrompt).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.includes('skipping this tick'))).toBe(true);
+    vi.mocked(store.readPrWatchStateSync).mockRestore();
+    expect(readPrWatchStateSync(dir, identity).kind).toBe('state');
+  });
+});
+
+describe('buildDrainPrompt role guidance and display case', () => {
+  const recipient: PrWatchRecipient = {
+    sessionId: 's1',
+    workspaceCwd: '/ws',
+    url: 'https://github.com/QwenLM/Qwen-Code/pull/42',
+    role: 'review',
+  };
+
+  it('carries the built-in role guidance when no actions are set', () => {
+    const state = pendingState();
+    const prompt = buildDrainPrompt(
+      state,
+      state.pending![0],
+      recipient,
+      undefined,
+    );
+    expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.review);
+    expect(prompt).not.toContain('Handle the event with your normal workflow');
+  });
+
+  it('renders the repo as the binding URL spells it, not the lowercased key', () => {
+    const state = pendingState({
+      pr: { host: 'github.com', repo: 'qwenlm/qwen-code', number: 42 },
+    });
+    const prompt = buildDrainPrompt(
+      state,
+      state.pending![0],
+      recipient,
+      new Map([['default', 'Handle %repo% at %url%']]),
+    );
+    expect(prompt).toContain('QwenLM/Qwen-Code');
+    expect(prompt).toContain('Repo: QwenLM/Qwen-Code');
+    expect(prompt).not.toContain('qwenlm/qwen-code');
   });
 });
