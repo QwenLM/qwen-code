@@ -70,6 +70,7 @@ import type {
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
+import { HostedRestoreKeptBytes } from './hosted-restore-kept-bytes.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -18308,6 +18309,88 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it('reads each resource once on a workspace cold load, apart from the definition and the latest checkpoint', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const toolProfile = 'hosted-workspace-files/1';
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile,
+    });
+    expect(created.status).toBe(200);
+    for (const promptId of [PROMPT_ID, randomUUID()]) {
+      const prompt = [{ type: 'text', text: `hello ${promptId}` }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+    }
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    const reads = new Map<string, { kind: string; count: number }>();
+    const read = LocalManagedSessionResourceStore.prototype.read;
+    const counted = vi
+      .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+      .mockImplementation(function (
+        this: LocalManagedSessionResourceStore,
+        ref,
+      ) {
+        const entry = reads.get(ref.resourceId);
+        reads.set(ref.resourceId, {
+          kind: ref.kind,
+          count: (entry?.count ?? 0) + 1,
+        });
+        return read.call(this, ref);
+      });
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile });
+    counted.mockRestore();
+    expect(loaded.status).toBe(200);
+    const kinds = new Set([...reads.values()].map(({ kind }) => kind));
+    for (const kind of [
+      'managed-message',
+      'managed-checkpoint',
+      'managed-input',
+      'managed-turn-result',
+    ])
+      expect(kinds).toContain(kind);
+    expect(
+      [...reads.values()].filter(({ kind }) => kind === 'managed-checkpoint')
+        .length,
+    ).toBeGreaterThan(2);
+    // The checkpoints and message bodies the restore verification reads
+    // serve the checkpoint checks and the history projection too. Two reads
+    // happen once per load whatever the history: the load route reads the
+    // definition before the verification does, and the restore bundle reads
+    // the latest checkpoint for its run authorization.
+    expect(
+      [...reads.values()].filter(
+        ({ kind, count }) => count !== (kind === 'managed-definition' ? 2 : 1),
+      ),
+    ).toEqual([{ kind: 'managed-checkpoint', count: 2 }]);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      loaded.body.clientId as string,
+    );
+  });
+
   it('refuses a cold load when a settled file tool outcome is missing from its checkpoint', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
@@ -18448,6 +18531,24 @@ describe('Hosted Harness no-tool session', () => {
     const created = await headers(supertest(server).post('/session')).send(
       body,
     );
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       created.body.clientId as string,
@@ -18552,24 +18653,68 @@ describe('Hosted Harness no-tool session', () => {
     expect(seal).toBeDefined();
     sealedResources.delete(sealKey);
     const read = vi.spyOn(state.toolResults, 'read');
+    const handedOver = vi.spyOn(
+      ManagedSessionRecordSink.prototype,
+      'rememberMessageBody',
+    );
     const refused = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
     expect(refused.body.reason).toBe('restore_verification_failed');
+    // The content check failed after the message bodies were verified, and a
+    // load the checks refuse hands none of them to the shared body cache.
+    expect(handedOver).not.toHaveBeenCalled();
     expect(
       read.mock.calls.map(([ref]) => [ref.kind, ref.resourceId]),
     ).toContainEqual(['managed-tool-result-content', sealId]);
     read.mockRestore();
     sealedResources.set(sealKey, seal);
+    const reread = vi.spyOn(state.toolResults, 'read');
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(loaded.status).toBe(200);
+    expect(handedOver.mock.calls.map(([ref]) => ref.kind)).toContain(
+      'managed-message',
+    );
+    handedOver.mockRestore();
+    // The verification read the manifest once, through the Session's
+    // resources; its manifest check and both content reads use those bytes.
+    expect(
+      reread.mock.calls.filter(
+        ([ref]) => ref.resourceId === manifest.resourceId,
+      ),
+    ).toEqual([]);
+    expect(
+      reread.mock.calls.map(([ref]) => [ref.kind, ref.resourceId]),
+    ).toContainEqual(['managed-tool-result-content', sealId]);
+    reread.mockRestore();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       loaded.body.clientId as string,
+    );
+    // Past its budget a manifest is read through the tool-result store again,
+    // for the manifest check and for each content stream.
+    const unkept = vi
+      .spyOn(HostedRestoreKeptBytes.prototype, 'keep')
+      .mockReturnValue(false);
+    const fallback = vi.spyOn(state.toolResults, 'read');
+    const reloaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
+    expect(reloaded.status).toBe(200);
+    expect(
+      fallback.mock.calls.filter(
+        ([ref]) => ref.resourceId === manifest.resourceId,
+      ),
+    ).toHaveLength(3);
+    fallback.mockRestore();
+    unkept.mockRestore();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      reloaded.body.clientId as string,
     );
   });
 
