@@ -266,6 +266,7 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…](#af-159)
 - [160. (top level) · Env constant commentary — Moved out of the workflow verbatim to keep the file under GitHub's start-runs gate…](#af-160)
 - [161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…](#af-161)
+- [162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…](#af-162)
 
 ---
 
@@ -4948,4 +4949,46 @@ output: skillLog redacts credentials, headings are stripped to the
 same character class the check-name lists use, and the existing
 feedback echo defangs both workflow-command syntaxes before anything
 reaches step stdout.
+```
+
+<a id="af-162"></a>
+
+### 162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…
+
+In `review-scan` · `Scan for PRs with new feedback`.
+
+```text
+New in this change, not moved from the YAML.
+
+Observed on #16408: a maintainer's feedback comment sat unaddressed
+for 13+ hours while the loop spun a review-timeout ↔ base-update
+cycle. The mechanics: review-pr times out on a large diff (~6h per
+run) and lands FAILURE; the stale-base gate sees a red check that is
+green on MAIN_GREEN_CHECKS (the last-merged PR's review passed) and a
+branch behind main, so it merges main via update-branch and
+`continue`s — skipping feedback processing for that scan. The merge
+creates a new head, which starts a FRESH review-pr run; the #8888
+review-in-flight gate then holds every scan until that run ends, and
+when it times out the stale-base gate fires again. Two base updates
+(01:14, 07:47) both cited review-pr and neither cleared it; the
+pending comment never reached a round.
+
+The green-on-main premise is unsound for review-pr specifically: it
+reviews THIS PR's diff, so a timeout reproduces on any base — merging
+main cannot fix it, it only restarts the clock. af-109 already calls
+green-on-main necessary-but-NOT-sufficient; this is the check where
+the insufficiency is structural, not incidental. The selector
+therefore drops review-pr by name (the same key NON_BLOCKING_CHECKS
+uses), alongside the existing Qwen Autofix exclusion.
+
+What remains unchanged: while review-pr is IN_PROGRESS the #8888 gate
+still holds the round (a push would cancel the review); a red
+review-pr still appears in feedback.md's failed-check sections once a
+round runs; and every OTHER red check keeps its stale-base behavior.
+The trade-off: a review-pr red genuinely caused by a stale base no
+longer auto-merges main — but the feedback round still lists it under
+failed checks, and the address agent can merge main itself when the
+evidence calls for it. The meta-test pins both directions: review-pr
+alone green-on-main no longer updates, and a mixed review-pr + Test
+red still updates for Test.
 ```
