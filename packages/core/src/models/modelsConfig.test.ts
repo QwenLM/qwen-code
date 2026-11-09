@@ -14,7 +14,11 @@ import {
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
 } from '../qwen/oauth-config.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
-import type { ModelConfig, ModelProvidersConfig } from './types.js';
+import type {
+  ModelConfig,
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from './types.js';
 import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
 
 describe('ModelsConfig', () => {
@@ -1264,6 +1268,162 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('reports a name-inferred modalities as computed, not provider-declared', () => {
+    // The registry fills a missing `modalities` from the model name before
+    // `applyResolvedModelDefaults` sees it, so a stamp of `modelProviders` for
+    // every field would tell a media refusal to point at a
+    // `generationConfig.modalities` key the entry does not contain
+    // (QwenLM/qwen-code#16185).
+    const modelsConfig = openaiConfig([entry('text-only-model', 'Text only')]);
+
+    refreshOpenAI(modelsConfig, 'text-only-model');
+
+    expect(modelsConfig.getGenerationConfigSources()['modalities']?.kind).toBe(
+      'computed',
+    );
+  });
+
+  it('keeps a provider-declared modalities attributed to the entry', () => {
+    const modelsConfig = openaiConfig([
+      entry('vision-model', 'Vision', undefined, undefined, {
+        modalities: { image: true },
+      }),
+    ]);
+
+    refreshOpenAI(modelsConfig, 'vision-model');
+
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'modelProviders',
+      authType: 'openai',
+      modelId: 'vision-model',
+      detail: 'generationConfig.modalities',
+    });
+  });
+
+  it('does not attribute a declared modalities the registry overrode', async () => {
+    // The registry canonicalises `modalities` for a family whose capabilities
+    // are fixed by the model name, so the entry's own value can be discarded.
+    // Claiming the entry declared the value actually in use sends a media
+    // refusal to a key that already says the operator wants that modality
+    // (QwenLM/qwen-code#16185, F1).
+    const modelsConfig = openaiConfig([
+      entry('minimax-m3-text', 'MiniMax', undefined, undefined, {
+        modalities: { audio: true },
+      }),
+    ]);
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'minimax-m3-text');
+
+    expect(modelsConfig.getGenerationConfig()['modalities']).not.toEqual({
+      audio: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']?.kind).toBe(
+      'computed',
+    );
+  });
+
+  it.each<{
+    shape: string;
+    providers: ModelProvidersConfig;
+    protocols?: ProviderProtocolConfig;
+    authType: AuthType;
+  }>([
+    {
+      shape: "openai entry with wireApi: 'responses'",
+      providers: {
+        openai: [
+          {
+            id: 'vision-model',
+            baseUrl: 'https://responses.example.com/v1',
+            envKey: 'KEY',
+            wireApi: 'responses' as const,
+            generationConfig: { modalities: { image: true } },
+          },
+        ],
+      },
+      protocols: undefined,
+      authType: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      shape: 'custom provider id routed by providerProtocol',
+      providers: {
+        idealab: [
+          {
+            id: 'vision-model',
+            baseUrl: 'https://idealab.example.com/v1',
+            envKey: 'KEY',
+            generationConfig: { modalities: { image: true } },
+          },
+        ],
+      },
+      protocols: { idealab: 'openai' },
+      authType: AuthType.USE_OPENAI,
+    },
+  ])(
+    'attributes a declared modalities when the provider is $shape',
+    async ({ providers, protocols, authType }) => {
+      // `modelProviders` is keyed by provider id while `model.authType` is the
+      // resolved protocol, so a protocol-keyed lookup misses both of these
+      // documented shapes and stamps the declared field as a default
+      // (QwenLM/qwen-wt-15780 review R2-1).
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: authType,
+        modelProvidersConfig: providers,
+        ...(protocols === undefined
+          ? {}
+          : { providerProtocolConfig: protocols }),
+      });
+
+      await modelsConfig.switchModel(authType, 'vision-model');
+
+      expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+        kind: 'modelProviders',
+        authType,
+        modelId: 'vision-model',
+        detail: 'generationConfig.modalities',
+      });
+    },
+  );
+
+  it('clears a name-inferred modalities when manual credentials replace the provider route', async () => {
+    // The registry fills a missing `modalities` from the model name, so the
+    // value outlives the entry without being declared. Clearing drives off the
+    // recorded route, not the label: otherwise a vision-detecting provider
+    // leaves `image: true` on a manually configured text-only model and images
+    // go on the wire (QwenLM/qwen-code#16185 review R2-2).
+    const modelsConfig = openaiConfig([
+      entry('qwen3-vl-detected', 'Vision detected'),
+    ]);
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'qwen3-vl-detected');
+    expect(modelsConfig.getGenerationConfig()['modalities']).toEqual({
+      image: true,
+      video: true,
+    });
+
+    modelsConfig.updateCredentials({
+      apiKey: 'manual-api-key',
+      model: 'text-only-llm',
+    });
+
+    expect(modelsConfig.getGenerationConfig()['modalities']).toBeUndefined();
+    expect(
+      modelsConfig.getGenerationConfigSources()['modalities'],
+    ).toBeUndefined();
+  });
+
+  it('labels only the modality value as auto-detected, not the filed defaults', async () => {
+    const modelsConfig = openaiConfig([entry('text-only-model', 'Text only')]);
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'text-only-model');
+
+    const sources = modelsConfig.getGenerationConfigSources();
+    expect(sources['modalities']).toMatchObject({ kind: 'computed' });
+    // The registry never derives these; they are the field's own default.
+    for (const field of ['timeout', 'samplingParams', 'maxRetries']) {
+      expect(sources[field]).toMatchObject({ kind: 'default' });
+    }
+  });
+
   it('should maintain consistency between currentModelId and _generationConfig.model during updateCredentials', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
@@ -2169,6 +2329,38 @@ describe('ModelsConfig', () => {
       modelsConfig.reloadModelProvidersConfig(idealab(), { idealab: 'openai' });
 
       expect(openaiIds(modelsConfig)).toContain('qwen3.7-max');
+    });
+
+    it('finds the second entry when one id and baseUrl serve two wires', () => {
+      // The documented dual-wire config declares the same `id` and `baseUrl`
+      // twice, once per wire; only `wireApi` tells them apart. Matching the
+      // endpoint first would never reach the second entry.
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            entry('dual-wire', 'Dual Wire', API_URL, 'DUAL_KEY', {
+              timeout: 111,
+            }),
+            {
+              ...entry('dual-wire', 'Dual Wire', API_URL, 'DUAL_KEY', {
+                timeout: 222,
+              }),
+              wireApi: 'responses',
+            },
+          ],
+        },
+      });
+
+      modelsConfig.syncAfterAuthRefresh(
+        AuthType.USE_OPENAI_RESPONSES,
+        'dual-wire',
+      );
+
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.timeout).toBe(222);
+      expect(modelsConfig.getGenerationConfigSources()['timeout']?.kind).toBe(
+        'modelProviders',
+      );
     });
   });
 });

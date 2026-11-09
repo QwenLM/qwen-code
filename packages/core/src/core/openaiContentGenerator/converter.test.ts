@@ -4703,6 +4703,31 @@ describe('modality filtering', () => {
     return Array.isArray(userMsg?.content) ? wireParts(userMsg) : [];
   }
 
+  function userContentPartsWithSource(
+    model: string,
+    modalities: RequestContext['modalities'],
+    modalitiesSourceKind: NonNullable<RequestContext['modalitiesSourceKind']>,
+    part: Part,
+    modalitiesSourceViaKind?: NonNullable<
+      RequestContext['modalitiesSourceViaKind']
+    >,
+  ): WirePart[] {
+    const userMsg = findRole(
+      OpenAIContentConverter.convertLlmRequestToOpenAI(
+        { model: 'test-model', contents: [content('user', part)] },
+        {
+          model,
+          modalities,
+          modalitiesSourceKind,
+          ...(modalitiesSourceViaKind ? { modalitiesSourceViaKind } : {}),
+          startTime: 0,
+        },
+      ),
+      'user',
+    );
+    return Array.isArray(userMsg?.content) ? wireParts(userMsg) : [];
+  }
+
   it.each<[string, string, RequestContext['modalities'], Part, string[]]>([
     [
       'replaces image with placeholder when image modality is disabled',
@@ -4750,6 +4775,35 @@ describe('modality filtering', () => {
     for (const fragment of fragments) {
       expect(parts[0].text).toContain(fragment);
     }
+  });
+
+  it('names the model and the modalities source in the image placeholder', () => {
+    const parts = userContentPartsWithSource('deepseek-chat', {}, 'computed', {
+      inlineData: { mimeType: 'image/png', data: 'abc123' },
+      displayName: 'screenshot.png',
+    } as unknown as Part);
+
+    expect(parts[0].text).toContain("Model 'deepseek-chat'");
+    expect(parts[0].text).toContain('inferred from the model name');
+  });
+
+  it('names only the provider entry when the source came through a provider route', () => {
+    // A `modelProviders` route never reads `model.generationConfig.modalities`,
+    // so offering that key sends the operator to a setting that did not
+    // produce this value (QwenLM/qwen-code#16178).
+    const parts = userContentPartsWithSource(
+      'deepseek-chat',
+      {},
+      'computed',
+      {
+        inlineData: { mimeType: 'image/png', data: 'abc123' },
+        displayName: 'screenshot.png',
+      } as unknown as Part,
+      'modelProviders',
+    );
+
+    expect(parts[0].text).toContain('modelProviders entry');
+    expect(parts[0].text).not.toContain('model.generationConfig.modalities');
   });
 
   it('keeps BMP image data when image modality is enabled', () => {

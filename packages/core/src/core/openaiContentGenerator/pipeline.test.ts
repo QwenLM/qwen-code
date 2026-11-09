@@ -4640,6 +4640,186 @@ describe('ContentGenerationPipeline', () => {
       await streamed(chunkOf({ content: 'Hello' }, 'stop'));
     });
 
+    it('carries the modalities source into the request context', async () => {
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        // The real Config answers with the config the running generator is
+        // built for; the pipeline compares the two configs to decide whose
+        // sources apply.
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'computed' },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).toMatchObject({
+        model: 'test-model',
+        modalitiesSourceKind: 'computed',
+      });
+    });
+
+    it('forwards the provider route the computed source was derived through', async () => {
+      // Without `via` the converter's refusal falls into the arm that names
+      // `model.generationConfig.modalities`, a key a `modelProviders` route
+      // never reads (QwenLM/qwen-code#16178).
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
+        getContentGeneratorConfigSources: () => ({
+          modalities: {
+            kind: 'computed',
+            via: { kind: 'modelProviders' },
+          },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).toMatchObject({
+        modalitiesSourceKind: 'computed',
+        modalitiesSourceViaKind: 'modelProviders',
+      });
+    });
+
+    it('omits the modalities source for a generator on another model', async () => {
+      mockCliConfig = {
+        getModel: () => 'primary-model',
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'computed' },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).toMatchObject({
+        model: 'test-model',
+      });
+      expect(convert.mock.calls.at(-1)![1]).not.toHaveProperty(
+        'modalitiesSourceKind',
+      );
+    });
+
+    it('omits the primary source for a generator running under a subagent’s runtime view', async () => {
+      // Inside a sub-agent frame `getModel()` already answers with the
+      // subagent's model, so a name comparison makes the pipeline's own
+      // generator look like the primary's; the config identity decides
+      // (QwenLM/qwen-code#16185).
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        getContentGeneratorConfig: () => ({ model: 'subagent-model' }),
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'modelProviders' },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).not.toHaveProperty(
+        'modalitiesSourceKind',
+      );
+    });
+
+    it('omits the modalities source when the generator runs on another auth type', async () => {
+      // Same model id can be reachable through two protocols; the sources
+      // describe the entry the cliConfig resolved, so a generator built for
+      // another one must not borrow them (QwenLM/qwen-code#16185).
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'anthropic',
+        }),
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'modelProviders' },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).not.toHaveProperty(
+        'modalitiesSourceKind',
+      );
+    });
+
+    it('omits the modalities source when the wire model overrides the config model', async () => {
+      // `extra_body.model` replaces what goes on the wire but not the config
+      // whose `modalities` were resolved, so the two must not be paired
+      // (QwenLM/qwen-code#16185).
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'computed' },
+        }),
+      } as unknown as Config;
+      mockConfig = {
+        ...mockConfig,
+        cliConfig: mockCliConfig,
+        contentGeneratorConfig: {
+          ...mockContentGeneratorConfig,
+          extra_body: { model: 'wire-model' },
+        },
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).toMatchObject({
+        model: 'wire-model',
+      });
+      expect(convert.mock.calls.at(-1)![1]).not.toHaveProperty(
+        'modalitiesSourceKind',
+      );
+    });
+
     it('should collect all OpenAI chunks for logging even when Gemini responses are filtered', async () => {
       const finalResponse = responseOf(
         [fnCall('test_function', { param: 'value' }, 'call_123')],

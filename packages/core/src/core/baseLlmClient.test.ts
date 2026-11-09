@@ -26,6 +26,10 @@ import { AuthType } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
+import {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+} from '../agents/runtime/agent-context.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -65,10 +69,17 @@ vi.mock('./contentGenerator.js', async (importOriginal) => {
 });
 
 const mockBuildAgentContentGeneratorConfig = vi.fn();
-vi.mock('../models/content-generator-config.js', () => ({
-  buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
-    mockBuildAgentContentGeneratorConfig(...args),
-}));
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
+      mockBuildAgentContentGeneratorConfig(...args),
+  };
+});
 
 const mockGenerateContent = vi.fn();
 const mockGenerateContentStream = vi.fn();
@@ -815,6 +826,12 @@ describe('BaseLlmClient', () => {
             : [{ id: fastModel, authType: AuthType.USE_ANTHROPIC }],
         ),
         getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
+        // The session's own map; a per-model view must not hand it out.
+        getContentGeneratorConfigSources: vi.fn().mockReturnValue({
+          modalities: { kind: 'settings' },
+        }),
+        getModelProvidersConfig: vi.fn().mockReturnValue(undefined),
+        getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
       } as unknown as Mocked<Config>;
     });
 
@@ -1118,9 +1135,94 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(2);
     });
 
-    it('falls back to the main generator when the target model is not in the registry', async () => {
-      getResolvedModel.mockReturnValue(undefined);
+    it('carries its own modalities source into the frame it runs in', async () => {
+      // A frame around this view must not read the session's sources: those
+      // describe the primary model, and this generator serves another one
+      // (QwenLM/qwen-code#16185).
+      getResolvedModel.mockReturnValue(anthropicKey());
+      const resolved = await resolve('other-model');
 
+      // The view carries its own map, derived from the target's provider
+      // entry rather than the session's `settings` source. `Config` returns
+      // this map while the frame is active, which is what keeps `read_file`
+      // from naming a setting that describes the primary model.
+      expect(resolved.configSources?.['modalities']).toMatchObject({
+        kind: 'computed',
+        detail: "auto-detected from 'fast-model'",
+        // Derived through this view's provider route, so the refusal advice
+        // must not fall back to the settings key.
+        via: { kind: 'modelProviders' },
+      });
+      await runWithRuntimeContentGenerator(resolved, async () => {
+        expect(getRuntimeContentGenerator()?.configSources).toBe(
+          resolved.configSources,
+        );
+      });
+    });
+
+    it('does not report a provider declaration the registry replaced', async () => {
+      // The entry asks for audio, but the registry canonicalises a name-fixed
+      // family away from it, so the agent runs without audio. Reporting the
+      // declaration would aim a refusal at a key that already asks for the
+      // refused modality (QwenLM/qwen-code#16185).
+      getResolvedModel.mockReturnValue({
+        ...anthropicKey(),
+        id: fastModel,
+        generationConfig: { modalities: { image: true, video: true } },
+      });
+      crossProviderConfig.getModelProvidersConfig.mockReturnValue({
+        'openai-compatible': [
+          {
+            id: fastModel,
+            baseUrl: undefined,
+            generationConfig: { modalities: { audio: true } },
+          },
+        ],
+      } as never);
+
+      const resolved = await resolve(fastModel);
+
+      expect(resolved.configSources?.['modalities']).toEqual({
+        kind: 'computed',
+        detail: "auto-detected from 'fast-model'",
+        // The value was derived through the provider route, so a refusal must
+        // not offer `model.generationConfig.modalities` to this agent.
+        via: {
+          kind: 'modelProviders',
+          authType: AuthType.USE_ANTHROPIC,
+          modelId: fastModel,
+          detail: 'generationConfig',
+        },
+      });
+    });
+
+    it('reports the provider declaration when the registry kept it', async () => {
+      getResolvedModel.mockReturnValue({
+        ...anthropicKey(),
+        id: fastModel,
+        generationConfig: { modalities: { audio: true } },
+      });
+      crossProviderConfig.getModelProvidersConfig.mockReturnValue({
+        'openai-compatible': [
+          {
+            id: fastModel,
+            baseUrl: undefined,
+            generationConfig: { modalities: { audio: true } },
+          },
+        ],
+      } as never);
+
+      const resolved = await resolve(fastModel);
+
+      expect(resolved.configSources?.['modalities']).toEqual({
+        kind: 'modelProviders',
+        authType: AuthType.USE_ANTHROPIC,
+        modelId: fastModel,
+        detail: 'generationConfig.modalities',
+      });
+    });
+
+    it('falls back to the main generator when the target model is not in the registry', async () => {
       const resolved = await resolve('unknown-model');
 
       expect(resolved.contentGenerator).toBe(mockContentGenerator);
