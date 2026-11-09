@@ -642,15 +642,40 @@ export function decodeAnsiCEscape(
       const code = parseInt(digits, 16);
       const length = 2 + digits.length;
       // `String.fromCodePoint` throws above U+10FFFF, but bash does not reject
-      // the word: it writes the four-byte encoding anyway (`printf %s
-      // $'a\U00110000' | xxd -p` is `61f4908080`, exit 0, on bash 5.3.20). Emit
-      // those bytes so the resolved word is the word the shell builds; above the
-      // four-byte maximum there is nothing to encode, so the escape stays
-      // literal rather than throwing out of the permission guard
+      // the word: it keeps widening the UTF-8 form — four bytes to
+      // U+1FFFFF, five to U+3FFFFFF, six beyond (`printf %s $'\U00110000'`
+      // is `f4908080`, `\U00200000` is `f888808080`, `\UFFFFFFFF` is
+      // `ffbfbfbfbfbf`, exit 0, on bash 5.3.20). Emit those bytes so the
+      // resolved word is the word the shell builds rather than throwing
+      // out of the permission guard
       // (#16540 review, R3-3).
       if (next !== 'x' && code > 0x10ffff) {
+        if (code > 0x3ffffff) {
+          return {
+            text: body.slice(index, index + length),
+            bytes: [
+              (0xfc | (code >> 30)) & 0xff,
+              0x80 | ((code >> 24) & 0x3f),
+              0x80 | ((code >> 18) & 0x3f),
+              0x80 | ((code >> 12) & 0x3f),
+              0x80 | ((code >> 6) & 0x3f),
+              0x80 | (code & 0x3f),
+            ],
+            length,
+          };
+        }
         if (code > 0x1fffff) {
-          return { text: body.slice(index, index + length), length };
+          return {
+            text: body.slice(index, index + length),
+            bytes: [
+              0xf8 | (code >> 24),
+              0x80 | ((code >> 18) & 0x3f),
+              0x80 | ((code >> 12) & 0x3f),
+              0x80 | ((code >> 6) & 0x3f),
+              0x80 | (code & 0x3f),
+            ],
+            length,
+          };
         }
         return {
           text: body.slice(index, index + length),
@@ -669,7 +694,17 @@ export function decodeAnsiCEscape(
       const bytes =
         next === 'x'
           ? [code & 0xff]
-          : [...Buffer.from(String.fromCodePoint(code), 'utf8')];
+          : next !== 'x' && code >= 0xd800 && code <= 0xdfff
+            ? // A lone surrogate: bash writes the three-byte WTF-8 form
+              // (`$'\uD800'` is `ed a0 80`), while String.fromCodePoint's
+              // UTF-8 encode replaced it with U+FFFD — a write target no rule
+              // keyed on the real bytes could match (#16540 review, R3-3).
+              [
+                0xe0 | (code >> 12),
+                0x80 | ((code >> 6) & 0x3f),
+                0x80 | (code & 0x3f),
+              ]
+            : [...Buffer.from(String.fromCodePoint(code), 'utf8')];
       return {
         text:
           next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code),
@@ -2396,8 +2431,21 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerQuote: '',
           wrapperPayloadUnresolved: true,
           // Unquoted expansion in the `-c` slot: word splitting applies, so the
-          // script is whatever the variable holds (#16540 review, R4-5).
+          // script is whatever the variable holds (#16540 review, R4-5). An
+          // empty expansion drops out and the NEXT word becomes the script,
+          // so a background operator sitting there survives into the spawn
+          // exactly like a resolvable payload's (`bash -c $X "exit 1 &"`
+          // forks the payload and exits 0) (#16540 review, R6-4).
           wrapperScriptUnprovable: true,
+          // The unresolvable terminator may itself be the option terminator
+          // (dropping out and handing the slot to the next word) or the
+          // script; judge this word AND the ones after it either way
+          // (`bash -c $X "exit 1 &"` lands here with $X as the terminator)
+          // (#16540 review, R6-4).
+          ...(posixWrapper &&
+          unquotedSlotBackgrounds(terminator.token, terminator.rest)
+            ? { payloadOperatorUnstrippable: true }
+            : {}),
         };
       }
       if (terminator && terminatorWord === '--' && posixWrapper) {
@@ -2469,8 +2517,16 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerQuote: '',
           wrapperPayloadUnresolved: true,
           // Unquoted expansion: word splitting applies, so the script is
-          // whatever the variable holds (#16540 review, R5-2).
+          // whatever the variable holds (#16540 review, R5-2). The expansion
+          // may also drop out empty and hand the slot to the NEXT word, so a
+          // background operator in either this token's resolved text or the
+          // following word survives into the spawn (`bash -c $X "exit 1 &"`
+          // forks the payload and exits 0) (#16540 review, R6-4).
           wrapperScriptUnprovable: true,
+          ...(posixWrapper &&
+          unquotedSlotBackgrounds(commandToken.token, commandToken.rest)
+            ? { payloadOperatorUnstrippable: true }
+            : {}),
         };
       }
       const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
@@ -2616,7 +2672,23 @@ export function hasUnprovableWrapperScript(command: string): boolean {
  * whose operator WAS stripped (`bash -c "tail -f $LOG &"`) is not affected.
  */
 export function hasUnstrippablePayloadOperator(command: string): boolean {
-  return parseMonitorShellWrapper(command).payloadOperatorUnstrippable === true;
+  if (parseMonitorShellWrapper(command).payloadOperatorUnstrippable === true) {
+    return true;
+  }
+  // The head-only parse misses a wrapper behind a prefix (`nohup bash -c
+  // 'exit 1 &'`, `sudo`, `timeout 5`): the spawn keeps the payload's `&`, the
+  // tracked shell exits 0, and the monitor reports success for a failure
+  // nobody observed. Judge the spawn itself for those; a head wrapper was
+  // already judged above, where an operator that WAS stripped is fine
+  // (#16540 review, R6-4).
+  const normalized = normalizeMonitorCommand(command);
+  if (normalized.spawnCommand === normalized.analysisCommand) {
+    // No wrapper at the head was unwrapped: the spawn is the command as
+    // typed (or its amp-stripped form), and a background anywhere in it
+    // forks work the monitor cannot observe.
+    return backgroundsAnyPart(normalized.spawnCommand);
+  }
+  return false;
 }
 
 export function normalizeMonitorCommand(
@@ -2809,8 +2881,149 @@ function payloadBackgroundSurvivesStrip(payloadToken: string): boolean {
   if (before !== null && before.text !== after.text) return false;
   // Nothing was stripped and the word carries an expansion: the operator may
   // hide inside the expansion's VALUE (`"$X"$'\x26'`, `"$X"` with X='… &'),
-  // which no static strip can remove — refuse instead of certifying.
-  return after.hasExpansion;
+  // which no static strip can remove — refuse instead of certifying. But an
+  // expansion with LITERAL text after it (`"tail -f $LOG"`) cannot end in an
+  // operator whatever the value holds: the trailing literal decides the
+  // word's end, and refusing it denied the dynamic watches the monitor
+  // exists for (`bash -c "tail -f $LOG"` threw about an operator it does not
+  // contain) (#16540 review, R6-2).
+  return after.hasExpansion && !endsWithLiteralAfterExpansion(payloadToken);
+}
+
+/**
+ * The words after an unquoted `-c` expansion: the expansion may drop out
+ * empty and hand the script slot to the FIRST of them (`bash -c $X "exit 1 &"`
+ * runs `exit 1 &`), so that word's operator survives into the spawn just
+ * like a resolvable payload's (#16540 review, R6-4).
+ */
+function followingWordBackgrounds(rest: string): boolean {
+  const next = takeLeadingToken(rest.trimStart());
+  if (next == null) return false;
+  // The empty expansion drops out and this word becomes the `-c` script AS
+  // WRITTEN: the spawn keeps its quotes, so no spawn-side strip applies and
+  // any background operator in it forks the payload unobserved
+  // (`bash -c $X "exit 1 &"` exits 0 while the payload fails detached).
+  // The head spelling's strip does not run here — the parser already
+  // returned the command unchanged (#16540 review, R6-4).
+  const removal = shellWordQuoteRemoval(next.token);
+  if (removal === null) return true;
+  return (
+    resolvedTextBackgrounds(removal.text) ||
+    hasNonFinalTopLevelBackgroundOperator(removal.text) ||
+    (removal.hasExpansion && !endsWithLiteralAfterExpansion(next.token))
+  );
+}
+
+/**
+ * The two readings of an unquoted expansion in the `-c`/terminator slot:
+ * its VALUE becomes the script (an operator may hide inside it), or it
+ * drops out empty and a following word does. An expansion glued to
+ * surrounding text (`x$Y`) contributes to ONE word, so only the value
+ * reading applies; a standalone `$X` may vanish entirely
+ * (#16540 review, R6-4).
+ */
+function unquotedSlotBackgrounds(token: string, rest: string): boolean {
+  const standalone =
+    /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$/.test(token);
+  if (!standalone) {
+    // Glued to surrounding text (`x$Y`), the expansion contributes to ONE
+    // word: its value may append an operator no static strip can remove.
+    return payloadBackgroundSurvivesStrip(token);
+  }
+  const next = takeLeadingToken(rest.trimStart());
+  if (next == null) {
+    // No following word: the expansion IS the script, and its value may
+    // end in an operator.
+    return payloadBackgroundSurvivesStrip(token);
+  }
+  // A following word exists, so the expansion is at most $0 — data, not
+  // the script. The empty-expansion reading hands the slot to that word
+  // AS WRITTEN, quotes included, so any operator in it forks the payload
+  // unobserved (#16540 review, R6-4).
+  return followingWordBackgrounds(rest);
+}
+
+/**
+ * Whether the token's last character is literal payload text — not part of
+ * an expansion — so no expansion value can append a background operator to
+ * the resolved word. The closing quote of a span whose body ends in literal
+ * text counts (`"tail -f $LOG"` ends in `G"`); a word ending INSIDE an
+ * expansion (`"$X"`, `"$X"$'\x26'`) does not (#16540 review, R6-2).
+ */
+function endsWithLiteralAfterExpansion(token: string): boolean {
+  const trimmed = token.trimEnd();
+  if (trimmed === '') return false;
+  let quote: '"' | "'" | '' = '';
+  let lastExpansionEnd = -1;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = '';
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = '';
+        continue;
+      }
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '$' || ch === '`') {
+      if (ch === '`') {
+        const close = trimmed.indexOf('`', i + 1);
+        i = close === -1 ? trimmed.length : close;
+        lastExpansionEnd = i + 1;
+        continue;
+      }
+      const next = trimmed[i + 1];
+      if (next === '{') {
+        let depth = 1;
+        let j = i + 2;
+        while (j < trimmed.length && depth > 0) {
+          if (trimmed[j] === '{') depth++;
+          else if (trimmed[j] === '}') depth--;
+          j++;
+        }
+        i = j - 1;
+        lastExpansionEnd = j;
+        continue;
+      }
+      if (next === '(') {
+        let depth = 1;
+        let j = i + 2;
+        while (j < trimmed.length && depth > 0) {
+          if (trimmed[j] === '(') depth++;
+          else if (trimmed[j] === ')') depth--;
+          j++;
+        }
+        i = j - 1;
+        lastExpansionEnd = j;
+        continue;
+      }
+      if (next !== undefined && /[A-Za-z_0-9@*#?$!-]/.test(next)) {
+        let j = i + 1;
+        if (/[A-Za-z_]/.test(next)) {
+          while (j < trimmed.length && /[A-Za-z0-9_]/.test(trimmed[j]!)) j++;
+        } else {
+          j++;
+        }
+        i = j - 1;
+        lastExpansionEnd = j;
+        continue;
+      }
+      // `$'…'` / `$"…"`: a quoted segment, not an expansion.
+    }
+  }
+  // The final character (or its closing quote) sits after every expansion;
+  // `lastExpansionEnd` is one past the last expansion's final character, so
+  // equality means the word ends inside an expansion.
+  return lastExpansionEnd < trimmed.length;
 }
 
 function endsWithBackgroundAmp(command: string): boolean {

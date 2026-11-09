@@ -542,6 +542,24 @@ describe('MonitorTool', () => {
       ).resolves.toBe('ask');
     });
 
+    // R6-3 (#16540 review): the unprovable-wrapper-script gate must hold on
+    // the monitor too — the outer shell expands a self-supplied `${X:=…}`
+    // before the inner bash re-parses it, so a read-only projection of the
+    // payload must not auto-allow the spawn that keeps the wrapper.
+    it('asks on an unprovable wrapper script even when the projection is read-only', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+      await expect(
+        createInvocation({
+          command: 'bash -c "ls $X &"',
+        }).getDefaultPermission(),
+      ).resolves.toBe('ask');
+      await expect(
+        createInvocation({
+          command: 'bash -c "ls ${X:=;rm -rf /tmp/victim} &"',
+        }).getDefaultPermission(),
+      ).resolves.toBe('ask');
+    });
+
     it.each([undefined, '/test/dir/sub', '/test/dir/sub/..'])(
       'allows read-only monitor commands within the workspace in %s',
       async (directory) => {
@@ -709,6 +727,26 @@ describe('MonitorTool', () => {
       expect(validate({ command: `bash -c "tail -f $LOG &"` })).toBeNull();
       expect(validate({ command: `bash -c "exit 1 &"` })).toBeNull();
       expect(validate({ command: `bash -c $'echo $X &' arg0` })).toBeNull();
+    });
+
+    // R6-2 (#16540 review): an expansion with literal text after it cannot
+    // end in an operator whatever its value holds — refusing it denied the
+    // dynamic watches the monitor exists for, while the amp-bearing spelling
+    // was accepted and spawned the identical bytes.
+    it('accepts an expansion-bearing payload with no background operator', () => {
+      expect(validate({ command: 'bash -c "tail -f $LOG"' })).toBeNull();
+    });
+
+    // R6-4 (#16540 review): a wrapper behind a prefix and the unresolvable
+    // unquoted `-c` slot both keep an operator in the spawn — the tracked
+    // shell exits 0 while the payload fails detached.
+    it('rejects a background payload behind a prefix or an unquoted -c slot', () => {
+      expect(validate({ command: "nohup bash -c 'exit 1 &'" })).toMatch(
+        /must not (background the payload|contain non-final top-level background operators)/,
+      );
+      expect(validate({ command: 'bash -c $X "exit 1 &"' })).toMatch(
+        /must not background the payload/,
+      );
     });
 
     it('accepts final trailing ampersands that monitor normalization strips', () => {

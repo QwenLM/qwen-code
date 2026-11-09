@@ -1919,6 +1919,18 @@ describe('wrapper script provability and payload operator markers', () => {
     [`bash -c "exit 1 &"`, false],
     [`bash -c $'echo $X &' arg0`, false],
     ['tail -f app.log', false],
+    // R6-2: an expansion with literal text after it cannot end in an
+    // operator whatever its value holds.
+    ['bash -c "tail -f $LOG"', false],
+    // R6-4: a wrapper behind a prefix keeps the payload's operator in the
+    // spawn; the unquoted `-c` slot hands it to the next word when the
+    // expansion drops out empty — while an operator-free following word
+    // stays allowed.
+    ["nohup bash -c 'exit 1 &'", true],
+    ["sudo bash -c 'tail -f x &'", true],
+    ['bash -c $X "exit 1 &"', true],
+    ["bash -c $X 'tail -f app.log'", false],
+    ['timeout 5 bash -c "tail -f $LOG"', false],
   ])('hasUnstrippablePayloadOperator(%s) === %s', (command, want) => {
     expect(hasUnstrippablePayloadOperator(command)).toBe(want);
   });
@@ -1966,10 +1978,25 @@ describe('round-4 lexing regressions', () => {
     expect(decodeAnsiCEscape('a\\U00110000', 1)?.bytes).toEqual([
       0xf4, 0x90, 0x80, 0x80,
     ]);
-    // An in-range code point is unchanged, and above the four-byte maximum there
-    // is nothing bash could encode, so the escape stays literal.
+    // An in-range code point is unchanged. R3-3 (this round): bash keeps
+    // widening the UTF-8 form — five bytes to U+3FFFFFF, six to U+7FFFFFFF —
+    // and only above THAT maximum does the escape stay literal.
     expect(decodeAnsiCWord('\\U0010FFFF')).toBe('\u{10FFFF}');
-    expect(decodeAnsiCEscape('\\U00200000', 0)?.bytes).toBeUndefined();
+    expect(decodeAnsiCBytes('\\U00200000')).toEqual([
+      0xf8, 0x88, 0x80, 0x80, 0x80,
+    ]);
+    expect(decodeAnsiCBytes('\\U7FFFFFFF')).toEqual([
+      0xfd, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf,
+    ]);
+    // The six-byte lead keeps folding the high bits (`\UFFFFFFFF` is
+    // `ffbfbfbfbfbf` on bash 5.3.20), so no eight-digit form stays literal.
+    expect(decodeAnsiCBytes('\\UFFFFFFFF')).toEqual([
+      0xff, 0xbf, 0xbf, 0xbf, 0xbf, 0xbf,
+    ]);
+    // A lone surrogate: bash writes the three-byte WTF-8 form
+    // (`$'\uD800'` is `ed a0 80`), not U+FFFD.
+    expect(decodeAnsiCBytes('\\uD800')).toEqual([0xed, 0xa0, 0x80]);
+    expect(decodeAnsiCBytes('\\uDFFF')).toEqual([0xed, 0xbf, 0xbf]);
   });
   it.each([
     ['\\xc3\\xa9', 'é'],

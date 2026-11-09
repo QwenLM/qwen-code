@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import os from 'node:os';
 import {
   extractShellOperations,
   extractShellOperationsAcrossCommand,
@@ -911,6 +912,19 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
       extractShellOperationsAcrossCommand("(cat > $'\\x41')", '/repo'),
     ).toEqual([write('/repo/A')]);
   });
+
+  // R3-3 (#16540 review, this round): after `\c\` the operand backslash — and
+  // a second backslash it escapes — are consumed, so both spellings build the
+  // word `a<0x1c>tb`. Emitting the extra backslash made it a directory
+  // separator in the analysed path, a path bash never opens.
+  it('consumes the escaped backslash after a \\c\\ operand in the tokenizer', () => {
+    expect(
+      extractShellOperationsAcrossCommand("cat $'a\\c\\\\tb'", '/repo'),
+    ).toEqual([read('/repo/a\u001ctb')]);
+    expect(
+      extractShellOperationsAcrossCommand("cat $'a\\c\\tb'", '/repo'),
+    ).toEqual([read('/repo/a\u001ctb')]);
+  });
 });
 
 // R2-1/R2-2/R2-4/R2-5/R2-8 (#16540 review): a word that is nothing but decoded
@@ -1035,6 +1049,41 @@ describe('decoded ANSI-C words stay data', () => {
     const target = ops('cat > ~/x')[0]?.filePath ?? '';
     expect(target.startsWith('/')).toBe(true);
     expect(target).not.toBe(`${CWD}/~/x`);
+  });
+
+  // R6-1 (#16540 review): only the tilde PREFIX's own quoting suppresses
+  // expansion, markings travel with the token (not by decoded text), and a
+  // bare occurrence merges in the expanding direction — each of these wrote
+  // under $HOME while the analysis reported an in-repo path, so a
+  // $HOME/out-of-workspace deny rule never fired.
+  it('expands a bare tilde prefix even when the rest of the word is quoted', () => {
+    const home = os.homedir().replace(/\\/g, '/');
+    expect(
+      extractShellOperationsAcrossCommand('cat > ~/"out"', '/repo'),
+    ).toEqual([write(`${home}/out`)]);
+    expect(
+      extractShellOperationsAcrossCommand('truncate -s 0 "~/x" ~/x', '/repo'),
+    ).toEqual([edit(`${home}/x`), edit(`${home}/x`)]);
+    expect(
+      extractShellOperationsAcrossCommand("cp a $'\\x7e/x' ~/x", '/repo'),
+    ).toEqual([read('/repo/a'), read(`${home}/x`), write(`${home}/x`)]);
+  });
+
+  it('keeps quoting through prefix commands and flag-value slices', () => {
+    // sudo re-tokenized the joined decoded text and lost the quoting.
+    expect(
+      extractShellOperationsAcrossCommand("sudo tee '~/y'", '/repo'),
+    ).toEqual([write('/repo/~/y')]);
+    expect(
+      extractShellOperationsAcrossCommand("sudo cat $'\\x7e/x'", '/repo'),
+    ).toEqual(extractShellOperationsAcrossCommand("cat $'\\x7e/x'", '/repo'));
+    // getFlagValue handed resolvePath a slice with no marking.
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cp a --target-directory=$'\\x7e/d'",
+        '/repo',
+      ),
+    ).toEqual([read('/repo/a'), write('/repo/~/d/a')]);
   });
 
   it('keeps a literal astral character whole', () => {

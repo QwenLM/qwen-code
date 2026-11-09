@@ -43,6 +43,7 @@ import {
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
+  hasUnprovableWrapperScript,
   hasUnstrippablePayloadOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
@@ -192,6 +193,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Like read_file outside the workspace: ask rather than reject at build
     // time, so an approval (or YOLO) can let it run.
     if (this.isDirectoryOutsideWorkspace()) return 'ask';
+    // Same contract as the shell tool: a wrapper whose `-c` script cannot be
+    // proved statically must not auto-allow on the projection. The outer
+    // shell expands a self-supplied `${X:=…}` before the inner bash re-parses
+    // it, so the read-only projection of `ls ${X:=;rm -rf /tmp/victim}` ran
+    // the rm with no prompt (#16540 review, R6-3). 'ask', not 'deny', per the
+    // #4093 fall-through contract.
+    if (hasUnprovableWrapperScript(this.params.command)) return 'ask';
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const command = normalized.safetyCommand;
     const cwd =
