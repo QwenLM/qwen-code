@@ -11954,11 +11954,32 @@ exit 1
     // The EXIT trap is the in-step cleanup twin of the always() step; it
     // must remove the fleet file, the per-run dir AND the gh config dir.
     // bash keeps one EXIT handler per shell, so af-162's cleanup joins this
-    // line instead of a second `trap … EXIT` that would replace it.
+    // line instead of a second `trap … EXIT` that would replace it. The
+    // `:-` defaults are load-bearing: the trap is installed at the mint, so
+    // it also fires on the empty-PAT and WORKDIR-pre-clean exits, where
+    // FLEET_FILE does not exist yet (R3-1).
     expect(reviewScanJob).toContain(
-      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"; rm -rf "${GH_CONFIG_DIR}"\' EXIT',
+      'trap \'rm -f "${FLEET_FILE:-}"; rm -rf "${WORKDIR:-}"; rm -rf "${GH_CONFIG_DIR}"\' EXIT',
     );
+    // Installed at the mint, ahead of every early exit in the step — not
+    // down by FLEET_FILE, where two exit paths precede it and leak the dir.
+    const scanMint = reviewScanJob.indexOf('export GH_CONFIG_DIR');
+    const scanTrap = reviewScanJob.indexOf("trap 'rm -f");
+    expect(scanMint).toBeGreaterThan(-1);
+    expect(scanTrap).toBeGreaterThan(scanMint);
+    expect(reviewScanJob.indexOf('CI_DEV_BOT_PAT is empty')).toBeGreaterThan(
+      scanTrap,
+    );
+    expect(reviewScanJob.indexOf('(umask 077; mkdir -p')).toBeGreaterThan(
+      scanTrap,
+    );
+    // One handler per step, everywhere a cleanup trap was added (R3-3): a
+    // second `trap … EXIT` silently REPLACES the first, and neither the
+    // census (substring presence) nor the lazy preamble match would notice.
     expect(reviewScanJob.match(/trap [^\n]*EXIT/g) ?? []).toHaveLength(1);
+    for (const step of [...commandSteps, routeStep]) {
+      expect(step.match(/trap [^\n]*EXIT/g) ?? []).toHaveLength(1);
+    }
     // Pin the cleanup step's command inside its own slice, not job-wide: a
     // no-op cleanup with the right name and if: shipped green before.
     const scanCleanupStep =
@@ -13309,14 +13330,68 @@ exit 1
     }
   });
 
+  it('takes the scan gh config dir off the pool on its early exit paths', () => {
+    // af-162 / R3-1: the scan's merged trap used to be installed down by
+    // FLEET_FILE, ~30 lines after the mint. Two paths exit before that point
+    // — the empty-PAT guard and the WORKDIR pre-clean under bash -e — and
+    // each left the dir on a pool that reclaims nothing there. The trap now
+    // sits at the mint. Probed: with the trap moved back down, the empty-PAT
+    // arm leaves a directory behind and this test reds.
+    const block = reviewScanJob.match(
+      /- name: 'Scan for PRs with new feedback'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name: ')/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const cases = [
+      { name: 'empty PAT', env: { GITHUB_TOKEN: '' }, workdir: null },
+      {
+        name: 'WORKDIR pre-clean failure',
+        env: { GITHUB_TOKEN: 'pat' },
+        // mkdir -p cannot create this, so the step aborts under bash -e.
+        workdir: '/proc/no-such-dir/workdir',
+      },
+    ];
+    for (const { name, env, workdir } of cases) {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-scan-exit-'));
+      try {
+        const proc = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', block.replace(/^ {10}/gm, '')],
+          {
+            env: {
+              ...process.env,
+              RUNNER_TEMP: dir,
+              WORKDIR: workdir ?? join(dir, 'workdir'),
+              GITHUB_OUTPUT: join(dir, 'github-output'),
+              EVENT_NAME: 'schedule',
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '',
+              ...env,
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(proc.status, name).not.toBe(0);
+        expect(
+          readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+          `${name} left its gh config dir behind on the pool`,
+        ).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('makes every gh config mint site either self-cleaning or a recorded leak', () => {
     // af-162 / R2-1: the cleanup rule started on the three jobs this lane
     // moved, which left six other sites leaking behind wording that reads
     // file-wide. Pin the WHOLE census instead: every mint site
     // must either remove its dir or appear in the leak list below, so a new
     // site cannot join silently and a fixed one cannot leave the list stale.
-    // The four remaining leaks are the heavy agent jobs' PAT steps — they
-    // predate this lane and are a follow-up, not an accident.
+    // The remaining leaks are the heavy agent jobs' PAT steps and the two
+    // sites in the push-and-report script — they predate this lane and are a
+    // follow-up, not an accident. The script is walked too (R3-2): af-162
+    // claims EVERY mint site, and a census that reads only the workflow
+    // reports a completeness it does not have.
     const MINT = 'mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX"';
     const jobStarts = [...workflow.matchAll(/\n {2}([a-z][a-z0-9-]*):\n/g)];
     const stepStarts = [...workflow.matchAll(/\n {6}- name: '([^']+)'/g)];
@@ -13359,6 +13434,32 @@ exit 1
         leaking.push(key);
       }
     }
+    // The script has no job/step structure, so key its sites by the shape of
+    // their own line. Walked separately from the workflow: the offsets above
+    // are workflow offsets and do not line up with this source.
+    for (
+      let pos = pushAndReportScript.indexOf(MINT);
+      pos !== -1;
+      pos = pushAndReportScript.indexOf(MINT, pos + MINT.length)
+    ) {
+      const lineStart = pushAndReportScript.lastIndexOf('\n', pos) + 1;
+      const line = pushAndReportScript.slice(
+        lineStart,
+        pushAndReportScript.indexOf('\n', pos),
+      );
+      const kind = line.trimStart().startsWith('if !')
+        ? 'deferred-findings upsert child'
+        : 'top-level preamble';
+      const key = `autofix-push-and-report.sh · ${kind}`;
+      if (
+        pushAndReportScript.includes('rm -rf "${GH_CONFIG_DIR}"') ||
+        pushAndReportScript.includes('rm -rf "${cfg}"')
+      ) {
+        cleaned.push(key);
+      } else {
+        leaking.push(key);
+      }
+    }
     expect(cleaned.sort()).toEqual(
       [
         'route · Decide phases',
@@ -13375,6 +13476,8 @@ exit 1
         'review-address · Prepare branch and feedback',
         'review-address · Report dry-run / failure',
         'review-address · Finalize autofix status comment',
+        'autofix-push-and-report.sh · top-level preamble',
+        'autofix-push-and-report.sh · deferred-findings upsert child',
       ].sort(),
     );
   });

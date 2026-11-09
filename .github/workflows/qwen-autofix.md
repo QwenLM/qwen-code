@@ -5007,22 +5007,36 @@ path. They call gh and jq, both already used by route on
 this pool; they run no node, docker or tmux, so they get no
 'Check runner environment' capability preflight.
 
-The rule is file-wide, so it is pinned file-wide (R2-1). Ten
-steps mint this dir; only the three moved jobs and the
-heartbeat cleaned up, leaving six leaks behind a rule that
-reads file-wide. Two of those six are fixed here: route — up
-to 144 cron runs a day — and review-scan. review-scan
-cannot carry a second `trap … EXIT`: bash keeps one handler
-per shell, so its removal joins the existing fleet/WORKDIR
-trap, and that merged line is pinned verbatim. The remaining
-four are the heavy agent jobs' PAT steps (issue-autofix's
-publish, review-address's prepare, dry-run report and
-finalize). They predate this lane and stay a follow-up — but
-a RECORDED one: a census test walks every mint site and
-requires each to be either self-cleaning or on an explicit
-leak list, so a new site cannot join unnoticed and a fixed
-one cannot leave the list stale. The heartbeat's per-call
-wrapper is the tenth site and already cleans up after itself.
+The rule is file-wide, so it is pinned file-wide (R2-1).
+Twelve sites mint this dir: ten in the workflow and two in
+autofix-push-and-report.sh. Only the three moved jobs and the
+heartbeat's per-call wrapper cleaned up, leaving eight leaks
+behind wording that reads file-wide. Two are fixed here:
+route — up to 144 cron runs a day — and review-scan.
+
+review-scan cannot carry a second `trap … EXIT`: bash keeps
+one handler per shell, so its removal joins the existing
+fleet/WORKDIR trap and that merged line is pinned verbatim.
+The merged trap is installed AT THE MINT, not down beside
+FLEET_FILE (R3-1): the empty-PAT guard and the WORKDIR
+pre-clean both exit before that later point, and each would
+otherwise leave the dir behind — a mis-scoped secret would
+leak one per scan tick while a substring census still called
+the site clean. FLEET_FILE does not exist on those paths, so
+the merged line reads it with a `:-` default. Every step that
+gained a trap is also pinned to exactly ONE EXIT handler
+(R3-3): a second one silently replaces the first, and neither
+the census nor the lazy preamble match would notice.
+
+The remaining six are the heavy agent jobs' PAT steps
+(issue-autofix's publish, review-address's prepare, dry-run
+report and finalize) and the script's two sites. They predate
+this lane and stay a follow-up — but a RECORDED one: a census
+walks BOTH sources and requires every mint site to be either
+self-cleaning or on an explicit leak list, so a new site
+cannot join unnoticed and a fixed one cannot leave the list
+stale. Reading only the workflow was itself a false claim of
+completeness (R3-2).
 
 One bound on all of this: an EXIT trap covers bash's own
 exits, not a SIGKILLed shell. That is why the scan lane also
