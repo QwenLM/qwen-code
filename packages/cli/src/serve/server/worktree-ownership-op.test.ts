@@ -17,7 +17,9 @@ import { canonicalPathForTesting as cleanupKey } from './worktree-orphan-cleanup
 // a checkout that does not resolve. Derivations that drift apart stop
 // excluding each other on one checkout. The reset derives its key inline in
 // `resolveWorktreeOwnershipTarget`; the `fs.realpathSync` assertions below
-// restate that rule rather than run it.
+// restate that rule rather than run it. The `..` route-level cases in
+// `routes/session-worktree-reset.test.ts` run the reset's and the restore's
+// inline derivations.
 describe('worktree ownership lock key', () => {
   let root: string;
   let checkout: string;
