@@ -207,9 +207,17 @@ export async function stopPrWatch(
   options.stopTimer();
   let timer: NodeJS.Timeout | undefined;
   let timedOut = false;
+  // Sequential, not parallel: a tick that is still observing has not entered a
+  // drain tick yet, so sampling drain-idle alongside it resolves immediately —
+  // and that tick then dispatches a restore which outlives it. Drain-idle has
+  // to be sampled after the tick ends. Both arms share one timeout budget.
+  const settled = (async () => {
+    await options.waitForTick?.();
+    await options.state.idle();
+  })();
   try {
     await Promise.race([
-      Promise.all([options.state.idle(), options.waitForTick?.()]),
+      settled,
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           timedOut = true;

@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,6 +28,7 @@ import {
   claimPrWatchOwnershipSync,
   prWatchOwnerPath,
   readPrWatchStateSync,
+  releaseOwnedPrWatchSync,
   writePrWatchStateSync,
   type PrWatchIdentity,
 } from './pr-watch-store.js';
@@ -366,7 +373,6 @@ describe('stopPrWatch', () => {
     claimPrWatchOwnershipSync(dir, () => {});
     // A record this machine cannot verify blocks the claim and must survive
     // our shutdown: it is not ours to remove.
-    const { writeFileSync } = await import('node:fs');
     writeFileSync(
       prWatchOwnerPath(dir),
       JSON.stringify({
@@ -377,5 +383,61 @@ describe('stopPrWatch', () => {
     );
     await stopPrWatch({ state, watchDir: dir, stopTimer: () => {} });
     expect(existsSync(prWatchOwnerPath(dir))).toBe(true);
+  });
+
+  it('refuses a foreign PID namespace even when the process token matches', async () => {
+    // The token really is this process's, so `isSameProcess` accepts it — and
+    // where no token is readable (macOS/Windows) it degrades to PID liveness.
+    // The claim still refuses the record, so the release must apply the claim's
+    // identity rule too. Reproduces on every platform, not just those two.
+    expect(claimPrWatchOwnershipSync(dir, () => {}).kind).toBe('claimed');
+    const ownerPath = prWatchOwnerPath(dir);
+    const record = JSON.parse(readFileSync(ownerPath, 'utf8')) as {
+      pidNs?: number | null;
+    };
+    writeFileSync(
+      ownerPath,
+      JSON.stringify({ ...record, pidNs: (record.pidNs ?? 0) + 1 }),
+    );
+    expect(claimPrWatchOwnershipSync(dir, () => {}).kind).toBe('blocked');
+    expect(releaseOwnedPrWatchSync(dir)).toBe(false);
+    expect(existsSync(ownerPath)).toBe(true);
+  });
+
+  it('waits for a restore the tick dispatches after shutdown began', async () => {
+    // Shutdown lands mid-observation: drain-idle is already true, and the tick
+    // then enters a drain and dispatches a restore that outlives it. Sampling
+    // the two arms in parallel releases the record while that restore is still
+    // admitting; drain-idle has to be sampled after the tick ends.
+    claimPrWatchOwnershipSync(dir, () => {});
+    seedPending();
+    const wake = gatedWake();
+    let openTick: () => void = () => {};
+    const tickGate = new Promise<void>((resolve) => {
+      openTick = resolve;
+    });
+    const stopped = stopPrWatch({
+      state,
+      watchDir: dir,
+      stopTimer: () => {},
+      waitForTick: async () => {
+        await tickGate;
+        // The tick's drain runs to completion, leaving a restore in flight.
+        await runPrWatchDrainTick([runtime()], makeDeps(wake.deps), state);
+      },
+      timeoutMs: 5_000,
+    });
+    let released = false;
+    void stopped.then(() => {
+      released = true;
+    });
+    openTick();
+    await vi.waitFor(() => expect(state.restoring.size).toBe(1));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(released).toBe(false);
+    expect(existsSync(prWatchOwnerPath(dir))).toBe(true);
+    wake.open();
+    await stopped;
+    expect(existsSync(prWatchOwnerPath(dir))).toBe(false);
   });
 });

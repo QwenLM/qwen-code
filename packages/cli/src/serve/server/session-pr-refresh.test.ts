@@ -2204,6 +2204,137 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('stopWatch waits for a restore the tick dispatches after shutdown began', async () => {
+    // The full combination: shutdown lands mid-observation, the tick then
+    // enters the drain and dispatches a dormant restore that outlives it.
+    // Drain-idle sampled alongside the tick is already true, so the record
+    // would be released while that restore is still admitting.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-stop-restore-'),
+    );
+    const clock = Date.parse('2026-11-08T00:00:00.000Z');
+    const now = () => clock;
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      observedAt: new Date(clock).toISOString(),
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      pending: [
+        {
+          type: 'ci_failure',
+          key: 'k-stop-restore',
+          summary: 'CI failing',
+          detectedAt: new Date(clock).toISOString(),
+        },
+      ],
+    });
+    let openView: () => void = () => {};
+    const viewGate = new Promise<void>((resolve) => {
+      openView = resolve;
+    });
+    let viewStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      viewStarted = resolve;
+    });
+    let openWake: () => void = () => {};
+    const wakeGate = new Promise<void>((resolve) => {
+      openWake = resolve;
+    });
+    const wakeSession = vi.fn(() =>
+      wakeGate.then(() => ({
+        kind: 'restored' as const,
+        release: async () => {},
+      })),
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: async (url: string) => {
+          viewStarted();
+          await viewGate;
+          return {
+            kind: 'ok' as const,
+            view: {
+              url,
+              title: 'PR 42',
+              headSha: 'a'.repeat(40),
+              state: 'open' as const,
+              checks: 'passing' as const,
+              failingChecks: [] as string[],
+            },
+          };
+        },
+        now,
+      }),
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async () => ({
+          bindings: [
+            {
+              sessionId: SESSION_A,
+              workspaceCwd: trustedCwd,
+              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+            },
+          ],
+          partial: false,
+        }),
+        resolveRuntime: () => trustedRuntime,
+        isSessionLive: () => false,
+        wakeSession,
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await started;
+      let stopped = false;
+      const stopping = handle?.stopWatch().then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      // Let the observation finish and the tick run on into the drain. The
+      // state sweep below is only reached once the drain tick has returned.
+      openView();
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+      });
+      await vi.waitFor(() => expect(wakeSession).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(0);
+      // The tick is over, its restore is not: the record must still be held.
+      expect(stopped).toBe(false);
+      await expect(
+        fsp.access(prWatchOwnerPath(watchDir)),
+      ).resolves.toBeUndefined();
+      openWake();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await stopping;
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
   it('never reads the PR-drain deps while the observation switch is off', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

@@ -5,7 +5,7 @@
  */
 
 import * as path from 'node:path';
-import { parse } from 'yaml';
+import { parseDocument } from 'yaml';
 import { readRegularFile } from '../../commands/autofix-pr/state.js';
 import { HOSTNAME_RE } from '../../commands/review/lib/gh.js';
 import { normalizeWatchHost } from './pr-watch-observation.js';
@@ -39,10 +39,11 @@ export function ghConfigDir(
  * A port is dropped because the watch identity comes from `pullRequestKey`,
  * which drops it too — keeping it here would make an enterprise host with a
  * port never match. An absent file yields an empty set silently (gh is simply
- * not logged in anywhere); an unreadable, non-regular or malformed one yields
- * an empty set with a log line. The caller composes the final allowed set and
- * always includes `github.com`, so a failure here can never silently disable
- * every view.
+ * not logged in anywhere); an unreadable, non-regular or unparseable one yields
+ * an empty set with a log line. A YAML warning still yields the host names, with
+ * a sanitized log line. The caller composes the final allowed set and always
+ * includes `github.com`, so a failure here can never silently disable every
+ * view.
  */
 export function readGhConfiguredHosts(
   env: Readonly<Record<string, string | undefined>>,
@@ -63,23 +64,46 @@ export function readGhConfiguredHosts(
     return new Set();
   }
   if (text === null) return new Set();
-  let parsed: unknown;
-  try {
-    parsed = parse(text);
-  } catch (error) {
-    // A YAML parse error quotes the offending source line, and a hosts.yml
-    // line carries an oauth token. Log only the non-echoing code and line
-    // number, never the message.
+  // A YAML diagnostic quotes the offending source line, and a hosts.yml line
+  // carries an oauth token. Only the non-echoing code and line number may ever
+  // reach the log — for warnings as much as for errors.
+  const diagnostic = (error: unknown): string => {
     const detail = error as {
       code?: unknown;
       linePos?: Array<{ line: number }>;
     };
     const code = typeof detail.code === 'string' ? detail.code : 'unknown';
     const line = detail.linePos?.[0]?.line;
+    return `${code}${line !== undefined ? ` at line ${line}` : ''}`;
+  };
+  let parsed: unknown;
+  try {
+    // parseDocument, not parse: `parse` forwards warnings to
+    // process.emitWarning with the source line attached, bypassing both this
+    // catch and the caller's log. An unresolved tag on a token line parses
+    // successfully and still writes the token to stderr.
+    const doc = parseDocument(text);
+    if (doc.errors.length > 0) {
+      log(
+        `PR watch: cannot parse gh hosts ${filePath} (${diagnostic(
+          doc.errors[0],
+        )}); using the default allowed hosts`,
+      );
+      return new Set();
+    }
+    if (doc.warnings.length > 0) {
+      log(
+        `PR watch: gh hosts ${filePath} has a YAML warning (${diagnostic(
+          doc.warnings[0],
+        )}); reading host names only`,
+      );
+    }
+    parsed = doc.toJS();
+  } catch (error) {
     log(
-      `PR watch: cannot parse gh hosts ${filePath} (${code}${
-        line !== undefined ? ` at line ${line}` : ''
-      }); using the default allowed hosts`,
+      `PR watch: cannot parse gh hosts ${filePath} (${diagnostic(
+        error,
+      )}); using the default allowed hosts`,
     );
     return new Set();
   }

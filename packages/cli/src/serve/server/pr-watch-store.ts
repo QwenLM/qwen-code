@@ -835,6 +835,11 @@ export function releaseOwnedPrWatchSync(watchDir: string): boolean {
     return false;
   }
   if (!current || current.pid !== process.pid) return false;
+  // Same order as the claim: a matching PID number does not authorize deleting
+  // a record from another boot, machine or PID namespace sharing this home.
+  // `isSameProcess` alone degrades to a PID-liveness check where no process
+  // token is readable (macOS/Windows), which would delete a foreign record.
+  if (!isLocalIdentity(current)) return false;
   if (!isSameProcess(current.pid, current.procStart)) return false;
   return releasePrWatchOwnershipSync(watchDir, current);
 }

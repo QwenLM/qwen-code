@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ghConfigDir, readGhConfiguredHosts } from './pr-watch-gh-hosts.js';
 
 let root: string;
@@ -163,6 +163,30 @@ describe('readGhConfiguredHosts', () => {
       // Still diagnosable: the non-echoing line number survives.
       expect(logs.join('\n')).toMatch(/at line \d+/);
     }
+  });
+
+  it('never emits a token through a YAML warning either', () => {
+    // The warning path bypasses both the catch and the caller's log: `parse()`
+    // hands it to process.emitWarning with the offending source line attached.
+    // An unresolved tag on a token line parses successfully and still writes
+    // the whole line to stderr.
+    const env = configWith(
+      'github.com:\n  oauth_token: !unknown super-secret-token\n',
+    );
+    const spy = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    let hosts: string[];
+    try {
+      hosts = read(env);
+    } finally {
+      spy.mockRestore();
+    }
+    const emitted = spy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(emitted).not.toContain('super-secret-token');
+    // A warning does not invalidate the host names.
+    expect(hosts).toEqual(['github.com']);
+    expect(logs.join('\n')).not.toContain('super-secret-token');
+    expect(logs.join('\n')).toContain('YAML warning');
+    expect(logs.join('\n')).toMatch(/at line \d+/);
   });
 
   it('degrades to an empty set with a log on malformed YAML', () => {
