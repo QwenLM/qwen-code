@@ -845,3 +845,200 @@ test('edits GitHub bound-session action templates on demand and toggles fullscre
   };
   expect(secondBody.config['boundSessionActions']).toBeUndefined();
 });
+
+test('configures a WeChat channel with in-browser QR login', async ({
+  page,
+}, testInfo) => {
+  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'channel_management',
+      ],
+    },
+    channelTypes: [
+      {
+        type: 'weixin',
+        displayName: 'WeChat',
+        manageable: true,
+        fields: [
+          {
+            key: 'baseUrl',
+            label: 'API Base URL',
+            kind: 'string',
+            envResolvable: true,
+          },
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'disabled',
+            options: [{ value: 'disabled', label: 'Disabled' }],
+          },
+          {
+            key: 'privatePolicy',
+            label: 'Private Policy',
+            kind: 'enum',
+            required: true,
+            default: 'pairing',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'sessionScope',
+            label: 'Session Scope',
+            kind: 'enum',
+            required: true,
+            default: 'user',
+            options: [
+              { value: 'user', label: 'Per user and chat' },
+              { value: 'single', label: 'One shared session' },
+            ],
+          },
+        ],
+      },
+    ],
+    channels: { revision: '1', instances: {} },
+    sessions: [
+      {
+        workspaceCwd,
+        sessionId: 'task-session',
+        displayName: 'Web Shell task',
+        sourceType: 'default',
+      },
+    ],
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  // The WeChat login routes are process-global, so the workspace mock daemon
+  // does not serve them. Registered after installMockDaemon so this handler
+  // takes precedence; anything else falls through to the shared mock.
+  let configured = false;
+  let flowStatus: 'waiting' | 'scanned' | 'ready' = 'waiting';
+  let revokes = 0;
+  await page.route('**/auth/weixin**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const method = request.method();
+    if (path === '/auth/weixin' && method === 'GET') {
+      await route.fulfill({
+        json: {
+          enabled: true,
+          configured,
+          ...(configured ? { userId: 'wx-user-1' } : {}),
+        },
+      });
+      return;
+    }
+    if (path === '/auth/weixin/flows' && method === 'POST') {
+      flowStatus = 'waiting';
+      await route.fulfill({
+        status: 201,
+        json: {
+          id: 'flow-1',
+          status: 'waiting',
+          qrText: '▄▀▄▀',
+          qrcodeUrl: 'https://scan.example/qr-1',
+        },
+      });
+      return;
+    }
+    if (path === '/auth/weixin/flows/flow-1' && method === 'GET') {
+      const status = flowStatus;
+      if (flowStatus === 'waiting') flowStatus = 'scanned';
+      else if (flowStatus === 'scanned') {
+        flowStatus = 'ready';
+        configured = true;
+      }
+      await route.fulfill({
+        json: {
+          id: 'flow-1',
+          status,
+          ...(status === 'ready' ? {} : { qrText: '▄▀▄▀' }),
+        },
+      });
+      return;
+    }
+    if (path === '/auth/weixin/revoke' && method === 'POST') {
+      revokes += 1;
+      configured = false;
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+  // The platform must be offered at all — before this feature weixin was
+  // filtered out of the Web Shell allowlist.
+  await page.getByRole('button', { name: 'Configure WeChat' }).click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', { name: 'Configure WeChat' }),
+  ).toBeVisible();
+
+  const panel = editor.getByTestId('weixin-login-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Not logged in');
+  // No credential input: the token comes from the QR login, not the form.
+  await expect(editor.locator('input[type="password"]')).toHaveCount(0);
+
+  await panel.getByRole('button', { name: 'Log in with QR code' }).click();
+  await expect(panel.locator('pre')).toHaveText('▄▀▄▀');
+  await expect(panel).toContainText('Scan the QR code with WeChat.');
+  await expect(panel).toContainText('Scanned. Confirm on your phone.');
+  await expect(panel).toContainText('WeChat connected.');
+  await expect(panel).toContainText('Logged in');
+  await expect(panel).toContainText('User ID: wx-user-1');
+  // The QR is gone once the flow is terminal.
+  await expect(panel.locator('pre')).toHaveCount(0);
+
+  await panel.getByRole('button', { name: 'Log out' }).click();
+  await expect.poll(() => revokes).toBe(1);
+  await expect(panel).toContainText('Not logged in');
+
+  // Saving must not require being logged in.
+  await editor.getByLabel('Instance name').fill('my-weixin');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  const upserts = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' &&
+        request.path.endsWith('/channels/my-weixin'),
+    );
+  await expect.poll(() => upserts().length).toBe(1);
+  expect(upserts()[0]?.body).toEqual(
+    expect.objectContaining({
+      config: expect.objectContaining({
+        type: 'weixin',
+        groupPolicy: 'disabled',
+      }),
+    }),
+  );
+});

@@ -1,0 +1,463 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// @vitest-environment jsdom
+
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  DaemonWeixinAccountStatus,
+  DaemonWeixinLoginFlow,
+} from '@qwen-code/sdk/daemon';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+const { WeixinLoginPanel } = await import('./WeixinLoginPanel');
+const { I18nProvider, getTranslator } = await import('../../i18n');
+
+const LOGGED_OUT: DaemonWeixinAccountStatus = {
+  enabled: true,
+  configured: false,
+};
+const LOGGED_IN: DaemonWeixinAccountStatus = {
+  enabled: true,
+  configured: true,
+  userId: 'wx-user-1',
+  savedAt: '2026-11-09T00:00:00.000Z',
+};
+const WAITING: DaemonWeixinLoginFlow = {
+  id: 'flow-1',
+  status: 'waiting',
+  qrText: '▄▀▄▀',
+  qrcodeUrl: 'https://scan.example/qr-1',
+};
+
+let container: HTMLDivElement;
+let root: Root;
+let unmounted: boolean;
+
+function buttonByText(text: string): HTMLButtonElement | undefined {
+  return Array.from(container.querySelectorAll('button')).find(
+    (item) => item.textContent?.trim() === text,
+  );
+}
+
+async function renderPanel({
+  status = vi.fn().mockResolvedValue(LOGGED_OUT),
+  start = vi.fn().mockResolvedValue(WAITING),
+  poll = vi.fn().mockResolvedValue(WAITING),
+  revoke = vi.fn().mockResolvedValue(undefined),
+  language = 'en',
+}: {
+  status?: () => Promise<DaemonWeixinAccountStatus | undefined>;
+  start?: () => Promise<DaemonWeixinLoginFlow | undefined>;
+  poll?: (id: string) => Promise<DaemonWeixinLoginFlow | undefined>;
+  revoke?: () => Promise<void>;
+  language?: 'en' | 'zh-CN';
+} = {}) {
+  await act(async () => {
+    root.render(
+      <I18nProvider language={language}>
+        <WeixinLoginPanel api={{ status, start, poll, revoke }} />
+      </I18nProvider>,
+    );
+  });
+  return { status, start, poll, revoke };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  unmounted = false;
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  if (!unmounted) act(() => root.unmount());
+  container.remove();
+  vi.useRealTimers();
+});
+
+describe('WeixinLoginPanel', () => {
+  it('shows the logged-out state with a login action and no QR', async () => {
+    const { status } = await renderPanel();
+
+    expect(status).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('Not logged in');
+    expect(buttonByText('Log in with QR code')).toBeDefined();
+    expect(container.querySelector('pre')).toBeNull();
+    expect(buttonByText('Log out')).toBeUndefined();
+  });
+
+  it('shows the logged-in account with relogin and logout actions', async () => {
+    await renderPanel({ status: vi.fn().mockResolvedValue(LOGGED_IN) });
+
+    expect(container.textContent).toContain('Logged in');
+    expect(container.textContent).toContain('User ID: wx-user-1');
+    expect(container.textContent).toContain(
+      'Logged in at 2026-11-09T00:00:00.000Z',
+    );
+    expect(container.textContent).toContain(
+      'Channels that are already running keep the previous account',
+    );
+    expect(buttonByText('Log in again')).toBeDefined();
+    expect(buttonByText('Log out')).toBeDefined();
+    expect(buttonByText('Log in with QR code')).toBeUndefined();
+  });
+
+  it('renders the unsupported hint when the daemon has no route', async () => {
+    await renderPanel({ status: vi.fn().mockResolvedValue(undefined) });
+
+    expect(container.textContent).toContain(
+      'This daemon does not support WeChat login',
+    );
+    expect(buttonByText('Log in with QR code')).toBeUndefined();
+    expect(buttonByText('Log out')).toBeUndefined();
+  });
+
+  it('starts a flow and renders the QR block', async () => {
+    const { start } = await renderPanel();
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(container.querySelector('pre')?.textContent).toBe('▄▀▄▀');
+    expect(container.textContent).toContain('Scan the QR code with WeChat.');
+    // While the QR is live the login action is replaced by the QR itself.
+    expect(buttonByText('Log in with QR code')).toBeUndefined();
+  });
+
+  it('falls back to the raw link when the QR could not be rendered', async () => {
+    await renderPanel({
+      start: vi.fn().mockResolvedValue({
+        id: 'flow-1',
+        status: 'waiting',
+        qrcodeUrl: 'https://scan.example/qr-1',
+      }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+
+    expect(container.querySelector('pre')).toBeNull();
+    const link = container.querySelector<HTMLAnchorElement>('a');
+    expect(link?.getAttribute('href')).toBe('https://scan.example/qr-1');
+    expect(link?.textContent).toContain('Open the login URL');
+  });
+
+  it('polls through scanned to ready and then stops', async () => {
+    const poll = vi
+      .fn()
+      .mockResolvedValueOnce({ ...WAITING, status: 'scanned' })
+      .mockResolvedValue({ id: 'flow-1', status: 'ready' });
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce(LOGGED_OUT)
+      .mockResolvedValue(LOGGED_IN);
+    await renderPanel({ poll, status });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(container.textContent).toContain('Scanned. Confirm on your phone.');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(container.textContent).toContain('WeChat connected.');
+    expect(container.textContent).toContain('Logged in');
+    expect(poll).toHaveBeenCalledTimes(2);
+
+    // Terminal status must stop the loop, not keep spending requests.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(poll).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers a refresh after the QR expires', async () => {
+    const start = vi
+      .fn()
+      .mockResolvedValueOnce(WAITING)
+      .mockResolvedValue({ ...WAITING, id: 'flow-2' });
+    await renderPanel({
+      start,
+      poll: vi.fn().mockResolvedValue({
+        id: 'flow-1',
+        status: 'expired',
+        errorCode: 'qr_expired',
+      }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(container.textContent).toContain(
+      'QR code expired. Refresh to try again.',
+    );
+    expect(container.querySelector('pre')).toBeNull();
+    const refresh = buttonByText('Refresh QR code');
+    expect(refresh).toBeDefined();
+
+    await act(async () => {
+      refresh?.click();
+    });
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('pre')?.textContent).toBe('▄▀▄▀');
+  });
+
+  it('shows a single refresh action when a logged-in account retries', async () => {
+    await renderPanel({
+      status: vi.fn().mockResolvedValue(LOGGED_IN),
+      poll: vi.fn().mockResolvedValue({
+        id: 'flow-1',
+        status: 'error',
+        errorCode: 'login_failed',
+      }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in again')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    // The retry and relogin branches must not both render: two buttons doing
+    // the same thing is the defect this pins.
+    expect(buttonByText('Refresh QR code')).toBeDefined();
+    expect(buttonByText('Log in again')).toBeUndefined();
+    expect(container.textContent).toContain('WeChat login failed. Try again.');
+  });
+
+  it('logs out and returns to the logged-out state', async () => {
+    const revoke = vi.fn().mockResolvedValue(undefined);
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce(LOGGED_IN)
+      .mockResolvedValue(LOGGED_OUT);
+    await renderPanel({ status, revoke });
+
+    await act(async () => {
+      buttonByText('Log out')?.click();
+    });
+
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('Not logged in');
+    expect(buttonByText('Log in with QR code')).toBeDefined();
+  });
+
+  it('surfaces a start failure without leaving the panel wedged', async () => {
+    await renderPanel({
+      start: vi.fn().mockRejectedValue(new Error('upstream unavailable')),
+    });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+
+    expect(container.textContent).toContain('upstream unavailable');
+    expect(buttonByText('Log in with QR code')?.disabled).toBe(false);
+  });
+
+  it('stops polling once unmounted', async () => {
+    const { poll } = await renderPanel();
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(poll).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+    unmounted = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps polling while the daemon reports the same status', async () => {
+    // Waiting is the normal state until the operator scans. A one-shot timer
+    // re-armed only on a status change fires once and then stops, leaving the
+    // QR frozen forever — the mock must therefore repeat one status.
+    const poll = vi.fn().mockResolvedValue(WAITING);
+    await renderPanel({ poll });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(poll).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(poll).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(poll).toHaveBeenCalledTimes(3);
+    expect(container.querySelector('pre')?.textContent).toBe('▄▀▄▀');
+  });
+
+  it('recovers from a transient poll failure and clears the error', async () => {
+    // A non-terminal flow renders no refresh button, so a poll loop that stopped
+    // on the first network blip would strand the operator with no way to retry.
+    const poll = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('network blip'))
+      .mockResolvedValue({ id: 'flow-1', status: 'ready' });
+    await renderPanel({ poll });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(container.textContent).toContain('network blip');
+    expect(poll).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(poll).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('WeChat connected.');
+    expect(container.textContent).not.toContain('network blip');
+  });
+
+  it('keeps polling when the host rebuilds the api object on re-render', async () => {
+    // The real host hands down a fresh api object whenever it re-renders. A
+    // poll timer keyed on that identity is cleared and restarted every time,
+    // so under continuous re-rendering it never fires — the QR sits at
+    // "waiting" forever. The mocks stay stable; only the object identity churns.
+    const poll = vi.fn().mockResolvedValue({ id: 'flow-1', status: 'ready' });
+    const status = vi.fn().mockResolvedValue(LOGGED_OUT);
+    const start = vi.fn().mockResolvedValue(WAITING);
+    const revoke = vi.fn().mockResolvedValue(undefined);
+    const renderWithFreshApi = async () => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <WeixinLoginPanel api={{ status, start, poll, revoke }} />
+          </I18nProvider>,
+        );
+      });
+    };
+
+    await renderWithFreshApi();
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+
+    // Re-render every 400ms across more than one poll interval.
+    for (let i = 0; i < 8; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      await renderWithFreshApi();
+    }
+
+    expect(poll).toHaveBeenCalled();
+    expect(container.textContent).toContain('WeChat connected.');
+  });
+
+  it('treats a vanished flow as a return to the account view', async () => {
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce(LOGGED_OUT)
+      .mockResolvedValue(LOGGED_IN);
+    await renderPanel({ poll: vi.fn().mockResolvedValue(undefined), status });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(container.querySelector('pre')).toBeNull();
+    expect(container.textContent).toContain('Logged in');
+  });
+});
+
+describe('WeixinLoginPanel localization', () => {
+  it.each(['en', 'zh-CN'] as const)(
+    'renders the logged-out copy in %s without raw keys',
+    async (language) => {
+      await renderPanel({ language });
+      const t = getTranslator(language);
+
+      expect(container.textContent).toContain(t('channels.weixin.loggedOut'));
+      expect(container.textContent).toContain(t('channels.weixin.description'));
+      expect(buttonByText(t('channels.weixin.login'))).toBeDefined();
+      expect(container.textContent).not.toContain('channels.weixin.');
+      // The zh catalog must actually differ from EN, or this case would pass
+      // on a missing translation that silently fell back.
+      if (language === 'zh-CN') {
+        expect(t('channels.weixin.loggedOut')).toBe('未登录');
+        expect(t('channels.weixin.login')).toBe('扫码登录');
+      }
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'renders the logged-in copy in %s without raw keys',
+    async (language) => {
+      await renderPanel({
+        language,
+        status: vi.fn().mockResolvedValue(LOGGED_IN),
+      });
+      const t = getTranslator(language);
+
+      expect(container.textContent).toContain(t('channels.weixin.loggedIn'));
+      expect(container.textContent).toContain(
+        t('channels.weixin.userId', { id: 'wx-user-1' }),
+      );
+      expect(container.textContent).toContain('wx-user-1');
+      expect(buttonByText(t('channels.weixin.logout'))).toBeDefined();
+      expect(container.textContent).not.toContain('channels.weixin.');
+      expect(container.textContent).not.toContain('{id}');
+      if (language === 'zh-CN') {
+        expect(t('channels.weixin.loggedIn')).toBe('已登录');
+        expect(t('channels.weixin.logout')).toBe('退出登录');
+      }
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'renders the unsupported hint in %s',
+    async (language) => {
+      await renderPanel({
+        language,
+        status: vi.fn().mockResolvedValue(undefined),
+      });
+      const t = getTranslator(language);
+
+      expect(container.textContent).toContain(t('channels.weixin.unsupported'));
+      expect(container.textContent).not.toContain('channels.weixin.');
+      if (language === 'zh-CN') {
+        expect(t('channels.weixin.unsupported')).toContain('当前 daemon');
+      }
+    },
+  );
+});

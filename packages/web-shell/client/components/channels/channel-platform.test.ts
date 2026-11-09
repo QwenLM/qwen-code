@@ -26,14 +26,15 @@ describe('Channel platform availability', () => {
       [
         descriptor('dingtalk'),
         descriptor('dws'),
+        descriptor('weixin'),
         descriptor('wecom'),
         descriptor('wecom-callback'),
         descriptor('feishu'),
         descriptor('github'),
         descriptor('gitlab'),
         descriptor('telegram'),
-        descriptor('weixin'),
         descriptor('dingtalk', false),
+        descriptor('weixin', false),
         descriptor('github', false),
         descriptor('gitlab', false),
       ]
@@ -42,6 +43,7 @@ describe('Channel platform availability', () => {
     ).toEqual([
       'dingtalk',
       'dws',
+      'weixin',
       'wecom',
       'wecom-callback',
       'feishu',
@@ -53,6 +55,7 @@ describe('Channel platform availability', () => {
   it('uses the same allowlist for configured Channel instances', () => {
     expect(isSupportedChannelType('dingtalk')).toBe(true);
     expect(isSupportedChannelType('dws')).toBe(true);
+    expect(isSupportedChannelType('weixin')).toBe(true);
     expect(isSupportedChannelType('wecom')).toBe(true);
     expect(isSupportedChannelType('wecom-callback')).toBe(true);
     expect(isSupportedChannelType('feishu')).toBe(true);

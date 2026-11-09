@@ -6237,3 +6237,29 @@ export interface DaemonSubscriptionActivation {
   modelId: string;
   runtimeSync: DaemonModelProviderRuntimeSyncResult;
 }
+
+/**
+ * WeChat login state. The credential is process-global (one account.json in
+ * the daemon's home), so these views are served outside any workspace scope.
+ * Neither carries the bot token: it is consumed by the daemon when it saves
+ * the account and is never returned to a client.
+ */
+export interface DaemonWeixinAccountStatus {
+  enabled: boolean;
+  configured: boolean;
+  userId?: string;
+  savedAt?: string;
+}
+
+export interface DaemonWeixinLoginFlow {
+  id: string;
+  status: 'waiting' | 'scanned' | 'ready' | 'expired' | 'error';
+  /** Block-glyph QR rendering, absent when the encoder could not render it. */
+  qrText?: string;
+  /**
+   * The URL the operator scans. Present while the flow is live even when
+   * qrText is not; terminal views carry neither.
+   */
+  qrcodeUrl?: string;
+  errorCode?: string;
+}

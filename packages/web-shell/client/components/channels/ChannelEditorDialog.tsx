@@ -67,6 +67,7 @@ import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
+import { WeixinLoginPanel, type WeixinLoginApi } from './WeixinLoginPanel';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
@@ -98,6 +99,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   dingtalk: {
     clientId: 'channels.editor.field.dingtalk.clientId',
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
+  },
+  weixin: {
+    baseUrl: 'channels.editor.field.weixin.baseUrl',
+    groupPolicy: 'channels.editor.field.weixin.groupPolicy',
   },
   wecom: {
     botId: 'channels.editor.field.wecom.botId',
@@ -242,6 +247,12 @@ export interface ChannelEditorDialogProps {
     name: string,
     request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
+  /**
+   * WeChat login is process-global rather than workspace-scoped, so it arrives
+   * as its own injected API instead of riding the channel management client.
+   * Absent when the host cannot supply it; the panel then does not render.
+   */
+  weixinLogin?: WeixinLoginApi;
 }
 
 function configuredAllowedUsers(instance?: DaemonChannelInstanceSnapshot) {
@@ -341,6 +352,7 @@ export function ChannelEditorDialog({
   approvePairingRequest,
   listPairingApprovals,
   revokePairingApproval,
+  weixinLogin,
 }: ChannelEditorDialogProps) {
   const { t } = useI18n();
   const formId = useId();
@@ -1561,6 +1573,15 @@ export function ChannelEditorDialog({
                 </Select>
               </FieldShell>
             </section>
+
+            {descriptor.type === 'weixin' && weixinLogin ? (
+              <section className={styles.section}>
+                <h3 className={styles.sectionHeading}>
+                  {t('channels.editor.section.credentials')}
+                </h3>
+                <WeixinLoginPanel api={weixinLogin} />
+              </section>
+            ) : null}
 
             {(['credentials', 'connection'] as const).map((section) => {
               const sectionFields = credentialFields.filter(

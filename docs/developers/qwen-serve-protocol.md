@@ -1421,6 +1421,52 @@ snapshots contain `senderIds` and `groupIds` because allowlists do not persist
 display names. Revoking an unknown user or group returns
 `404 channel_pairing_approval_not_found`.
 
+#### WeChat login
+
+The WeChat (`weixin`) channel authenticates by QR scan rather than by a config
+token, and its credential is a single process-global `account.json` in the
+daemon's home shared by every WeChat channel in every workspace. Its login
+routes therefore sit outside the workspace-scoped Channel management surface,
+alongside the subscription auth routes, and carry no `/workspaces/:workspace`
+variant:
+
+- `GET /auth/weixin`
+- `POST /auth/weixin/flows`
+- `GET /auth/weixin/flows/:id`
+- `DELETE /auth/weixin/flows/:id`
+- `POST /auth/weixin/revoke`
+
+`GET /auth/weixin` reads local state only and returns
+`{ "enabled": boolean, "configured": boolean, "userId"?: string, "savedAt"?: string }`.
+It never calls the upstream platform.
+
+`POST /auth/weixin/flows` requires the strict mutation gate, mints a QR upstream,
+and returns `201` with `{ "id": string, "status": "waiting", "qrText"?: string,
+"qrcodeUrl"?: string }`. The scan loop then runs in the daemon; clients poll
+`GET /auth/weixin/flows/:id`, whose `status` advances through `waiting`,
+`scanned`, and the terminals `ready`, `expired`, or `error` (with a stable
+`errorCode`: `qr_expired` or `login_failed`). `qrText` is a best-effort
+block-glyph rendering and is absent when the encoder cannot render the URL;
+`qrcodeUrl` remains so the operator can open it directly. At most four flows run
+concurrently; a further start returns `429 too_many_flows`. A terminal view is
+retained for 60 seconds and then dropped, after which the poll returns
+`404 flow_not_found`. `DELETE /auth/weixin/flows/:id` aborts a flow and returns
+`204`. Daemon shutdown aborts every in-flight flow.
+
+On `ready` the daemon persists the credential itself. **No response on any of
+these routes carries the bot token**, and no request field can redirect the
+upstream API root.
+
+`POST /auth/weixin/revoke` requires the strict mutation gate, cancels every
+in-flight flow, removes the stored account, and returns `204`. Channels already
+running keep the account they read at connect time until they are restarted.
+
+These routes are gated by the daemon's bearer authentication, not by workspace
+trust, because the credential they manage has no workspace scope. Clients that
+predate them receive `404`; the Web Shell treats that as "this daemon does not
+support WeChat login" rather than as an error. No separate capability tag is
+advertised — the panel lives behind the existing `channel_management` UI gate.
+
 ### Channel delivery and Notify
 
 `channel_delivery` advertises immediate, best-effort delivery support. It is a

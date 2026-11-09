@@ -670,6 +670,8 @@ export type {
   DaemonSubscriptionConfig,
   DaemonSubscriptionUserInfo,
   DaemonSubscriptionFlow,
+  DaemonWeixinAccountStatus,
+  DaemonWeixinLoginFlow,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonSessionContextStatus,
