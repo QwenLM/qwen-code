@@ -1737,6 +1737,8 @@ class ManagedAgentApiContractTest {
     private void exchangeDiagnostics(Map<String, String> drift, String tenant, String otherTenant,
             java.security.Principal principal, String session) throws Exception {
         String[][] routes = {
+                {"context-usage", "session-context-usage", "ContextUsage"},
+                {"stats", "session-stats", "ModelStatistics"},
                 {"resources", "session-resources", "Resources"},
                 {"agent-trace", "session-agent-trace", "AgentTrace"}
         };

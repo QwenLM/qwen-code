@@ -7527,6 +7527,208 @@
         "summary": "Read recent current Session Items and page toward older Items"
       }
     },
+    "/v1/agents/sessions/{sessionId}/context-usage": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "description": "The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticContextUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["Public Sessions"],
+        "operationId": "getSessionDiagnosticContextUsage"
+      }
+    },
+    "/api/agent/web-shell/v1/session-context-usage/query": {
+      "post": {
+        "description": "The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticContextUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["WebShell"],
+        "operationId": "querySessionDiagnosticContextUsage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/stats": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "description": "Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["Public Sessions"],
+        "operationId": "getSessionDiagnosticModelStatistics"
+      }
+    },
+    "/api/agent/web-shell/v1/session-stats/query": {
+      "post": {
+        "description": "Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["WebShell"],
+        "operationId": "querySessionDiagnosticModelStatistics",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/agents/sessions/{sessionId}/resources": {
       "parameters": [
         {
@@ -17947,6 +18149,749 @@
           }
         },
         "required": ["workspaceId", "worktreeId", "idempotencyKey"]
+      },
+      "ManagedModelStatisticsBucket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requests",
+          "tokens",
+          "usageKnown",
+          "latencyMs",
+          "timing",
+          "failures",
+          "backoffRetries"
+        ],
+        "properties": {
+          "requests": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "total",
+              "success",
+              "error",
+              "cancelled",
+              "interrupted"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "success": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "error": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "cancelled": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "interrupted": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "tokens": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["prompt", "candidates", "total", "cached", "thoughts"],
+            "properties": {
+              "prompt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "candidates": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "cached": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "thoughts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "usageKnown": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["prompt", "candidates", "total", "cached", "thoughts"],
+            "properties": {
+              "prompt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "candidates": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "cached": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "thoughts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "latencyMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "timing": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ttftCount",
+              "totalTtftMs",
+              "generationCount",
+              "totalGenerationMs",
+              "throughputOutputTokens"
+            ],
+            "properties": {
+              "ttftCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "totalTtftMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "generationCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "totalGenerationMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "throughputOutputTokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "failures": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["http", "transport", "timeout", "other"],
+            "properties": {
+              "http": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "transport": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "other": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "backoffRetries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "ManagedModelStatisticsSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "snapshotRevision",
+          "observedAt",
+          "coverage",
+          "totals",
+          "sources",
+          "models",
+          "overflow",
+          "recent",
+          "modelBreakdownOmitted",
+          "samplesTruncated"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1
+          },
+          "snapshotRevision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "observedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["gaps"],
+            "properties": {
+              "gaps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "totals": {
+            "$ref": "#/components/schemas/ManagedModelStatisticsBucket"
+          },
+          "sources": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["main", "hook", "compression"],
+            "properties": {
+              "main": {
+                "$ref": "#/components/schemas/ManagedModelStatisticsBucket"
+              },
+              "hook": {
+                "$ref": "#/components/schemas/ManagedModelStatisticsBucket"
+              },
+              "compression": {
+                "$ref": "#/components/schemas/ManagedModelStatisticsBucket"
+              }
+            }
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "name", "nameTruncated", "metrics"],
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "nameTruncated": {
+                  "type": "boolean"
+                },
+                "metrics": {
+                  "$ref": "#/components/schemas/ManagedModelStatisticsBucket"
+                }
+              }
+            },
+            "maxItems": 16
+          },
+          "overflow": {
+            "$ref": "#/components/schemas/ManagedModelStatisticsBucket"
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "executionId",
+                "source",
+                "modelKey",
+                "at",
+                "outcome",
+                "durationMs",
+                "ttftMs",
+                "generationMs",
+                "outputTokens",
+                "failureKind",
+                "statusCode",
+                "backoffRetryOrdinal"
+              ],
+              "properties": {
+                "executionId": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string",
+                  "enum": ["main", "hook", "compression"]
+                },
+                "modelKey": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": ["success", "error", "cancelled", "interrupted"]
+                },
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ttftMs": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "generationMs": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "outputTokens": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "failureKind": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": ["http", "transport", "timeout", "other"]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "statusCode": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 100,
+                      "maximum": 599
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "backoffRetryOrdinal": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            },
+            "maxItems": 20
+          },
+          "modelBreakdownOmitted": {
+            "type": "boolean"
+          },
+          "samplesTruncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ManagedContextUsageSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "attemptId",
+          "turnId",
+          "model",
+          "observedAt",
+          "inputTokens",
+          "cachedTokens",
+          "contextWindowSize",
+          "breakdown",
+          "thresholds",
+          "details",
+          "attributionComplete",
+          "detailsTruncated"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1
+          },
+          "attemptId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "observedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "inputTokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cachedTokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contextWindowSize": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "breakdown": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "systemPrompt",
+              "builtinTools",
+              "mcpTools",
+              "instructionFiles",
+              "memoryFiles",
+              "skills",
+              "startupContext",
+              "messages"
+            ],
+            "properties": {
+              "systemPrompt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "builtinTools": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "mcpTools": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "instructionFiles": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "memoryFiles": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "skills": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "startupContext": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "messages": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          },
+          "thresholds": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["warn", "auto", "hard"],
+                "properties": {
+                  "warn": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "auto": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "hard": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["category", "name", "tokens"],
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "systemPrompt",
+                    "builtinTools",
+                    "mcpTools",
+                    "instructionFiles",
+                    "memoryFiles",
+                    "skills",
+                    "startupContext",
+                    "messages"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "tokens": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            },
+            "maxItems": 32
+          },
+          "attributionComplete": {
+            "type": "boolean"
+          },
+          "detailsTruncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ManagedDiagnosticContextUsage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "readRevision",
+          "availability",
+          "coverageReasons",
+          "sourceSequence",
+          "stale",
+          "staleReasons",
+          "estimated",
+          "context"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sourceSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "staleReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "estimated": {
+            "type": "boolean",
+            "const": true
+          },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedContextUsageSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedDiagnosticStats": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "readRevision",
+          "availability",
+          "coverageReasons",
+          "sourceSequence",
+          "statistics"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sourceSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "statistics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedModelStatisticsSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
       },
       "ManagedDiagnosticSkill": {
         "type": "object",

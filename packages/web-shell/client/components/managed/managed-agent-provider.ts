@@ -101,12 +101,24 @@ export function managedPermissionRulesEqual(
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+export type ManagedDiagnosticContextUsage =
+  components['schemas']['ManagedDiagnosticContextUsage'];
+export type ManagedDiagnosticStats =
+  components['schemas']['ManagedDiagnosticStats'];
 export type ManagedDiagnosticResources =
   components['schemas']['ManagedDiagnosticResources'];
 export type ManagedDiagnosticAgentTrace =
   components['schemas']['ManagedDiagnosticAgentTrace'];
 
 export interface ManagedDiagnosticsProvider {
+  getContextUsage(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticContextUsage>;
+  getStatistics(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticStats>;
   getResources(
     sessionId: string,
     options: ManagedAgentRequestOptions,

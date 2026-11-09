@@ -3,12 +3,14 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
-  ManagedDiagnosticResources,
+  ManagedDiagnosticStats,
   ManagedDiagnosticsProvider,
 } from './managed-agent-provider';
 import { useManagedDiagnostics } from './use-managed-diagnostics';
 import {
+  diagnosticContext,
   diagnosticResources,
+  diagnosticStats,
   diagnosticTrace,
 } from './managed-diagnostics.test-fixtures';
 
@@ -31,6 +33,8 @@ describe('useManagedDiagnostics', () => {
     document.body.append(container);
     root = createRoot(container);
     provider = {
+      getContextUsage: vi.fn().mockResolvedValue(diagnosticContext),
+      getStatistics: vi.fn().mockResolvedValue(diagnosticStats),
       getResources: vi.fn().mockResolvedValue(diagnosticResources),
       listAgentTrace: vi.fn().mockResolvedValue(diagnosticTrace),
     };
@@ -38,7 +42,7 @@ describe('useManagedDiagnostics', () => {
       provider,
       sessionId: 's1',
       clientId: 'actor-a',
-      tab: 'resources',
+      tab: 'statistics',
       running: false,
     };
   });
@@ -50,30 +54,30 @@ describe('useManagedDiagnostics', () => {
   });
 
   it('aborts the old owner and refuses late data after Session and actor replacement', async () => {
-    let resolveOld!: (value: ManagedDiagnosticResources) => void;
-    vi.mocked(provider.getResources).mockImplementationOnce(
+    let resolveOld!: (value: ManagedDiagnosticStats) => void;
+    vi.mocked(provider.getStatistics).mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           resolveOld = resolve;
         }),
     );
     await render();
-    const oldSignal = vi.mocked(provider.getResources).mock.calls[0][1].signal;
-    vi.mocked(provider.getResources).mockResolvedValue({
-      ...diagnosticResources,
+    const oldSignal = vi.mocked(provider.getStatistics).mock.calls[0][1].signal;
+    vi.mocked(provider.getStatistics).mockResolvedValue({
+      ...diagnosticStats,
       sessionId: 's2',
     });
     await render({ sessionId: 's2', clientId: 'actor-b' });
     expect(oldSignal?.aborted).toBe(true);
     expect(latest.snapshot?.value.sessionId).toBe('s2');
-    await act(async () => resolveOld(diagnosticResources));
+    await act(async () => resolveOld(diagnosticStats));
     expect(latest.snapshot?.value.sessionId).toBe('s2');
   });
 
   it('clears previously visible observations when access is revoked', async () => {
     await render();
     expect(latest.snapshot).toBeDefined();
-    vi.mocked(provider.getResources).mockRejectedValue(
+    vi.mocked(provider.getStatistics).mockRejectedValue(
       new Error('session_not_found'),
     );
     await act(async () => latest.refresh());
@@ -81,23 +85,20 @@ describe('useManagedDiagnostics', () => {
     expect(latest.snapshot).toBeUndefined();
   });
 
-  it('polls only a visible running trace and cancels polling when idle', async () => {
+  it('polls only visible running statistics and cancels polling when idle', async () => {
     vi.useFakeTimers();
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
-    await render({ tab: 'agents', running: true });
-    expect(provider.listAgentTrace).toHaveBeenCalledTimes(1);
+    await render({ running: true });
+    expect(provider.getStatistics).toHaveBeenCalledTimes(1);
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
-    expect(provider.listAgentTrace).toHaveBeenCalledTimes(2);
+    expect(provider.getStatistics).toHaveBeenCalledTimes(2);
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
-    expect(provider.listAgentTrace).toHaveBeenCalledTimes(2);
+    expect(provider.getStatistics).toHaveBeenCalledTimes(2);
     await render({ running: false });
-    const count = vi.mocked(provider.listAgentTrace).mock.calls.length;
+    const count = vi.mocked(provider.getStatistics).mock.calls.length;
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
-    expect(provider.listAgentTrace).toHaveBeenCalledTimes(count);
-    await render({ tab: 'resources', running: true });
-    await act(async () => vi.advanceTimersByTimeAsync(10_000));
-    expect(provider.getResources).toHaveBeenCalledTimes(1);
+    expect(provider.getStatistics).toHaveBeenCalledTimes(count);
   });
 
   it('keeps trace cursors local to a Session and tab', async () => {
@@ -125,8 +126,8 @@ describe('useManagedDiagnostics', () => {
   });
 
   it('rejects a mismatched response instead of displaying another Session', async () => {
-    vi.mocked(provider.getResources).mockResolvedValue({
-      ...diagnosticResources,
+    vi.mocked(provider.getStatistics).mockResolvedValue({
+      ...diagnosticStats,
       sessionId: 'foreign',
     });
     await render();

@@ -433,6 +433,18 @@ export function createJavaManagedAgentProvider(
       },
     },
     diagnostics: {
+      async getContextUsage(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticContextUsage(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async getStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
       async getResources(sessionId, request) {
         return requireDiagnosticSnapshot(
           await client.getDiagnosticResources(sessionId, request.signal),
