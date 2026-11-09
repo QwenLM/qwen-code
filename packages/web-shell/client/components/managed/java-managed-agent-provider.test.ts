@@ -3,7 +3,9 @@ import { artifact } from './managed-tool-result.test-fixtures';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
 import { pendingQuestion } from './managed-question.test-fixtures';
 import {
+  diagnosticContext,
   diagnosticResources,
+  diagnosticStats,
   diagnosticTrace,
 } from './managed-diagnostics.test-fixtures';
 
@@ -18,6 +20,8 @@ describe('createJavaManagedAgentProvider', () => {
   it('reads diagnostics through passive product routes and rejects foreign snapshots', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(diagnosticContext))
+      .mockResolvedValueOnce(jsonResponse(diagnosticStats))
       .mockResolvedValueOnce(jsonResponse(diagnosticResources))
       .mockResolvedValueOnce(jsonResponse(diagnosticTrace));
     const provider = createJavaManagedAgentProvider({
@@ -27,6 +31,12 @@ describe('createJavaManagedAgentProvider', () => {
     });
     const signal = new AbortController().signal;
     const request = { clientId: 'c', signal };
+    await expect(
+      provider.diagnostics!.getContextUsage('s1', request),
+    ).resolves.toEqual(diagnosticContext);
+    await expect(
+      provider.diagnostics!.getStatistics('s1', request),
+    ).resolves.toEqual(diagnosticStats);
     await expect(
       provider.diagnostics!.getResources('s1', request),
     ).resolves.toEqual(diagnosticResources);
@@ -38,12 +48,17 @@ describe('createJavaManagedAgentProvider', () => {
       }),
     ).resolves.toEqual(diagnosticTrace);
     expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual(
-      ['session-resources', 'session-agent-trace'].map(
+      [
+        'session-context-usage',
+        'session-stats',
+        'session-resources',
+        'session-agent-trace',
+      ].map(
         (route) =>
           `https://product.example/api/agent/web-shell/v1/${route}/query`,
       ),
     );
-    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+    expect(JSON.parse(String(fetchImpl.mock.calls[3][1]?.body))).toEqual({
       sessionId: 's1',
       cursor: 'older',
       limit: 20,
@@ -52,10 +67,10 @@ describe('createJavaManagedAgentProvider', () => {
       fetchImpl.mock.calls.every(([, options]) => options?.signal === signal),
     ).toBe(true);
     fetchImpl.mockResolvedValueOnce(
-      jsonResponse({ ...diagnosticResources, sessionId: 'foreign' }),
+      jsonResponse({ ...diagnosticStats, sessionId: 'foreign' }),
     );
     await expect(
-      provider.diagnostics!.getResources('s1', request),
+      provider.diagnostics!.getStatistics('s1', request),
     ).rejects.toThrow('identity mismatch');
     fetchImpl.mockResolvedValueOnce(
       jsonResponse({

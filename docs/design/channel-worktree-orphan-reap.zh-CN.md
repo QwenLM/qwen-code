@@ -96,9 +96,19 @@ worktree 锁，后 coordinator——否则两种顺序可能死锁（AB-BA）。
    （`<ws>/.qwen/worktrees`，或仓库顶层的等价目录，allowed-roots 的推导方式与
    create 路由一致）。
 6. 跨会话共享：扫描 sidecar 目录下的 `*.worktree.json`，必须找不到**其他**会话
-   的 sidecar 指向同一个（规范化）worktree 路径。tombstone 前任会话
-   （`supersededBy` 正好指向被删除的会话）合法地指向同一个 checkout——它是这次
-   移交的证据，不是共享。
+   的 sidecar 指向同一个（规范化）worktree 路径。tombstone——在 reset 中交出了
+   checkout 的会话留下的、带 `supersededBy` 的 sidecar——合法地指向同一个
+   checkout：它是这次移交的证据，不是共享。只要在所有权锁下读到的 marker（规则
+   4）指向被删除的会话，tombstone 就不可能拥有这个 checkout，而每次 reset 也都
+   持有这把锁。链接本身不会被追溯：每次 reset 只改写它所移交的那一对，所以多次
+   reset 之后，较早的 tombstone 所指向的会话可能已被删除或归档。如果唯一的
+   tombstone 是直接前任（`supersededBy` 指向被删除的会话），它一律不计入共享：
+   bridge 之后可能已经在工作区根目录重新打开了它（定时任务 keepalive、ACP
+   load），这时拒绝会让 checkout 永久泄漏，因此自身切断未完成的直接前任在这里得
+   不到保护。如果还有较早的 tombstone 也指向这个 checkout，则只有在没有任何指向
+   它的会话仍在 bridge 上时才不计入——既包括本目录里的 tombstone，也包括另一种归
+   档状态目录里的任何会话——因为切断步骤没有完成的 reset 会让被替代的会话继续运
+   行，它可能还在 checkout 里跑着后台工作。
 
 执行（在删除被确认之后，仍持有 worktree 锁）：
 
