@@ -9,6 +9,7 @@ import { isatty } from 'node:tty';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { JsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import {
+  AGENT_VIEW_ROSTER_MESSAGE,
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
@@ -75,11 +76,35 @@ export async function relaunchOnExitCode(
  * exits after a grace period instead of running on indefinitely. `graceMs` is
  * for tests.
  */
+let relaunchSupervised = false;
+
+/**
+ * Asks the relaunch supervisor to open the Agent View roster once this
+ * process exits. The supervisor owns the terminal handoff, which a nested
+ * spawnSync cannot do reliably on Windows: the blocked parent keeps reading
+ * console input. Resolves false when no supervisor is listening.
+ */
+export function requestAgentViewRosterOnExit(cwd: string): Promise<boolean> {
+  if (!relaunchSupervised || !process.send || !process.connected) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    try {
+      process.send!({ type: AGENT_VIEW_ROSTER_MESSAGE, cwd }, (error) =>
+        resolve(!error),
+      );
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
 export function exitWhenSupervisorExits(graceMs = ORPHAN_GRACE_MS): void {
   const supervision = process.env[RELAUNCH_SUPERVISED_ENV];
   if (supervision !== '1' && supervision !== 'terminal') {
     return;
   }
+  relaunchSupervised = true;
   // Tools and subagents this process spawns are not the supervisor's children.
   delete process.env[RELAUNCH_SUPERVISED_ENV];
   // A process that never had a channel was not spawned by a supervisor, and
@@ -129,14 +154,13 @@ export async function relaunchAppInChildProcess(
   const script = process.argv[1];
   const scriptArgs = process.argv.slice(2);
   const command = options?.interpreter?.command ?? process.execPath;
-  const nodeArgs = [
+  const launchPrefix = [
     ...(options?.interpreter?.runtime === 'bun'
       ? ['--expose-gc']
       : [...getRelaunchExecArgv(), ...additionalNodeArgs]),
     script,
-    ...additionalScriptArgs,
-    ...scriptArgs,
   ];
+  const nodeArgs = [...launchPrefix, ...additionalScriptArgs, ...scriptArgs];
   const createChildEnv = (): NodeJS.ProcessEnv => {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -198,6 +222,7 @@ export async function relaunchAppInChildProcess(
 
   const runner = () => {
     let updateOnExitRequested = false;
+    let agentViewRosterCwd: string | undefined;
     const terminalHandoff =
       options?.interpreter?.runtime === 'bun' && isatty(0);
     const newEnv = {
@@ -229,6 +254,17 @@ export async function relaunchAppInChildProcess(
       ) {
         updateOnExitRequested = true;
       }
+      if (
+        typeof message === 'object' &&
+        message !== null &&
+        'type' in message &&
+        message.type === AGENT_VIEW_ROSTER_MESSAGE &&
+        'cwd' in message &&
+        typeof message.cwd === 'string' &&
+        message.cwd.length > 0
+      ) {
+        agentViewRosterCwd = message.cwd;
+      }
     });
 
     // Allow the parent to clean up process.env after spawn copies it
@@ -248,6 +284,33 @@ export async function relaunchAppInChildProcess(
       });
       child.on('close', (code) => {
         removeSignalHandler();
+        if (agentViewRosterCwd) {
+          // The detached session asked for the roster: hand the terminal to
+          // it while stdin stays paused here. The command is this CLI's own;
+          // the child only chooses the workspace.
+          const rosterArgs = [
+            ...launchPrefix,
+            'agents',
+            '--cwd',
+            agentViewRosterCwd,
+          ];
+          agentViewRosterCwd = undefined;
+          if (process.platform === 'win32') {
+            // The exiting session cleared the shared console title, and
+            // Node 22's libuv aborts when a process reads an empty one.
+            process.title = 'Qwen Agent View';
+          }
+          const roster = spawn(command, rosterArgs, {
+            stdio: 'inherit',
+            env: createChildEnv(),
+          });
+          roster.on('error', reject);
+          roster.on('close', (rosterCode) => {
+            process.stdin.resume();
+            resolve(rosterCode ?? 1);
+          });
+          return;
+        }
         // Resume stdin before the parent process exits.
         process.stdin.resume();
         const exitCode = code ?? 1;

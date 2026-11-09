@@ -491,6 +491,41 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  if (process.argv.includes('--internal-agent-view-supervisor')) {
+    // Gate on the supervisor launch env so a prompt that merely mentions the
+    // flag cannot hijack the process into supervisor mode.
+    const { runAgentViewSupervisor, INTERNAL_AGENT_VIEW_SUPERVISOR_ENV } =
+      await import('./agent-view/supervisor-runner.js');
+    if (process.env[INTERNAL_AGENT_VIEW_SUPERVISOR_ENV] === '1') {
+      await runAgentViewSupervisor();
+      process.exit(0);
+    }
+  }
+
+  const ptyHostArgIndex = process.argv.indexOf(
+    '--internal-agent-view-pty-host',
+  );
+  if (ptyHostArgIndex !== -1) {
+    // Gate on the host auth token, which only the spawner sets.
+    const { PTY_HOST_AUTH_TOKEN_ENV } = await import(
+      './agent-view/pty-host-env.js'
+    );
+    if (process.env[PTY_HOST_AUTH_TOKEN_ENV]) {
+      const launchPath = process.argv[ptyHostArgIndex + 1];
+      const socketPath = process.argv[ptyHostArgIndex + 2];
+      if (!launchPath || !socketPath) {
+        throw new Error(
+          'Agent View PTY host requires launch and socket paths.',
+        );
+      }
+      const { runAgentViewPtyHostProcess } = await import(
+        './agent-view/pty-host-process.js'
+      );
+      await runAgentViewPtyHostProcess({ launchPath, socketPath });
+      process.exit(0);
+    }
+  }
+
   // Run before yargs parses subcommands — handlers like `channel status`/`stop`
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
@@ -1129,6 +1164,35 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    {
+      const {
+        readAgentViewWorkerSidebandEnv,
+        reportAgentViewWorkerState,
+        sendAgentViewWorkerEvent,
+        startAgentViewWorkerHeartbeat,
+      } = await import('./agent-view/worker-sideband.js');
+      if (readAgentViewWorkerSidebandEnv()) {
+        await sendAgentViewWorkerEvent({
+          type: 'ready',
+          cwd: process.cwd(),
+          capabilities: ['ready', 'heartbeat', 'state'],
+          summary: config.getQuestion(),
+        }).catch((error) => {
+          debugLogger.debug(
+            `Agent View worker ready sideband failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+        await reportAgentViewWorkerState({
+          sessionState: 'idle',
+          cwd: process.cwd(),
+          summary: config.getQuestion(),
+        });
+        startAgentViewWorkerHeartbeat();
+      }
+    }
 
     // The interactive UI segments text through Intl.Segmenter; on an ICU-less
     // Node the first segmentation segfaults the process (#11747). Probe here,

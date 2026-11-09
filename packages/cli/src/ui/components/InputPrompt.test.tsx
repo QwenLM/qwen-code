@@ -4768,6 +4768,56 @@ describe('InputPrompt', () => {
     });
   });
 
+  describe('Agent View left arrow', () => {
+    it('opens Agent View on Left with an empty prompt', async () => {
+      props.onOpenAgentView = vi.fn();
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B[D');
+      await wait();
+
+      expect(props.onOpenAgentView).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('moves the cursor instead when the prompt has text', async () => {
+      props.onOpenAgentView = vi.fn();
+      mockBuffer.text = 'hello';
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B[D');
+      await wait();
+
+      expect(props.onOpenAgentView).not.toHaveBeenCalled();
+      expect(mockBuffer.handleInput).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'left' }),
+      );
+      unmount();
+    });
+
+    it('leaves Left alone when Agent View is not enabled', async () => {
+      props.onOpenAgentView = undefined;
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B[D');
+      await wait();
+
+      expect(mockBuffer.handleInput).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'left' }),
+      );
+      unmount();
+    });
+  });
+
   describe('unfocused paste', () => {
     it('should handle bracketed paste when not focused', async () => {
       props.focus = false;

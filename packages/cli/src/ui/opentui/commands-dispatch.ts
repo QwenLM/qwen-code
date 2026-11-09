@@ -1186,6 +1186,14 @@ export class OpenTuiSlashDispatcher {
                   wasIdleBeforeDispatch,
                 });
               }
+              case 'agent_view_detach':
+                this.addMessage({
+                  type: MessageType.ERROR,
+                  content:
+                    'Agent View detach is not supported in the OpenTUI renderer.',
+                  timestamp: new Date(),
+                });
+                return { kind: 'handled' };
               case 'stream_messages': {
                 // stream_messages is only used in ACP/Zed integration mode
                 // and should not be returned in interactive UI mode

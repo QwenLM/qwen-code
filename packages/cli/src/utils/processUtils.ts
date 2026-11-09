@@ -22,6 +22,7 @@ export const CUSTOM_SANDBOX_IMAGE_ENV_VAR = 'QWEN_CODE_CUSTOM_SANDBOX_IMAGE';
 export const HOST_UPDATE_RELAUNCH_ENV_VAR = 'QWEN_CODE_HOST_UPDATE_RELAUNCH';
 
 export const UPDATE_ON_EXIT_MESSAGE = 'qwen-code:update-on-exit';
+export const AGENT_VIEW_ROSTER_MESSAGE = 'qwen-code:agent-view-roster';
 
 type UpdateRelaunchHandler = (
   relaunchOnFailure: boolean,

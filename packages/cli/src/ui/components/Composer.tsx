@@ -5,7 +5,13 @@
  */
 
 import { Box, Text, useIsScreenReaderEnabled, type DOMElement } from 'ink';
-import { useCallback, useRef, useState, type RefObject } from 'react';
+import {
+  useCallback,
+  useContext,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
@@ -23,6 +29,8 @@ import { useModBand } from '../hooks/use-mod-band.js';
 import { ModBand } from './ModBand.js';
 import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import { t } from '../../i18n/index.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { isAgentViewEnabled } from '../../agent-view/feature.js';
 
 interface ComposerProps {
   footerRef?: RefObject<DOMElement | null>;
@@ -35,6 +43,10 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const subscriptionActive =
     config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const uiActions = useUIActions();
+  const settings = useContext(SettingsContext);
+  const agentViewEnabled = settings
+    ? isAgentViewEnabled(settings.merged)
+    : false;
   const { vimEnabled } = useVimModeState();
   const modBand = useModBand(config);
 
@@ -149,6 +161,11 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           onEscapePromptChange={uiActions.onEscapePromptChange}
           onToggleShortcuts={handleToggleShortcuts}
           showShortcuts={showShortcuts}
+          onOpenAgentView={
+            agentViewEnabled
+              ? () => uiActions.handleFinalSubmit('/background')
+              : undefined
+          }
           onSuggestionsVisibilityChange={setShowSuggestions}
           onTabConsumerChange={handleTabConsumerChange}
           focus={true}

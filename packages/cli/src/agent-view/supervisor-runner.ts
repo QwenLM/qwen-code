@@ -39,6 +39,10 @@ import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
 
+// Set on the spawned supervisor child so the startup branch can tell a real
+// daemon launch from a natural-language prompt that mentions the flag.
+export const INTERNAL_AGENT_VIEW_SUPERVISOR_ENV = 'QWEN_AGENT_VIEW_SUPERVISOR';
+
 const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
 const SUPERVISOR_MAINTENANCE_INTERVAL_MS = 5000;
@@ -495,12 +499,18 @@ async function readSupervisorAuthToken(
 
 function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
   const argv = buildCurrentQwenCliArgv(args);
+  // `--bare` is env-driven; it must not leak into the long-lived daemon and
+  // every session it later spawns.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env['QWEN_CODE_SIMPLE'];
   return spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
     env: {
-      ...process.env,
+      ...env,
       QWEN_CODE_NO_RELAUNCH: '1',
+      [INTERNAL_AGENT_VIEW_SUPERVISOR_ENV]: '1',
     },
   });
 }
