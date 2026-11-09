@@ -165,6 +165,22 @@ export interface ManagedQueuedUserMessage {
   readonly input: readonly unknown[];
 }
 
+export interface ManagedMemoryQuery {
+  readonly operation:
+    | 'binding'
+    | 'recall'
+    | 'search'
+    | 'remember'
+    | 'get'
+    | 'forget';
+  readonly inputId?: string;
+  readonly callId?: string;
+  readonly query?: string;
+  readonly content?: string;
+  readonly memoryId?: string;
+  readonly expectedContent?: string;
+}
+
 export interface HttpManagedSessionStores {
   supportsModelDiagnostics(): boolean;
   supportsExecutionDiagnostics(): boolean;
@@ -194,6 +210,7 @@ export interface HttpManagedSessionStores {
   ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
   modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
+  memory(query: ManagedMemoryQuery): Promise<unknown>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -300,6 +317,7 @@ export function createHttpManagedSessionStores(
     approvalSelection: () => client.approvalSelection(),
     modelConfig: (expectedDigest, kind) =>
       client.modelConfig(expectedDigest, kind),
+    memory: (query) => client.memory(query),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -999,6 +1017,50 @@ class ManagedSessionStoreHttpClient {
         revision: Number(message['revision']),
         input: message['input'],
       };
+    });
+  }
+
+  async memory(query: ManagedMemoryQuery): Promise<unknown> {
+    await this.assertWritable();
+    return this.withRetry(false, 'POST', '/memory:query', async (timeoutMs) => {
+      const response = await this.request(
+        '/memory:query',
+        'POST',
+        {
+          ...query,
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: this.grant!.writerGeneration,
+        },
+        Math.min(timeoutMs, 6_000),
+      );
+      const reader = response.body?.getReader();
+      if (!reader) throw corrupt('Memory response has no body.');
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const item = await reader.read();
+          if (item.done) break;
+          length += item.value.byteLength;
+          if (length > 64 * 1024) {
+            await reader.cancel();
+            throw corrupt('Memory response exceeds its byte limit.');
+          }
+          chunks.push(item.value);
+        }
+        return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+      } catch (error) {
+        if (error instanceof TypeError || error instanceof DOMException)
+          throw new ManagedSessionStoreTransportError(
+            'Managed memory response failed.',
+          );
+        if (error instanceof SyntaxError)
+          throw corrupt('Memory response is invalid JSON.');
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
     });
   }
 

@@ -18658,6 +18658,40 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(degradedRows('watch_budget_low')).toHaveLength(2);
       });
 
+      it('journals the recovery edge once, not on every later healthy poll', async () => {
+        // Closing the episode must CLEAR the open flag. Without that clear,
+        // each subsequent healthy poll re-enters the close path and appends
+        // another recovery row — the edge becomes a per-poll heartbeat and
+        // rotates the useful rows out of the timeline. The existing recovery
+        // case goes low again right after recovering, so it never observes a
+        // second healthy poll and cannot catch this.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode opens
+          mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // episode closes: exactly one recovery row
+          expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+
+          // Two more healthy polls with the episode already closed.
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+      });
+
       it('honours a configured reserve of 0 as disabling the gate', async () => {
         await initChannel(
           { ...watchConfig, prWatchBudgetReserve: 0 },
