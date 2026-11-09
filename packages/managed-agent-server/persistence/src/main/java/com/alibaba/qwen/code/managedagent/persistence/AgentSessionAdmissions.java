@@ -393,7 +393,7 @@ final class AgentSessionAdmissions {
             WorkspaceCsiRegistration registration, String sessionId) {
         requireCsiJournalIsolation();
         SessionRecord session = storeRows.requireSessionForUpdate(registration.tenantId(), sessionId);
-        if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
+        if (!CsiFilesRetirementProfile.isProfile(session.toolProfile())
                 || session.workspace() == null
                 || !"qwen-code".equals(session.agentId())
                 || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(
@@ -403,7 +403,7 @@ final class AgentSessionAdmissions {
         }
         RuntimeProvisionRequest request =
                 CsiFilesRetirementProfile.request(
-                        session.workspace(), registration.mountRoot(), session.sessionId());
+                        session.workspace(), registration.mountRoot(), session.sessionId(), session.toolProfile());
         String saved =
                 jdbc.queryForObject(
                         "SELECT runtime_request_key FROM ma_session"
@@ -463,7 +463,7 @@ final class AgentSessionAdmissions {
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -699,7 +699,7 @@ final class AgentSessionAdmissions {
             String parentSessionId, String idempotencyKey,
             String requestDigest) {
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId, parentSessionId);
-        if (CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+        if (CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(
                     409,
                     "child_parent_unavailable",
@@ -838,7 +838,7 @@ final class AgentSessionAdmissions {
                 registration == null
                         ? null
                         : CsiFilesRetirementProfile.request(
-                                        workspace, registration.mountRoot(), sessionId)
+                                        workspace, registration.mountRoot(), sessionId, CsiFilesRetirementProfile.ACTIVITY_PROFILE)
                                 .requestKey();
         String turnId = input.isEmpty() ? null : AgentStoreRows.publicId("turn");
         String promptId = input.isEmpty() ? null
@@ -868,7 +868,7 @@ final class AgentSessionAdmissions {
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
                 registration != null
-                        ? CsiFilesRetirementProfile.PROFILE
+                        ? CsiFilesRetirementProfile.ACTIVITY_PROFILE
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
                 runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",
