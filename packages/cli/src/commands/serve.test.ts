@@ -11,6 +11,10 @@ import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import {
+  DEFAULT_RING_MAX_BYTES,
+  MAX_RING_MAX_BYTES,
+} from '@qwen-code/acp-bridge/eventBus';
+import {
   maybeOpenWebShellBrowser,
   serveCommand,
   validateManagedLocalFlags,
@@ -52,6 +56,23 @@ vi.mock('../serve/run-qwen-serve.js', () => ({
 vi.mock('../serve/managed-web-serve.js', () => ({
   runManagedWebServe: mockRunManagedWebServe,
 }));
+const mockListLanCandidates = vi.hoisted(() =>
+  vi.fn((): Array<{ interfaceName: string; address: string }> => []),
+);
+const mockListExplicitCandidates = vi.hoisted(() =>
+  vi.fn((): Array<{ interfaceName: string; address: string }> => []),
+);
+vi.mock('../serve/local-control/lan-interfaces.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../serve/local-control/lan-interfaces.js')
+    >();
+  return {
+    ...actual,
+    listLanCandidates: mockListLanCandidates,
+    listExplicitCandidates: mockListExplicitCandidates,
+  };
+});
 vi.mock('../serve/open-with-auth.js', () => ({
   applyOpenWithAuth: mockApplyOpenWithAuth,
 }));
@@ -261,6 +282,37 @@ describe('serve command args', () => {
       '--permission-response-timeout-ms 60000',
     );
     expect(parsed['permission-response-timeout-ms']).toBe(60000);
+  });
+
+  it('defaults and parses --event-ring-max-bytes', () => {
+    expect(buildParser().parseSync('')['event-ring-max-bytes']).toBe(
+      DEFAULT_RING_MAX_BYTES,
+    );
+    for (const value of [1, 1024 * 1024, MAX_RING_MAX_BYTES]) {
+      expect(
+        buildParser().parseSync(`--event-ring-max-bytes ${value}`)[
+          'event-ring-max-bytes'
+        ],
+      ).toBe(value);
+    }
+    expect(() => buildParser().parseSync('--event-ring-max-bytes')).toThrow(
+      /Not enough arguments/,
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    MAX_RING_MAX_BYTES + 1,
+  ])('rejects --event-ring-max-bytes=%s', (value) => {
+    expect(() =>
+      buildParser().parseSync(`--event-ring-max-bytes=${value}`),
+    ).toThrow(/eventRingMaxBytes/);
   });
 
   it('parses --compacted-replay-max-bytes as a number', () => {
@@ -592,6 +644,23 @@ describe('serve rate limit env parsing', () => {
     ).toBe(expected);
   });
 
+  it.each([
+    ['', DEFAULT_RING_MAX_BYTES],
+    ['--event-ring-max-bytes 1048576', 1024 * 1024],
+  ] as const)(
+    'forwards the event ring byte cap %s to the daemon',
+    async (args, expected) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
+      await startServeHandlerWithArgs(`--no-web ${args}`);
+      expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+        eventRingMaxBytes: expected,
+      });
+    },
+  );
+
   it('applies authenticated open before the yargs path starts the daemon', async () => {
     let tokenAtBoot: string | undefined;
     mockRunQwenServe.mockImplementationOnce(
@@ -902,6 +971,231 @@ describe('serve rate limit env parsing', () => {
     ).rejects.toThrow('process.exit(1) called');
     expect(close).toHaveBeenCalledOnce();
     expect(mockQr.generate).not.toHaveBeenCalled();
+  });
+
+  it('marks --local-control-address as the operator explicit opt-in (#14136)', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://203.0.113.10:4170/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --local-control-address 203.0.113.10',
+    );
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    // The flag is what distinguishes the operator's explicit pick from an
+    // HTTP-posted string; the service records it as the standing grant.
+    expect(enable).toHaveBeenCalledWith({
+      address: '203.0.113.10',
+      allowExplicitAddress: true,
+    });
+  });
+
+  it('points a no-LAN-interface failure at --local-control-address (#14136)', async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // No private candidate exists; the escape hatch is exactly the flag the
+    // CLI must name. The shared error message stays client-neutral, so the
+    // hint is added here and not in NoLanInterfaceError itself.
+    const enable = vi.fn().mockRejectedValue(
+      Object.assign(new Error('No private IPv4 address is available.'), {
+        code: 'no_lan_interface',
+      }),
+    );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain('No private IPv4 address is available.');
+    expect(stderr).toContain('--local-control-address');
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("lists the host's current addresses when a named address is unknown (#14136)", async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // The named address is gone (typo, or the network changed after the hint
+    // was read): the retry must not be a blind guess. The shared error stays
+    // client-neutral; the candidate list is the CLI-only remedy, added here.
+    const enable = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(
+          new Error(
+            '203.0.113.99 is not an IPv4 address this host can expose right now.',
+          ),
+          { code: 'unknown_lan_interface' },
+        ),
+      );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    mockListExplicitCandidates.mockReturnValue([
+      { interfaceName: 'eth0', address: '172.21.106.31' },
+    ]);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--local-control --local-control-address 203.0.113.99',
+    );
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      '203.0.113.99 is not an IPv4 address this host can expose right now.',
+    );
+    expect(stderr).toContain('eth0 (172.21.106.31)');
+    expect(close).toHaveBeenCalledOnce();
+    mockListExplicitCandidates.mockReturnValue([]);
+  });
+
+  it('enumerates addresses the automatic filter excludes when a named address is unknown (#14136)', async () => {
+    // The host shapes --local-control-address was widened for — VPN-only or
+    // public-range intranet — have an EMPTY automatic candidate list; listing
+    // only that list would tell the operator nothing about what the host
+    // holds. The hint enumerates the acceptance space instead.
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const enable = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(
+          new Error(
+            '203.0.113.99 is not an IPv4 address this host can expose right now.',
+          ),
+          { code: 'unknown_lan_interface' },
+        ),
+      );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    mockListLanCandidates.mockReturnValue([]);
+    mockListExplicitCandidates.mockReturnValue([
+      { interfaceName: 'en0', address: '203.0.113.10' },
+    ]);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--local-control --local-control-address 203.0.113.99',
+    );
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      '203.0.113.99 is not an IPv4 address this host can expose right now.',
+    );
+    expect(stderr).toContain('en0 (203.0.113.10)');
+    expect(close).toHaveBeenCalledOnce();
+    mockListExplicitCandidates.mockReturnValue([]);
+  });
+
+  it('omits the enumeration when the host has no exposable address at all (#14136)', async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const enable = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(
+          new Error(
+            '203.0.113.99 is not an IPv4 address this host can expose right now.',
+          ),
+          { code: 'unknown_lan_interface' },
+        ),
+      );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    mockListLanCandidates.mockReturnValue([]);
+    mockListExplicitCandidates.mockReturnValue([]);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--local-control --local-control-address 203.0.113.99',
+    );
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      '203.0.113.99 is not an IPv4 address this host can expose right now.',
+    );
+    expect(stderr).not.toContain('This host currently has');
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it('passes normalized named channels to runQwenServe', async () => {

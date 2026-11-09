@@ -11,7 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mockDebugLogger, mockAddDaemonRequestAttribute, statFault } =
   vi.hoisted(() => ({
-    mockDebugLogger: { debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    mockDebugLogger: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
     mockAddDaemonRequestAttribute: vi.fn(),
     statFault: { zeroInode: false },
   }));
@@ -44,6 +49,11 @@ import {
   getAutoMemorySnapshot,
 } from '../memory/request-context.js';
 import { Storage } from '../config/storage.js';
+import { localManagedSessionKey } from '../utils/sessionStorageUtils.js';
+import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { LocalManagedSessionAuthority } from '../managed-runtime/managed-session-authority.js';
+import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import { ManagedSessionMessageProjection } from '../managed-runtime/managed-session-message-projection.js';
 import type { Config } from '../config/config.js';
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
@@ -688,6 +698,539 @@ describe('SessionTranscriptReader', () => {
       );
     },
   );
+
+  describe('last user prompt timestamp', () => {
+    it('uses the effective main branch and ignores later non-user activity', async () => {
+      const [u1, a1, u2, a2] = chain(...TWO_TURNS);
+      const inactive = record('u-inactive', a1.uuid, 'discarded branch');
+      const notification = {
+        ...record('u-notice', a2.uuid, 'notice'),
+        subtype: 'notification',
+        provenance: 'system',
+      } as ChatRecord;
+      const cron = {
+        ...record('u-cron', notification.uuid, 'cron'),
+        subtype: 'cron',
+      } as ChatRecord;
+      const goal = {
+        ...record('u-goal', cron.uuid, 'goal'),
+        provenance: 'goal_runtime',
+      } as ChatRecord;
+      await writeRecords([u1, a1, u2, inactive, a2, notification, cron, goal]);
+      expect(
+        await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+          sessionId,
+        ),
+      ).toBe(u2.timestamp);
+    });
+
+    it('includes attachment-only, realtime and persisted human mid-turn input', async () => {
+      const u1 = record('u1', null, '');
+      u1.message = {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'AA==' } }],
+      };
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const file = await writeRecords([u1]);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(u1.timestamp);
+      const realtime = {
+        ...record('u-voice', u1.uuid, 'voice'),
+        subtype: 'realtime_message',
+      } as ChatRecord;
+      await appendRecords(file, realtime);
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(
+        realtime.timestamp,
+      );
+      const midTurn = {
+        ...record('u-mid', realtime.uuid, 'human follow-up'),
+        subtype: 'mid_turn_user_message',
+      } as ChatRecord;
+      await appendRecords(file, midTurn);
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(
+        midTurn.timestamp,
+      );
+    });
+
+    it('includes human agent mentions but excludes messages from external agents', async () => {
+      const humanMention = {
+        ...record('u-human-mention', null, 'question for the agent'),
+        subtype: 'agent_mention',
+      } as ChatRecord;
+      const externalMention = {
+        ...record('u-external-mention', humanMention.uuid, 'agent message'),
+        subtype: 'agent_mention',
+        provenance: 'external_agent',
+      } as ChatRecord;
+      await writeRecords([humanMention, externalMention]);
+      expect(
+        await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+          sessionId,
+        ),
+      ).toBe(humanMention.timestamp);
+    });
+
+    it('omits inherited, sidechain, attributed-agent and invalid questions without a fallback', async () => {
+      const inheritedQuestion = inherited(
+        record('u1', null, 'parent question'),
+      );
+      const sidechain = {
+        ...record('u-side', inheritedQuestion.uuid, 'side'),
+        isSidechain: true,
+      };
+      const agent = {
+        ...record('u-agent', sidechain.uuid, 'agent'),
+        agentId: 'worker',
+      };
+      const invalid = {
+        ...record('u-invalid', agent.uuid, 'bad clock'),
+        timestamp: 'invalid',
+      };
+      await writeRecords([inheritedQuestion, sidechain, agent, invalid]);
+      expect(
+        await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+          sessionId,
+        ),
+      ).toBeUndefined();
+    });
+
+    it('accepts legacy questions and preserves valid future source timestamps', async () => {
+      const legacy = {
+        ...record('u1', null, 'legacy'),
+        provenance: undefined,
+        timestamp: '2099-01-01T00:00:00.000Z',
+      };
+      await writeRecords([legacy]);
+      expect(
+        await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+          sessionId,
+        ),
+      ).toBe(legacy.timestamp);
+    });
+
+    it('retains a full question index beyond 512 rows and reads warm scalars without filesystem work', async () => {
+      const first = record('u1', null, 'first');
+      const file = await writeRecords([first]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      const stat = await fs.stat(file);
+      const statSpy = vi.spyOn(fs, 'stat').mockResolvedValue(stat);
+      for (let i = 0; i < 600; i++)
+        await reader.setLastUserPromptAt(
+          `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+          first.timestamp,
+        );
+      statSpy.mockClear();
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'active', {
+          preferCache: true,
+        }),
+      ).toBe(first.timestamp);
+      for (let i = 0; i < 600; i++)
+        expect(
+          await reader.getLastUserPromptAt(
+            `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+            'active',
+            {
+              preferCache: true,
+            },
+          ),
+        ).toBe(first.timestamp);
+      expect(statSpy).not.toHaveBeenCalled();
+      statSpy.mockRestore();
+      const next = record('u2', first.uuid, 'new question');
+      await appendRecords(file, next);
+      await reader.setLastUserPromptAt(sessionId, next.timestamp);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'active', {
+          preferCache: true,
+        }),
+      ).toBe(next.timestamp);
+    });
+
+    it('keeps a notified question when scope eviction overlaps cold initialization', async () => {
+      const first = record('u1', null, 'first');
+      const next = record('u2', first.uuid, 'new question');
+      const file = await writeRecords([first]);
+      const reader = newReader();
+      setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+        if (builtPath !== file) return;
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        for (let i = 0; i < 64; i++) {
+          await new SessionTranscriptReader(
+            path.join(runtimeDir, `other-${i}`),
+            undefined,
+            runtimeDir,
+          )
+            .getLastUserPromptAt(sessionId)
+            .catch(() => undefined);
+        }
+        await appendRecords(file, next);
+        await reader.setLastUserPromptAt(sessionId, next.timestamp);
+      });
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+    });
+
+    it('refreshes archived metadata after unarchive, another question and rearchive', async () => {
+      const first = record('u1', null, 'first');
+      const next = record('u2', first.uuid, 'new question');
+      const file = await writeRecords([first]);
+      const service = svc();
+      const reader = newReader();
+      expect((await service.archiveSessions([sessionId])).errors).toEqual([]);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'archived', {
+          preferCache: true,
+        }),
+      ).toBe(first.timestamp);
+      expect((await service.unarchiveSessions([sessionId])).errors).toEqual([]);
+      await appendRecords(file, next);
+      await service.setLastUserPromptAt(sessionId, next.timestamp);
+      expect((await service.archiveSessions([sessionId])).errors).toEqual([]);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'archived', {
+          preferCache: true,
+        }),
+      ).toBe(next.timestamp);
+      expect((await service.removeSessions([sessionId])).errors).toEqual([]);
+      await writeRecords([first]);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'active', {
+          preferCache: true,
+        }),
+      ).toBe(first.timestamp);
+    });
+
+    it('keeps hot metadata across assistant appends and updates persisted human input without scanning', async () => {
+      const first = record('u1', null, 'first');
+      const file = await writeRecords([first]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const builds = countBuilds(file);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      expect(builds.count).toBe(1);
+      const assistant = record('a1', first.uuid, 'assistant output');
+      assistant.type = 'assistant';
+      await appendRecords(file, assistant);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      expect(builds.count).toBe(1);
+      const next = record('u2', assistant.uuid, 'second');
+      await appendRecords(file, next);
+      await reader.setLastUserPromptAt(sessionId, next.timestamp);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+      expect(builds.count).toBe(1);
+      await reader.setLastUserPromptAt(sessionId, undefined);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+      expect(builds.count).toBe(2);
+    });
+
+    it('keeps a newer notified question when cold initialization completes later', async () => {
+      const first = record('u1', null, 'first');
+      const next = record('u2', first.uuid, 'new persisted question');
+      const file = await writeRecords([first]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      setSessionTranscriptIndexBuildCompleteHookForTest(async () => {
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        await appendRecords(file, next);
+        await reader.setLastUserPromptAt(sessionId, next.timestamp);
+      });
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+    });
+
+    it('recovers instead of retaining an old time after a notified update fails', async () => {
+      const first = record('u1', null, 'first');
+      const next = record('u2', first.uuid, 'persisted next question');
+      const file = await writeRecords([first]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const builds = countBuilds(file);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      await appendRecords(file, next);
+      const stat = vi
+        .spyOn(fs, 'stat')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('too many open files'), { code: 'EMFILE' }),
+        );
+      await expect(
+        reader.setLastUserPromptAt(sessionId, next.timestamp),
+      ).rejects.toThrow('too many open files');
+      stat.mockRestore();
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+      expect(builds.count).toBe(2);
+    });
+
+    it('holds a warm page larger than the dense index cache and shares concurrent reads', async () => {
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const ids = Array.from(
+        { length: 100 },
+        (_, index) =>
+          `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      );
+      for (const id of ids)
+        await writeRecords([record('u1', null, 'history', id)], id);
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest(() => {
+        builds++;
+      });
+      await Promise.all([
+        reader.getLastUserPromptAt(ids[0]!),
+        reader.getLastUserPromptAt(ids[0]!),
+      ]);
+      expect(builds).toBe(1);
+      for (const id of ids) await reader.getLastUserPromptAt(id);
+      expect(builds).toBe(100);
+      for (const id of ids) await reader.getLastUserPromptAt(id);
+      expect(builds).toBe(100);
+    });
+
+    it('omits changed snapshots with unverifiable identity without rescanning', async () => {
+      statFault.zeroInode = true;
+      const first = record('u1', null, 'first');
+      const file = await writeRecords([first]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const builds = countBuilds(file);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      const replacement = record('u2', null, 'a longer replacement question');
+      await fs.rename(file, `${file}.old`);
+      await writeRecords([replacement]);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      expect(builds.count).toBe(1);
+      await reader.setLastUserPromptAt(sessionId, replacement.timestamp);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(
+        replacement.timestamp,
+      );
+      expect(builds.count).toBe(1);
+    });
+
+    it('keeps active and archived histories separate', async () => {
+      const active = record('u1', null, 'active');
+      const file = await writeRecords([active]);
+      const archive = path.join(path.dirname(file), 'archive');
+      await fs.mkdir(archive);
+      const archived = record('u-archive', null, 'archived');
+      await fs.writeFile(
+        path.join(archive, `${sessionId}.jsonl`),
+        jsonLine(archived),
+      );
+      const reader = new SessionTranscriptReader(workspaceDir);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(
+        active.timestamp,
+      );
+      expect(await reader.getLastUserPromptAt(sessionId, 'archived')).toBe(
+        archived.timestamp,
+      );
+    });
+
+    it('rejects numeric and invalid-calendar timestamps instead of normalizing them', async () => {
+      const file = await writeRecords([
+        {
+          ...record('u1', null, 'invalid day'),
+          timestamp: '2026-02-30T00:00:00.000Z',
+        },
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      await fs.writeFile(
+        file,
+        jsonLine({ ...record('u2', null, 'numeric'), timestamp: '123' }),
+      );
+      expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      // The previous read warmed the cache; without a reset the longer payload
+      // would be served from that cached undefined without parsing.
+      resetSessionTranscriptIndexCacheForTest();
+      await writeRawTranscript(
+        jsonLine({ ...record('u3', null, 'numeric value'), timestamp: 123 }),
+      );
+      const builds = countBuilds(file);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      expect(builds.count).toBe(1);
+    });
+
+    it('serves a frozen prefix while appending and rejects replacement during the read', async () => {
+      const first = record('u1', null, 'first');
+      const file = await writeRecords([first]);
+      const next = record('u2', first.uuid, 'next');
+      setSessionTranscriptIndexBuildCompleteHookForTest(async () => {
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        await appendRecords(file, next);
+      });
+      const reader = new SessionTranscriptReader(workspaceDir);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      await reader.setLastUserPromptAt(sessionId, next.timestamp);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+      resetSessionTranscriptIndexCacheForTest();
+      setSessionTranscriptIndexBuildCompleteHookForTest(async () => {
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        await fs.rename(file, `${file}.old`);
+        await fs.writeFile(file, jsonLine(first));
+      });
+      await expect(
+        reader.getLastUserPromptAt(sessionId),
+      ).rejects.toBeInstanceOf(Unavailable);
+    });
+
+    it('applies service project ownership before exposing a timestamp', async () => {
+      await writeRecords([
+        {
+          ...record('u1', null, 'foreign'),
+          cwd: path.join(runtimeDir, 'foreign-workspace'),
+        },
+      ]);
+      expect(
+        await new SessionService(workspaceDir).getLastUserPromptAt(sessionId),
+      ).toBeUndefined();
+    });
+
+    it('rejects a cached foreign snapshot on the warm service read without scanning', async () => {
+      const foreign = {
+        ...record('u1', null, 'foreign'),
+        cwd: path.join(runtimeDir, 'foreign-workspace'),
+      };
+      const file = await writeRecords([foreign]);
+      const builds = countBuilds(file);
+      expect(
+        await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+          sessionId,
+        ),
+      ).toBe(foreign.timestamp);
+      expect(builds.count).toBe(1);
+
+      const stat = vi.spyOn(fs, 'stat');
+      expect(
+        await new SessionService(workspaceDir).getLastUserPromptAt(
+          sessionId,
+          'active',
+          { preferCache: true },
+        ),
+      ).toBeUndefined();
+      expect(stat).not.toHaveBeenCalled();
+      expect(builds.count).toBe(1);
+    });
+
+    it.each([false, true])(
+      'binds ownership to the timestamp snapshot after a path replacement (warm cache: %s)',
+      async (warmCache) => {
+        const owned = record('u-owned', null, 'owned question');
+        const foreign = {
+          ...record('u-foreign', null, 'foreign question'),
+          cwd: path.join(runtimeDir, 'foreign-workspace'),
+        };
+        const file = await writeRecords([foreign]);
+        const builds = countBuilds(file);
+        if (warmCache) {
+          expect(
+            await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+              sessionId,
+            ),
+          ).toBe(foreign.timestamp);
+        }
+        await fs.rename(file, `${file}.foreign`);
+        await writeRecords([owned]);
+        const original = SessionTranscriptReader.prototype.getLastUserPromptAt;
+        const read = vi
+          .spyOn(SessionTranscriptReader.prototype, 'getLastUserPromptAt')
+          .mockImplementationOnce(async function (
+            this: SessionTranscriptReader,
+            ...args: Parameters<SessionTranscriptReader['getLastUserPromptAt']>
+          ) {
+            await fs.rename(file, `${file}.owned`);
+            await fs.rename(`${file}.foreign`, file);
+            return original.apply(this, args);
+          });
+        try {
+          expect(
+            await new SessionService(workspaceDir).getLastUserPromptAt(
+              sessionId,
+            ),
+          ).toBeUndefined();
+          expect(builds.count).toBe(1);
+        } finally {
+          read.mockRestore();
+        }
+      },
+    );
+
+    it('omits unavailable metadata above the canonical index limit without scanning', async () => {
+      const file = await writeRecords([record('u1', null, 'large history')]);
+      await fs.truncate(file, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+      const builds = countBuilds(file);
+      expect(
+        await new SessionTranscriptReader(workspaceDir).getLastUserPromptAt(
+          sessionId,
+        ),
+      ).toBeUndefined();
+      expect(builds.count).toBe(0);
+    });
+
+    it('projects only committed Managed questions', async () => {
+      const file = await writeRawTranscript('');
+      const sessionKey = localManagedSessionKey(workspaceDir, sessionId);
+      const store = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: runtimeDir,
+        sessionKey,
+      });
+      const lease = await LocalManagedSessionAuthority.acquireWriter({
+        runtimeBaseDir: runtimeDir,
+        sessionId,
+        transcriptPath: file,
+      });
+      const reference = {
+        resourceId: 'test-ref',
+        kind: 'test',
+        schemaVersion: 1,
+        byteLength: 4,
+        digest: 'e'.repeat(64),
+      };
+      const authority = await LocalManagedSessionAuthority.open({
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
+        sessionKey,
+        cwd: workspaceDir,
+        version: 'test',
+        resources: store,
+        create: {
+          definitionRef: reference,
+          rootSnapshotRef: reference,
+          createdBy: 'daemon',
+        },
+      });
+      const projection = new ManagedSessionMessageProjection(authority, store);
+      const first = record('u1', null, 'committed');
+      const last = record('u2', first.uuid, 'not committed in snapshot');
+      try {
+        for (const item of [first, last])
+          await projection.commit(
+            {
+              operation: 'commitMessage',
+              commandId: item.uuid,
+              sessionKey,
+              contentDigest: 'e'.repeat(64),
+            },
+            { record: item },
+            { class: 'trusted_entry' },
+          );
+      } finally {
+        await authority.close();
+      }
+      const lines = (await fs.readFile(file, 'utf8')).trimEnd().split('\n');
+      expect(JSON.parse(lines.at(-1)!).subtype).toBe(
+        'managed_session_commit_v1',
+      );
+      await fs.writeFile(file, lines.slice(0, -1).join('\n') + '\n');
+      const reader = new SessionTranscriptReader(workspaceDir);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      const archive = path.join(path.dirname(file), 'archive');
+      await fs.mkdir(archive);
+      await fs.copyFile(file, path.join(archive, `${sessionId}.jsonl`));
+      expect(await reader.getLastUserPromptAt(sessionId, 'archived')).toBe(
+        first.timestamp,
+      );
+    });
+  });
 
   it.each(['user', 'mid-turn'] as const)(
     'keeps directory context non-interrupting after saving and reloading a checkpoint (%s)',

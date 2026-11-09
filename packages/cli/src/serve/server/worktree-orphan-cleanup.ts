@@ -35,8 +35,18 @@ export interface WorktreeCleanupPlan {
   sidecarPath: string;
   /** Canonical worktree path: realpath when resolvable, raw otherwise. */
   lockKey: string;
+  /**
+   * The sidecar dir of the other archive state, when it differs from the
+   * one `sidecarPath` lives in.
+   */
+  otherStateSidecarDir?: string;
 }
 
+/**
+ * Also derives the ownership lock key, so it must keep the rule stated in
+ * `worktree-ownership-op.ts`, which the restore and the reset route follow
+ * too.
+ */
 function canonicalPath(candidate: string): string {
   try {
     return fs.realpathSync(candidate);
@@ -68,8 +78,9 @@ export function logWorktreeCleanupPreserve(
  * replacement now — and skips silently so preserve-and-log keeps its
  * meaning. A `supersedes` link means this session IS the current owner
  * (it took the checkout from a predecessor), so it stays cleanable;
- * the predecessor's tombstone sidecar is discounted by the sharing
- * scan instead.
+ * the sharing scan discounts tombstones (sibling sidecars carrying
+ * `supersededBy`) instead: its direct predecessor alone always, older
+ * ones once no superseded session naming the checkout is still live.
  *
  * The sidecar is an untrusted input class (crash-truncated or
  * hand-edited), so the two fields that later derive the containment
@@ -150,11 +161,18 @@ export async function preclassifyWorktreeCleanup(
       return undefined;
     }
   }
+  const activeDir = path.dirname(service.getWorktreeSessionPath(sessionId));
+  const archivedDir = path.dirname(
+    service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
+  );
+  const ownDir = path.dirname(sidecarPath);
+  const otherStateSidecarDir = ownDir === activeDir ? archivedDir : activeDir;
   return {
     sessionId,
     sidecar: session,
     sidecarPath,
     lockKey: canonicalPath(session.worktreePath),
+    ...(otherStateSidecarDir !== ownDir ? { otherStateSidecarDir } : {}),
   };
 }
 
@@ -188,6 +206,42 @@ async function worktreeAllowedRoots(
   return [...roots];
 }
 
+const SIDECAR_SUFFIX = '.worktree.json';
+
+/**
+ * Scans another sidecar dir for a sidecar that names the checkout and
+ * belongs to a session still on the bridge. Returns the refusal reason, or
+ * `undefined` when there is none; a dir that cannot be listed, or a
+ * sidecar in it that cannot be read, also refuses.
+ */
+async function findLiveSessionNamingCheckout(
+  dir: string,
+  lockKey: string,
+  isSessionLive: (sessionId: string) => boolean,
+): Promise<string | undefined> {
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    return `sidecar scan failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(SIDECAR_SUFFIX)) continue;
+    const other = await readWorktreeSessionStrict(path.join(dir, entry));
+    if (other.state === 'missing') continue;
+    if (other.state === 'invalid') return `unreadable sibling sidecar ${entry}`;
+    if (canonicalPath(other.session.worktreePath) !== lockKey) continue;
+    const otherId = entry.slice(0, -SIDECAR_SUFFIX.length);
+    if (isSessionLive(otherId)) {
+      return `session ${otherId} naming the checkout is still live`;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Full ownership verification, called under the cleanup lock before the
  * record is deleted. The sidecar is re-read because the pre-read was
@@ -195,10 +249,14 @@ async function worktreeAllowedRoots(
  * must resolve under the workspace worktree roots; and no other
  * session's sidecar may name the same checkout (a freshly transferred
  * replacement satisfies the naive ownership bar during exactly the
- * window the superseded redirect exists to heal).
+ * window the superseded redirect exists to heal). The exception is a
+ * tombstone, a sidecar carrying `supersededBy`: the direct predecessor
+ * alone always, older ones once `isSessionLive` reports every session
+ * naming the checkout gone.
  */
 export async function verifyWorktreeCleanupOwnership(
   plan: WorktreeCleanupPlan,
+  isSessionLive: (sessionId: string) => boolean,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const { sessionId, sidecar } = plan;
   const locked = await readWorktreeSessionStrict(plan.sidecarPath);
@@ -266,19 +324,53 @@ export async function verifyWorktreeCleanupOwnership(
       }`,
     };
   }
+  const tombstoneIds: string[] = [];
+  let olderTombstone = false;
   for (const entry of entries) {
-    if (!entry.endsWith('.worktree.json') || entry === ownFile) continue;
+    if (!entry.endsWith(SIDECAR_SUFFIX) || entry === ownFile) continue;
     const other = await readWorktreeSessionStrict(path.join(chatsDir, entry));
     if (other.state === 'missing') continue;
     if (other.state === 'invalid') {
       return { ok: false, reason: `unreadable sibling sidecar ${entry}` };
     }
-    if (canonicalPath(other.session.worktreePath) === plan.lockKey) {
-      // A tombstone predecessor (superseded by exactly this session)
-      // legitimately names the same checkout; it is evidence of the
-      // transfer, not sharing.
-      if (other.session.supersededBy === sessionId) continue;
+    if (canonicalPath(other.session.worktreePath) !== plan.lockKey) continue;
+    // A tombstone (a session that handed the checkout on in a reset)
+    // legitimately names the same checkout; it is evidence of the
+    // transfer, not sharing. It cannot own the checkout while the marker,
+    // read above under the ownership lock every reset also takes, names
+    // this session. The link is not followed: each reset rewrites only the
+    // pair it transfers between, so after several resets older tombstones
+    // name sessions that may since have been deleted or archived.
+    if (other.session.supersededBy === undefined) {
       return { ok: false, reason: `checkout shared with ${entry}` };
+    }
+    tombstoneIds.push(entry.slice(0, -SIDECAR_SUFFIX.length));
+    if (other.session.supersededBy !== sessionId) olderTombstone = true;
+  }
+  // With only the direct predecessor, the one-reset rule discounts it
+  // regardless: the bridge may have reopened it at the workspace root since
+  // (scheduled-task keepalive, ACP load), and refusing then would leak the
+  // checkout for good. Older tombstones are discounted only once no
+  // superseded session naming the checkout is still on the bridge, in
+  // either archive state's dir: a reset whose sever did not finish leaves
+  // its superseded session running, possibly with background work in the
+  // checkout.
+  if (olderTombstone) {
+    for (const otherId of tombstoneIds) {
+      if (isSessionLive(otherId)) {
+        return {
+          ok: false,
+          reason: `superseded session ${otherId} is still live`,
+        };
+      }
+    }
+    if (plan.otherStateSidecarDir !== undefined) {
+      const otherState = await findLiveSessionNamingCheckout(
+        plan.otherStateSidecarDir,
+        plan.lockKey,
+        isSessionLive,
+      );
+      if (otherState !== undefined) return { ok: false, reason: otherState };
     }
   }
   // Every guard above verified plan.lockKey, but the removal call

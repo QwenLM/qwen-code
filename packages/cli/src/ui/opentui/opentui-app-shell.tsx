@@ -1802,7 +1802,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 config={config}
                 settings={settings}
                 commands={presentedCommands}
-                onClose={() => setDialog(null)}
+                onClose={() => {
+                  if (dialog.dialog === 'auth') {
+                    setCurrentModel(config.getModel());
+                  }
+                  setDialog(null);
+                }}
                 notify={notify}
                 fillInput={fillComposer}
                 onSelectSetting={handleSelectSetting}

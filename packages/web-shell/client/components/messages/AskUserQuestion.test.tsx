@@ -100,6 +100,7 @@ afterEach(() => {
 function rerender(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  onAskDetails?: () => void,
 ): void {
   act(() =>
     root!.render(
@@ -109,6 +110,7 @@ function rerender(
           onConfirm={onConfirm}
           onError={onError}
           keyboardActive={keyboardActive}
+          onAskDetails={onAskDetails}
         />
       </I18nProvider>,
     ),
@@ -118,11 +120,12 @@ function rerender(
 function render(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  onAskDetails?: () => void,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req);
+  rerender(keyboardActive, req, onAskDetails);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -1585,4 +1588,76 @@ it('allows spaces in a custom answer while blocking modifier-Enter under hover-o
       .defaultPrevented,
   ).toBe(true);
   expect(onConfirm).not.toHaveBeenCalled();
+});
+
+describe('ask-for-details action', () => {
+  function detailsButton(): HTMLButtonElement | null {
+    return (
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find(
+        (b) => b.textContent === 'Ask for details',
+      ) ?? null
+    );
+  }
+
+  it('stays hidden when the host provides no details callback', () => {
+    render();
+    expect(detailsButton()).toBeNull();
+  });
+
+  it('opens the details side task without answering the question', () => {
+    const onAskDetails = vi.fn();
+    render(undefined, request, onAskDetails);
+    const button = detailsButton();
+    expect(button).not.toBeNull();
+    expect(button!.title).toBe(
+      'Open a side task that explains this question before you answer',
+    );
+
+    act(() => button!.click());
+
+    expect(onAskDetails).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(submitButton()!.disabled).toBe(false);
+  });
+
+  it('stays out of the option group and its digit shortcuts', () => {
+    const onAskDetails = vi.fn();
+    render(undefined, request, onAskDetails);
+    const button = detailsButton()!;
+    expect(optionButtons()).not.toContain(button);
+
+    // Move the committed answer off the default (option 0) so a leaked digit
+    // would observably rewrite it; asserting option 0 stays selected otherwise
+    // passes even when the digit leaks, because '1' maps to the default.
+    const opts = optionButtons();
+    act(() => opts[0]!.focus());
+    pressKey(opts[0]!, 'ArrowDown'); // Red -> Blue
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+
+    act(() => button.focus());
+    pressKey(button, '1', { cancelable: true });
+
+    expect(onAskDetails).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+    // The digit did not leak into the option group's shortcuts: the committed
+    // answer is still Blue, not reset to option 0.
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('is disabled while a submission is in flight', async () => {
+    const pending = deferred<boolean>();
+    onConfirm.mockReturnValue(pending.promise);
+    const onAskDetails = vi.fn();
+    render(undefined, request, onAskDetails);
+
+    act(() => submitButton()!.click());
+    expect(detailsButton()!.disabled).toBe(true);
+
+    await act(async () => {
+      pending.resolve(true);
+      await pending.promise;
+    });
+    expect(onAskDetails).not.toHaveBeenCalled();
+  });
 });

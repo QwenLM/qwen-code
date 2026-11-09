@@ -1,9 +1,11 @@
 package com.alibaba.qwen.code.managedagent.adapters.extensions;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionArchives;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -12,14 +14,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.channels.FileChannel;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.UUID;
 
 @Component
-public class ManagedExtensionArchiveStore implements com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionArchives {
+public class ManagedExtensionArchiveStore implements ExtensionArchives {
     private final ManagedAgentSettings properties;
 
     public ManagedExtensionArchiveStore(ManagedAgentSettings properties) {
@@ -51,7 +55,7 @@ public class ManagedExtensionArchiveStore implements com.alibaba.qwen.code.manag
                     output.write(buffer, 0, count);
                 }
             }
-            if (length == 0 || !digest.equals(org.apache.commons.codec.binary.Hex.encodeHexString(hash.digest()))) {
+            if (length == 0 || !digest.equals(Hex.encodeHexString(hash.digest()))) {
                 throw new ManagedAgentException(400,
                         "extension_package_digest_mismatch", "Extension archive digest does not match its contents.");
             }
@@ -60,7 +64,7 @@ public class ManagedExtensionArchiveStore implements com.alibaba.qwen.code.manag
             }
             try {
                 Files.createLink(target, temporary);
-            } catch (java.nio.file.FileAlreadyExistsException existing) {
+            } catch (FileAlreadyExistsException existing) {
                 verify(tenant, workspace, digest, length);
             }
             try (FileChannel directory = FileChannel.open(target.getParent(), StandardOpenOption.READ)) {
@@ -110,7 +114,7 @@ public class ManagedExtensionArchiveStore implements com.alibaba.qwen.code.manag
         }
         if (Files.getFileStore(directory).supportsFileAttributeView("posix")) {
             Files.setPosixFilePermissions(directory,
-                    java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+                    PosixFilePermissions.fromString("rwx------"));
         }
     }
 

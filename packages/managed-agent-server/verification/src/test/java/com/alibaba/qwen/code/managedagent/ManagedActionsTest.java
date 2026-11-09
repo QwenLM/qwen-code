@@ -157,6 +157,89 @@ class ManagedActionsTest {
     }
 
     @Test
+    void structuredQuestionsSurviveRefreshAndReplayAcrossPublicAndWebShell() throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        JsonNode input = json.readTree("""
+                {"questions":[{"question":"Which targets?","header":"Targets","multiSelect":true,
+                "options":[{"label":"Same","description":"First"},{"label":"Same","description":"Second"}]}]}
+                """);
+        ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
+                .withQuestions(input);
+        journal.change("requested", null);
+        for (JsonNode view : inputViews(tenant, session, journal.id)) {
+            boolean web = view.has("actionId");
+            assertThat(view.path("kind").asText()).isEqualTo("question");
+            assertThat(view.path(web ? "toolName" : "tool_name").asText()).isEqualTo("ask_user_question");
+            assertThat(view.path(web ? "functionCallId" : "function_call_id").asText()).isEqualTo("call-actions");
+            assertThat(view.path("questions").get(0).path(web ? "allowText" : "allow_text").asBoolean()).isTrue();
+            assertThat(view.at("/questions/0/options/1/id").asText()).isEqualTo("q1o2");
+        }
+        String body = """
+                {"kind":"question","input_revision":1,"policy_revision":"hosted-user-question/1",
+                 "answers":[{"question_id":"q1","option_ids":["q1o2","q1o1"],"text":"Extra 中😀"}]}
+                """;
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "other")
+                        .header("Idempotency-Key", "question-answer").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden());
+        mvc.perform(auth(get(path(session, journal.id)), tenant(), "owner")).andExpect(status().isNotFound());
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "invalid-question").contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("q1o2", "unknown")))
+                .andExpect(status().isBadRequest());
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("requested");
+        AtomicInteger delivered = new AtomicInteger();
+        responses.put(journal.id, call -> {
+            delivered.incrementAndGet();
+            JsonNode response = call.getArgument(3);
+            assertThat(response.at("/answers/0/optionIds/0").asText()).isEqualTo("q1o1");
+            journal.change("decided", response);
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        });
+        JsonNode admitted = readAccepted(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                .header("Idempotency-Key", "question-answer").contentType(MediaType.APPLICATION_JSON).content(body));
+        String operation = admitted.path("id").asText();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(sessions.findOperation(tenant, session, operation)
+                .orElseThrow().state()).isEqualTo("COMPLETED"));
+        JsonNode replay = readAccepted(auth(post("/api/agent/web-shell/v1/actions/respond"), tenant, "owner")
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of(
+                        "sessionId", session, "actionId", journal.id, "idempotencyKey", "question-answer",
+                        "response", Map.of("kind", "question", "inputRevision", 1, "policyRevision", "hosted-user-question/1",
+                                "answers", List.of(Map.of("questionId", "q1", "optionIds", List.of("q1o1", "q1o2"), "text", "Extra 中😀")))))));
+        assertThat(replay.path("operationId").asText()).isEqualTo(operation);
+        assertThat(replay.path("replayed").asBoolean()).isTrue();
+        assertThat(delivered.get()).isEqualTo(1);
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("decided");
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "question-answer").contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("Extra 中😀", "Different")))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("idempotency_conflict"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cancelled", "expired"})
+    void terminalQuestionsCannotInventAnAnswer(String state) throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        JsonNode input = json.readTree("""
+                {"questions":[{"question":"Which target?","header":"Target",
+                "options":[{"label":"First","description":"First"},{"label":"Second","description":"Second"}]}]}
+                """);
+        ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
+                .withQuestions(input);
+        journal.change("requested", null);
+        journal.change(state, null);
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                        .header("Idempotency-Key", "terminal-question").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"kind":"question","input_revision":1,"policy_revision":"hosted-user-question/1",
+                                 "answers":[{"question_id":"q1","text":"Custom"}]}
+                                """))
+                .andExpect(status().isConflict());
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo(state);
+    }
+
+    @Test
     void aggregatesDirectChildActionsWithOwnerAndScopeBoundPagination() throws Exception {
         String tenant = tenant();
         String root = session(tenant);
@@ -166,8 +249,14 @@ class ManagedActionsTest {
         jdbc.update("UPDATE ma_session SET public_child_agents_version = 1, parent_session_id = ?, root_session_id = ?, parent_child_run_id = 'run-1', child_depth = 1 WHERE tenant_id = ? AND session_id = ?",
                 root, root, tenant, child);
         long now = System.currentTimeMillis();
-        ActionJournal own = action(tenant, root, now, 9_007_199_254_740_991L);
-        ActionJournal nested = action(tenant, child, now + 1, 9_007_199_254_740_991L);
+        ActionJournal own = new ActionJournal(journals, tenant, root, now, 9_007_199_254_740_991L);
+        own.id = "command_approval_" + "d".repeat(48);
+        own.options.put("requestId", own.id);
+        own.change("requested", null);
+        ActionJournal nested = new ActionJournal(journals, tenant, child, now + 1, 9_007_199_254_740_991L);
+        nested.id = "command_approval_" + "e".repeat(48);
+        nested.options.put("requestId", nested.id);
+        nested.change("requested", null);
         action(tenant, other, now + 2, 9_007_199_254_740_991L);
         JsonNode first = read(auth(get("/v1/agents/sessions/" + root + "/actions")
                 .param("include_children", "true").param("limit", "1"), tenant, "owner"));
@@ -583,6 +672,8 @@ class ManagedActionsTest {
         ActionJournal first = action(tenant, session, 100, 1000);
         first.change("expired", null);
         ActionJournal second = new ActionJournal(first, 200, 9007199254740991L);
+        second.id = "command_approval_" + "b".repeat(48);
+        second.options.put("requestId", second.id);
         second.change("requested", null);
         JsonNode publicView = read(auth(get(path(session, second.id)), tenant, "owner"));
         assertThat(OpenApiContract.load().validate("/components/schemas/PublicAction", publicView))
@@ -609,6 +700,8 @@ class ManagedActionsTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(1));
         ActionJournal third = new ActionJournal(second, 200, 9007199254740991L);
+        third.id = "command_approval_" + "c".repeat(48);
+        third.options.put("requestId", third.id);
         third.change("requested", null);
         String greatest = second.id.compareTo(third.id) > 0 ? second.id : third.id;
         String smallest = greatest.equals(second.id) ? third.id : second.id;

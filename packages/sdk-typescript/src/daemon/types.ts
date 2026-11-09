@@ -170,6 +170,11 @@ export interface DaemonCapabilitiesLimits {
   sessionRestoreTimeoutMs?: number;
   /** Present when `workspace_file_upload` is advertised. */
   maxWorkspaceFileUploadBytes?: number;
+  /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+  maxSkillArchiveBytes?: number;
+  maxSkillArchiveExpandedBytes?: number;
+  maxSkillArchiveEntries?: number;
+  maxSkillArchiveManifestBytes?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -325,6 +330,11 @@ export type DaemonGitOperation =
   | 'cherry-pick'
   | 'revert'
   | 'bisect';
+
+export interface DaemonWorkspaceGitIgnoredPaths {
+  v: 1;
+  ignoredPaths: string[];
+}
 
 /**
  * Current Git metadata returned from a workspace Git status route.
@@ -909,6 +919,12 @@ export interface DaemonStatusReportSession {
   pendingPermissionCount: number;
   hasActivePrompt: boolean;
   lastEventId: number;
+  eventRingCount?: number;
+  eventRingBytes?: number;
+  eventRingEarliestEventId?: number;
+  eventRingEvictedEvents?: number;
+  eventRingEvictedBytes?: number;
+  availableCommandsSnapshotBytes?: number;
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
@@ -1052,6 +1068,7 @@ export interface DaemonStatusReport {
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
     eventRingSize: number;
+    eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;
     writerIdleTimeoutMs: number | null;
     channelIdleTimeoutMs: number;
@@ -1604,7 +1621,14 @@ export interface DaemonRestoredSession extends DaemonSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at least once for this session
+   * Publish-time summary/unverified-seed boundary captured with a full load
+   * snapshot in eventEpoch. A suffix starting after it excludes those sources,
+   * not other partial/truncated/degraded content. Zero precedes the first event;
+   * absence is not zero. Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed for this session
    * (load only): `compactedReplay`/`liveJournal` may lag behind live
    * events. Clients should prefer the full transcript (see
    * `fullTranscriptAvailable`) over the degraded snapshot.
@@ -1724,6 +1748,9 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1919,6 +1946,8 @@ export type DaemonSessionGroupFilter =
   | (string & {});
 
 export interface DaemonSessionListPageOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -1936,6 +1965,14 @@ export interface DaemonSessionListPageOptions {
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * List the sessions currently live in the workspace bridge instead of
+   * persisted history, so closed rows cannot crowd live sessions out of the
+   * first page. Served over native REST; the ACP transport does not carry it.
+   * Cannot be combined with `view`, archived `archiveState`,
+   * `parentSessionId`, `sourceType`, or `sourceId`.
+   */
+  liveOnly?: boolean;
 }
 
 export interface DaemonSessionListPage {
@@ -1955,8 +1992,8 @@ export interface DaemonSessionCatalogWorkspace {
 export interface DaemonSessionCatalogRequest {
   /** 1–20 entries; `all` excludes internal workspaces. */
   workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-  /** Shared filters; pageSize is 1–100, default 20. */
-  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  /** Shared filters; pageSize is 1–100, default 20. `liveOnly` is not shared. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor' | 'liveOnly'>;
   includeGroups?: boolean;
 }
 
@@ -4161,12 +4198,61 @@ export interface DaemonSkillInstallRequest {
   source: DaemonSkillInstallSource;
 }
 
+export type DaemonSkillConfigInstallRequest =
+  | DaemonSkillInstallRequest
+  | {
+      name: string;
+      scope: DaemonSkillScope;
+      attemptId?: string;
+      source: { type: 'zip-file'; path: string; sha256?: string };
+    };
+
+export interface DaemonSkillInstallOptions {
+  signal?: AbortSignal;
+  /** Native sources default to 130 seconds; 0 disables only the client timeout. */
+  timeoutMs?: number;
+}
+
+export interface DaemonSkillArchiveInstallRequest
+  extends Omit<DaemonWorkspaceFileUploadRequest, 'path'> {
+  name: string;
+  attemptId?: string;
+}
+
+export interface DaemonSkillArchiveInstallResult
+  extends DaemonSkillMutationResult {
+  attemptId: string;
+  archiveSha256: string;
+}
+
+export interface DaemonSkillInstallAttempt {
+  attemptId: string;
+  scope: DaemonSkillScope;
+  skillName: string;
+  workspaceId: string;
+  generationId?: number;
+  state: 'running' | 'committed' | 'not_committed' | 'recovery_required';
+  phase:
+    | 'receiving'
+    | 'copying'
+    | 'waiting'
+    | 'extracting'
+    | 'publishing'
+    | 'cleanup';
+  archiveSha256?: string;
+  result?: DaemonSkillMutationResult;
+  error?: { code: string; message: string; retainedPaths?: string[] };
+}
+
 export interface DaemonSkillMutationResult {
   skillName: string;
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
   activation?: DaemonSkillToggleActivation;
+  attemptId?: string;
+  archiveSha256?: string;
+  activationWarning?: string;
 }
 
 export interface DaemonSettingDescriptor {
@@ -5628,6 +5714,7 @@ export type DaemonHookEventName =
   | 'TodoCreated'
   | 'TodoCompleted'
   | 'InstructionsLoaded'
+  | 'FileChanged'
   | (string & {});
 
 export type DaemonHookMatcherKind =
