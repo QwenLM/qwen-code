@@ -118,13 +118,28 @@ output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 
-`stallAlertRetries` (default 30, roughly five minutes at the ten-second retry
-interval) sets how many consecutive identical failures a slot may accumulate
-before the manager logs `STALL ALERT` instead of the ordinary retry line. The
-counter resets whenever a cycle succeeds or the failure changes. A stall alert
-means the slot is serving no jobs and needs reconciliation; the manager keeps
-retrying and never exits on its own, so systemd does not restart it. Alert on
-that journal marker rather than on service state.
+Failed cycles retry with jittered exponential backoff: 10 s doubling to a
+60 s cap, or 30 s doubling to a 300 s cap while GitHub answers HTTP 403/429,
+so a rate-limited pool stops sustaining its own rate limit. The backoff
+sleep stays interruptible and a shutdown cuts it short.
+
+`stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
+repeat the same failure before the manager logs `STALL ALERT` instead of the
+ordinary retry line. The threshold is wall-clock, so it holds under any retry
+cadence, and the default sits well above the 300 s backoff ceiling on purpose:
+a pool-wide rate-limit storm stalls every slot at once, and a threshold shorter
+than the cadence would put one alert per slot in the journal simultaneously.
+The clock resets whenever a cycle succeeds or the failure changes, and each
+stall episode alerts once. Because the check happens when a failure is
+observed, the alert lands on the first failure at or after the threshold, so
+the reported duration is the threshold rounded up to the current cadence. A
+stall alert means the slot is serving no jobs and needs reconciliation; the
+manager keeps retrying and never exits on its own, so systemd does not restart
+it. Alert on that journal marker rather than on service state.
+
+Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
+read. A config that still carries it has no effect and falls back to the
+1800 s default, so set `stallAlertSeconds` explicitly if you had tuned it.
 
 ## Install and operate
 

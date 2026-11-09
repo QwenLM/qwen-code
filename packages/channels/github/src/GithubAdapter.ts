@@ -203,7 +203,7 @@ interface GithubCursor {
   dispatchedComments?: string[];
   /**
    * created_at per dispatched comment key, so eviction can respect the
-   * re-list window: a comment whose created_at is newer than the committed
+   * re-list window: a comment whose created_at is not before the committed
    * cursor can still be re-fetched (mark-read may have failed), so its key
    * must NOT be evicted — otherwise a re-listed aggregate SUPERSET batch
    * re-dispatches already-replied comments under a fresh batch hash that
@@ -214,9 +214,47 @@ interface GithubCursor {
   dispatchedCommentTimes?: Record<string, string>;
   /** Direct-action event node IDs already accepted by the channel. */
   dispatchedEvents?: string[];
+  /**
+   * The comments of the cursor's own second that the window which advanced
+   * the cursor there read (`at` is that cursor). GitHub stamps comments and
+   * notifications to the second, so a notification that arrives after that
+   * window can name a comment of the same second. The next window reads the
+   * cursor's second again and leaves out only these. Without a record for the
+   * cursor (one saved by an older version, or more than MAX_BOUNDARY_COMMENTS
+   * such comments), the window starts after that second. The first cursor is
+   * the start time with milliseconds, which no GitHub timestamp equals.
+   * `threads` (`owner/repo|thread` keys, at most MAX_BOUNDARY_COMMENTS) are
+   * the threads whose notification of that second the window listed: such a
+   * notification listed again is a re-listing, not a late one.
+   */
+  boundaryComments?: { at: string; keys: string[]; threads: string[] };
 }
 
 const MAX_DISPATCHED = 500;
+/** Bounds each list of GithubCursor.boundaryComments (one second's worth). */
+const MAX_BOUNDARY_COMMENTS = 500;
+
+/** Keys a window has seen in the latest second it has seen one from. */
+interface LatestSecond {
+  at: string;
+  keys: Set<string>;
+  overflow: boolean;
+}
+
+function noteLatestSecond(
+  latest: LatestSecond | undefined,
+  at: string,
+  key: string,
+): LatestSecond {
+  if (!latest || at > latest.at) {
+    return { at, keys: new Set([key]), overflow: false };
+  }
+  if (at === latest.at && !latest.keys.has(key)) {
+    if (latest.keys.size < MAX_BOUNDARY_COMMENTS) latest.keys.add(key);
+    else latest.overflow = true;
+  }
+  return latest;
+}
 /**
  * Ceiling on the dispatchedCommentTimes map. The ring itself has no hard
  * cap: window-aware eviction never drops a protected (re-listable) key, so
@@ -281,10 +319,33 @@ interface NotificationContext {
   issueNumber: number;
   lastReadAt: string | null;
   windowSince: string;
+  /**
+   * Comments of the `windowSince` second the window that ended there read,
+   * or null when the window starts after that second (see
+   * GithubCursor.boundaryComments).
+   */
+  boundaryComments: ReadonlySet<string> | null;
   metaFloor: string;
   maxUpdatedAt: string;
   subjectTitle: string;
   reason: string;
+}
+
+/**
+ * Whether a comment is past the window's lower bound: created after the
+ * cursor's second, or in it when the window that ended there did not read it.
+ */
+function startsInWindow(
+  ctx: NotificationContext,
+  createdAt: string,
+  key: string,
+): boolean {
+  if (createdAt > ctx.windowSince) return true;
+  return (
+    createdAt === ctx.windowSince &&
+    ctx.boundaryComments !== null &&
+    !ctx.boundaryComments.has(key)
+  );
 }
 
 interface WorkingReaction {
@@ -570,6 +631,14 @@ interface CiObservation {
   aggregate: CiAggregate;
   /** Names of failed checks (capped), for actionable event summaries. */
   failedChecks: string[];
+  /**
+   * The walk stopped on a failing page that still had a next page, so any
+   * failures beyond it went unread. Whether there ARE more is unknown — that
+   * is what skipping the page means — so the summary says "may be incomplete".
+   * It has to say something: ci_failure fires once per head, so this is the
+   * only notice those later failures would ever get.
+   */
+  namesIncomplete: boolean;
 }
 
 const MAX_REPORTED_FAILED_CHECKS = 5;
@@ -1468,6 +1537,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * nothing new (a repeated skip) are written once per window.
    */
   private windowJournalKeys = new Set<string>();
+  /**
+   * The comments this window has read that were created in the latest second
+   * it has read a comment from, and the threads it has listed whose
+   * notification is of the latest second it has listed one from. When the
+   * window is marked read, those of the new cursor's second become
+   * GithubCursor.boundaryComments.
+   */
+  private windowLatestComments: LatestSecond | undefined;
+  private windowLatestThreads: LatestSecond | undefined;
+  /**
+   * Threads of late notifications (see `late` in pollOnce) this window has
+   * read: the comments of the cursor's second GitHub listed then were read,
+   * so a later failure reading one again in the window is treated as stale.
+   */
+  private windowLateThreadsRead = new Set<string>();
 
   constructor(
     name: string,
@@ -1547,6 +1631,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
       }
       base.dispatchedCommentTimes = clean;
+    }
+    // A record that does not belong to the cursor, or that cannot be read,
+    // is dropped: the window then starts after the cursor's second, as it
+    // did before the record existed, and nothing it read is read again.
+    const boundary = base.boundaryComments as unknown;
+    if (boundary !== undefined) {
+      const record = boundary as {
+        at?: unknown;
+        keys?: unknown;
+        threads?: unknown;
+      } | null;
+      const isKeyList = (list: unknown) =>
+        Array.isArray(list) &&
+        list.length <= MAX_BOUNDARY_COMMENTS &&
+        list.every((key) => typeof key === 'string');
+      if (
+        !record ||
+        typeof record !== 'object' ||
+        record.at !== base.lastProcessedAt ||
+        !isKeyList(record.keys) ||
+        !isKeyList(record.threads)
+      ) {
+        delete base.boundaryComments;
+      }
     }
     return base;
   }
@@ -2503,10 +2611,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : this.cursor.lastProcessedAt;
 
     // Comment window lower bound: the cursor BEFORE this poll advances it.
-    // Comments with updated_at <= windowSince were already eligible for
+    // Comments created before windowSince were already eligible for
     // processing in a previous poll — skip them to prevent duplicates when
-    // PUT /notifications' async mark fails to mark the thread read.
+    // PUT /notifications' async mark fails to mark the thread read. Comments
+    // of the windowSince second itself are read unless the window that ended
+    // there read them (see GithubCursor.boundaryComments).
     const windowSince = this.cursor.lastProcessedAt;
+    const boundary =
+      this.cursor.boundaryComments?.at === windowSince
+        ? this.cursor.boundaryComments
+        : undefined;
+    const boundaryComments = boundary ? new Set(boundary.keys) : null;
+    const boundaryThreads = new Set(boundary?.threads);
 
     if (maxUpdatedAt > this.cursor.lastProcessedAt) {
       this.pendingCursorUpdatedAt =
@@ -2613,6 +2729,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         issueNumber,
         lastReadAt,
         windowSince,
+        boundaryComments,
         metaFloor: this.cursor.metaFloor,
         maxUpdatedAt,
         subjectTitle: notification.subject.title || '',
@@ -2620,11 +2737,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       };
 
       const failureKey = `${chatId}|${threadId}`;
-      // A notification at or before the cursor belongs to a window that
-      // already committed; it is listed again only because its mark-as-read
-      // did not apply. A 5xx reading it neither holds the new window nor
-      // spends its budget; a rate limit still stops the poll.
-      const stale = notification.updated_at <= this.cursor.lastProcessedAt;
+      this.windowLatestThreads = noteLatestSecond(
+        this.windowLatestThreads,
+        notification.updated_at,
+        failureKey,
+      );
+      // A notification before the cursor belongs to a window that already
+      // committed; it is listed again only because its mark-as-read did not
+      // apply. A 5xx reading it neither holds the new window nor spends its
+      // budget; a rate limit still stops the poll. One of the cursor's own
+      // second that the window ending there did not list can instead be a
+      // late notification for a comment that window did not read, when the
+      // window reads that second: it holds a newer window waiting to be
+      // marked read, and while none waits it is not marked read anyway, so
+      // it spends no budget. Once the window has read its thread, it is
+      // stale again.
+      const late =
+        notification.updated_at === windowSince &&
+        boundaryComments !== null &&
+        !boundaryThreads.has(failureKey) &&
+        !this.windowLateThreadsRead.has(failureKey);
+      const stale =
+        notification.updated_at < windowSince ||
+        (notification.updated_at === windowSince &&
+          (!late || !this.pendingCursorUpdatedAt));
       try {
         switch (reason) {
           case 'mention':
@@ -2648,6 +2784,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             break;
           default:
             await this.processCommentLane(ctx, false);
+        }
+        // A thread held at poll start was not read (see fetchNewComments),
+        // and a failing task store or audit may have refused what it read.
+        if (
+          late &&
+          !this.threadHeldAtPollStart(chatId, threadId) &&
+          !this.inboundPersistenceBlocked &&
+          !this.publicationAuditBlocked &&
+          this.windowLateThreadsRead.size < MAX_WINDOW_KEYS
+        ) {
+          this.windowLateThreadsRead.add(failureKey);
         }
       } catch (err) {
         const failure = classifyThreadFailure(err);
@@ -2695,7 +2842,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // that task, so the thread is read again.
         const taskHeld =
           !retry && !storeHeld && this.threadTaskHoldsCursor(chatId, threadId);
-        const held = retry || storeHeld || taskHeld;
+        // A late notification of the cursor's own second that fails with a
+        // 5xx while no newer window waits is stale only for the budget:
+        // nothing is marked read this poll, so the thread is read again.
+        const idleHeld =
+          failure === 'transient' &&
+          !retry &&
+          !storeHeld &&
+          !taskHeld &&
+          late &&
+          !this.pendingCursorUpdatedAt;
+        const held = retry || storeHeld || taskHeld || idleHeld;
         const milestone = (n: number) => n === 1 || n % 10 === 0;
         const report =
           failure === 'shared'
@@ -2705,7 +2862,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 ? milestone(failures)
                 : this.journalOncePerWindow(`failing\0${failureKey}`)
               : this.journalOncePerWindow(
-                  `${storeHeld || taskHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
+                  `${storeHeld || taskHeld || idleHeld ? 'held' : stale ? 'stale' : 'skip'}\0${failureKey}`,
                 );
         if (report) {
           const error = sanitizeLogText(
@@ -2721,7 +2878,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                   ? `[Channel:${this.name}] error processing ${threadId} while channel state cannot be persisted, keeping it unread for the next poll: ${error}\n`
                   : taskHeld
                     ? `[Channel:${this.name}] error processing ${threadId} while its task is unfinished, keeping it unread for the next poll: ${error}\n`
-                    : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
+                    : idleHeld
+                      ? `[Channel:${this.name}] API error processing ${threadId} while no newer notification waits, keeping it unread for the next poll: ${error}\n`
+                      : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
           );
           let detail: Record<string, number> | undefined;
           if (failure === 'transient' && !stale) {
@@ -2787,14 +2946,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         await this.markNotificationsAsRead(committedAt);
         if (committedAt > this.cursor.lastProcessedAt) {
           this.cursor.lastProcessedAt = committedAt;
+          const read = this.windowLatestComments;
+          const listed = this.windowLatestThreads;
+          if (read?.at === committedAt && read.overflow) {
+            delete this.cursor.boundaryComments;
+          } else {
+            // Past the bound a listed thread is left out, so a notification
+            // of it listed again counts as late: the cautious direction.
+            this.cursor.boundaryComments = {
+              at: committedAt,
+              keys: read?.at === committedAt ? [...read.keys] : [],
+              threads: listed?.at === committedAt ? [...listed.keys] : [],
+            };
+          }
         }
         this.pendingCursorUpdatedAt = undefined;
-        // A new window starts: its hold budget, streaks and once-per-window
-        // journal keys start again.
+        // A new window starts: its hold budget, streaks, once-per-window
+        // journal keys and what it has read and listed start again.
         this.transientHoldPolls = 0;
         this.sharedHoldPolls = 0;
         this.transientNotificationFailures.clear();
         this.windowJournalKeys.clear();
+        this.windowLatestComments = undefined;
+        this.windowLatestThreads = undefined;
+        this.windowLateThreadsRead.clear();
       }
     } finally {
       // Bound the comment-time map EVERY poll, independent of dispatch: fetch
@@ -3208,13 +3383,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // every poll of the frozen window only spends the shared PAT budget.
     if (this.threadHeldAtPollStart(ctx.chatId, ctx.threadId)) return [];
     const [owner, repo] = ctx.chatId.split('/');
+    // When the window reads the cursor's own second, list from a second
+    // earlier, as the notification list does, so a comment last updated in
+    // that second is listed whether GitHub's `since` includes it or not.
+    const since = ctx.boundaryComments
+      ? new Date(new Date(ctx.windowSince).getTime() - 1000).toISOString()
+      : ctx.windowSince;
     const comments = (await this.githubApi(
       () =>
         this.octokit.paginate(this.octokit.rest.issues.listComments, {
           owner,
           repo,
           issue_number: ctx.issueNumber,
-          since: ctx.windowSince,
+          since,
           per_page: 100,
         }),
       `listComments(${ctx.threadId})`,
@@ -3232,12 +3413,32 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
     this.recordEditedMentions(ctx, comments);
-    return comments.filter(
+    const inWindow = comments.filter(
       (comment) =>
         comment.user?.login !== this.botUsername &&
         (!comment.created_at ||
-          (comment.created_at > ctx.windowSince &&
+          (startsInWindow(
+            ctx,
+            comment.created_at,
+            comment.node_id || String(comment.id),
+          ) &&
             comment.created_at <= ctx.maxUpdatedAt)),
+    );
+    for (const comment of inWindow) this.noteWindowComment(comment);
+    return inWindow;
+  }
+
+  /**
+   * Remember a comment this window read, if it is of the latest second the
+   * window has read a comment from (the cursor can advance at most to the
+   * newest notification, and no comment it reads is newer than that).
+   */
+  private noteWindowComment(comment: GithubComment): void {
+    if (!comment.created_at) return;
+    this.windowLatestComments = noteLatestSecond(
+      this.windowLatestComments,
+      comment.created_at,
+      comment.node_id || String(comment.id),
     );
   }
 
@@ -3261,7 +3462,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (
         comment.user?.login === botUsername ||
         !comment.created_at ||
-        comment.created_at > ctx.windowSince ||
+        startsInWindow(
+          ctx,
+          comment.created_at,
+          comment.node_id || String(comment.id),
+        ) ||
         !comment.updated_at ||
         comment.updated_at <= ctx.windowSince ||
         !testBotMention(comment.body || '', botUsername)
@@ -3396,9 +3601,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   /**
    * Window-aware eviction. Once over the soft cap, drop EVERY key whose
-   * comment can no longer be re-listed (created_at <= the committed cursor),
-   * keeping protected keys regardless of position. A key newer than the
-   * cursor — or with no recorded time (legacy migration) — is protected:
+   * comment can no longer be re-listed (created_at before the committed
+   * cursor; the window can read the cursor's own second again, see
+   * GithubCursor.boundaryComments), keeping protected keys regardless of
+   * position. A key at or after the cursor — or with no recorded time
+   * (legacy migration) — is protected:
    * evicting it would let a re-listed aggregate SUPERSET re-dispatch
    * already-replied comments under a fresh batch hash that misses the
    * publication-audit backstop (duplicate public reply / private injection
@@ -3416,14 +3623,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const cursor = this.cursor.lastProcessedAt;
     return list.filter((key) => {
       const time = times[key];
-      return time === undefined || time > cursor;
+      return time === undefined || time >= cursor;
     });
   }
 
   /**
    * Bound the time map: drop entries that are neither in the ring nor still
    * re-listable. Times for fetched-but-not-yet-dispatched comments survive
-   * while their created_at is newer than the cursor (they may be dispatched
+   * while their created_at is not before the cursor (they may be dispatched
    * later this poll), so eviction never loses a key's protection mid-poll.
    */
   private pruneCommentTimes(): void {
@@ -3432,7 +3639,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const live = new Set(this.cursor.dispatchedComments ?? []);
     const cursor = this.cursor.lastProcessedAt;
     for (const [key, time] of Object.entries(times)) {
-      if (!live.has(key) && time <= cursor) delete times[key];
+      if (!live.has(key) && time < cursor) delete times[key];
     }
     // Bound the map even under a permanently frozen cursor (nothing expires):
     // fetch captures a time for every re-listable comment, including ones the
@@ -3939,7 +4146,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         let posted = task.errorCommentPosted === true;
         // Bound-session delivery is private: a failure must not post a public
         // error comment. The fallback path clears delivery before retrying.
-        if (!posted && !stillBound && task.privateOnly !== true) {
+        // A failed public attempt is run again on a later poll until the
+        // budget is spent (see isRecoverableInboundTask), so the comment,
+        // which asks the user to mention the bot again, waits for the last.
+        if (
+          !posted &&
+          !stillBound &&
+          task.privateOnly !== true &&
+          attempts >= MAX_INBOUND_TASK_ATTEMPTS
+        ) {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
@@ -6744,7 +6959,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       const failedChecks =
         ciResult && ciResult.failedChecks.length > 0
-          ? ` Failed checks: ${ciResult.failedChecks.join(', ')}.`
+          ? ` Failed checks: ${ciResult.failedChecks.join(', ')}${
+              ciResult.namesIncomplete
+                ? ' (list may be incomplete: later check pages were not read)'
+                : ''
+            }.`
           : '';
       events.push({
         type: 'ci_failure',
@@ -7289,76 +7508,119 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     repo: string,
     sha: string,
   ): Promise<CiObservation> {
-    const checkRuns = (await this.githubApi(
-      () =>
-        this.octokit.paginate(this.octokit.rest.checks.listForRef, {
-          owner,
-          repo,
-          ref: sha,
-          per_page: 100,
-        }),
+    // The observation is accumulated per ATTEMPT, inside the retried
+    // closure: githubApi retries the whole pagination, and state carried
+    // over from an attempt that died on a later page would let its partial
+    // pending/success readings decide the retry's aggregate.
+    const checks = await this.githubApi(
+      async () => {
+        let sawFailure = false;
+        let sawPending = false;
+        let sawSuccess = false;
+        let namesIncomplete = false;
+        const failedChecks: string[] = [];
+        await this.octokit.paginate(
+          this.octokit.rest.checks.listForRef,
+          {
+            owner,
+            repo,
+            ref: sha,
+            per_page: 100,
+          },
+          (response, done) => {
+            // Octokit's conclusion union omits 'startup_failure', which the
+            // API does return and this aggregate must count as a failure.
+            const runs = response.data as Array<{
+              name?: string | null;
+              status?: string | null;
+              conclusion?: string | null;
+            }>;
+            for (const run of runs) {
+              if (run.status !== 'completed') {
+                sawPending = true;
+                continue;
+              }
+              if (
+                run.conclusion === 'failure' ||
+                run.conclusion === 'timed_out' ||
+                run.conclusion === 'action_required' ||
+                // A workflow that fails at startup (e.g. a broken workflow
+                // file) never runs a single job; missing it would certify a
+                // broken CI as 'none' or even 'success'. A deliberate SUBSET
+                // of core's FAILING_CHECK_RUN_CONCLUSIONS: core also counts
+                // cancelled/stale, which the design excludes as
+                // concurrency-cancel noise (a superseded run's cancellation
+                // is not a CI failure of this head).
+                run.conclusion === 'startup_failure'
+              ) {
+                sawFailure = true;
+                if (
+                  typeof run.name === 'string' &&
+                  run.name.length > 0 &&
+                  failedChecks.length < MAX_REPORTED_FAILED_CHECKS
+                ) {
+                  failedChecks.push(run.name);
+                }
+              } else if (run.conclusion === 'success') {
+                sawSuccess = true;
+              }
+            }
+            // A failure decides the aggregate: no later page can overturn
+            // it, so stop paging instead of spending one request per page
+            // of a head that carries hundreds of check runs. Whole pages are
+            // still read, so a head whose failures all fit in the pages read
+            // reports the same names as before.
+            if (sawFailure) {
+              // Only unread pages make the list partial: stopping on the
+              // LAST page read everything. The iterator follows this same
+              // header, so its presence is exactly "a page went unread".
+              namesIncomplete = /<[^<>]+>;\s*rel="next"/.test(
+                response.headers?.link ?? '',
+              );
+              done();
+            }
+            return [];
+          },
+        );
+        return {
+          sawFailure,
+          sawPending,
+          sawSuccess,
+          failedChecks,
+          namesIncomplete,
+        };
+      },
       `checks.listForRef(${sha})`,
       3,
       (err) => !isWatchFailFastError(err),
-    )) as Array<{
-      name?: string | null;
-      status?: string | null;
-      conclusion?: string | null;
-    }>;
-    let sawFailure = false;
-    let sawPending = false;
-    let sawSuccess = false;
-    const failedChecks: string[] = [];
-    for (const run of checkRuns) {
-      if (run.status !== 'completed') {
-        sawPending = true;
-        continue;
-      }
-      if (
-        run.conclusion === 'failure' ||
-        run.conclusion === 'timed_out' ||
-        run.conclusion === 'action_required' ||
-        // A workflow that fails at startup (e.g. a broken workflow file)
-        // never runs a single job; missing it would certify a broken CI as
-        // 'none' or even 'success'. A deliberate SUBSET of core's
-        // FAILING_CHECK_RUN_CONCLUSIONS: core also counts cancelled/stale,
-        // which the design excludes as concurrency-cancel noise (a
-        // superseded run's cancellation is not a CI failure of this head).
-        run.conclusion === 'startup_failure'
-      ) {
-        sawFailure = true;
-        if (
-          typeof run.name === 'string' &&
-          run.name.length > 0 &&
-          failedChecks.length < MAX_REPORTED_FAILED_CHECKS
-        ) {
-          failedChecks.push(run.name);
-        }
-      } else if (run.conclusion === 'success') {
-        sawSuccess = true;
-      }
-    }
-    const { data: combined } = await this.githubApi(
-      () =>
-        this.octokit.rest.repos.getCombinedStatusForRef({
-          owner,
-          repo,
-          ref: sha,
-        }),
-      `combinedStatus(${sha})`,
-      3,
-      (err) => !isWatchFailFastError(err),
     );
-    // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
-    // SHA with no legacy commit statuses; an empty combined status must not
-    // count as active CI (it would keep every poll re-fetching forever).
-    if (combined.total_count > 0) {
-      if (combined.state === 'failure' || combined.state === 'error') {
-        sawFailure = true;
-      } else if (combined.state === 'pending') {
-        sawPending = true;
-      } else {
-        sawSuccess = true;
+    let { sawFailure, sawPending, sawSuccess } = checks;
+    const { failedChecks, namesIncomplete } = checks;
+    // A check run already failed, so the combined status could only confirm
+    // 'failure' — skip the request rather than pay for a decided aggregate.
+    if (!sawFailure) {
+      const { data: combined } = await this.githubApi(
+        () =>
+          this.octokit.rest.repos.getCombinedStatusForRef({
+            owner,
+            repo,
+            ref: sha,
+          }),
+        `combinedStatus(${sha})`,
+        3,
+        (err) => !isWatchFailFastError(err),
+      );
+      // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
+      // SHA with no legacy commit statuses; an empty combined status must not
+      // count as active CI (it would keep every poll re-fetching forever).
+      if (combined.total_count > 0) {
+        if (combined.state === 'failure' || combined.state === 'error') {
+          sawFailure = true;
+        } else if (combined.state === 'pending') {
+          sawPending = true;
+        } else {
+          sawSuccess = true;
+        }
       }
     }
     const aggregate: CiAggregate = sawFailure
@@ -7368,7 +7630,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : sawSuccess
           ? 'success'
           : 'none';
-    return { aggregate, failedChecks };
+    return { aggregate, failedChecks, namesIncomplete };
   }
 
   private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
