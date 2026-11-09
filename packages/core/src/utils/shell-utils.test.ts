@@ -818,6 +818,15 @@ describe('detectSelfKillCommand', () => {
     ]);
   });
 
+  // R7-9: the expansion word may be the option terminator, so the word
+  // after it is a script bash runs; the self-kill gate must read it too.
+  it('detects self-kill behind an unresolvable -c payload', () => {
+    expectEach(detectSelfKillCommand, true, [
+      "sh -c $(printf -- --) 'pkill -f qwen'",
+      'sh -c `printf -- --` "pkill -f qwen"',
+    ]);
+  });
+
   // The option terminator can be spelled with ANSI-C escapes, octal escapes
   // or quote concatenation; each still ends option parsing, so the self-kill
   // payload after it is the command (witnessed with sh/bash). A NUL ends the

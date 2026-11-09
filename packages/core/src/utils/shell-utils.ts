@@ -955,6 +955,55 @@ export function stripShellWrapper(command: string): string {
   }
 }
 
+/**
+ * The alternative reading of a wrapper whose `-c` payload word carries an
+ * unresolvable expansion: the word may expand to the option terminator
+ * (`sh -c $(printf -- --) 'pkill -f qwen'`), so the NEXT word is a script
+ * bash can run. Returns that word's quote-removed text, or null when the
+ * payload is readable, no next word exists, or the wrapper is cmd-style
+ * (R7-9). The base reading of stripShellWrapper stays unchanged.
+ */
+export function unresolvedWrapperAlternatePayload(
+  command: string,
+): string | null {
+  const trimmed = trimBashEdgeSeparators(command);
+  let rest = trimmed;
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) break;
+    rest = token.rest;
+  }
+  const wrapperToken = takeLeadingToken(rest);
+  if (!wrapperToken || !isKnownMonitorWrapperToken(wrapperToken.token)) {
+    return null;
+  }
+  if (shellWrapperCommandConsumesRest(wrapperToken.token)) return null;
+  rest = wrapperToken.rest;
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token) return null;
+    if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
+      const markerRest = restAfterOptionTerminator(token.rest) ?? token.rest;
+      const payload = takeLeadingToken(markerRest);
+      if (!payload) return null;
+      const removed = shellWordQuoteRemoval(payload.token);
+      if (removed === null || !removed.hasExpansion) return null;
+      const next = takeLeadingToken(payload.rest);
+      if (!next) return null;
+      const { value } = stripSymmetricQuotes(next.token);
+      return value || null;
+    }
+    const normalized = getNormalizedShellToken(token.token);
+    if (!isShellWrapperFlagToken(normalized)) return null;
+    rest = token.rest;
+    if (shellWrapperFlagConsumesOperand(token.token)) {
+      const operandToken = takeLeadingToken(rest);
+      if (!operandToken) return null;
+      rest = operandToken.rest;
+    }
+  }
+}
+
 const SELF_KILL_PROCESS_PATTERN =
   /(^|[^a-z0-9_-])(node(?:\.exe)?|qwen(?:-code)?(?:\.exe)?)(?=$|[^a-z0-9_-])/i;
 const QWEN_PROCESS_PATTERN =
@@ -1438,6 +1487,14 @@ function xargsInvokesKill(segment: string | undefined): boolean {
 export function detectSelfKillCommand(command: string): boolean {
   if (!/kill/i.test(command)) {
     return false;
+  }
+
+  // An unresolvable -c payload may be the option terminator: the word
+  // after it is a script bash runs, so the self-kill gate reads it too
+  // (R7-9). The base reading is still evaluated below.
+  const alternate = unresolvedWrapperAlternatePayload(command);
+  if (alternate !== null && detectSelfKillCommand(alternate)) {
+    return true;
   }
 
   const segments = getCommandSegments(command);
@@ -1936,15 +1993,32 @@ export function normalizeMonitorCommand(
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
   // flags are preserved in spawnCommand, but are not converted into Bash(...)
   // command-rule surface.
+  // An unresolvable payload keeps the WHOLE wrapper as the safety surface:
+  // appending the following word surfaces the script bash may run, so a
+  // `Bash(bash -c *)` wildcard no longer covers the unreadable spelling
+  // while its readable twin asks (R7-9).
+  const alternatePayload = wrapperTokens
+    ? unresolvedWrapperAlternatePayload(command)
+    : null;
+  const payloadUnresolved =
+    wrapperTokens !== undefined &&
+    (() => {
+      const removed = shellWordQuoteRemoval(innerCommand);
+      return removed !== null && removed.hasExpansion && !innerQuote;
+    })();
   const safetyParts = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
     ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
   const safetyCommand =
-    wrapperTokens && safetyParts.length > 0
+    wrapperTokens && !payloadUnresolved && safetyParts.length > 0
       ? safetyParts.join(' ').trim()
-      : analysisCommand;
+      : payloadUnresolved
+        ? [safetyParts.join(' ').trim(), alternatePayload ?? '']
+            .filter(Boolean)
+            .join(' ')
+        : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
