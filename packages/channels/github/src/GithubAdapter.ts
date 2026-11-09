@@ -60,6 +60,7 @@ interface GithubConfig extends ChannelConfig, RepoFilterConfigFields {
   deliverToBoundSessions?: boolean;
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
+  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
   prCommentWatch?: unknown;
 }
@@ -561,6 +562,19 @@ export const DEFAULT_PR_WATCH_LIMIT = 30;
 export const MAX_PR_WATCH_LIMIT = 500;
 
 /**
+ * Requests held back for the interactive notification lane. When the last
+ * known REST budget is at or below this, the watch pass is skipped for the
+ * poll so a human mention is not starved by background PR polling. ~4% of a
+ * 5,000/hour classic-PAT budget: enough for several polls of mention traffic
+ * while barely trimming a healthy watch. Operators on other scales (GitHub
+ * Enterprise, finer-grained tokens) set prWatchBudgetReserve explicitly.
+ */
+export const DEFAULT_PR_WATCH_BUDGET_RESERVE = 200;
+
+/** Hard ceiling for the configurable watch budget reserve. */
+export const MAX_PR_WATCH_BUDGET_RESERVE = 5000;
+
+/**
  * After a head change, checks register asynchronously (queued or self-hosted
  * runners can take minutes). Within this window an empty CI aggregate
  * ('none') is treated as unsettled and re-checked every poll.
@@ -815,6 +829,7 @@ interface BoundSessionConfigFields {
   deliverToBoundSessions?: unknown;
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
+  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
   prCommentWatch?: unknown;
 }
@@ -911,6 +926,28 @@ export function validateBoundSessionConfig(
   // No deliverToBoundSessions dependency: prCommentWatch is default-on, so the
   // editor emits it even for channels without bound delivery. It is inert there
   // (the watch is gated on deliverToBoundSessions at runtime), not an error.
+  if (
+    config.prWatchBudgetReserve !== undefined &&
+    config.deliverToBoundSessions !== true
+  ) {
+    return `prWatchBudgetReserve for channel ${channelName} requires deliverToBoundSessions: true.`;
+  }
+  // The descriptor's only lower bound is exclusiveMinimum: -1 (so 0 can
+  // disable the gate), which also admits values in (-1, 0). The getter would
+  // silently fall back to the default for a negative, so reject it here
+  // instead of letting a saved value mean something other than it says.
+  // Positive fractions stay legal: the getter rounds them UP, which is the
+  // documented behaviour, not a silent fallback.
+  if (config.prWatchBudgetReserve !== undefined) {
+    const reserve = config.prWatchBudgetReserve;
+    if (
+      typeof reserve !== 'number' ||
+      !Number.isFinite(reserve) ||
+      reserve < 0
+    ) {
+      return `prWatchBudgetReserve for channel ${channelName} must be a non-negative number.`;
+    }
+  }
   try {
     normalizePrWatchEvents(config, channelName);
     normalizeBoundSessionActions(config, channelName);
@@ -1268,17 +1305,25 @@ type GithubRequestError = {
   response?: { headers?: Record<string, string | number> };
 };
 
-/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
-function rateLimitRemaining(err: unknown): number | undefined {
-  const value = (err as GithubRequestError).response?.headers?.[
-    'x-ratelimit-remaining'
-  ];
+/**
+ * A rate-limit header value (remaining count or reset epoch) as a
+ * non-negative integer; absent or malformed is undefined. GitHub sends
+ * these as decimal strings; a number is accepted for tests and proxies.
+ */
+function parseRateLimitCount(value: unknown): number | undefined {
   if (typeof value === 'number') {
     return Number.isInteger(value) && value >= 0 ? value : undefined;
   }
   return typeof value === 'string' && /^\d+$/.test(value)
     ? Number(value)
     : undefined;
+}
+
+/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
+function rateLimitRemaining(err: unknown): number | undefined {
+  return parseRateLimitCount(
+    (err as GithubRequestError).response?.headers?.['x-ratelimit-remaining'],
+  );
 }
 
 /**
@@ -1540,6 +1585,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     | 'pending'
     | undefined;
   /**
+   * Last REST budget seen on a SUCCESSFUL response, recorded by the request
+   * hook regardless of the call's return shape. Undefined until the first
+   * response carries the header. Gates the watch pass so background polling
+   * cannot starve the interactive notification lane.
+   */
+  private lastRateLimitRemaining: number | undefined;
+  /**
+   * Reset time (epoch ms) of the window lastRateLimitRemaining belongs to.
+   * Once passed, the reading is stale and must not gate the watch: a low
+   * count from a window that has already reset would otherwise starve the
+   * watch until the next successful response overwrites it.
+   */
+  private lastRateLimitResetAt: number | undefined;
+  /**
+   * Whether the watch pass is currently skipped for low budget. Edge-triggered
+   * journaling (the watchReconcileBlockedCause pattern): a permanent low-budget
+   * condition journalled once on the edge, not every poll, so it cannot rotate
+   * the useful rows out of the timeline. Cleared on the recovery edge.
+   */
+  private watchBudgetLow = false;
+  /**
+   * A `watch_budget_low` row has been journaled and its episode has not been
+   * closed by a recovery row yet. Tracked apart from watchBudgetLow because
+   * the two answer different questions: the skip latch is released when the
+   * watch stops being eligible (so a later starvation journals a fresh skip),
+   * but the episode stays open until the BUDGET recovers — otherwise a budget
+   * that recovers during an ineligible window would never get its recovery
+   * row. In-memory by design: a restart mid-episode leaves no recovery row,
+   * which the user guide states.
+   */
+  private watchBudgetEpisodeOpen = false;
+  /**
    * Consecutive binding-refresh failures since the last success. While no
    * snapshot has ever succeeded, the cold-start gate defers the comment lane,
    * so a permanent failure (an old daemon lacking the route, rotated
@@ -1784,6 +1861,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(this.proxy
         ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
         : {}),
+    });
+    // One choke point for the success-path budget: the wrap sees the response
+    // headers on every request, including each page of a paginate call,
+    // independent of what fn() returns (array vs {data,headers}). It records
+    // the last known remaining budget so the watch gate can protect the
+    // notification lane before a request is ever rejected.
+    this.octokit.hook.wrap('request', async (request, options) => {
+      const response = await request(options);
+      this.recordRateLimitBudget(response.headers);
+      return response;
     });
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
@@ -2599,13 +2686,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       (this.prWatchEvents.size > 0 || commentWatchActive) &&
       !this.boundRefreshFailed
     ) {
-      try {
-        await this.runPrStateWatch();
-      } catch (err) {
-        process.stderr.write(
-          `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-        );
+      // Protect the interactive notification lane: the watch runs first and
+      // is best-effort edge-triggered detection, so when the last known REST
+      // budget is at or below the reserve, skip the pass this poll rather
+      // than spend the budget a human mention needs. Skipping delays
+      // detection of a state that persists (baselines and pending queues are
+      // durable); a transition that appears and reverts between passes is
+      // not observed. The reactive isWatchFailFastError backstop still
+      // covers a wrong estimate. The gate covers the comment fetches too:
+      // they run inside the same pass and spend the same budget.
+      if (this.watchBudgetExhausted()) {
+        this.noteWatchBudgetLow();
+      } else {
+        this.watchBudgetLow = false;
+        this.closeWatchBudgetEpisode();
+        try {
+          await this.runPrStateWatch();
+        } catch (err) {
+          process.stderr.write(
+            `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+          );
+        }
+        // The pass itself may have spent down to the reserve and yielded
+        // mid-way; close nothing here, the next poll's gate sees the reading.
       }
+    } else {
+      // The watch stopped being eligible (subscriptions off, binding refresh
+      // failing). Release the skip latch so a later starvation journals a
+      // fresh skip rather than being suppressed as a repeat, but keep the
+      // EPISODE open until the budget itself recovers — a budget that
+      // recovers during this window still owes its recovery row.
+      this.watchBudgetLow = false;
+      this.closeWatchBudgetEpisode();
     }
 
     if (this.inboundRecoveryPending) {
@@ -5083,6 +5195,79 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Record the REST budget from a successful response's headers. Called by
+   * the request hook on every response. A missing or malformed remaining
+   * header leaves the last known value untouched (a proxy that strips the
+   * header must not erase a real reading). The reset time is refreshed from
+   * the same response; if that header is absent the reset is cleared, so the
+   * gate falls back to protecting on the count alone rather than trusting a
+   * reset time from a different window.
+   */
+  private recordRateLimitBudget(
+    headers: Record<string, unknown> | undefined,
+  ): void {
+    const remaining = parseRateLimitCount(headers?.['x-ratelimit-remaining']);
+    if (remaining === undefined) return;
+    this.lastRateLimitRemaining = remaining;
+    const reset = parseRateLimitCount(headers?.['x-ratelimit-reset']);
+    this.lastRateLimitResetAt = reset === undefined ? undefined : reset * 1000;
+  }
+
+  /**
+   * Whether the watch pass must yield this poll to protect the notification
+   * lane. True only when a usable remaining reading is at or below the
+   * reserve AND its window has not already reset (a stale low count from a
+   * rolled-over window must not starve the watch). With no reading yet the
+   * watch runs normally; the reactive isWatchFailFastError backstop still
+   * covers a wrong estimate or a secondary limit.
+   */
+  private watchBudgetExhausted(): boolean {
+    const reserve = this.prWatchBudgetReserve;
+    // A reserve of 0 disables the gate outright. Without this, a remaining
+    // of 0 would still satisfy `0 <= 0` and skip the watch the operator
+    // explicitly opted out of protecting.
+    if (reserve === 0) return false;
+    if (this.lastRateLimitRemaining === undefined) return false;
+    if (
+      this.lastRateLimitResetAt !== undefined &&
+      Date.now() >= this.lastRateLimitResetAt
+    ) {
+      return false;
+    }
+    return this.lastRateLimitRemaining <= reserve;
+  }
+
+  /**
+   * Open a low-budget episode: latch the skip and journal its edge once.
+   * Shared by the poll-boundary gate and the in-pass yield so a mid-pass stop
+   * records the same row rather than a second vocabulary.
+   */
+  private noteWatchBudgetLow(): void {
+    this.watchBudgetEpisodeOpen = true;
+    if (this.watchBudgetLow) return;
+    this.watchBudgetLow = true;
+    this.recordPollDegraded('watch_budget_low', {
+      remaining: this.lastRateLimitRemaining ?? 0,
+      reserve: this.prWatchBudgetReserve,
+    });
+    process.stderr.write(
+      `[Channel:${this.name}] PR state watch skipped: REST budget ${this.lastRateLimitRemaining} at or below reserve ${this.prWatchBudgetReserve}; preserving budget for the notification lane\n`,
+    );
+  }
+
+  /**
+   * Close the episode once the budget is no longer exhausted. A still-low
+   * budget keeps it open: the watch being ineligible says nothing about the
+   * budget, and claiming recovery there would be a false report.
+   */
+  private closeWatchBudgetEpisode(): void {
+    if (!this.watchBudgetEpisodeOpen) return;
+    if (this.watchBudgetExhausted()) return;
+    this.watchBudgetEpisodeOpen = false;
+    this.recordPollDegraded('watch_budget_recovered');
+  }
+
+  /**
    * Journals a degraded dependency the poll loop itself survived: the poll
    * still reports `ok`, so without this row a binding scan that stalls every
    * notification is invisible in the timeline. Emitted only where the
@@ -6786,6 +6971,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Requests reserved for the notification lane: at or below this remaining
+   * budget the watch pass yields. Clamped like prWatchLimit; a configured 0
+   * is honoured (disables the gate) so an operator can opt out, while unset
+   * or invalid keeps the default. Rounds up so the reserve is never silently
+   * smaller than requested.
+   */
+  private get prWatchBudgetReserve(): number {
+    const configured: unknown = (this.config as GithubConfig)
+      .prWatchBudgetReserve;
+    if (
+      typeof configured === 'number' &&
+      Number.isFinite(configured) &&
+      configured >= 0
+    ) {
+      return Math.min(Math.ceil(configured), MAX_PR_WATCH_BUDGET_RESERVE);
+    }
+    return DEFAULT_PR_WATCH_BUDGET_RESERVE;
+  }
+
+  /**
    * Edge-triggered state watch over the PRs bound to live sessions. Runs
    * inside the existing poll loop; detection is API-level and costs no model
    * tokens until a real transition fires.
@@ -6978,6 +7183,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // and resume next pass.
     const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
     for (const [key, candidate] of watched) {
+      // Yield at the spend site, not only at the poll boundary: one pass can
+      // issue several requests per watched PR, so a pass entered just above
+      // the reserve would otherwise spend the whole reserve before the
+      // notification lane runs. Break (not return) so the baseline observed
+      // so far still reaches savePrWatchState below.
+      if (this.watchBudgetExhausted()) {
+        this.noteWatchBudgetLow();
+        break;
+      }
       try {
         // The state observation costs a pulls.get per watched PR per poll; skip
         // it when no state event is subscribed so a comment-only channel does

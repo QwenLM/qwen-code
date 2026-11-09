@@ -53,6 +53,36 @@ describe('github plugin validateConfig', () => {
     );
   });
 
+  it('requires deliverToBoundSessions for the watch budget reserve', () => {
+    expect(validate({ prWatchBudgetReserve: 300 })).toContain(
+      'prWatchBudgetReserve',
+    );
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 300 }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a reserve the descriptor admits but the getter would silently default', () => {
+    // exclusiveMinimum: -1 lets 0 disable the gate, but it also admits
+    // (-1, 0); those must be refused rather than becoming the default 200.
+    for (const reserve of [-0.5, -1, 'abc', Number.NaN]) {
+      expect(
+        validate({
+          deliverToBoundSessions: true,
+          prWatchBudgetReserve: reserve,
+        }),
+      ).toContain('must be a non-negative number');
+    }
+    // 0 disables, and a positive fraction is rounded up by the getter — both
+    // stay legal.
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 0 }),
+    ).toBeUndefined();
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 200.5 }),
+    ).toBeUndefined();
+  });
+
   it('accepts the full watch vocabulary, case-insensitively', () => {
     expect(
       validate({

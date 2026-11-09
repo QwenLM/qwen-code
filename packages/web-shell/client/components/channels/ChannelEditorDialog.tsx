@@ -125,6 +125,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     prCommentWatch: 'channels.editor.field.github.prCommentWatch',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
     prWatchLimit: 'channels.editor.field.github.prWatchLimit',
+    prWatchBudgetReserve: 'channels.editor.field.github.prWatchBudgetReserve',
     boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
@@ -156,6 +157,7 @@ const BOUND_SESSION_FIELD_KEYS = new Set([
   'prCommentWatch',
   'prWatchEvents',
   'prWatchLimit',
+  'prWatchBudgetReserve',
   'boundSessionActions',
 ]);
 

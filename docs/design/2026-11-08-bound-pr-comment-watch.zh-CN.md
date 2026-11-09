@@ -45,7 +45,7 @@
 
 ### 1. 轮询 —— channel PR watch
 
-独立的 `watchPrComments` 与 `watchOnePr` 一起在每 PR watch pass 中运行，受 `deliverToBoundSessions` 与关闭开关门禁，独立于 `prWatchEvents`。仅评论的 channel（`prWatchEvents` 为空）完全跳过 `watchOnePr`，因此不付每轮 `pulls.get`：
+独立的 `watchPrComments` 与 `watchOnePr` 一起在每 PR watch pass 中运行，受 `deliverToBoundSessions` 与关闭开关门禁，独立于 `prWatchEvents`。仅评论的 channel（`prWatchEvents` 为空）完全跳过 `watchOnePr`，因此不付每轮 `pulls.get`。该 pass 受[预算保留额](2026-11-09-github-channel-budget-awareness.zh-CN.md)约束：轮次边界的门与每 PR 花费点的检查都排在评论抓取之前，故预算不足时评论监视与状态检测一样被推迟，持久化的 `commentSince` 游标从停下处续跑：
 
 - 抓取绑定 PR 的会话评论（`issues.listComments`）与行内 review 评论（`pulls.listReviewComments`），用 `since` 游标分页。按固定间隔复查（`COMMENT_RECHECK_INTERVAL_MS`，2 分钟）；没有 `updated_at` 快路径。两个抓取沿用状态 watch 的限流快速退出重试判断，并把共享凭据/限流错误交给本轮中止逻辑。
 - 只有**同账号**评论成为候选（`user.login` 等于 channel 的 `botUsername`）；异账号评论留给通知 lane。

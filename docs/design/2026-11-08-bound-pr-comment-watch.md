@@ -45,7 +45,7 @@ The practical failure (observed 2026-11-08 on PR #16587, session `7bddc58f`): a 
 
 ### 1. Polling — channel PR watch
 
-A separate `watchPrComments` runs alongside `watchOnePr` in the per-PR watch pass, gated on `deliverToBoundSessions` and the kill-switch, independent of `prWatchEvents`. A comment-only channel (empty `prWatchEvents`) skips `watchOnePr` entirely, so it pays no per-poll `pulls.get`:
+A separate `watchPrComments` runs alongside `watchOnePr` in the per-PR watch pass, gated on `deliverToBoundSessions` and the kill-switch, independent of `prWatchEvents`. A comment-only channel (empty `prWatchEvents`) skips `watchOnePr` entirely, so it pays no per-poll `pulls.get`. The pass is subject to the [budget reserve](2026-11-09-github-channel-budget-awareness.md): both the poll-boundary gate and the per-PR spend-site check sit ahead of the comment fetches, so a low budget defers comment watching exactly as it defers state detection, and the durable `commentSince` cursor resumes where it stopped:
 
 - Fetch conversation comments (`issues.listComments`) and inline review comments (`pulls.listReviewComments`) for the bound PR, paginated with a `since` cursor. Re-check on a fixed interval (`COMMENT_RECHECK_INTERVAL_MS`, 2 minutes); there is no `updated_at` fast path. Both fetches use the state watch's fail-fast retry predicate and hand shared credential/rate-limit errors to the pass-abort logic.
 - Only **same-account** comments become candidates (`user.login` equals the channel's `botUsername`); other-account comments are left to the notification lanes.
