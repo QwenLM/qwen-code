@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -86,6 +87,34 @@ describe('selectPathsDeniedByPermissionRules', () => {
         paths,
       ),
     ).toEqual(new Set(paths));
+  });
+
+  it('canonicalizes each result path once per call', async () => {
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () =>
+        ['a', 'b', 'c', 'd'].map((dir) => `Read(./${dir}/**)`),
+      getProjectRoot: () => process.cwd(),
+      getCwd: () => process.cwd(),
+    });
+    pm.initialize();
+    const paths = [path.resolve('d/one.txt'), path.resolve('two.txt')];
+    const realpath = vi.spyOn(fs.realpathSync, 'native');
+
+    const denied = await selectPathsDeniedByPermissionRules(
+      pm,
+      ToolNames.GREP,
+      process.cwd(),
+      paths,
+    );
+    const resolved = realpath.mock.calls.map(([target]) => target);
+    realpath.mockRestore();
+
+    expect(denied).toEqual(new Set([paths[0]]));
+    for (const target of paths) {
+      expect(resolved.filter((p) => p === target)).toHaveLength(1);
+    }
   });
 
   it('skips evaluation when only an allow rule matches the result', async () => {

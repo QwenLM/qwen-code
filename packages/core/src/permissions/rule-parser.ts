@@ -18,12 +18,18 @@ import {
 import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
-const pathPatternCache = new AsyncLocalStorage<
-  Map<string, picomatch.Matcher[]>
->();
+// A search checks every result path against every rule, so within one call
+// each rule pattern is compiled and each path canonicalized only once.
+const pathPatternCache = new AsyncLocalStorage<{
+  matchers: Map<string, picomatch.Matcher[]>;
+  canonicalPaths: Map<string, string[]>;
+}>();
 
 export function withPathPatternCache<T>(callback: () => T): T {
-  return pathPatternCache.run(new Map(), callback);
+  return pathPatternCache.run(
+    { matchers: new Map(), canonicalPaths: new Map() },
+    callback,
+  );
 }
 
 /**
@@ -1519,7 +1525,7 @@ export function matchesPathPattern(
   cwd: string,
   matchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
-  const cache = pathPatternCache.getStore();
+  const cache = pathPatternCache.getStore()?.matchers;
   const cacheKey = `${specifier}\0${projectRoot}\0${cwd}\0${matchMode}`;
   let matchers = cache?.get(cacheKey);
   if (!matchers) {
@@ -1562,13 +1568,19 @@ function getCanonicalPathMatchCandidates(
   filePath: string,
   cwd: string,
 ): string[] {
+  const cache = pathPatternCache.getStore()?.canonicalPaths;
+  const cacheKey = `${filePath}\0${cwd}`;
+  const cached = cache?.get(cacheKey);
+  if (cached) return cached;
   const candidates = new Set([toPosixPath(filePath)]);
   const absolutePath = resolveWithoutNormalizing(cwd, filePath);
   const canonicalPath = realpathNearestExisting(absolutePath);
   if (canonicalPath !== undefined) {
     candidates.add(toPosixPath(canonicalPath));
   }
-  return [...candidates];
+  const result = [...candidates];
+  cache?.set(cacheKey, result);
+  return result;
 }
 
 function resolveWithoutNormalizing(base: string, filePath: string): string {
