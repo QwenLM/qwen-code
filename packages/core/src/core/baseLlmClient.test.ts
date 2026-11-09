@@ -544,7 +544,14 @@ describe('BaseLlmClient', () => {
       const stream = (async function* () {
         yield createMockTextResponse('partial');
         yield {
+          candidates: [{ finishReason: 'STOP' }],
+        } as GenerateContentResponse;
+        yield {
           candidates: [{ finishReason: 'MAX_TOKENS' }],
+        } as GenerateContentResponse;
+        // Providers can emit usage-only chunks after the final candidate.
+        yield {
+          usageMetadata: { totalTokenCount: 3 },
         } as GenerateContentResponse;
       })();
 
