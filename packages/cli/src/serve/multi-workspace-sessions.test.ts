@@ -6546,6 +6546,14 @@ describe('multi-workspace session dispatch', () => {
         .expect(400);
       expect(filtered.body.code).toBe('invalid_session_live_only_filter');
 
+      const questionSorted = await request(trusted.app)
+        .get(
+          '/workspaces/secondary-id/sessions?liveOnly=1&sortBy=lastUserPromptAt',
+        )
+        .set('Host', host())
+        .expect(400);
+      expect(questionSorted.body.code).toBe('invalid_session_live_only_filter');
+
       const invalid = await request(trusted.app)
         .get('/workspaces/secondary-id/sessions?liveOnly=0')
         .set('Host', host())
