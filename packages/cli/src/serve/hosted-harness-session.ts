@@ -13223,7 +13223,7 @@ export function registerHostedHarnessSessionRoutes(
               // below.
               heldDrainUnproven = true;
               writeStderrLineSafe(
-                `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (R28-1).`,
+                `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (#16579).`,
               );
               continue;
             }
