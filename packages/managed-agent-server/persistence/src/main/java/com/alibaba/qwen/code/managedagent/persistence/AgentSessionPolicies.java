@@ -211,6 +211,8 @@ final class AgentSessionPolicies {
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.requireSessionVisibility(
+                session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
         }
@@ -254,6 +256,8 @@ final class AgentSessionPolicies {
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.requireSessionVisibility(
+                session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
         }
@@ -524,6 +528,8 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.requireSessionVisibility(
+                session, actorId, workspaces);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
                     "Model selection requires a Workspace Session");
@@ -594,6 +600,8 @@ final class AgentSessionPolicies {
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.requireSessionVisibility(
+                session, actorId, workspaces);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
                     "Approval selection requires a Workspace Session");

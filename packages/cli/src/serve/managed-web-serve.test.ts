@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runManagedWebServe } from './managed-web-serve.js';
 
-const browserToken = 'browser-token-with-thirty-two-independent-bytes';
+const browserToken = 'browser-token';
 const signingKey = 'operator-signing-key-with-thirty-two-bytes\n ';
 
 describe('dedicated Managed Web gateway', () => {
@@ -110,7 +110,7 @@ describe('dedicated Managed Web gateway', () => {
     });
   }
 
-  it('serves public assets and authenticated Managed-only boot without credentials', async () => {
+  it('serves public assets and authenticated Managed-only boot with a short browser token', async () => {
     await start();
     const html = await (await fetch(`${gateway!.url}/`)).text();
     expect(html).toContain('<meta name="qwen-managed-app" content="true">');
@@ -277,9 +277,15 @@ describe('dedicated Managed Web gateway', () => {
   });
 
   it('fails before listening for invalid configuration or missing, weak, shared credentials', async () => {
-    for (const token of [undefined, 'short', signingKey, signingKey.trim()]) {
+    for (const token of [
+      undefined,
+      '',
+      ' \t ',
+      signingKey,
+      signingKey.trim(),
+    ]) {
       await expect(start({ token })).rejects.toThrow(
-        'independent browser and signing keys',
+        'non-empty browser token and an independent signing key',
       );
     }
     for (const values of [
@@ -297,7 +303,7 @@ describe('dedicated Managed Web gateway', () => {
     await saveConfig();
     await writeFile(keyFile, 'weak');
     await expect(start()).rejects.toThrow(
-      'independent browser and signing keys',
+      'non-empty browser token and an independent signing key',
     );
     await writeFile(keyFile, signingKey);
     vi.stubEnv('QWEN_SERVER_TOKEN', browserToken);

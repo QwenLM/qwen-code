@@ -151,6 +151,10 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.Store.class,
+                            List.of("MemoryStore")),
+                    entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.StoreList.class,
+                            List.of("MemoryStoreList")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.OptionsRequest.class, List.of("WebShellSessionWorktreeOptionsRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.QueryRequest.class, List.of("WebShellSessionWorktreeQueryRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.InspectRequest.class, List.of("WebShellSessionWorktreeInspectRequest")),
@@ -1728,6 +1732,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "sessionWorktreeCleanup", 404,
                 post("/v1/agents/workspaces/ws-default/worktrees/missing/cleanup").header(TENANT, workspaceTenant).principal(actor)
                         .header(IDEMPOTENCY_KEY, "cleanup"), null);
+        exchange(drift, "createPersonalMemoryStore", 503,
+                post("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), "{}");
+        exchange(drift, "listPersonalMemoryStores", 503,
+                get("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), null);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
