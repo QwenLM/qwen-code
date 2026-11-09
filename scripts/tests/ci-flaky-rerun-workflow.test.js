@@ -1808,26 +1808,50 @@ describe('ci failure patrol workflow', () => {
       join(home, '.gitconfig'),
       `[core]\n\thooksPath = ${hooks}\n[user]\n\tname = t\n\temail = t@e\n`,
     );
-    // The release runner exports an empty job-wide GIT_CONFIG_GLOBAL, which
-    // outranks $HOME/.gitconfig; pin it to the planted file so the positive
-    // control still exercises the config the fixture wrote.
-    const fixtureGitConfig = {
-      GIT_CONFIG_GLOBAL: join(home, '.gitconfig'),
+    // The release runner appends GIT_CONFIG_GLOBAL=<empty file> to
+    // $GITHUB_ENV before `npm run test:scripts`, and that outranks
+    // $HOME/.gitconfig. Reproduce the ambient on every lane so the pin below
+    // is load-bearing here too, not only on a release run.
+    const releaseGitConfig = join(root, 'release-gitconfig');
+    writeFileSync(releaseGitConfig, '');
+    const releaseAmbient = {
+      GIT_CONFIG_GLOBAL: releaseGitConfig,
       GIT_CONFIG_COUNT: '0',
       GIT_CONFIG_PARAMETERS: '',
+    };
+    // Pin the global file back to the planted config so the positive control
+    // still exercises the hooksPath the fixture wrote.
+    const fixtureGitConfig = {
+      GIT_CONFIG_GLOBAL: join(home, '.gitconfig'),
     };
     const git = (args, env) =>
       execFileSync('git', args, {
         cwd: workspace,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, HOME: home, ...fixtureGitConfig, ...env },
+        env: {
+          ...process.env,
+          ...releaseAmbient,
+          HOME: home,
+          ...fixtureGitConfig,
+          ...env,
+        },
       });
     const seed = () => {
       git(['init', '-q']);
       writeFileSync(join(workspace, 'driver.mjs'), 'trusted driver\n');
       git(['add', '.']);
-      git(['commit', '-qm', 'seed']);
+      // Identity via -c, not the planted config: removing the pin must fail
+      // the positive control below, not this commit.
+      git([
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@e',
+        'commit',
+        '-qm',
+        'seed',
+      ]);
     };
     try {
       seed();
