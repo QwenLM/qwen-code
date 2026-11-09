@@ -3452,6 +3452,66 @@ describe('useComposerCore tags', () => {
     );
   });
 
+  describe('quote draft persistence on non-persistent hosts', () => {
+    const quoteTag = {
+      id: 'quote:draft-1',
+      kind: 'quote',
+      value: 'fragment',
+      serialized: '<quoted-message>fragment</quoted-message>',
+    };
+    const sessionKey = getSessionDraftKey('quote-draft-session');
+
+    it('keeps the quote chip when leaving and returning to the session', async () => {
+      vi.useFakeTimers();
+      const mounted = await mount({
+        sessionId: 'quote-draft-session',
+        atWorkspaceCwd: '/workspace/shared',
+      });
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      act(() => vi.advanceTimersByTime(2000));
+      expect(localStorage.getItem(sessionKey)).toContain('"kind":"quote"');
+
+      // split -> overview -> split: leave the session and come back.
+      mounted.switchSession('other-session', '/workspace/shared');
+      mounted.switchSession('quote-draft-session', '/workspace/shared');
+
+      const view = latest!.viewRef.current!;
+      expect(view.state.doc.toString()).toContain(quoteTag.serialized);
+      expect(
+        getInlineComposerTags(view).some((tag) => tag.kind === 'quote'),
+      ).toBe(true);
+    });
+
+    it('restores the quote chip after a full remount', async () => {
+      vi.useFakeTimers();
+      await mount({
+        sessionId: 'quote-draft-session',
+        atWorkspaceCwd: '/workspace/shared',
+      });
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      act(() => vi.advanceTimersByTime(2000));
+      act(() => root?.unmount());
+      container?.remove();
+      root = null;
+      container = null;
+      latest = null;
+
+      await mount({
+        sessionId: 'quote-draft-session',
+        atWorkspaceCwd: '/workspace/shared',
+      });
+      const view = latest!.viewRef.current!;
+      expect(view.state.doc.toString()).toContain(quoteTag.serialized);
+      expect(
+        getInlineComposerTags(view).some((tag) => tag.kind === 'quote'),
+      ).toBe(true);
+    });
+  });
+
   it('updates inline tag state when a document change removes the last tag', async () => {
     await mount();
 

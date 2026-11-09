@@ -1296,7 +1296,7 @@ function validDraftReferences(draft: ComposerReferenceDraft) {
       start >= 0 &&
       end > start &&
       end <= draft.text.length &&
-      tag.kind === 'file' &&
+      (tag.kind === 'file' || tag.kind === 'quote') &&
       draft.text.slice(start, end) === getComposerTagSerialized(tag),
   );
 }
@@ -2074,7 +2074,7 @@ export function useComposerCore(
               text: stored.text,
               inlineTags: persistFileReferencesRef.current
                 ? stored.inlineTags
-                : [],
+                : stored.inlineTags.filter(({ tag }) => tag.kind === 'quote'),
             }
           : content,
         draftAttachmentStore,
@@ -2590,21 +2590,30 @@ export function useComposerCore(
     viewRef.current?.focus();
   }, [draftHasQuote, emitImageIngestionNotice, setShellMode, t]);
   function referenceDraft(view: EditorView | null) {
-    if (!persistFileReferencesRef.current) return undefined;
+    const placements = view ? getInlineComposerTagPlacements(view) : [];
+    const quotePlacements = placements.filter(
+      ({ tag }) => tag.kind === 'quote',
+    );
+    if (!persistFileReferencesRef.current) {
+      return quotePlacements.length > 0
+        ? { inlineTags: quotePlacements, tags: [] }
+        : undefined;
+    }
     return {
-      inlineTags: view
-        ? getInlineComposerTagPlacements(view).filter(
-            ({ tag }) => tag.kind === 'file',
-          )
-        : [],
+      inlineTags: placements.filter(
+        ({ tag }) => tag.kind === 'file' || tag.kind === 'quote',
+      ),
       tags: composerTagsRef.current.filter((tag) => tag.kind === 'file'),
     };
   }
   const referenceEffects = useCallback(
     (draft: ComposerReferenceDraft | null) => {
       return (
-        persistFileReferencesRef.current && draft
-          ? validDraftReferences(draft)
+        draft
+          ? validDraftReferences(draft).filter(
+              ({ tag }) =>
+                persistFileReferencesRef.current || tag.kind === 'quote',
+            )
           : []
       ).map(({ start, end, tag }) =>
         addInlineTagEffect.of({
