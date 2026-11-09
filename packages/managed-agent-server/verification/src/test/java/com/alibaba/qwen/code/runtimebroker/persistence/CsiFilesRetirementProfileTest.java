@@ -10,6 +10,8 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CsiFilesRetirementProfileTest {
     private final ContextBinding workspace = new ContextBinding("tenant", "workspace", 3,
@@ -21,6 +23,24 @@ class CsiFilesRetirementProfileTest {
                 CsiFilesRetirementProfile.CAPABILITY_DIGEST);
         assertEquals("sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
                 CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+    }
+
+    @Test
+    void diagnosticsAreAnIndependentProfileWithAnExactStorageFloor() {
+        String session = UUID.randomUUID().toString();
+        var legacy = CsiFilesRetirementProfile.request(workspace, "/workspace", session);
+        var diagnostics = CsiFilesRetirementProfile.request(workspace, "/workspace", session,
+                CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE);
+        assertEquals("sha256:e973d9401c00a917e8b3de2d8fd63a0d1b09e3c4407aecf64826cdfff6c1c321",
+                diagnostics.getScope().getCapabilityDigest());
+        assertNotEquals(legacy.requestKey(), diagnostics.requestKey());
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(legacy.getScope(), 1));
+        assertFalse(CsiFilesRetirementProfile.supportsStorage(legacy.getScope(), 3));
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(diagnostics.getScope(), 1));
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(diagnostics.getScope(), 3));
+        assertFalse(CsiFilesRetirementProfile.supportsStorage(diagnostics.getScope(), 2));
+        assertFalse(CsiFilesRetirementProfile.matches(CsiFilesRetirementProfile.PROFILE,
+                diagnostics.getScope().getCapabilityDigest()));
     }
 
     @Test

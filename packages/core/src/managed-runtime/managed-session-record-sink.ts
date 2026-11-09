@@ -22,7 +22,9 @@ import {
   MANAGED_MESSAGE_INLINE_BYTES,
   publishManagedMessageBody,
 } from './managed-message-chunks.js';
+import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
+import { getManagedSessionDiagnostics } from './managed-session-diagnostics.js';
 
 /**
  * The record shapes the message projection can carry today.
@@ -316,6 +318,12 @@ export class ManagedSessionRecordSink {
    * carries beyond the fields the event indexes.
    */
   private async commitTurnSettled(record: ChatRecord): Promise<void> {
+    const diagnostics = getManagedSessionDiagnostics(this.authority);
+    const commit = () => this.commitTurnSettledOwned(record);
+    return diagnostics ? diagnostics.serialCommit(commit) : commit();
+  }
+
+  private async commitTurnSettledOwned(record: ChatRecord): Promise<void> {
     const payload = record.systemPayload as
       | { promptId?: unknown; state?: unknown; stopReason?: unknown }
       | undefined;
@@ -350,6 +358,10 @@ export class ManagedSessionRecordSink {
       occurredAt: Date.parse(record.timestamp) || Date.now(),
       eventId: `turn:${turnId}`,
     };
+    const usageRef =
+      (await getManagedSessionDiagnostics(this.authority)?.publishTurnFallback(
+        turnId,
+      )) ?? null;
     if (actor.class === 'harness' && held !== undefined) {
       const authorization = await this.authority.harnessRunAuthorization();
       if (
@@ -361,7 +373,7 @@ export class ManagedSessionRecordSink {
         await this.authority.commitTurnComplete(
           command,
           {
-            turn,
+            turn: { ...turn, usageRef },
             boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
             state: (identity, previous) =>
               createNextTurnReadyHarnessCheckpoint({
@@ -401,7 +413,7 @@ export class ManagedSessionRecordSink {
           outcome: turn.outcome,
           stopReason: turn.stopReason,
           resultRef,
-          usageRef: null,
+          usageRef,
           pendingOwnersRef: null,
         },
       }),
@@ -498,6 +510,11 @@ export class ManagedSessionRecordSink {
   /** Reader-facing records rebuilt from the authoritative log. */
   project(throughSequence?: number): Promise<ChatRecord[]> {
     return this.projection.project(throughSequence);
+  }
+
+  /** See `ManagedSessionMessageProjection.rememberBody`. */
+  rememberMessageBody(ref: ManagedSessionDurableRef, body: Buffer): void {
+    this.projection.rememberBody(ref, body);
   }
 
   projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {

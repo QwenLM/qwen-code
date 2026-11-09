@@ -5,8 +5,10 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -50,8 +52,27 @@ async function fixture(t) {
   let loseJit = false;
   let failDelete = false;
   let deleteStatus = 422;
+  let extraRunners = [];
+  let rejectFirstDelete = false;
   let jitFailure = null;
   let listFailure = null;
+  const layerlessContainers = new Set();
+  const goneContainers = new Set();
+  const dockerError = (message, stderr) =>
+    Object.assign(new Error(message), { exitCode: 1, status: 0, stderr });
+  const storageFailure = (id) => {
+    if (goneContainers.has(id))
+      return dockerError(
+        'docker failed (exit 1)',
+        `Error response from daemon: No such container: ${id}`,
+      );
+    if (layerlessContainers.has(id))
+      return dockerError(
+        'docker failed (exit 1)',
+        `Error response from daemon: RWLayer of container ${id} is unexpectedly nil`,
+      );
+    return null;
+  };
   const labelsFromArgs = (args) => {
     const labels = {};
     for (let i = 0; i < args.length; i += 1) {
@@ -87,16 +108,24 @@ async function fixture(t) {
         return JSON.stringify({ runner, encoded_jit_config: 'jit-secret' });
       }
       if (args.includes('DELETE')) {
+        if (rejectFirstDelete) {
+          rejectFirstDelete = false;
+          const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
+          error.status = deleteStatus;
+          throw error;
+        }
         if (failDelete) {
           const error = new Error(`gh failed (exit 1, HTTP ${deleteStatus})`);
           error.status = deleteStatus;
           throw error;
         }
-        runner = undefined;
+        const id = Number(path.split('/').pop());
+        if (runner?.id === id) runner = undefined;
+        extraRunners = extraRunners.filter((entry) => entry.id !== id);
         return '';
       }
       if (listFailure) throw listFailure();
-      return JSON.stringify(runner ? [runner] : []);
+      return JSON.stringify(runner ? [runner, ...extraRunners] : extraRunners);
     }
     if (args[0] === 'inspect') {
       const entry = containers.get(args[args.length - 1]);
@@ -139,8 +168,24 @@ async function fixture(t) {
       containers.set(id, { labels: labelsFromArgs(args) });
       return id;
     }
-    if (args[0] === 'logs') return 'runner log';
+    if (args[0] === 'logs') {
+      const failure = storageFailure(args[args.length - 1]);
+      if (failure) throw failure;
+      return 'runner log';
+    }
+    if (args[0] === 'cp') {
+      const failure = storageFailure(String(args[1]).split(':')[0]);
+      if (failure) throw failure;
+      return '';
+    }
     if (args[0] === 'rm') {
+      const failure = storageFailure(args[args.length - 1]);
+      if (failure) {
+        // A daemon-dropped container also disappears from later ps calls.
+        if (goneContainers.has(args[args.length - 1]))
+          containers.delete(args[args.length - 1]);
+        throw failure;
+      }
       if (failRemove) throw new Error('docker unavailable');
       if (!keepContainerAfterRemove) containers.delete(args[args.length - 1]);
       return '';
@@ -189,12 +234,36 @@ async function fixture(t) {
         });
     },
     setRunner: (value) => {
-      runner = value;
+      runner =
+        'status' in value
+          ? { busy: false, ...value }
+          : { status: 'offline', busy: false, ...value };
+    },
+    setExtraRunners: (values) => {
+      extraRunners = values.map((value) => ({
+        status: 'offline',
+        busy: false,
+        ...value,
+      }));
+    },
+    runnerList: () => [...(runner ? [runner] : []), ...extraRunners],
+    setRejectFirstDelete: (status = 422) => {
+      rejectFirstDelete = true;
+      deleteStatus = status;
     },
     addOrphanContainer(labels) {
       const id = `container-orphan-${containers.size}`;
       containers.set(id, { labels });
       return id;
+    },
+    setLayerless: (id) => {
+      layerlessContainers.add(id);
+    },
+    setGone: (id) => {
+      goneContainers.add(id);
+    },
+    removeContainerRecord: (id) => {
+      containers.delete(id);
     },
   };
 }
@@ -604,6 +673,376 @@ test('startup reclaims a live container before replenishing after a crash', asyn
       .length,
     1,
   );
+});
+
+test('multi-identity orphan pile without slot state self-heals instead of stalling', async (t) => {
+  // hz4 incident: address-pool exhaustion left several `Created`
+  // containers per slot, each with a different qwen.instance, and no
+  // slot state. recoverIdentity refuses to pick one — but with no state
+  // every leftover is an orphan, so the cycle must sweep them all and
+  // replenish instead of failing identically forever.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  const orphanA = f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  const orphanB = f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  const orphanNetwork = f.addForeignNetwork({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-cccccccc-cccc-4ccc-cccc-cccccccccccc',
+  });
+  // A registration orphaned by one of the swept containers, under this
+  // slot's suffixed naming scheme.
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef', busy: true });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const removedOrphans = f.calls.filter(
+    (c) =>
+      c.program === 'docker' &&
+      c.args[0] === 'rm' &&
+      (c.args.includes(orphanA) || c.args.includes(orphanB)),
+  );
+  assert.equal(removedOrphans.length, 2, 'both orphan containers removed');
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'network' &&
+        c.args[1] === 'rm' &&
+        c.args.includes(orphanNetwork),
+    ),
+    'orphan network removed',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'orphaned registration swept by the slot naming scheme',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenished in the same cycle',
+  );
+});
+
+test('the identity-less sweep never deletes an online registration', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-deadbeef',
+    status: 'online',
+    busy: true,
+  });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'an online registration may belong to a live runner elsewhere',
+  );
+});
+
+test('the identity-less sweep keeps the HTTP status of a rejected deletion', async (t) => {
+  // A 403/429 on the sweep's DELETE must escape with .status intact so the
+  // retry loop can pick the rate-limit backoff ladder; a bare rewrap would
+  // classify a rate-limit storm as an ordinary failure.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef' });
+  f.setFailDelete(true, 429);
+  await assert.rejects(
+    createManager(f.config, { command: f.command }).cycle(1),
+    (error) =>
+      error.status === 429 && /deletion was rejected/.test(error.message),
+  );
+});
+
+test('a rejected sweep deletion is retried on the next cycle before the pile is gone', async (t) => {
+  // The sweep runs while the leftovers still exist: a rejected DELETE
+  // must stay reachable next cycle. Sweeping after removal leaked the
+  // registration forever — no state and no leftovers means cleanup()
+  // never runs again.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef', busy: true });
+  f.setRejectFirstDelete(422);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /deletion was rejected/);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+    'no replacement while the rejected registration survives',
+  );
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ).length,
+    2,
+    'the next cycle retries the same registration',
+  );
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [],
+    'the rejected registration is gone after the retry',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenishes in the retry cycle',
+  );
+});
+
+test('a 429-rejected sweep deletion promises the retry and the next cycle completes it', async (t) => {
+  // Two-cycle probe. Cycle 1 has its DELETE refused while the orphan pile is
+  // still on disk, so the error must name the retry and the registration must
+  // survive; cycle 2 must actually delete it. Sweeping after the pile was
+  // removed left the slot with neither state nor leftovers, so cleanup() never
+  // ran again and the registration leaked.
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef' });
+  f.setRejectFirstDelete(429);
+  const manager = createManager(f.config, { command: f.command });
+  const deletedIds = () =>
+    f.calls
+      .filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .map((c) =>
+        c.args.find((v) => v.startsWith('/repos/owner/repo/actions/runners/')),
+      )
+      .filter(Boolean)
+      .map((v) => Number(v.split('/').pop()));
+  const creates = () =>
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length;
+
+  await assert.rejects(
+    manager.cycle(1),
+    /Runner 77 deletion was rejected \(HTTP 429\); retrying on the next cycle/,
+  );
+  assert.deepEqual(deletedIds(), [77], 'cycle 1 attempted exactly this slot');
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [77],
+    'the rejected registration survives cycle 1',
+  );
+  assert.equal(creates(), 0, 'no replacement while the rejection stands');
+
+  await manager.cycle(1);
+  // Cycle 2 also deletes the runner it just created for the job, so count only
+  // the registration under test.
+  assert.deepEqual(
+    deletedIds().filter((id) => id === 77),
+    [77, 77],
+    'cycle 2 retries the same runner',
+  );
+  assert.deepEqual(
+    f
+      .runnerList()
+      .map((entry) => entry.id)
+      .filter((id) => id === 77),
+    [],
+    'the registration is gone after the retry',
+  );
+});
+
+test('a foreign or missing identity blocks sweeping even this slot offline registration', async (t) => {
+  // The naming scheme assumes poolId is unique per host, so a pile whose
+  // instance labels are not all this slot's means the resources may belong to
+  // another pool sharing the host. Nothing may be swept by name then — not
+  // even this slot's own offline registration — and the slot must not be
+  // replenished while the pile blocks it. Another slot's registration and an
+  // online one are never candidates in any case.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-other-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({ 'qwen.pool': 'trial', 'qwen.slot': '1' });
+  f.setRunner({ id: 88, name: 'ecs-qwen-trial-01-cafe1234' });
+  f.setExtraRunners([
+    { id: 55, name: 'ecs-qwen-trial-02-abcdef12' },
+    { id: 99, name: 'ecs-qwen-trial-01-beef9999', status: 'online' },
+  ]);
+  const manager = createManager(f.config, { command: f.command });
+
+  await assert.rejects(
+    manager.cycle(1),
+    /Orphaned resources carry no unambiguous slot identity; manual reconciliation required/,
+  );
+  assert.deepEqual(
+    f.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE')),
+    [],
+    'no registration DELETE at all on a foreign or missing identity',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+    'the slot is not replenished while the pile blocks it',
+  );
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [88, 55, 99],
+    'this slot offline, the other slot, and the online registration all survive',
+  );
+});
+
+test('the identity-less sweep never deletes a registration without a status', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-deadbeef',
+    status: undefined,
+  });
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'only registrations GitHub explicitly reports offline may be swept',
+  );
+});
+
+test('the identity-less sweep only deletes registrations under the slot naming scheme', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-deadbeef' });
+  f.setExtraRunners([
+    { id: 78, name: 'ecs-qwen-trial-01-scratch' },
+    { id: 79, name: 'ecs-qwen-trial-02-abcdef12' },
+    { id: 80, name: 'shared-linux-runner' },
+  ]);
+  await createManager(f.config, { command: f.command }).cycle(1);
+  const deleted = f.calls
+    .filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+    .map((c) =>
+      c.args
+        .find((v) => v.startsWith('/'))
+        .split('/')
+        .pop(),
+    )
+    .filter((id) => ['77', '78', '79', '80'].includes(id));
+  assert.deepEqual(
+    deleted,
+    ['77'],
+    'prefix siblings, other slots, and unrelated runners are never swept',
+  );
+  assert.deepEqual(
+    f.runnerList().map((entry) => entry.id),
+    [78, 79, 80],
+  );
+});
+
+test('orphan log archives stay prunable by the log pruner', async (t) => {
+  const f = await fixture(t);
+  const pool = { 'qwen.pool': 'trial', 'qwen.slot': '1' };
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.addOrphanContainer({
+    ...pool,
+    'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const orphanLogs = (await readdir(f.config.logDir)).filter((name) =>
+    name.includes('-orphan-'),
+  );
+  assert.ok(orphanLogs.length >= 1, 'orphan logs are archived');
+  for (const name of orphanLogs) {
+    const past = new Date(Date.now() - 8 * 86400000);
+    await utimes(join(f.config.logDir, name), past, past);
+  }
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '2',
+    'qwen.instance': 'ecs-qwen-trial-2-cccccccc-cccc-4ccc-cccc-cccccccccccc',
+  });
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '2',
+    'qwen.instance': 'ecs-qwen-trial-2-dddddddd-dddd-4ddd-dddd-dddddddddddd',
+  });
+  await manager.cycle(2);
+  const remaining = await readdir(f.config.logDir);
+  for (const name of orphanLogs)
+    assert.ok(
+      !remaining.includes(name),
+      `aged orphan archive ${name} is recognized and pruned`,
+    );
 });
 
 test('accepts immutable local image IDs and rejects mutable tags and invalid configuration', async (t) => {
@@ -1077,20 +1516,40 @@ test('an orphaned container is reclaimed from its instance label', async (t) => 
   );
 });
 
-test('an orphaned container with an unidentifiable label still blocks replacement', async (t) => {
+test('a foreign-labeled orphan is removed but registration sweeping stays blocked', async (t) => {
   const f = await fixture(t);
-  f.addOrphanContainer({
+  const foreign = f.addOrphanContainer({
     'qwen.pool': 'trial',
     'qwen.slot': '1',
     'qwen.instance': 'ecs-qwen-other-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
   });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
   const manager = createManager(f.config, { command: f.command });
   await assert.rejects(manager.cycle(1), /manual reconciliation/);
-  await assert.rejects(manager.cycle(1), /manual reconciliation/);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes(foreign),
+    ),
+    'the foreign-labeled resource in our slot namespace is still removed',
+  );
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'registrations are never swept by name on a foreign identity',
+  );
+  await manager.cycle(1);
   assert.equal(
     f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
       .length,
-    0,
+    1,
+    'replenishes on the next cycle once the foreign resource is gone',
   );
 });
 
@@ -1114,8 +1573,12 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
   );
 });
 
-test('disagreeing resource labels are reported as ambiguous, not missing', async (t) => {
+test('disagreeing labels keep reporting while Docker refuses removals', async (t) => {
   const f = await fixture(t);
+  const manager = createManager(f.config, { command: f.command });
+  // While Docker refuses removals the pile cannot be swept, so an
+  // ambiguous identity must delete nothing and keep reporting.
+  f.setFailRemove(true);
   f.addOrphanContainer({
     'qwen.pool': 'trial',
     'qwen.slot': '1',
@@ -1126,12 +1589,12 @@ test('disagreeing resource labels are reported as ambiguous, not missing', async
     'qwen.slot': '1',
     'qwen.instance': 'ecs-qwen-trial-1-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
   });
-  const manager = createManager(f.config, { command: f.command });
-  await assert.rejects(manager.cycle(1), /labels disagree/);
+  await assert.rejects(manager.cycle(1), /docker unavailable/);
   assert.equal(
-    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
     0,
-    'an ambiguous identity still deletes nothing',
+    'no replacement while the ambiguous pile survives',
   );
 });
 
@@ -1231,28 +1694,11 @@ test('a registration retry uses a fresh unique name untouched by a leftover', as
 });
 
 test('identical failures past the time threshold raise one stall alert; recovery resets it', async (t) => {
-  const f = await fixture(t);
-  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
-    mode: 0o755,
-  });
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
-  t.after(() => {
-    process.env.PATH = previousPath;
-  });
-  const messages = [];
-  const previousLog = console.log;
-  console.log = (message) => messages.push(String(message));
-  t.after(() => {
-    console.log = previousLog;
-  });
+  const { f, alerts, clock, messages } = await stallHarness(t);
   // The threshold is wall-clock, so drive the clock through the injected
   // sleep. Jitter is pinned to its floor: delays 5+10+20+40 s carry the
   // fifth identical failure past a 60 s threshold, and the alert fires
   // when that failure is observed.
-  let now = 1_000_000;
-  t.mock.method(Date, 'now', () => now);
-  t.mock.method(Math, 'random', () => 0);
   let failures = 0;
   let recovered = false;
   const command = (program, args, options) => {
@@ -1276,20 +1722,19 @@ test('identical failures past the time threshold raise one stall alert; recovery
     {
       command,
       sleep: async (ms) => {
-        now += ms;
+        clock.now += ms;
       },
     },
   );
   await manager.start();
-  const alerts = messages.filter((message) => message.includes('STALL ALERT'));
   // The episode alerts once; the recovery cycle then resets the clock (a
   // later identical stall would be a new episode with its own alert).
-  assert.equal(alerts.length, 1);
+  assert.equal(alerts().length, 1);
   assert.match(
-    alerts[0],
+    alerts()[0],
     /slot 1: .*for \d+s across 5 consecutive identical failures/,
   );
-  assert.match(alerts[0], /docker unavailable/);
+  assert.match(alerts()[0], /docker unavailable/);
   assert.ok(
     messages.some(
       (message) =>
@@ -1302,24 +1747,7 @@ test('identical failures past the time threshold raise one stall alert; recovery
 });
 
 test('a changing error restarts the stall clock instead of alerting early', async (t) => {
-  const f = await fixture(t);
-  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
-    mode: 0o755,
-  });
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
-  t.after(() => {
-    process.env.PATH = previousPath;
-  });
-  const messages = [];
-  const previousLog = console.log;
-  console.log = (message) => messages.push(String(message));
-  t.after(() => {
-    console.log = previousLog;
-  });
-  let now = 1_000_000;
-  t.mock.method(Date, 'now', () => now);
-  t.mock.method(Math, 'random', () => 0.5);
+  const { f, clock, messages } = await stallHarness(t, { random: 0.5 });
   let failures = 0;
   const command = (program, args, options) => {
     if (program === 'docker' && args[0] === 'info' && failures < 6) {
@@ -1333,7 +1761,7 @@ test('a changing error restarts the stall clock instead of alerting early', asyn
     {
       command,
       sleep: async (ms) => {
-        now += ms;
+        clock.now += ms;
         if (failures >= 6) manager.stop();
       },
     },
@@ -1349,7 +1777,11 @@ test('a changing error restarts the stall clock instead of alerting early', asyn
 // Both threshold tests below drive the wall clock through the injected sleep
 // (the manager reads Date.now()), pin Math.random to the jitter floor so the
 // ladder is exact, and stop as soon as the alert lands.
-async function stallThresholdRun(t, { rateLimited, config }) {
+// The stall tests all need the same harness: a fixture, the flock shim on
+// PATH, captured logs, and a pinned clock they advance through the injected
+// sleep. Per-test behaviour — which commands fail, when to stop — stays in the
+// test itself.
+async function stallHarness(t, { random = 0 } = {}) {
   const f = await fixture(t);
   await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
     mode: 0o755,
@@ -1365,9 +1797,19 @@ async function stallThresholdRun(t, { rateLimited, config }) {
   t.after(() => {
     console.log = previousLog;
   });
-  let now = 1_000_000;
-  t.mock.method(Date, 'now', () => now);
-  t.mock.method(Math, 'random', () => 0);
+  const clock = { now: 1_000_000 };
+  t.mock.method(Date, 'now', () => clock.now);
+  t.mock.method(Math, 'random', () => random);
+  return {
+    f,
+    clock,
+    messages,
+    alerts: () => messages.filter((message) => message.includes('STALL ALERT')),
+  };
+}
+
+async function stallThresholdRun(t, { rateLimited, config }) {
+  const { f, alerts, clock, messages } = await stallHarness(t);
   let failures = 0;
   const command = (program, args, options) => {
     if (program === 'docker' && args[0] === 'info') {
@@ -1381,19 +1823,19 @@ async function stallThresholdRun(t, { rateLimited, config }) {
   const manager = createManager(config ?? f.config, {
     command,
     sleep: async (ms) => {
-      now += ms;
+      clock.now += ms;
       if (messages.some((message) => message.includes('STALL ALERT')))
         manager.stop();
     },
   });
   await manager.start();
-  const alerts = messages.filter((message) => message.includes('STALL ALERT'));
-  assert.equal(alerts.length, 1, 'one alert per stall episode');
+  const found = alerts();
+  assert.equal(found.length, 1, 'one alert per stall episode');
   return {
-    alerts,
+    alerts: found,
     failures,
-    durationSeconds: Number(/for (\d+)s across/.exec(alerts[0])[1]),
-    failureCount: Number(/across (\d+) consecutive/.exec(alerts[0])[1]),
+    durationSeconds: Number(/for (\d+)s across/.exec(found[0])[1]),
+    failureCount: Number(/across (\d+) consecutive/.exec(found[0])[1]),
   };
 }
 
@@ -1476,15 +1918,7 @@ test('rejects an invalid stall alert threshold', async (t) => {
 });
 
 test('a rate-limited runner deletion backs off on the 15-300 s ladder', async (t) => {
-  const f = await fixture(t);
-  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
-    mode: 0o755,
-  });
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
-  t.after(() => {
-    process.env.PATH = previousPath;
-  });
+  const { f, clock } = await stallHarness(t);
   // A persisted slot makes the preflight cleanup the first and only failure:
   // no JIT request is issued before the DELETE is rejected, which is the shape
   // wenshao measured as 5, 10, 20 … s before the status was preserved.
@@ -1501,18 +1935,15 @@ test('a rate-limited runner deletion backs off on the 15-300 s ladder', async (t
   );
   f.setRunner({ id: 7, name: persisted });
   f.setFailDelete(true, 403);
-  let now = 1_000_000;
-  t.mock.method(Date, 'now', () => now);
-  t.mock.method(Math, 'random', () => 0);
   const deletions = [];
   const command = (program, args, options) => {
-    if (program === 'gh' && args.includes('DELETE')) deletions.push(now);
+    if (program === 'gh' && args.includes('DELETE')) deletions.push(clock.now);
     return f.command(program, args, options);
   };
   const manager = createManager(f.config, {
     command,
     sleep: async (ms) => {
-      now += ms;
+      clock.now += ms;
       if (deletions.length >= 4) manager.stop();
     },
   });
@@ -1553,24 +1984,7 @@ test('the shipped example config pins the documented stall threshold', async () 
 });
 
 test('a slot that keeps stalling after the alert never alerts again', async (t) => {
-  const f = await fixture(t);
-  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
-    mode: 0o755,
-  });
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
-  t.after(() => {
-    process.env.PATH = previousPath;
-  });
-  const messages = [];
-  const previousLog = console.log;
-  console.log = (message) => messages.push(String(message));
-  t.after(() => {
-    console.log = previousLog;
-  });
-  let now = 1_000_000;
-  t.mock.method(Date, 'now', () => now);
-  t.mock.method(Math, 'random', () => 0);
+  const { f, alerts, clock } = await stallHarness(t);
   let cycles = 0;
   const command = (program, args, options) => {
     if (program === 'docker' && args[0] === 'info') {
@@ -1579,17 +1993,15 @@ test('a slot that keeps stalling after the alert never alerts again', async (t) 
     }
     return f.command(program, args, options);
   };
-  const alerts = () =>
-    messages.filter((message) => message.includes('STALL ALERT'));
   const manager = createManager(
     { ...f.config, stallAlertSeconds: 20 },
     {
       command,
       sleep: async (ms) => {
-        now += ms;
+        clock.now += ms;
         // Stay wedged for ten minutes: far past the alert, so a per-cycle
         // alert would fire many times before the slot is stopped.
-        if (now >= 1_000_000 + 600_000) manager.stop();
+        if (clock.now >= 1_000_000 + 600_000) manager.stop();
       },
     },
   );
@@ -1605,4 +2017,169 @@ test('a slot that keeps stalling after the alert never alerts again', async (t) 
     `only ${cycles} failing cycles ran; the scenario needs a sustained stall`,
   );
   assert.match(found[0], /across \d+ consecutive identical failures/);
+});
+
+test('a recovered slot that stalls again raises a second alert', async (t) => {
+  const { f, alerts, clock } = await stallHarness(t);
+  // Six failing cycles carry the first episode past the alert, the seventh
+  // completes so the slot recovers, and every later cycle fails again.
+  const RECOVER_AT = 7;
+  let cycles = 0;
+  let failing = true;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      cycles += 1;
+      failing = cycles !== RECOVER_AT;
+    }
+    if (failing && program === 'docker' && args[0] === 'info') {
+      return Promise.reject(new Error('docker unavailable'));
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 20 },
+    {
+      command,
+      sleep: async (ms) => {
+        clock.now += ms;
+        // Stop on the second alert, or after an hour of simulated time so a
+        // missing re-arm fails the assertion instead of looping forever.
+        if (alerts().length >= 2 || clock.now >= 1_000_000 + 3_600_000)
+          manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  const found = alerts();
+  assert.equal(
+    found.length,
+    2,
+    `a slot that recovered and stalled again raised ${found.length} alerts instead of 2`,
+  );
+  assert.ok(
+    cycles >= RECOVER_AT + 4,
+    `only ${cycles} cycles ran; the scenario needs a second stall past the threshold`,
+  );
+  // Both episodes alert from their own clock, so the recovered slot must not
+  // inherit the failures counted before it recovered. Compare the two counts
+  // rather than a literal: the number itself is backoff-ladder arithmetic, and
+  // only their independence is the claim under test.
+  const countedFailures = (message) =>
+    Number(/across (\d+) consecutive identical failures/.exec(message)[1]);
+  assert.equal(
+    countedFailures(found[0]),
+    countedFailures(found[1]),
+    'each episode counts its own failures instead of inheriting the previous run',
+  );
+});
+
+test('a changed failure message re-arms the stall alert for the new episode', async (t) => {
+  const { f, alerts, clock } = await stallHarness(t);
+  // The slot never recovers: it alerts on one failure message, the message
+  // changes, and the new episode has to alert again on its own clock. Only the
+  // new-episode reset clears the latch here, so this is the case that pins it.
+  let switched = false;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'info') {
+      if (alerts().length >= 1) switched = true;
+      return Promise.reject(
+        new Error(switched ? 'network unreachable' : 'docker unavailable'),
+      );
+    }
+    return f.command(program, args, options);
+  };
+  const manager = createManager(
+    { ...f.config, stallAlertSeconds: 20 },
+    {
+      command,
+      sleep: async (ms) => {
+        clock.now += ms;
+        if (alerts().length >= 2 || clock.now >= 1_000_000 + 3_600_000)
+          manager.stop();
+      },
+    },
+  );
+  await manager.start();
+  const found = alerts();
+  assert.equal(
+    found.length,
+    2,
+    `a changed failure message raised ${found.length} alerts instead of 2`,
+  );
+  assert.match(found[0], /docker unavailable/);
+  assert.match(found[1], /network unreachable/);
+});
+
+test('a layerless container skips diagnostics and defers removal with a clear reason', async (t) => {
+  // hz4 incident: after a dockerd restart some containers lost their
+  // RWLayer, so logs/cp/rm all failed with the same opaque `docker failed
+  // (exit 1)` every cycle. Cleanup must not waste the diagnostic calls on
+  // a container that can never yield them, and the retry message must
+  // name the real condition instead of a bare exit code.
+  const f = await fixture(t);
+  const orphan = f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setLayerless(orphan);
+  await assert.rejects(
+    createManager(f.config, { command: f.command }).cycle(1),
+    /has no storage layer; removal deferred/,
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'cp').length,
+    0,
+    'the _diag archive is not attempted once the layer is known lost',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+    'removal is still attempted once per cycle',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+    'no replacement while the wedged record remains',
+  );
+});
+
+test('a layerless container self-heals once Docker drops the record', async (t) => {
+  const f = await fixture(t);
+  const orphan = f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setLayerless(orphan);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /has no storage layer/);
+  // containerd finishes the task deletion and dockerd drops the record.
+  f.removeContainerRecord(orphan);
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenished once the wedged record is gone',
+  );
+});
+
+test('a container the daemon already dropped is treated as removed, not a failure', async (t) => {
+  const f = await fixture(t);
+  const orphan = f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  // A stale ps listing: every follow-up call reports the container gone.
+  f.setGone(orphan);
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenished in the same cycle',
+  );
 });
