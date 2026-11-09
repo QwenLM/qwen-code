@@ -337,6 +337,23 @@ describe('WorkspaceSessionProvider targets', () => {
     );
   });
 
+  it('preserves undefined language and theme props for App so daemon settings resolve (#16398)', async () => {
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-a"
+          chromeTheme="light"
+          chromeLanguage="zh-CN"
+          webShellProps={{}}
+        />,
+      );
+    });
+
+    const passedAppProps = mocks.appProps.at(-1);
+    expect(passedAppProps?.['theme']).toBeUndefined();
+    expect(passedAppProps?.['language']).toBeUndefined();
+  });
+
   it('keeps the app mounted when opening a standalone session from a workspace', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     const app = container.querySelector('output');

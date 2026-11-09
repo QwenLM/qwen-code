@@ -52999,6 +52999,29 @@ describe('settings-derived theme and language (#11955)', () => {
     expect(onLanguageResolved).toHaveBeenCalledWith('zh-CN');
   });
 
+  it('resolves general.language and ui.theme from settings when no workspaces are present (#16398)', async () => {
+    mockWorkspace.capabilities = {
+      workspaces: [],
+      features: ['standalone_sessions'],
+    };
+    testState.settings = [languageSetting('ru'), themeSetting('Qwen Light')];
+    const onLanguageResolved = vi.fn();
+    const onThemeResolved = vi.fn();
+    const { container } = renderApp({ onLanguageResolved, onThemeResolved });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('ru');
+    expect(onLanguageResolved).toHaveBeenCalledWith('ru');
+    expect(
+      container
+        .querySelector('[data-web-shell-root]')
+        ?.classList.contains('dark'),
+    ).toBe(false);
+    expect(onThemeResolved).toHaveBeenCalledWith('light');
+  });
+
   it('lets an explicit language prop win over general.language', async () => {
     testState.settings = [languageSetting('zh')];
     const onLanguageResolved = vi.fn();
