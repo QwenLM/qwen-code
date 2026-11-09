@@ -52,7 +52,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
         jdbc = new ManagedSchemaJdbcTemplate(database.source());
         transactions = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
         agents = VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                events -> {}, mock(ManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new SdkHarnessRules());
+                events -> {}, mock(JdbcManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new SdkHarnessRules());
     }
 
     @AfterEach
@@ -199,14 +199,14 @@ class ManagedLockScopeConcurrencyMySqlIT {
         jdbc.update("UPDATE ma_storage SET storage_kind = ?", kind);
         jdbc.update("UPDATE ma_storage_owner SET storage_kind = ?", kind);
         String readyKey = transactions.execute(status -> "LOCAL".equals(kind)
-                ? LocalStorageOwners.key(jdbc, TENANT, "storage") : SshWorkspaceStore.physicalKey(jdbc, TENANT, "storage"));
+                ? LocalStorageOwners.key(jdbc, TENANT, "storage") : JdbcSshWorkspaceStore.physicalKey(jdbc, TENANT, "storage"));
         assertThat(readyKey).isEqualTo("d".repeat(64));
         jdbc.update(fenceSql("physical"));
         if ("LOCAL".equals(kind)) {
             String recoveryKey = transactions.execute(status -> LocalStorageOwners.key(jdbc, TENANT, "storage"));
             assertThat(recoveryKey).isEqualTo(readyKey);
         } else {
-            assertThatThrownBy(() -> transactions.execute(status -> SshWorkspaceStore.physicalKey(jdbc, TENANT, "storage")))
+            assertThatThrownBy(() -> transactions.execute(status -> JdbcSshWorkspaceStore.physicalKey(jdbc, TENANT, "storage")))
                     .isInstanceOf(RuntimeBrokerException.class);
         }
         assertThatThrownBy(() -> transactions.executeWithoutResult(status ->
@@ -382,7 +382,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
                 : "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE storage_key = '" + "d".repeat(64) + "'";
     }
 
-    private ManagedSessionStore storageWriters(boolean distinctAliases) {
+    private JdbcManagedSessionStore storageWriters(boolean distinctAliases) {
         var journal = VerificationFixtures.managedSessionStore(jdbc);
         for (String session : List.of("storage-a", "storage-b")) {
             transactions.execute(status -> journal.acquireWriter(TENANT, session, TOKEN,

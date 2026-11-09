@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -25,8 +27,8 @@ import java.util.List;
 
 @Repository
 @Qualifier("managedAgentTransactionManager")
-public class WorkspaceLifecycleStore
-        implements com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore {
+public class JdbcWorkspaceLifecycleStore
+        implements WorkspaceLifecycleStore {
     private static final ObjectMapper OCCURRENCE_JSON = new ObjectMapper();
 
     public static boolean legacyClose(JdbcTemplate jdbc, String tenant, String session) {
@@ -37,7 +39,7 @@ public class WorkspaceLifecycleStore
     }
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
-    private final ManagedExtensionRecordStore records;
+    private final JdbcManagedExtensionRecordStore records;
     private final ObjectProvider<RuntimeBindingRepository> bindings;
     private WorkspaceProfileLifecycleVerifier profiles;
     private ResidentWorkspaces residents = new ResidentWorkspaces(java.util.List.of());
@@ -50,10 +52,10 @@ public class WorkspaceLifecycleStore
     @org.springframework.beans.factory.annotation.Autowired
     void setProfiles(WorkspaceProfileLifecycleVerifier profiles) { this.profiles = profiles; }
 
-    public WorkspaceLifecycleStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, ObjectProvider<RuntimeBindingRepository> bindings) {
+    public JdbcWorkspaceLifecycleStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, ObjectProvider<RuntimeBindingRepository> bindings) {
         this.jdbc = jdbc;
         this.json = json;
-        this.records = new ManagedExtensionRecordStore(jdbc);
+        this.records = new JdbcManagedExtensionRecordStore(jdbc);
         this.bindings = bindings;
     }
 
@@ -75,14 +77,14 @@ public class WorkspaceLifecycleStore
     public static void requireClaim(JdbcTemplate jdbc, String tenant, String session,
             RuntimeLifecycleAuthority authority, boolean drainingAllowed) {
         if (authority == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
         var rows = jdbc.query("SELECT o.claim_generation, o.claim_until AS lease_until, o.delivery_state, o.lifecycle_protocol_version, s.status, f.phase, f.operation_id FROM ma_operation o JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id JOIN ma_session_head f ON f.tenant_id = s.tenant_id AND f.harness_session_id = s.session_id WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ? AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE", (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), tenant, session, authority.operationId(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
         long now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
                 (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
         if (rows.size() != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
         var row = rows.getFirst();
         if (((Number) row.get("claim_generation")).longValue() != authority.claimGeneration()
@@ -92,7 +94,7 @@ public class WorkspaceLifecycleStore
                 || !List.of("CLOSING", "DELETING").contains(row.get("status"))
                 || !authority.operationId().equals(row.get("operation_id"))
                 || !"LIFECYCLE_ONLY".equals(row.get("phase")) && !(drainingAllowed && "DRAINING".equals(row.get("phase")))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
     }
 
@@ -124,7 +126,7 @@ public class WorkspaceLifecycleStore
         }
         if (!tenant.equals(heads.getFirst().get("tenant_id")) || !session.equals(heads.getFirst().get("session_id"))
                 || ((Number) heads.getFirst().get("compacted_through_revision")).longValue() != 0) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
         }
         long headRevision = ((Number) heads.getFirst().get("journal_revision")).longValue();
         // The head row locked above is the per-Session fence: writers append
@@ -142,7 +144,7 @@ public class WorkspaceLifecycleStore
         if (scan.maxRevision() < headRevision) {
             scan = scanJournal(jdbc, json, tenant, session, v2, true);
             if (scan.maxRevision() < headRevision) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
             }
         }
         var pending = scan.pending();
@@ -191,7 +193,7 @@ public class WorkspaceLifecycleStore
                             settled.add(turn);
                         }
                     } catch (java.io.IOException error) {
-                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
+                        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_journal_unverified");
                     }
                 }
             }, tenant, session);
@@ -201,7 +203,7 @@ public class WorkspaceLifecycleStore
     @Transactional
     public JsonNode recoverEffects(OperationRecord operation) {
         lock(operation);
-        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation), true);
+        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation), true);
         String saved = jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation"
                 + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ? FOR UPDATE", String.class,
                 operation.tenantId(), operation.sessionId(), operation.operationId());
@@ -252,7 +254,7 @@ public class WorkspaceLifecycleStore
     @Transactional
     public void saveEffects(OperationRecord operation, JsonNode receipt) {
         lock(operation);
-        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation), false);
+        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation), false);
         saveLocked(operation, receipt);
     }
 
@@ -270,7 +272,7 @@ public class WorkspaceLifecycleStore
                 + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ? AND operation_id = ? FOR UPDATE", String.class,
                 operation.tenantId(), operation.sessionId(), operation.operationId());
         if (saved == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
         }
         verifyEffects(operation, parse(saved));
         if (operation.lifecycleProtocolVersion() == 2) {
@@ -281,21 +283,21 @@ public class WorkspaceLifecycleStore
                 JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()));
         if (!writers.isEmpty() && (!operation.tenantId().equals(writers.getFirst().get("tenant_id"))
                 || !operation.sessionId().equals(writers.getFirst().get("session_id")))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
         if (!writers.isEmpty() && "ACTIVE".equals(writers.getFirst().get("state"))
                 && ((Number) writers.getFirst().get("live_writer")).intValue() != 0) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
         }
         if (residents.verifyClosed(jdbc, operation.tenantId(), operation.sessionId())) {
             if (!writers.isEmpty() && !"SEALED".equals(writers.getFirst().get("state"))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
             return;
         }
         RuntimeBindingRepository repository = bindings.getIfAvailable();
         if (!(repository instanceof com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+            throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
         }
         jdbc.execute((ConnectionCallback<Void>) connection -> {
             ((com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources) repository).verifyHarnessStopped(connection, operation.tenantId(), operation.sessionId());
@@ -306,10 +308,10 @@ public class WorkspaceLifecycleStore
     @Transactional
     public void requireSettledExecutions(OperationRecord operation) {
         lock(operation);
-        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation), true);
+        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation), true);
         if (operation.lifecycleProtocolVersion() == 2) {
             if (profiles == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
             }
             profiles.verifyExecutions(operation);
         }
@@ -317,25 +319,25 @@ public class WorkspaceLifecycleStore
 
     public void verifyOutputContents(OperationRecord operation) {
         if (profiles == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
         }
         try {
             profiles.verifyPublications(operation);
         } catch (IllegalArgumentException invalid) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
         }
     }
 
     @Transactional
     public void verifyResources(OperationRecord operation) {
         lock(operation);
-        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation), true);
-        if (!resourceClaim(jdbc, operation.tenantId(), operation.sessionId(), com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation)) || profiles == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+        requireClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation), true);
+        if (!resourceClaim(jdbc, operation.tenantId(), operation.sessionId(), WorkspaceLifecycleStore.authority(operation)) || profiles == null) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
         }
         RuntimeBindingRepository repository = bindings.getIfAvailable();
         if (!(repository instanceof com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+            throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
         }
         var originals = jdbc.execute((ConnectionCallback<List<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>>) connection ->
                 ((com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources) repository).verifyHarnessResources(connection, operation.tenantId(), operation.sessionId()));
@@ -344,7 +346,7 @@ public class WorkspaceLifecycleStore
         try {
             profiles.verifyResources(operation, originals, profile);
         } catch (IllegalArgumentException invalid) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
         }
     }
 
@@ -369,51 +371,51 @@ public class WorkspaceLifecycleStore
                 || !receiptOperation.equals(operation.operationId()) && !failedLifecyclePredecessor(operation, receiptOperation)
                 || !operation.kind().name().toLowerCase(java.util.Locale.ROOT).equals(receipt.path("kind").asText())
                 || !receipt.path("effects").isArray()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
         }
         if (operation.lifecycleProtocolVersion() == 2) {
             if (profiles == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
             }
             profiles.verifyEffects(operation);
         }
         JsonNode header = header(operation.tenantId(), operation.sessionId());
         if (receipt.path("neverInitialized").asBoolean()) {
             if (header != null || !receipt.path("effects").isEmpty() || !neverInitialized(operation)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
             }
             return;
         }
         if (header == null || !header.path("definitionRef").equals(receipt.path("definitionRef"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
         }
         JsonNode definition = records.readRecordResource(operation.tenantId(), operation.sessionId(), receipt.path("definitionRef"));
         if (WorkspaceToolProfiles.lifecycleProtocol(definition.path("toolProfile").asText()) != operation.lifecycleProtocolVersion()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_profile_unavailable");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_profile_unavailable");
         }
         for (JsonNode execution : records.listRecords(operation.tenantId(), operation.sessionId(), "hook_execution")) {
             if (execution.path("resultRef").isNull()
                     && !"not_started_proven".equals(execution.path("run").path("execution").asText())
                     || "recovery_blocked".equals(execution.path("run").path("state").asText())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
             }
         }
         if (!definition.has("hookCatalog")) {
             if (!receipt.path("effects").isEmpty()) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
             }
             return;
         }
         List<String> events = events(operation);
         if (receipt.path("effects").size() != events.size()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
         }
         for (int index = 0; index < events.size(); index++) {
             String event = events.get(index);
             JsonNode effect = receipt.path("effects").get(index);
             String latest = latestHookExecutionResource(operation, occurrence(event, receiptOperation));
             if (latest == null || !latest.equals(effect.path("recordRef").path("resourceId").asText())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
             }
             JsonNode record = records.readRecordResource(operation.tenantId(), operation.sessionId(), effect.path("recordRef"));
             ManagedHookRecords.requireExecution(record);
@@ -421,13 +423,13 @@ public class WorkspaceLifecycleStore
                     || !occurrence(event, receiptOperation).equals(record.path("hookExecutionId").asText())
                     || !"__plan__".equals(record.path("hookId").asText()) || record.path("resultRef").isNull()
                     || "recovery_blocked".equals(record.path("run").path("state").asText())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
             }
             records.readRecordResource(operation.tenantId(), operation.sessionId(), record.path("resultRef"));
             JsonNode plan = records.readRecordResource(operation.tenantId(), operation.sessionId(), record.path("planRef"));
             if (!event.equals(plan.path("input").path("hook_event_name").asText())
                     || !operation.sessionId().equals(plan.path("input").path("session_id").asText())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
             }
         }
     }
@@ -461,7 +463,7 @@ public class WorkspaceLifecycleStore
         return jdbc.queryForList("SELECT record_resource_id FROM ma_session_record"
                 + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ?"
                 + " AND domain = 'hook_execution' AND record_id = ? FOR UPDATE", String.class,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 ManagedExtensionProjection.recordKey(operation.sessionId(), "hook_execution", occurrence),
                 operation.tenantId(), operation.sessionId(), occurrence).stream().findFirst().orElse(null);
     }
@@ -471,9 +473,9 @@ public class WorkspaceLifecycleStore
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?",
                 (row, index) -> json.createObjectNode().put("resourceId", resource).put("kind", row.getString("kind"))
                         .put("schemaVersion", row.getInt("schema_version")).put("byteLength", row.getLong("byte_length"))
-                        .put("digest", row.getString("sha256")), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                        .put("digest", row.getString("sha256")), ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), resource).stream()
-                .findFirst().orElseThrow(() -> com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid"));
+                .findFirst().orElseThrow(() -> WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid"));
     }
 
     private JsonNode header(String tenant, String session) {
@@ -488,7 +490,7 @@ public class WorkspaceLifecycleStore
                 return record.path("managedSession");
             }
         }
-        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
     }
 
     private boolean failedLifecyclePredecessor(OperationRecord operation,
@@ -532,7 +534,7 @@ public class WorkspaceLifecycleStore
         try {
             return json.readTree(value);
         } catch (java.io.IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_receipt_invalid");
         }
     }
 }

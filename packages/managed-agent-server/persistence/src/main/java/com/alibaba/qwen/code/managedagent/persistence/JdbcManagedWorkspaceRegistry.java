@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
@@ -21,8 +22,8 @@ import java.util.List;
 import java.util.Map;
 
 @Repository
-public class ManagedWorkspaceRegistry
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry {
+public class JdbcManagedWorkspaceRegistry
+        implements ManagedWorkspaceRegistry {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private com.alibaba.qwen.code.managedagent.settings.SshSettings ssh;
@@ -32,7 +33,7 @@ public class ManagedWorkspaceRegistry
         this.ssh = properties.getRuntimeBroker().getSsh();
     }
 
-    public ManagedWorkspaceRegistry(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcManagedWorkspaceRegistry(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
@@ -42,7 +43,7 @@ public class ManagedWorkspaceRegistry
         }
         byte[] key;
         try {
-            key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return false;
         }
@@ -58,7 +59,7 @@ public class ManagedWorkspaceRegistry
         }
         byte[] key;
         try {
-            key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return false;
         }
@@ -80,7 +81,7 @@ public class ManagedWorkspaceRegistry
         }
         byte[] key;
         try {
-            key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return WorkspaceAccess.NONE;
         }
@@ -123,7 +124,7 @@ public class ManagedWorkspaceRegistry
 
     public List<WorkspaceSummary> listReadable(String tenantId,
             String actorId, String afterId, int limit) {
-        byte[] key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         byte[] after = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(afterId == null ? "" : afterId);
         List<WorkspaceSummary> rows = jdbc.query("SELECT r.workspace_id, r.display_name, r.state, r.workspace_kind, s.storage_kind, a.role FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id AND a.workspace_id = r.workspace_id"
@@ -136,7 +137,7 @@ public class ManagedWorkspaceRegistry
 
     public WorkspaceSummary findReadable(String tenantId, String actorId,
             String workspaceId) {
-        byte[] key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         List<WorkspaceSummary> rows = jdbc.query(
                 "SELECT r.workspace_id, r.display_name, r.state,"
                         + " r.workspace_kind, s.storage_kind, a.role FROM ma_workspace r"
@@ -163,7 +164,7 @@ public class ManagedWorkspaceRegistry
         if (workspaceIds.isEmpty()) {
             return java.util.Map.of();
         }
-        byte[] key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         String plain = String.join(", ", java.util.Collections.nCopies(
                 workspaceIds.size(), "?"));
         List<Object> arguments = new java.util.ArrayList<>(
@@ -310,7 +311,7 @@ public class ManagedWorkspaceRegistry
         }
         byte[] key;
         try {
-            key = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             throw new ManagedAgentException(403,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");

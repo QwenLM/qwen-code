@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
@@ -41,8 +43,8 @@ import java.util.Set;
  * record or settle a decision.
  */
 @Repository
-public class AutomationLedgerStore
-        implements com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore {
+public class JdbcAutomationLedgerStore
+        implements AutomationLedgerStore {
     /** A claim whose Harness answer stayed unobtainable past the bound. */
 
     /** The holder's proof: the definition row under this owner and fence. */
@@ -126,7 +128,7 @@ public class AutomationLedgerStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate commands;
 
-    public AutomationLedgerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcAutomationLedgerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.commands =
                 new TransactionTemplate(
@@ -164,7 +166,7 @@ public class AutomationLedgerStore
             String recordKey = ManagedExtensionProjection.recordKey(
                     identities.get(index).sessionId(), "automation_run",
                     identities.get(index).runId());
-            args.add(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId,
+            args.add(ManagedSessionStore.sessionScopeKey(tenantId,
                     identities.get(index).sessionId()));
             args.add(recordKey);
             runByRecordKey.put(recordKey, identities.get(index).runId());
@@ -271,7 +273,7 @@ public class AutomationLedgerStore
         if (!Objects.equals(current.sessionId(), sessionId)
                 || !Objects.equals(current.workspaceId(), workspaceId)) {
             throw new ManagedAgentException(409,
-                    ManagedExtensionRecordStore.ERROR_REJECTED,
+                    JdbcManagedExtensionRecordStore.ERROR_REJECTED,
                     "A schedule identity belongs to another Session.");
         }
         if (current.recordRevision() >= next.recordRevision()) {

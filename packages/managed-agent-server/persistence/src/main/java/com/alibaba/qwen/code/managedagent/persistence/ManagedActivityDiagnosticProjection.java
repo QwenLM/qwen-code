@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.ActivityPage;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -19,16 +21,16 @@ import java.util.Objects;
 import java.util.function.Function;
 
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
-import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.readBody;
-import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.require;
-import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.requireReference;
+import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.readBody;
+import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.require;
+import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.requireReference;
 
 /** All writes share the journal transaction and its Session head fence. */
 final class ManagedActivityDiagnosticProjection {
     private final JdbcTemplate jdbc;
-    private final ManagedExtensionRecordStore store;
+    private final JdbcManagedExtensionRecordStore store;
 
-    ManagedActivityDiagnosticProjection(JdbcTemplate jdbc, ManagedExtensionRecordStore store) {
+    ManagedActivityDiagnosticProjection(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore store) {
         this.jdbc = jdbc;
         this.store = store;
     }
@@ -222,13 +224,13 @@ final class ManagedActivityDiagnosticProjection {
             require("managed-message-part".equals(bytes.kind()), "Invalid message part.");
             body.writeBytes(bytes.bytes());
         }
-        JsonNode record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(body.toString(StandardCharsets.UTF_8));
+        JsonNode record = ManagedExtensionRecordStore.parse(body.toString(StandardCharsets.UTF_8));
         require(record != null, "Invalid diagnostic message.");
         return record;
     }
 
     JsonNode find(String tenant, String session, String domain, String id) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         return jdbc.queryForList("SELECT record_resource_id FROM ma_session_record WHERE record_kind = 'DOMAIN'"
                         + " AND session_scope_key = ? AND record_key = ?", String.class, scope,
                 ManagedExtensionProjection.recordKey(session, domain, id)).stream()
@@ -236,7 +238,7 @@ final class ManagedActivityDiagnosticProjection {
     }
 
     ActivityPage page(String tenant, String session, String domain, long upper, Long time, String key, int limit) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         List<Object> args = new ArrayList<>(List.of(scope, domain));
         String position = "";
         if (time != null) {
@@ -296,7 +298,7 @@ final class ManagedActivityDiagnosticProjection {
         if (summary != null && "ready".equals(summary.path("readiness").asText())) {
             return true;
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         if (summary == null) {
             summary = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("schemaVersion", 1)
                     .put("reducerVersion", 1).putNull("epochId").putNull("startEventId").putNull("startedAt")
@@ -433,7 +435,7 @@ final class ManagedActivityDiagnosticProjection {
         require(bytes.length <= 65_536, "Activity projection exceeds 64 KiB.");
         String digest = DigestUtils.sha256Hex(bytes);
         String resource = ManagedActivityDiagnostics.PROJECTION_KIND + ":" + digest;
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
                         + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW
@@ -446,7 +448,7 @@ final class ManagedActivityDiagnosticProjection {
     }
 
     private void point(String tenant, String workspace, String session, String domain, String id, String resource, long sequence, long at) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String key = ManagedExtensionProjection.recordKey(session, domain, id);
         List<String> old = jdbc.queryForList("SELECT record_resource_id FROM ma_session_record WHERE session_scope_key = ?"
                 + " AND record_key = ?", String.class, scope, key);
@@ -462,7 +464,7 @@ final class ManagedActivityDiagnosticProjection {
                     + " AND record_key = ?", sequence, resource, scope, key);
         }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scope, key);
-        ManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, sequence, tenant, workspace,
+        JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, sequence, tenant, workspace,
                 session, resource);
         for (String previous : old) {
             discardUnreferenced(scope, previous);

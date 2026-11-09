@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -19,8 +21,8 @@ import java.util.Optional;
  * here is located or settled by a journal commit; none is a second copy of one.
  */
 @Repository
-public class ChannelInstanceStore
-        implements com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore {
+public class JdbcChannelInstanceStore
+        implements ChannelInstanceStore {
     /** The states a registered connection reports. */
 
     /** One delivery record row the projection still shows as owed. */
@@ -49,7 +51,7 @@ public class ChannelInstanceStore
 
     private final JdbcTemplate jdbc;
 
-    public ChannelInstanceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcChannelInstanceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
@@ -245,7 +247,7 @@ public class ChannelInstanceStore
                         + " AND record_id = ?",
                 (row, index) -> new DeliveryRecordState(row.getString(1),
                         row.getString(2)),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 deliveryId).stream().findFirst();
     }
 
@@ -267,7 +269,7 @@ public class ChannelInstanceStore
                         row.getString("record_id"), row.getLong("revision"),
                         row.getString("delivery_state"),
                         row.getString("record_resource_id")),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 limit);
     }
 
@@ -279,7 +281,7 @@ public class ChannelInstanceStore
                         + " AND storage_kind = 'MYSQL_INLINE'"
                         + " AND state = 'REFERENCED'",
                 (row, index) -> row.getBytes("inline_bytes"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, resourceId);
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, resourceId);
         return rows.isEmpty() ? null
                 : new String(rows.getFirst(), StandardCharsets.UTF_8);
     }
@@ -325,7 +327,7 @@ public class ChannelInstanceStore
 
     public boolean reserveReconciliation(ChannelClaim claim) {
         return jdbc.update("UPDATE ma_delivery SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", reconcile_operation_id = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND source_session_id = ? AND claimed_at = ? AND claim_generation = ? AND transport_state IN ('planned','sending','partial')",
-                com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.reconciliationOperationId(claim), JdbcChannelDeliveryRepository.deliveryKey(claim.tenantId(), claim.channelId(), claim.deliveryId()),
+                ChannelInstanceStore.reconciliationOperationId(claim), JdbcChannelDeliveryRepository.deliveryKey(claim.tenantId(), claim.channelId(), claim.deliveryId()),
                 claim.tenantId(), claim.channelId(), claim.deliveryId(), claim.sessionId(), claim.claimedAt(), claim.claimGeneration()) == 1;
     }
 
@@ -339,7 +341,7 @@ public class ChannelInstanceStore
                         + " AND delivery_kind = 'CHANNEL' FOR UPDATE", CLAIM, operationId);
         if (claims.size() != 1 || !tenantId.equals(claims.getFirst().tenantId())
                 || !sessionId.equals(claims.getFirst().sessionId()) || !deliveryId.equals(claims.getFirst().deliveryId())
-                || !operationId.equals(com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.reconciliationOperationId(claims.getFirst()))) {
+                || !operationId.equals(ChannelInstanceStore.reconciliationOperationId(claims.getFirst()))) {
             throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(409,
                     "channel_claim_stale", "The channel delivery claim changed before reconciliation committed.");
         }

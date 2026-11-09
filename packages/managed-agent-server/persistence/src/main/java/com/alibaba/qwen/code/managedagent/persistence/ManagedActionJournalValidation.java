@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.charset.StandardCharsets;
@@ -87,7 +88,7 @@ final class ManagedActionJournalValidation {
     }
 
     static JsonNode read(String value) {
-        JsonNode result = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(value);
+        JsonNode result = ManagedExtensionRecordStore.parse(value);
         require(result != null);
         return result;
     }
