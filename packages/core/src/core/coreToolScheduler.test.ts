@@ -8728,6 +8728,61 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(message).not.toContain('output limit');
   });
 
+  // #16417 mutation M3: folding the budget numbers into the retry-count key
+  // would reset the count at every truncation, so the third rejection with
+  // *different* budgets would carry the budget note instead of RETRY LOOP
+  // DETECTED. This pins the stable-key invariant.
+  it('keeps RETRY LOOP DETECTED on the third truncation with different budgets (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    const budgets = [
+      { usedTokens: 4096, limitTokens: 8192 },
+      { usedTokens: 5000, limitTokens: 8192 },
+      { usedTokens: 6000, limitTokens: 8192 },
+    ];
+    for (let i = 0; i < budgets.length; i++) {
+      await scheduleBatch(scheduler, {
+        ...toolRequest(
+          `${i + 1}`,
+          TestApprovalTool.Name,
+          { id: `test-loop-${i}` },
+          `prompt-loop-${i}`,
+        ),
+        wasOutputTruncated: true,
+        outputBudgetAtTruncation: budgets[i],
+      });
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledTimes(i + 1),
+      );
+    }
+    // The LAST batch's result carries the threshold directive.
+    const lastBatch = onAllToolCallsComplete.mock.calls[
+      onAllToolCallsComplete.mock.calls.length - 1
+    ]?.[0] as unknown[];
+    const message = expectTruncationRejection(lastBatch[0] as ToolCall);
+    expect(message).toContain('RETRY LOOP DETECTED');
+  });
+
+  // #16417 R1-2: when the cut landed far below the configured limit (e.g.
+  // a provider-side cut at 3K against a 64K ceiling), the "size each part
+  // well under that limit" guidance is suppressed — it would license a
+  // retry an order of magnitude too large.
+  it('omits size-each-part guidance when the cut is far below the limit (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    await scheduleBatch(scheduler, {
+      ...toolRequest('1', TestApprovalTool.Name, { id: 'test-far-cut' }, 'p1'),
+      wasOutputTruncated: true,
+      outputBudgetAtTruncation: { usedTokens: 3000, limitTokens: 64000 },
+    });
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const message = expectTruncationRejection(
+      firstBatch(onAllToolCallsComplete)[0],
+    );
+    expect(message).toContain('used 3000 of the 64000-token output limit');
+    expect(message).not.toContain('size each part well under');
+  });
+
   // The token-limit diagnosis being withdrawn must not withdraw the data-loss
   // guard with it: incomplete arguments mean incomplete file content either
   // way (QwenLM/qwen-code#12970).

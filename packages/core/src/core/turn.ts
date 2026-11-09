@@ -952,12 +952,20 @@ export class Turn {
               // output-limit consumption includes them. A bare
               // candidatesTokenCount under-reports there and the model would
               // size its retry too large. Fall back to candidatesTokenCount
-              // when total or prompt is missing (some providers omit them).
+              // when total or prompt is missing, zero-coerced (OpenAI
+              // converters stamp totalTokenCount unconditionally with
+              // `|| 0`), or non-finite — the subtraction must never
+              // certify a budget nothing was taken from (#16417 R1-1).
               const usage = resp.usageMetadata;
+              const total = usage?.totalTokenCount;
+              const prompt = usage?.promptTokenCount;
               const usedTokens =
-                usage?.totalTokenCount !== undefined &&
-                usage?.promptTokenCount !== undefined
-                  ? Math.max(0, usage.totalTokenCount - usage.promptTokenCount)
+                total !== undefined &&
+                prompt !== undefined &&
+                Number.isFinite(total) &&
+                Number.isFinite(prompt) &&
+                total > prompt
+                  ? total - prompt
                   : usage?.candidatesTokenCount;
               const limitTokens = this.chat.getLastRequestMaxOutputTokens?.();
               if (usedTokens !== undefined && limitTokens !== undefined) {

@@ -13289,6 +13289,10 @@ describe('LlmChat', async () => {
       expect(eventsOfType(events, StreamEventType.RETRY)).toEqual([
         { type: StreamEventType.RETRY, maxOutputTokensEscalated: 64_000 },
       ]);
+      // #16417 M5: the per-response limit the Turn reads must track the
+      // escalation — a MAX_TOKENS cut during the escalated round names the
+      // escalated limit, not the initial grant.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(64_000);
       expect(mockLogContentRetry).not.toHaveBeenCalledWith(
         mockConfig,
         expect.objectContaining({ error_type: 'NO_RESPONSE_TEXT' }),

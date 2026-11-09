@@ -3545,13 +3545,25 @@ export class CoreToolScheduler {
             // recorded, for the same reason as the directive below: the
             // numbers vary call-to-call, so folding them into the key would
             // reset the retry count at every truncation (#16417).
+            // The "size each part" guidance is emitted only when the usage
+            // corroborates the cut (used ≥ half the limit) — a provider can
+            // cut far below the configured ceiling (#16417's own DeepSeek
+            // case: cut near 3K against a 64K ceiling), and telling the
+            // model to size parts "well under 64K" when 95% of that budget
+            // was never spent licenses a retry an order of magnitude too
+            // large (#16417 R1-2).
             const budget = reqInfo.outputBudgetAtTruncation;
+            const usageCorroboratesCut =
+              budget !== undefined &&
+              budget.usedTokens >= budget.limitTokens / 2;
             const budgetNote =
               truncated && budget
                 ? ` This response used ${budget.usedTokens} of the ` +
-                  `${budget.limitTokens}-token output limit, so no single ` +
-                  `response can carry the whole file — size each part well ` +
-                  `under that limit.`
+                  `${budget.limitTokens}-token output limit.` +
+                  (usageCorroboratesCut
+                    ? ` No single response can carry the whole file — size ` +
+                      `each part well under that limit.`
+                    : '')
                 : '';
             // The directive is appended after the rejectionMessage key was
             // recorded: recordRetryableToolError prunes the tool's other keys,
