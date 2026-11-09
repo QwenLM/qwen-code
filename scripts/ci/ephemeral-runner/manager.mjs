@@ -575,17 +575,6 @@ export function createManager(config, dependencies = {}) {
         }
       }
     };
-    // A label-recovered identity lives only in the resource labels, never in a
-    // slot state file. Once the container and network are gone the next cycle
-    // finds nothing to clean up and just replenishes the slot, leaking the
-    // registration for good. Reconcile it while the resources still exist, so
-    // a refusal or a rejected deletion leaves the pile that keeps this slot
-    // re-entering cleanup(). A state-anchored identity stays on the later
-    // call site: deleting its registration before the container is stopped
-    // would hit GitHub's "runner is busy" rejection for every watchdog kill.
-    const resourceAnchoredIdentity =
-      Boolean(state?.name) && !state.runnerName && !state.runnerId;
-    if (resourceAnchoredIdentity) await reconcileRegistration();
     // A container whose storage layer is gone (dockerd restart left
     // `RWLayer ... is unexpectedly nil`) can never yield logs or a `_diag`
     // archive, and it may vanish from under us mid-cleanup. Detect that
@@ -594,8 +583,9 @@ export function createManager(config, dependencies = {}) {
       /RWLayer of container .* is unexpectedly nil/.test(error?.stderr || '');
     const alreadyGone = (error) =>
       /No such container/i.test(error?.stderr || '');
-    for (const id of containers) {
-      let diagnosticsPossible = true;
+    // Diagnostics run before any reconciliation refusal so a wedged slot
+    // still exports the one container an operator must inspect (R2-2).
+    const captureDiagnostics = async (id) => {
       try {
         const logs = await run('docker', ['logs', '--tail', '10000', id]);
         await writeFile(
@@ -609,43 +599,43 @@ export function createManager(config, dependencies = {}) {
         await pruneLogs();
       } catch (error) {
         if (layerless(error) || alreadyGone(error)) {
-          diagnosticsPossible = false;
           log(
             `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
           );
+          return;
         } else log(`slot ${slot}: container logs unavailable`);
       }
-      if (diagnosticsPossible) {
-        try {
-          const archive = await run(
-            'docker',
-            ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
-            { binary: true },
+      try {
+        const archive = await run(
+          'docker',
+          ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
+          { binary: true },
+        );
+        await writeFile(
+          join(
+            logDir,
+            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
+          ),
+          archive,
+          { mode: 0o600 },
+        );
+        await pruneLogs();
+      } catch (error) {
+        if (layerless(error) || alreadyGone(error))
+          log(
+            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
           );
-          await writeFile(
-            join(
-              logDir,
-              `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
-            ),
-            archive,
-            { mode: 0o600 },
+        else
+          log(
+            `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
           );
-          await pruneLogs();
-        } catch (error) {
-          if (layerless(error) || alreadyGone(error))
-            log(
-              `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
-            );
-          else
-            log(
-              `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
-            );
-        }
       }
+    };
+    const removeContainer = async (id) => {
       try {
         await run('docker', ['rm', '-f', '-v', id]);
       } catch (error) {
-        if (alreadyGone(error)) continue;
+        if (alreadyGone(error)) return;
         if (layerless(error))
           throw new Error(
             `container ${id.slice(0, 12)} has no storage layer; removal deferred until Docker drops the record`,
@@ -653,6 +643,66 @@ export function createManager(config, dependencies = {}) {
           );
         throw error;
       }
+    };
+    // A label-recovered identity lives only in the resource labels, never in a
+    // slot state file. Once the container and network are gone the next cycle
+    // finds nothing to clean up and just replenishes the slot, leaking the
+    // registration for good. Reconcile it while the resources still exist, so
+    // a refusal or a rejected deletion leaves an anchor that keeps this slot
+    // re-entering cleanup(). A state-anchored identity stays on the later
+    // call site: deleting its registration before the container is stopped
+    // would hit GitHub's "runner is busy" rejection for every watchdog kill.
+    const resourceAnchoredIdentity =
+      Boolean(state?.name) && !state.runnerName && !state.runnerId;
+    if (resourceAnchoredIdentity) {
+      for (const id of containers) await captureDiagnostics(id);
+      try {
+        await reconcileRegistration();
+      } catch (error) {
+        // No refusal keeps the CONTAINER. An online match backed by this
+        // slot's OWN leftover container would otherwise never clear: the
+        // retained container keeps heartbeating, so every cycle throws the
+        // same gate (R1-1). Remove the containers and keep the labelled
+        // network as the retry anchor — the runner can now actually reach
+        // offline, and the network keeps the next cycle in cleanup(). A
+        // permanent identity refusal pins no compute either: the same error
+        // resurfaces from the network anchor until a human reconciles, and
+        // the registration is never deleted (R2-1).
+        for (const id of containers) await removeContainer(id);
+        if ((await listContainers(slot)).length)
+          throw new Error('Container cleanup failed');
+        // Persist nothing: a label-recovered identity has no valid state
+        // shape (no runnerId), so the labelled network stays the anchor for
+        // BOTH refusal kinds — the container is already gone, so no compute
+        // stays pinned, and a permanent identity error resurfaces identically
+        // every cycle until a human reconciles (R2-1).
+        if (!networks.length) {
+          // The pile had no labelled network to anchor the retry (a killed
+          // `docker create` leaves only the container). Create the labelled
+          // anchor the normal provisioning would have made, so the retry
+          // still reaches this gate after the container is gone.
+          await run('docker', [
+            'network',
+            'create',
+            '--driver',
+            'bridge',
+            '--opt',
+            'com.docker.network.bridge.enable_icc=false',
+            '--label',
+            `qwen.pool=${config.poolId}`,
+            '--label',
+            `qwen.slot=${slot}`,
+            '--label',
+            `qwen.instance=${state.name}`,
+            state.name,
+          ]);
+        }
+        throw error;
+      }
+    }
+    for (const id of containers) {
+      if (!resourceAnchoredIdentity) await captureDiagnostics(id);
+      await removeContainer(id);
     }
     if ((await listContainers(slot)).length)
       throw new Error('Container cleanup failed');
