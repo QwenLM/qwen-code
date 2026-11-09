@@ -213,6 +213,10 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import {
+  registerHostedPackagePreparation,
+  HOSTED_PACKAGE_PREPARATION_PREFIX,
+} from './hosted-package-preparation.js';
 import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -2378,6 +2382,7 @@ export function createServeApp(
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        req.path.startsWith(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/`) ||
         (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
       )
@@ -2608,6 +2613,7 @@ export function createServeApp(
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
   let stopHostedCsiSessions: (() => Promise<void>) | undefined;
+  let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
@@ -2632,6 +2638,11 @@ export function createServeApp(
       hostedHarness,
       primaryBoundWorkspace,
       broker,
+    );
+    stopHostedPackagePreparation = registerHostedPackagePreparation(
+      app,
+      hostedHarness,
+      ordinary,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
@@ -4419,6 +4430,8 @@ export function createServeApp(
     ]);
   };
   serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
+  if (stopHostedPackagePreparation)
+    serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;

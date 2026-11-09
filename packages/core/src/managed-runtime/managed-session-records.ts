@@ -732,6 +732,20 @@ export function managedSessionKeysEqual(
   );
 }
 
+/** Whether two references name the same resource with the same identity. */
+export function managedSessionDurableRefsEqual(
+  left: ManagedSessionDurableRef,
+  right: ManagedSessionDurableRef,
+): boolean {
+  return (
+    left.resourceId === right.resourceId &&
+    left.kind === right.kind &&
+    left.schemaVersion === right.schemaVersion &&
+    left.byteLength === right.byteLength &&
+    left.digest === right.digest
+  );
+}
+
 export function assertManagedSessionDurableRef(
   value: ManagedSessionJsonValue | undefined,
   label: string,

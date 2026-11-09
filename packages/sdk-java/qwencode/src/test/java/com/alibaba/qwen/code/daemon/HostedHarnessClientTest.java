@@ -115,6 +115,41 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void packagePreparationStreamsWithoutCreatingASessionAndKeepsTheBootFence() throws Exception {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"managed-package-preparation/1\"],"));
+        String preparation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        AtomicReference<String> upload = new AtomicReference<>();
+        AtomicReference<String> receivedScope = new AtomicReference<>();
+        server.createContext("/internal/hosted-harness/v1/managed-packages/prepare", exchange -> {
+            assertEquals(BOOT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.BOOT_ID_HEADER));
+            assertEquals("1", exchange.getRequestHeaders().getFirst(HostedHarnessClient.PROTOCOL_HEADER));
+            upload.set(readBody(exchange));
+            sendControlPlaneSessionJson(exchange, 201, "{\"preparationId\":\"" + preparation
+                    + "\",\"packageDigest\":\"" + "b".repeat(64) + "\",\"byteLength\":7,\"manifest\":{},\"inspection\":{}}");
+        });
+        server.createContext("/internal/hosted-harness/v1/managed-packages/" + preparation + "/archive", exchange -> {
+            receivedScope.set(exchange.getRequestURI().getRawQuery());
+            exchange.getResponseHeaders().add(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            byte[] bytes = "archive".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        Map<String, Object> scope = Map.of("tenantId", "tenant", "workspaceId", "workspace", "actorKey", "a".repeat(64));
+        try (HostedHarnessClient client = newClient()) {
+            Map<String, Object> descriptor = client.prepareManagedPackage(Map.of("input", Map.of(), "tenantId", "tenant",
+                    "workspaceId", "workspace", "actorKey", "a".repeat(64)), new java.io.ByteArrayInputStream("source".getBytes(StandardCharsets.UTF_8)));
+            assertEquals(preparation, descriptor.get("preparationId"));
+            try (InputStream input = client.managedPackageArchive(preparation, scope)) {
+                assertEquals("archive", new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            }
+            assertEquals("source", upload.get());
+            assertTrue(receivedScope.get().startsWith("scope="));
+        }
+    }
+
+    @Test
     void modelConfigurationRequiresNegotiationAndSurvivesLoadCopies() {
         var store = ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
                 .tenantId("tenant-a").workspaceId("workspace-a").writerId(BOOT_ID)

@@ -1745,6 +1745,14 @@ Local focused tests, macOS developer receipts and the existing Linux static-exte
 gate below establish different boundaries. Complete package Linux/SSH cleanup,
 fault injection and real-provider qualification remain separate acceptance gates.
 
+## Managed-only Skill and MCP installation
+
+Set `qwen.managed-agent.extensions.self-service-enabled=true` to allow authorized Workspace operators in the extension deployment allowlist to upload ZIP/tar.gz Skill or extension archives and author ordinary stdio, Streamable HTTP and SSE MCP connections without a local daemon. The Hosted Harness must advertise `managed-package-preparation/1`; pool preparation uses an accepting capable member without creating Session placement. Both the uploader and Session query expose permission and apply eligibility, and the server rechecks them.
+
+Review normalized resources and non-secret configuration before confirming installation. Workspace service credentials are stored through encrypted extension settings; commands, arguments and resource files are not executed during preparation. Publishing a revision does not change an existing Session. Explicit apply pins the chosen package/settings revision only in an eligible idle Session and preserves unrelated extensions, independent MCP connections and base Hooks. Recovery of old content creates a new configuration revision. An unknown apply outcome keeps the original operation/owner barrier and must be queried or continued before another selection is submitted.
+
+Runtime project Skill snapshots and personal HTTP MCP OAuth are separate dependent deliveries. This installation protocol remains version 1 and adds no personal credential tables or bindings. See the complete [English design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.md) and [Chinese design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.zh-CN.md). Disabling self-service keeps already published and installed content available. Local focused checks and prior whole-branch CI do not establish real MySQL, browser-to-Runtime or process-fault acceptance of a split head.
+
 ## Linux extension process acceptance
 
 `HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.

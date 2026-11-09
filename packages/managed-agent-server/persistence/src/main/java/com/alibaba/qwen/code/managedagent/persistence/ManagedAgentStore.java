@@ -113,12 +113,11 @@ public class ManagedAgentStore implements AgentStateStore {
             @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
             @Nullable SessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
             @Lazy @Nullable ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
-        String approvalMode =
-                properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
+        String approvalMode = properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
-        List<WebShellModelOption> modelCatalog = AgentModelCatalog.options(properties);
+        List<WebShellModelOption> modelCatalog = ManagedSessionModelConfigs.catalog(properties);
         boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
@@ -130,9 +129,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
-            throw new IllegalArgumentException(
-                    "qwen.managed-agent.agent-revision must contain 1-128"
-                            + " characters");
+            throw new IllegalArgumentException("qwen.managed-agent.agent-revision must contain 1-128 characters");
         }
 
         AgentStoreRows storeRows = new AgentStoreRows(harnessRules, jdbc, objectMapper);
@@ -307,6 +304,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         return sessionPolicies.requireExtensionManagement(tenantId, actorId, sessionId, operationId, mutation);
     }
+
+    @Override
+    public boolean canApplyExtensions(SessionRecord session) { return sessionPolicies.canApplyExtensions(session); }
 
     @Override
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)

@@ -98,6 +98,24 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsSessionExtensions() { return false; }
 
+    public default boolean supportsPackagePreparation() { return false; }
+
+    public record PreparedPackage(Map<String, Object> descriptor, java.io.InputStream archive) implements AutoCloseable {
+        @Override public void close() throws java.io.IOException { archive.close(); }
+    }
+
+    public default PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        throw new UnsupportedOperationException("Managed package preparation is unavailable");
+    }
+
+    public default Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        throw new UnsupportedOperationException("Managed package inspection is unavailable");
+    }
+
+    public default Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        throw new UnsupportedOperationException("Managed package preview is unavailable");
+    }
+
     public default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         throw new UnsupportedOperationException("Extension management is unavailable");
     }
