@@ -19,6 +19,17 @@ import type { HostProgramProbe } from '../session-agents/contract.js';
 export const AGENTS_SCHEMA_VERSION = 1;
 export const AGENT_HOST_REPLACEMENT_REQUIRED =
   'Agent Host replacement requires enrollment.';
+/**
+ * A Replace sent with a secret an enrolled Host already holds: the Host
+ * makes a new one and sends the Replace again.
+ */
+export const AGENT_HOST_ALREADY_ENROLLED =
+  'This Agent Host secret is already enrolled.';
+/** What the enroll route answers for an enrollment the store refused. */
+export const AGENT_HOST_ENROLLMENT_REFUSED = 'Agent Host enrollment refused.';
+/** ...and for one it could not complete (busy or failing); retry it. */
+export const AGENT_HOST_ENROLLMENT_UNAVAILABLE =
+  'Agent Host enrollment did not complete; retry.';
 
 export const AGENT_HOSTS_SCHEMA_VERSION = 1;
 export const LOCAL_AGENT_RUNTIME_ID = 'local';
