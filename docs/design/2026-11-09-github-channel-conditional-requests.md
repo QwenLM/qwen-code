@@ -161,14 +161,33 @@ At the default 60-second poll the header is also 60, so nothing changes. Only
 operators who configured a faster poll are affected, and GitHub is explicitly
 asking them to slow down. The consequence is documented rather than hidden.
 
-### The cache is bounded and connection-scoped
+**The floor paces the steady state only.** The base loop sleeps this interval
+on success, but on a failed poll it sleeps the error backoff (2 s doubling to
+30 s) and continues, so an error episode polls faster than the header asks.
+Clamping that sleep too would mean changing the recovery cadence every other
+polling channel relies on, which is out of scope here. The claim is therefore
+narrowed to the steady state in the user guide and in the acceptance criteria
+rather than overstated.
 
-A moved `since` cursor mints new keys, so an unbounded map would grow for the
-life of the process. The cache evicts oldest-first past a fixed entry cap and
-declines to store bodies above a fixed size; a declined URL simply stays
-unconditional, which is the pre-change behavior. The cache is cleared on
-disconnect so a reconnect never serves a body cached under a previous
-credential.
+### The cache is sized from the fan-out, bounded, and connection-scoped
+
+A cache smaller than one watch sweep does not degrade proportionally — it
+collapses. Each miss evicts the entry the sweep is about to read, so every read
+of every later pass misses, and the saving is exactly zero for the high
+`prWatchLimit` deployments this change is meant to help. The entry cap is
+therefore derived from `MAX_PR_WATCH_LIMIT` (twice it, covering the open set,
+the terminal-drain slice and the notifications pages) so the two cannot drift.
+
+Recency is refreshed on a hit as well as on a write. A moved `since` cursor
+keeps minting notification entries that are never read again; without the
+refresh those dead entries would evict the quiet PRs that are read every poll.
+
+A moved cursor still mints new keys, so the map stays bounded and evicts
+least-recently-used first. Bodies above a fixed size are declined, sized
+against the entry cap so the retention bound stays in the same order as a
+smaller cache of larger bodies; a declined URL simply stays unconditional,
+which is the pre-change behavior. The cache is cleared on disconnect so a
+reconnect never serves a body cached under a previous credential.
 
 ## Files affected
 
@@ -176,9 +195,13 @@ credential.
 | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `packages/channels/github/src/GithubAdapter.ts`      | Conditional `fetch`, cache, `X-Poll-Interval` capture, `pollInterval` override. |
 | `packages/channels/github/src/GithubAdapter.test.ts` | Collocated tests, including a transport-level wire oracle.                      |
+| `packages/channels/github/src/index.ts`              | Operator-facing cost model and poll-interval help text.                         |
 | `docs/users/features/channels/github.md`             | Document the behavior and the poll-interval consequence.                        |
 
-No config descriptor change: the feature has no new operator-facing option.
+No new operator-facing option is added. The descriptor changes are wording
+only: the cost model an operator sizes `prWatchLimit` against, and the
+`pollInterval` help text beside the input they edit. Validation bounds are
+unchanged.
 
 ## Constraints and risks
 
@@ -218,8 +241,11 @@ No config descriptor change: the feature has no new operator-facing option.
   `304`.
 - CI re-checks fire on their existing schedule during a `304`-only sequence.
 - No `304` produces an error-level log line.
-- The poll interval never runs faster than the last `X-Poll-Interval`, and
-  never exceeds `MAX_POLL_INTERVAL_MS` however large that header is.
+- A steady-state poll never runs faster than the last `X-Poll-Interval`, and
+  never exceeds `MAX_POLL_INTERVAL_MS` however large that header is. An error
+  episode keeps the shared backoff and is explicitly outside this claim.
+- A watch sweep larger than the default limit still hits on every read of the
+  second pass; the cache is sized from the watch ceiling, not a fixed guess.
 - Existing watch, notification and budget tests stay green.
 
 ## Open questions

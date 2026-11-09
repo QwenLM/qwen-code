@@ -114,7 +114,7 @@ export const plugin: ChannelPlugin = {
         maximum: MAX_POLL_INTERVAL_MS,
         default: '60000',
         description:
-          'How often to poll the notifications API, in ms. Kept between 1 and 86400000 (one day): a smaller positive value is raised to 1. Leave empty for 60000',
+          "How often to poll the notifications API, in ms. Kept between 1 and 86400000 (one day): a smaller positive value is raised to 1. Leave empty for 60000. A steady-state poll is raised to the endpoint's X-Poll-Interval when that is larger, which paces the PR watch too; at the 60000 default the header is also 60s, so nothing changes",
       },
       {
         key: 'groupPolicy',
@@ -197,7 +197,7 @@ export const plugin: ChannelPlugin = {
         maximum: MAX_PR_WATCH_LIMIT,
         default: String(DEFAULT_PR_WATCH_LIMIT),
         description:
-          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
+          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one pulls.get per poll, but an unchanged PR answers 304 and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch (~60 requests/hour per PR) and the periodic CI re-checks, so size the budget against those rather than the state watch. An over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
       },
       {
         key: 'prWatchBudgetReserve',

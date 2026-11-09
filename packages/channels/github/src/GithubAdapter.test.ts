@@ -116,7 +116,11 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
   };
 });
 
-import { GithubChannel, validateBoundSessionConfig } from './GithubAdapter.js';
+import {
+  CONDITIONAL_CACHE_MAX_ENTRIES,
+  GithubChannel,
+  validateBoundSessionConfig,
+} from './GithubAdapter.js';
 
 const octokitModule = (await import('@octokit/rest')) as unknown as {
   Octokit: Mock;
@@ -19346,7 +19350,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
 
       /** Real Octokit + real pagination plugin over the production transport. */
-      async function realClient() {
+      async function realClient(log?: { error: (message: unknown) => void }) {
         const { Octokit } =
           await vi.importActual<typeof import('@octokit/rest')>(
             '@octokit/rest',
@@ -19354,6 +19358,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         return new Octokit({
           auth: 'test-token',
           request: { fetch: adapterFetch() },
+          // @octokit/core binds console.error at module evaluation, so a
+          // console-level spy installed after import can never see a plugin
+          // log line. Anything asserting on logging must inject the logger.
+          ...(log ? { log } : {}),
         });
       }
 
@@ -19399,6 +19407,31 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         // never as a thrown RequestError githubApi would retry.
         expect(second.status).toBe(200);
         expect(await second.json()).toEqual(await first.json());
+      });
+
+      it('wires the conditional transport into the client connect() builds', async () => {
+        // Every other case here pulls conditionalFetch off the instance and
+        // builds its own client, so none of them would notice the wiring being
+        // deleted: @octokit/request falls back to globalThis.fetch, requests
+        // still succeed, and the feature ships inert with a green suite.
+        const wired = new TestableGithubChannel(
+          'test-github',
+          makeConfig(watchConfig),
+          makeBridge(),
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        try {
+          await wired.connect();
+          expect(mockOctokitConstructor).toHaveBeenCalledWith(
+            expect.objectContaining({
+              request: expect.objectContaining({
+                fetch: expect.any(Function),
+              }),
+            }),
+          );
+        } finally {
+          wired.disconnect();
+        }
       });
 
       it('serves the fresh body and re-caches when the ETag changes', async () => {
@@ -19478,19 +19511,48 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
       it('produces no error-level log for a 304', async () => {
         await initChannel(watchConfig, { boundSessions });
-        installPagedNotifications(2);
-        const client = await realClient();
+        const seen = new Set<string>();
+        installTransport((url) => {
+          if (url.pathname !== '/notifications') {
+            // Out of scope, so the transport forwards it untouched and the
+            // 304 reaches Octokit as a RequestError.
+            return { status: 304, headers: { etag: '"x"' } };
+          }
+          if (seen.has(url.href)) {
+            return { status: 304, headers: { etag: '"n"' } };
+          }
+          seen.add(url.href);
+          return {
+            status: 200,
+            body: [{ id: '1', updated_at: '2026-07-02T09:00:00.000Z' }],
+            headers: { etag: '"n"' },
+          };
+        });
+        const errors: string[] = [];
+        const client = await realClient({
+          error: (message) => errors.push(String(message)),
+        });
+
+        await notificationsList(client);
         await notificationsList(client);
 
         // plugin-request-log logs every RequestError at error level. Handling
-        // the 304 above it would emit one line per 304 (~1,800/hour).
-        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-        try {
-          await notificationsList(client);
-        } finally {
-          errors.mockRestore();
-        }
-        expect(errors).not.toHaveBeenCalled();
+        // the 304 above the transport would emit one line per 304
+        // (~1,800/hour at the watch cap).
+        expect(errors).toEqual([]);
+
+        // Positive control: the injected logger really does receive
+        // plugin-request-log output. Without this the assertion above could
+        // be green merely because nothing is wired to the logger — which is
+        // exactly how a console-level spy behaves here.
+        await expect(
+          client.rest.issues.listComments({
+            owner: 'owner',
+            repo: 'repo',
+            issue_number: 42,
+          }),
+        ).rejects.toThrow();
+        expect(errors.length).toBeGreaterThan(0);
       });
 
       it('keys the cache on the full URL so a moved since cursor is a fresh read', async () => {
@@ -19546,9 +19608,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         const transport = adapterFetch();
         const pull = (n: number) =>
           `https://api.github.com/repos/owner/repo/pulls/${n}`;
+        const newest = CONDITIONAL_CACHE_MAX_ENTRIES + 1;
 
-        // One past the 128-entry cap.
-        for (let n = 1; n <= 129; n++) {
+        // One past the cap, read from the producer rather than restated here.
+        for (let n = 1; n <= newest; n++) {
           await transport(pull(n), { method: 'GET' });
         }
         await transport(pull(1), { method: 'GET' });
@@ -19556,18 +19619,81 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
         // Control: the newest entry survived, so an all-unconditional result
         // above is eviction rather than a cache that never stored anything.
-        await transport(pull(129), { method: 'GET' });
+        await transport(pull(newest), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+      });
+
+      it('keeps hitting across a full watch sweep larger than the default limit', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        // Past the default watch limit: the fan-out this channel supports is
+        // up to MAX_PR_WATCH_LIMIT open PRs plus a terminal-drain slice.
+        const urls = Array.from(
+          { length: 200 },
+          (_, i) => `https://api.github.com/repos/owner/repo/pulls/${i + 1}`,
+        );
+
+        for (const url of urls) await transport(url, { method: 'GET' });
+        const secondSweep = calls.length;
+        for (const url of urls) await transport(url, { method: 'GET' });
+
+        // A cache smaller than the sweep does not degrade proportionally, it
+        // collapses: each miss evicts the entry the sweep is about to read, so
+        // every read of every later pass misses and the saving is zero for
+        // exactly the high-fan-out deployments this change is meant to help.
+        expect(
+          calls.slice(secondSweep).every((c) => c.ifNoneMatch !== null),
+        ).toBe(true);
+      });
+
+      it('keeps a live PR cached while dead cursor entries churn past the cap', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        let prServed = false;
+        const calls = installTransport((url) => {
+          // The PR must answer 304 from the second read on: a 200 re-inserts
+          // through the write path and would hide the hit-path refresh.
+          if (url.href === prUrl && prServed) {
+            return { status: 304, headers: { etag: '"v1"' } };
+          }
+          if (url.href === prUrl) prServed = true;
+          return {
+            status: 200,
+            body: makePrMeta({}),
+            headers: { etag: '"v1"' },
+          };
+        });
+        const transport = adapterFetch();
+
+        await transport(prUrl, { method: 'GET' });
+        // Each moved `since` cursor mints an entry that is never read again.
+        // Interleaving a PR read with each one means the PR is the most
+        // recently used entry every round, so write-order eviction would
+        // wrongly drop it while recency-on-hit keeps it.
+        for (let i = 0; i <= CONDITIONAL_CACHE_MAX_ENTRIES; i++) {
+          await transport(prUrl, { method: 'GET' });
+          await transport(
+            `https://api.github.com/notifications?since=cursor-${i}`,
+            { method: 'GET' },
+          );
+        }
+
+        await transport(prUrl, { method: 'GET' });
         expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
       });
 
       it('declines to cache an oversized body', async () => {
         await initChannel(watchConfig, { boundSessions });
-        // 400k characters but 1.2 MB of UTF-8: over the cap only when it is
-        // measured in bytes. A PR title is operator-controlled text, so the
-        // multibyte case is the realistic one, not a corner.
+        // 100k characters but 300 KB of UTF-8: under the cap when measured in
+        // code units, over it when measured in bytes. A PR title is
+        // operator-controlled text, so multibyte is the realistic case.
         const calls = installTransport(() => ({
           status: 200,
-          body: { title: '中'.repeat(400_000) },
+          body: { title: '中'.repeat(100_000) },
           headers: { etag: '"big"' },
         }));
         const transport = adapterFetch();

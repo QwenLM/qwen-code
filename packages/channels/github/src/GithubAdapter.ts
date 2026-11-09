@@ -1301,19 +1301,29 @@ function isNoReplySentinel(text: string): boolean {
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
 
 /**
- * Cap on cached conditional responses. A moved notifications `since` cursor
- * mints a new key every time it advances, so an unbounded map would grow for
- * the life of the process. Oldest-first eviction past the cap; an evicted URL
- * simply pays for one full 200 again.
+ * Cap on cached conditional responses, sized from the fan-out it has to
+ * serve: up to MAX_PR_WATCH_LIMIT open PRs, a terminal-drain slice on top,
+ * and the notifications pages. A cap below the sweep does not degrade
+ * proportionally — each miss evicts the entry the sweep is about to read, so
+ * every read of every later pass misses and the saving is exactly zero for
+ * the high-fan-out deployments this is meant to help. Derived from the watch
+ * limit so the two cannot drift apart.
+ *
+ * A moved notifications `since` cursor still mints new keys, so the map is
+ * bounded and evicts least-recently-used first; an evicted URL simply pays
+ * for one full 200 again.
  */
-const CONDITIONAL_CACHE_MAX_ENTRIES = 128;
+export const CONDITIONAL_CACHE_MAX_ENTRIES = MAX_PR_WATCH_LIMIT * 2;
 
 /**
  * Bodies above this size are not cached, so a pathologically large page
- * cannot pin memory. A declined URL stays unconditional — the behavior from
- * before conditional requests existed.
+ * cannot pin memory. Sized against the entry cap above to keep the retention
+ * bound in the same order as a smaller cache of larger bodies. A declined URL
+ * stays unconditional — the behavior from before conditional requests
+ * existed — and a page this large is one whose contents are churning, where a
+ * 304 was unlikely anyway.
  */
-const CONDITIONAL_CACHE_MAX_BODY_BYTES = 1024 * 1024;
+const CONDITIONAL_CACHE_MAX_BODY_BYTES = 256 * 1024;
 
 interface ConditionalCacheEntry {
   etag: string;
@@ -5309,6 +5319,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       merged.delete('content-length');
       merged.delete('content-encoding');
       merged.set('content-type', 'application/json; charset=utf-8');
+      // Refresh recency on a hit, not just on a write: a moved `since` cursor
+      // keeps minting dead notification entries, and without this they would
+      // evict the quiet PRs that are being read every poll.
+      this.conditionalCache.delete(url);
+      this.conditionalCache.set(url, cached);
       return new Response(cached.body, { status: 200, headers: merged });
     }
 
