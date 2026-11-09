@@ -24,7 +24,12 @@ afterEach(async () => {
 });
 
 function fixture(
-  options: { running?: () => Promise<boolean>; deadline?: number } = {},
+  options: {
+    running?: () => Promise<boolean>;
+    deadline?: number;
+    failHeartbeats?: number;
+    heartbeatStatus?: number;
+  } = {},
 ) {
   const app = express();
   app.use(express.json());
@@ -41,6 +46,7 @@ function fixture(
     token: 'private-claim-token',
   };
   const deadlineAt = options.deadline ?? Date.now() + 300_000;
+  let heartbeatCount = 0;
   const body = (queryId = 'query') => ({
     queryId,
     sessionId: 'session',
@@ -97,7 +103,22 @@ function fixture(
       };
     if (path === 'running')
       result = { started: options.running ? await options.running() : true };
-    if (path === 'heartbeat') result = { active: true };
+    if (path === 'heartbeat') {
+      heartbeatCount += 1;
+      const status =
+        options.heartbeatStatus ??
+        (heartbeatCount <= (options.failHeartbeats ?? 0) ? 503 : 200);
+      if (status !== 200) {
+        return new Response(
+          JSON.stringify({ code: 'side_query_unavailable' }),
+          {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      }
+      result = { active: true };
+    }
     if (path === 'result')
       updates.push(parsed['update'] as Record<string, unknown>);
     return new Response(JSON.stringify(result), {
@@ -261,6 +282,58 @@ describe('instance-scoped Hosted side queries', () => {
     expect(f.updates.some((update) => update['outcome'] === 'success')).toBe(
       false,
     );
+  });
+
+  it('settles completed when a single heartbeat fails mid-generation', async () => {
+    const f = fixture({ failHeartbeats: 1 });
+    await f.post('/side-queries', f.body());
+    await vi.waitFor(() => expect(f.generate).toHaveBeenCalledTimes(1));
+    await vi.waitFor(
+      () =>
+        expect(
+          f.calls.filter((call) => call === 'heartbeat').length,
+        ).toBeGreaterThanOrEqual(2),
+      { timeout: 3500 },
+    );
+    await f.settle();
+    expect(f.generate.mock.calls[0]?.[2].aborted).toBe(false);
+    expect(f.updates.at(-1)).toMatchObject({
+      status: 'completed',
+      outcome: 'success',
+      text: 'answer',
+      usage: expect.objectContaining({ model: 'qwen-plus', purpose: 'btw' }),
+    });
+  });
+
+  it('aborts generation after sustained heartbeat failures but keeps a completed answer', async () => {
+    const f = fixture({ failHeartbeats: Number.MAX_SAFE_INTEGER });
+    await f.post('/side-queries', f.body());
+    await vi.waitFor(() => expect(f.generate).toHaveBeenCalledTimes(1));
+    await vi.waitFor(
+      () => expect(f.generate.mock.calls[0]?.[2].aborted).toBe(true),
+      { timeout: 4500 },
+    );
+    await f.settle();
+    expect(f.updates.at(-1)).toMatchObject({
+      status: 'completed',
+      outcome: 'success',
+      text: 'answer',
+    });
+  });
+
+  it('interrupts on a terminal heartbeat verdict', async () => {
+    const f = fixture({ heartbeatStatus: 409 });
+    await f.post('/side-queries', f.body());
+    await vi.waitFor(() => expect(f.generate).toHaveBeenCalledTimes(1));
+    await vi.waitFor(
+      () => expect(f.generate.mock.calls[0]?.[2].aborted).toBe(true),
+      { timeout: 2500 },
+    );
+    await f.settle();
+    expect(f.updates.at(-1)).toMatchObject({
+      status: 'interrupted',
+      outcome: 'interrupted',
+    });
   });
 
   it('fences status/cancel with the complete query claim', async () => {

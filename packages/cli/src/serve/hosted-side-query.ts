@@ -399,12 +399,17 @@ export function registerHostedSideQueryRoutes(
     let partialText = '';
     let publishedText = '';
     let heartbeatPending = false;
+    let heartbeatFailures = 0;
     let heartbeatWork: Promise<void> | undefined;
     let deadlineWork: Promise<unknown> | undefined;
+    // `interrupted` is reserved for ownership loss: transient heartbeat noise
+    // must not discard a healthy or already-completed generation.
+    let abortCause: 'deadline' | 'revoked' | 'heartbeat' | undefined;
     const result = (update: ResultUpdate) =>
       store.request('/result', { update }, false);
     const deadline = setTimeout(
       () => {
+        abortCause = 'deadline';
         entry.abort.abort();
         deadlineWork = result({
           status: 'interrupted',
@@ -421,7 +426,9 @@ export function registerHostedSideQueryRoutes(
       heartbeatWork = store
         .request('/heartbeat', {}, false)
         .then(async (value) => {
+          heartbeatFailures = 0;
           if (object(value)['active'] !== true) {
+            abortCause = 'revoked';
             entry.abort.abort();
             return;
           }
@@ -431,14 +438,30 @@ export function registerHostedSideQueryRoutes(
             partialText !== publishedText
           ) {
             publishedText = partialText;
+            // Ownership was just confirmed; progress publication is best-effort.
             await result({
               status: 'running',
               outcome: 'pending',
               text: publishedText,
-            });
+            }).catch(() => {});
           }
         })
-        .catch(() => entry.abort.abort())
+        .catch((error: unknown) => {
+          if (
+            error instanceof ManagedSideQueryError &&
+            (error.code === 'side_query_store_404' ||
+              error.code === 'side_query_store_409')
+          ) {
+            abortCause = 'revoked';
+            entry.abort.abort();
+            return;
+          }
+          heartbeatFailures += 1;
+          if (heartbeatFailures >= 3) {
+            abortCause = 'heartbeat';
+            entry.abort.abort();
+          }
+        })
         .finally(() => {
           heartbeatPending = false;
         });
@@ -500,10 +523,11 @@ export function registerHostedSideQueryRoutes(
         if (tagged?.[1]?.trim()) answer = tagged[1].trim();
         else outcome = 'invalid_recap';
       }
-      if (entry.abort.signal.aborted)
+      if (entry.abort.signal.aborted && abortCause !== 'heartbeat')
         throw new ManagedSideQueryError('interrupted');
       await heartbeatWork;
-      entry.abort.signal.throwIfAborted();
+      if (entry.abort.signal.aborted && abortCause !== 'heartbeat')
+        entry.abort.signal.throwIfAborted();
       await result({
         status: outcome === 'success' ? 'completed' : 'failed',
         outcome,

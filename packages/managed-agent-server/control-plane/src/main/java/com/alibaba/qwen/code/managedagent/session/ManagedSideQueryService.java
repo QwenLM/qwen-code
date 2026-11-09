@@ -162,9 +162,15 @@ public class ManagedSideQueryService {
             boolean terminal;
             try {
                 terminal = queries.get(execution.tenant(), execution.actor(), execution.session(), execution.query()).terminal();
-            } catch (RuntimeException revoked) {
+            } catch (ManagedAgentException revoked) {
                 interrupt(execution.tenant(), execution.session(), execution.query(), "side_query_owner_lost");
                 terminal = true;
+            } catch (RuntimeException unavailable) {
+                // A transient read failure (deadlock, lock wait, pool timeout) is
+                // not ownership loss; expiry reconciliation remains the backstop.
+                LOG.warn("Side-query reconcile read failed for {}: {}", execution.query(),
+                        unavailable.getClass().getSimpleName());
+                continue;
             }
             if (terminal) {
                 abort(execution);
@@ -177,9 +183,11 @@ public class ManagedSideQueryService {
                     }
                     release(execution);
                 }
-            } catch (RuntimeException lost) {
-                interrupt(execution.tenant(), execution.session(), execution.query(), "side_query_owner_lost");
-                abort(execution);
+            } catch (RuntimeException unavailable) {
+                // The connector normalizes genuine loss (unknown generation, 404)
+                // to active:false; what escapes is transport noise, not revocation.
+                LOG.warn("Side-query status probe failed for {}: {}", execution.query(),
+                        unavailable.getClass().getSimpleName());
             }
         }
     }

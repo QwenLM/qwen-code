@@ -147,6 +147,31 @@ class ManagedSideQueryServiceTest {
         verify(target).close();
     }
 
+    @Test
+    void transientReconcileReadDoesNotInterruptAHealthyQuery() {
+        service.create("tenant", "actor", "session", request);
+        when(queries.get("tenant", "actor", "session", "query"))
+                .thenThrow(new IllegalStateException("deadlock rollback"))
+                .thenReturn(query("running"));
+        when(target.status(any(), any())).thenReturn(Map.of("active", true));
+        service.reconcile();
+        service.reconcile();
+        verify(queries, never()).interrupt(any(), any(), any(), any());
+        verify(target, never()).close();
+        verify(target, never()).cancel(any(), any());
+    }
+
+    @Test
+    void transientStatusProbeDoesNotInterruptAHealthyQuery() {
+        service.create("tenant", "actor", "session", request);
+        when(queries.get("tenant", "actor", "session", "query")).thenReturn(query("running"));
+        when(target.status(any(), any())).thenThrow(new IllegalStateException("connection reset"));
+        service.reconcile();
+        verify(queries, never()).interrupt(any(), any(), any(), any());
+        verify(target, never()).close();
+        verify(target, never()).cancel(any(), any());
+    }
+
     private Query query(String state) {
         return new Query("query", "session", "btw", "manual", "question", state, null,
                 prefix, 1, "", Map.of(), null, 1, 1, System.currentTimeMillis() + 300_000);
