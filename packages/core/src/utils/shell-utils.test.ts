@@ -769,6 +769,14 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('sh -c --')).toEqual('--');
   });
 
+  // Invalid UTF-8 keeps one character per byte instead of U+FFFD.
+  it('keeps undecodable ANSI-C bytes distinct', () => {
+    expect(stripShellWrapper(String.raw`sh -c $'\xff'`)).toEqual('\udcff');
+    expect(stripShellWrapper(String.raw`sh -c $'\uD800'`)).toEqual(
+      '\udced\udca0\udc80',
+    );
+  });
+
   it.each(RESOLVED_PAYLOADS)(
     'unwraps %s to the resolved script',
     (_what, command) => {

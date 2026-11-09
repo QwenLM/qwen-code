@@ -599,12 +599,23 @@ describe('extractShellOperations', () => {
     ['echo x \\>>out2.txt', 'out2.txt'],
     ['echo x ">">out3.txt', 'out3.txt'],
     ["echo x $'\\x3e'>out4.txt", 'out4.txt'],
+    ["echo x '&'>out5.txt", 'out5.txt'],
+    ['echo x "&">>out6.txt', 'out6.txt'],
+    ['echo x \\&>out7.txt', 'out7.txt'],
+    ["echo x $'\\x26'>out8.txt", 'out8.txt'],
+    ["echo x '>'&>out9.txt", 'out9.txt'],
+    ['echo x "&"&>out10.txt', 'out10.txt'],
   ])(
     'a quoted operator before a real redirect keeps the write: %s',
     (command, file) => {
       expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
     },
   );
+
+  // A quoted word before a descriptor duplication leaves no file behind.
+  it("keeps '>'>&1 as fd duplication", () => {
+    expect(ops("echo hi '>'>&1")).toEqual([]);
+  });
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
   it.each<[command: string, file: string]>([
@@ -886,6 +897,21 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
     expect(
       extractShellOperationsAcrossCommand("(cat > $'\\x41')", '/repo'),
     ).toEqual([write('/repo/A')]);
+  });
+});
+
+// Invalid UTF-8 keeps one lone surrogate per byte: two different byte paths
+// must never collapse into the same string.
+describe('ANSI-C bytes that are not valid UTF-8', () => {
+  it.each<[command: string, path: string]>([
+    [String.raw`cat $'\xff'`, '/repo/\udcff'],
+    [String.raw`cat $'\xc3'`, '/repo/\udcc3'],
+    [String.raw`cat $'\uD800'`, '/repo/\udced\udca0\udc80'],
+    [String.raw`cat $'\U00110000'`, '/repo/\udcf4\udc90\udc80\udc80'],
+  ])('keeps one character per byte: %s', (command, path) => {
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      read(path),
+    ]);
   });
 });
 

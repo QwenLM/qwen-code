@@ -33,7 +33,11 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
-import { decodeAnsiCEscape, stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  decodeAnsiCBytes,
+  decodeAnsiCEscape,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
 
@@ -113,7 +117,7 @@ function tokenize(
   let ansiCBytes: number[] = [];
   const flushAnsiC = () => {
     if (ansiCBytes.length === 0) return;
-    const text = Buffer.from(ansiCBytes).toString('utf8');
+    const text = decodeAnsiCBytes(ansiCBytes);
     current += text;
     bare += '0'.repeat(text.length);
     ansiCBytes = [];
@@ -417,8 +421,9 @@ function isNetworkPseudoDevice(target: string): boolean {
 /**
  * Index where bash ends the word and starts an unquoted redirection operator.
  *
- * A quoted or escaped `<`/`>` stays inside the word, so `'>'>file` is the
- * word `>` followed by the redirect `>file`. The tokenizer keeps both in one
+ * A quoted or escaped `<`, `>` or `&` stays inside the word, so `'>'>file`
+ * is the word `>` followed by the redirect `>file`, and `'&'>file` is the
+ * word `&` followed by the same redirect. The tokenizer keeps both in one
  * token, and the masked spelling alone would hide the real operator.
  */
 function operatorAfterMaskedOperator(
@@ -427,15 +432,11 @@ function operatorAfterMaskedOperator(
 ): number {
   if (bare === undefined || bare.length !== token.length) return -1;
   for (let index = 1; index < token.length; index++) {
-    const character = token[index]!;
-    if (
-      (character === '<' || character === '>') &&
-      bare[index] === '1' &&
-      (token[index - 1] === '<' || token[index - 1] === '>') &&
-      bare[index - 1] !== '1'
-    ) {
-      return index;
-    }
+    if (bare[index] !== '1') continue;
+    const previous = token[index - 1]!;
+    if (bare[index - 1] === '1' || !'<>&'.includes(previous)) continue;
+    if (!/^(?:&>>|&>|>>|>|<<|<)/.test(token.slice(index))) continue;
+    return index;
   }
   return -1;
 }
@@ -584,7 +585,21 @@ function extractRedirects(
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
       const split = operatorAfterMaskedOperator(tok, tokBare);
-      const matchText = split > 0 ? tok.slice(split) : syntax;
+      const redirectText = split > 0 ? tok.slice(split) : tok;
+      const redirectBare = split > 0 ? tokBare?.slice(split) : tokBare;
+      const fdOp = split > 0 ? /^(?:[12]?>&|<&)/.exec(redirectText)?.[0] : null;
+      if (fdOp) {
+        const file = fdRedirectFile(redirectText.slice(fdOp.length));
+        if (file !== undefined) {
+          (fdOp === '<&' ? readFiles : writeFiles).push(
+            resolvePath(file, cwd, redirectBare?.slice(fdOp.length)),
+          );
+        }
+        tokens[i] = tok.slice(0, split);
+        if (bares !== undefined) bares[i] = tokBare!.slice(0, split);
+        continue;
+      }
+      const matchText = split > 0 ? redirectText : syntax;
       const m = matchText.match(
         /^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
       );

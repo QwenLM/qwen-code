@@ -632,19 +632,17 @@ export function decodeAnsiCEscape(
     if (digits) {
       const code = parseInt(digits, 16);
       const length = 2 + digits.length;
-      // `String.fromCodePoint` throws above U+10FFFF; keep the escape literal
-      // instead of throwing out of the permission guard.
-      if (next !== 'x' && code > 0x10ffff) {
+      if (next === 'x') return { bytes: [code], length };
+      const encoded = encodeUtf8CodePoint(code);
+      // Beyond the four-byte form bash's spelling is uncertain; keep the
+      // escape literal instead of throwing out of the permission guard.
+      if (encoded === null) {
         return {
           bytes: [...Buffer.from(body.slice(index, index + length))],
           length,
         };
       }
-      return {
-        bytes:
-          next === 'x' ? [code] : [...Buffer.from(String.fromCodePoint(code))],
-        length,
-      };
+      return { bytes: encoded, length };
     }
   }
   // `\c` needs an operand letter; at the end of the word (or right before the
@@ -671,6 +669,85 @@ export function decodeAnsiCEscape(
 }
 
 /**
+ * UTF-8 encode a numeric code point, including the surrogate range and the
+ * 0x110000–0x1FFFFF range bash still writes in the four-byte form.
+ */
+function encodeUtf8CodePoint(code: number): number[] | null {
+  if (code <= 0x7f) return [code];
+  if (code <= 0x7ff) {
+    return [0xc0 | (code >> 6), 0x80 | (code & 0x3f)];
+  }
+  if (code <= 0xffff) {
+    return [
+      0xe0 | (code >> 12),
+      0x80 | ((code >> 6) & 0x3f),
+      0x80 | (code & 0x3f),
+    ];
+  }
+  if (code <= 0x1fffff) {
+    return [
+      0xf0 | (code >> 18),
+      0x80 | ((code >> 12) & 0x3f),
+      0x80 | ((code >> 6) & 0x3f),
+      0x80 | (code & 0x3f),
+    ];
+  }
+  return null;
+}
+
+/**
+ * Decode ANSI-C bytes. Invalid UTF-8 becomes one lone low surrogate per byte
+ * (`surrogateescape`), so two different byte paths never collapse into the
+ * same string and the bytes stay recoverable.
+ */
+export function decodeAnsiCBytes(bytes: number[]): string {
+  let text = '';
+  for (let index = 0; index < bytes.length; ) {
+    const first = bytes[index]!;
+    if (first < 0x80) {
+      text += String.fromCharCode(first);
+      index++;
+      continue;
+    }
+    let length = 0;
+    let code = 0;
+    if (first >= 0xc2 && first <= 0xdf) {
+      length = 2;
+      code = first & 0x1f;
+    } else if (first >= 0xe0 && first <= 0xef) {
+      length = 3;
+      code = first & 0x0f;
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      length = 4;
+      code = first & 0x07;
+    }
+    let valid = length > 0 && index + length <= bytes.length;
+    for (let offset = 1; valid && offset < length; offset++) {
+      const next = bytes[index + offset]!;
+      if ((next & 0xc0) !== 0x80) valid = false;
+      else code = (code << 6) | (next & 0x3f);
+    }
+    if (
+      valid &&
+      ((length === 3 && code < 0x800) ||
+        (length === 4 && code < 0x10000) ||
+        code > 0x10ffff ||
+        (code >= 0xd800 && code <= 0xdfff))
+    ) {
+      valid = false;
+    }
+    if (!valid) {
+      text += String.fromCharCode(0xdc00 + first);
+      index++;
+      continue;
+    }
+    text += String.fromCodePoint(code);
+    index += length;
+  }
+  return text;
+}
+
+/**
  * Decode a whole ANSI-C word body. A NUL ends the word bash builds:
  * `$'--\0x'` is the word `--`; the rest of the segment is dropped.
  */
@@ -688,7 +765,7 @@ function decodeAnsiCWord(body: string): string {
     for (const byte of escape.bytes) bytes.push(byte);
     index += escape.length - 1;
   }
-  return Buffer.from(bytes).toString('utf8');
+  return decodeAnsiCBytes(bytes);
 }
 
 /**
