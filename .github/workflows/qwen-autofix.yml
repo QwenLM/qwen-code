@@ -1609,7 +1609,7 @@ jobs:
       cancel-in-progress: false
     # Persistent pool, not hosted: this is the maintainer-facing half of a
     # command route already accepted, and a hosted backlog left it silent.
-    # Full rationale → qwen-autofix.md#af-161
+    # Full rationale → qwen-autofix.md#af-162
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
@@ -1629,7 +1629,7 @@ jobs:
           # CI_DEV_BOT_PAT. The mint is guarded because `export VAR="$(...)"`
           # reports export's status, not the substitution's — an empty
           # GH_CONFIG_DIR is gh's fallback to that shared config.
-          # Full rationale → qwen-autofix.md#af-161
+          # Full rationale → qwen-autofix.md#af-162
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
@@ -1887,7 +1887,7 @@ jobs:
     concurrency:
       group: 'qwen-autofix-retry-cmd-${{ needs.route.outputs.retry_pr }}'
       cancel-in-progress: false
-    # Full rationale → qwen-autofix.md#af-161
+    # Full rationale → qwen-autofix.md#af-162
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
@@ -1904,7 +1904,7 @@ jobs:
           # CI_DEV_BOT_PAT. The mint is guarded because `export VAR="$(...)"`
           # reports export's status, not the substitution's — an empty
           # GH_CONFIG_DIR is gh's fallback to that shared config.
-          # Full rationale → qwen-autofix.md#af-161
+          # Full rationale → qwen-autofix.md#af-162
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
@@ -1959,7 +1959,7 @@ jobs:
     concurrency:
       group: 'qwen-autofix-takeover-ack-${{ needs.route.outputs.ack_pr }}'
       cancel-in-progress: false
-    # Full rationale → qwen-autofix.md#af-161
+    # Full rationale → qwen-autofix.md#af-162
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
@@ -1981,7 +1981,7 @@ jobs:
           # CI_DEV_BOT_PAT. The mint is guarded because `export VAR="$(...)"`
           # reports export's status, not the substitution's — an empty
           # GH_CONFIG_DIR is gh's fallback to that shared config.
-          # Full rationale → qwen-autofix.md#af-161
+          # Full rationale → qwen-autofix.md#af-162
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
@@ -4123,6 +4123,19 @@ jobs:
             exit 0
           fi
 
+          # Failed-check evidence while the working tree is STILL the trusted
+          # base: the collector and the patrol helper it imports must not come
+          # from the PR branch this step is about to check out. Best-effort —
+          # an absent script (it is new until this merges) or a failed read
+          # leaves the round with the name-only sections it has today.
+          # Full rationale → qwen-autofix.md#af-161
+          gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup,headRefOid \
+            > "${WORKDIR}/check-evidence-input.json" 2> /dev/null \
+            || echo '{}' > "${WORKDIR}/check-evidence-input.json"
+          node .github/scripts/autofix-check-evidence.mjs \
+            --repo "${REPO}" --checks "${WORKDIR}/check-evidence-input.json" \
+            > "${WORKDIR}/check-evidence.md" 2>> "${WORKDIR}/check-evidence.log" || true
+
           echo 'Restoring tracked build output before switching to the PR branch.'
           git status --short
           git restore --source=HEAD --staged --worktree .
@@ -4961,6 +4974,14 @@ jobs:
               | select((.completedAt // .updatedAt // "") <= $wm)
               | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
+            # The names above cannot say WHICH step or assertion failed; the
+            # collector adds failed step names and a bounded, redacted log
+            # excerpt per failing job. Absent before this script merges.
+            # Full rationale → qwen-autofix.md#af-161
+            if [[ -s "${WORKDIR}/check-evidence.md" ]]; then
+              echo
+              cat "${WORKDIR}/check-evidence.md"
+            fi
             # If the LAST round ended in a gate rejection, show the agent WHY.
             # It is otherwise invisible on the retry: the reason lives in the
             # bot's own handoff comment, which the feedback filter above

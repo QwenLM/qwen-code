@@ -96,7 +96,7 @@ const routeJob =
 const reviewScanJob =
   workflow.match(/\n {2}review-scan:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
-// The command lane (af-161): each of these steps is the visible half of a
+// The command lane (af-162): each of these steps is the visible half of a
 // command route already accepted, and each carries CI_DEV_BOT_PAT on the
 // persistent pool. Each is its job's only step, so the slice bounds on the
 // GENERIC next job-level line rather than on whichever job follows today.
@@ -7742,7 +7742,7 @@ exit 1
           ...process.env,
           PATH: `${bin}:${process.env.PATH}`,
           // The step mints its hermetic gh config dir under RUNNER_TEMP
-          // (af-161); the runner always provides it, so the fixture must.
+          // (af-162); the runner always provides it, so the fixture must.
           RUNNER_TEMP: dir,
           GITHUB_TOKEN: 'pat',
           AUTOFIX_BOT: 'qwen-code-dev-bot',
@@ -7757,7 +7757,7 @@ exit 1
         },
         encoding: 'utf8',
       });
-      // af-161: nothing reclaims RUNNER_TEMP on the persistent pool, so the
+      // af-162: nothing reclaims RUNNER_TEMP on the persistent pool, so the
       // step must take its gh config dir with it on EVERY exit path. This
       // runs inside the helper so every vector below is covered, including
       // the early-return refusals a trailing rm would have missed.
@@ -11920,7 +11920,7 @@ exit 1
     // The scan lane: route and review-scan gate the WHOLE fan-out, and a
     // hosted-runner backlog queued route past the cron period so the cron
     // supersede rule starved every scan round (2026-08-25). The command
-    // lane (af-161): route accepting a command in seconds is invisible
+    // lane (af-162): route accepting a command in seconds is invisible
     // while its only visible half waits for a hosted runner — on
     // 2026-11-08 an accepted /takeover left its PR unlabeled and unacked
     // behind a 39-49 minute hosted queue. Both lanes share the heavy
@@ -12749,7 +12749,7 @@ exit 1
     // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
     // collaborator-permission lookups into a local socket. The command
     // lane joins that pool for the same reason and pays the same price
-    // (af-161): its identity check is what gates the label write.
+    // (af-162): its identity check is what gates the label write.
     for (const [step, firstGh, configMint] of [
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
@@ -13182,7 +13182,7 @@ exit 1
           GITHUB_TOKEN: 'pat',
         },
       },
-      // The command lane (af-161) carries the same PAT onto the same pool.
+      // The command lane (af-162) carries the same PAT onto the same pool.
       // Its first gh call is the bot-identity check that gates the label
       // write, so the abort has to land in front of that too.
       ...commandStepNames.map((name, i) => ({
@@ -13257,7 +13257,7 @@ exit 1
   });
 
   it('takes the command lane gh config dir off the pool on every exit path', () => {
-    // af-161 / R1-1: nothing reclaims RUNNER_TEMP on this persistent pool
+    // af-162 / R1-1: nothing reclaims RUNNER_TEMP on this persistent pool
     // and the /tmp age sweep cannot reach it, so a dir left behind accrues
     // forever. The ack and re-arm replays assert this over their whole step
     // bodies; takeover-command has no such replay, so run each preamble on
@@ -21178,7 +21178,7 @@ exit 1
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
             // The step mints its hermetic gh config dir under RUNNER_TEMP
-            // (af-161); the runner always provides it, so the fixture must.
+            // (af-162); the runner always provides it, so the fixture must.
             RUNNER_TEMP: dir,
             GITHUB_TOKEN: 'x',
             PR: '7354',
@@ -21190,7 +21190,7 @@ exit 1
           },
           encoding: 'utf8',
         });
-        // af-161: the re-arm step must take its gh config dir with it on
+        // af-162: the re-arm step must take its gh config dir with it on
         // every exit path — RUNNER_TEMP is not reclaimed on this pool.
         expect(
           readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
@@ -32703,5 +32703,92 @@ describe('in-round self-review A/B (af-156)', () => {
   it('documents the arm in the design doc', () => {
     expect(designDoc).toContain('<a id="af-156"></a>');
     expect(designDoc).toContain('(#af-156)');
+  });
+});
+
+describe('failed-check evidence (af-161)', () => {
+  const prepareStart = workflow.indexOf(
+    "      - name: 'Prepare branch and feedback'",
+  );
+  const prepare = workflow.slice(
+    prepareStart,
+    workflow.indexOf(
+      "      - name: 'Post autofix status comment'",
+      prepareStart,
+    ),
+  );
+  const collectorCall = 'node .github/scripts/autofix-check-evidence.mjs';
+
+  it('collects from the trusted base, before the PR branch is checked out', () => {
+    // The collector imports the patrol's log scrubber, so BOTH files must
+    // resolve from the trusted checkout. Below the checkout they would be
+    // branch-supplied code running with the PAT in env (af-041/af-158).
+    expect(prepare).toContain(collectorCall);
+    const callAt = prepare.indexOf(collectorCall);
+    expect(callAt).toBeGreaterThan(-1);
+    expect(callAt).toBeLessThan(prepare.indexOf('git checkout -B "${BRANCH}"'));
+    expect(callAt).toBeLessThan(
+      prepare.indexOf("echo 'Restoring tracked build output"),
+    );
+    // A staged RUNNER_TEMP copy would need a digest and would still execute
+    // after branch code has run; the working-tree call at this position is
+    // what makes staging unnecessary.
+    expect(prepare).not.toContain('RUNNER_TEMP}/autofix-check-evidence');
+  });
+
+  it('degrades to less evidence, never to a failed round', () => {
+    expect(prepare).toContain('--json statusCheckRollup,headRefOid');
+    expect(prepare).toContain(
+      `|| echo '{}' > "\${WORKDIR}/check-evidence-input.json"`,
+    );
+    const call = prepare.slice(
+      prepare.indexOf(collectorCall),
+      prepare.indexOf("echo 'Restoring tracked build output"),
+    );
+    expect(call).toContain('--checks "${WORKDIR}/check-evidence-input.json"');
+    expect(call).toContain('> "${WORKDIR}/check-evidence.md"');
+    // stderr rides the whole-WORKDIR artifact upload instead of the round log.
+    expect(call).toContain('2>> "${WORKDIR}/check-evidence.log"');
+    expect(call).toContain('|| true');
+  });
+
+  it('feeds the section after the name-only lists and before the gate rejection', () => {
+    const guard = 'if [[ -s "${WORKDIR}/check-evidence.md" ]]; then';
+    expect(prepare).toContain(guard);
+    const stillRed = prepare.indexOf(
+      '## Still-red checks (persisting from before the last evaluation)',
+    );
+    const evidence = prepare.indexOf(guard);
+    const rejection = prepare.indexOf(
+      '# If the LAST round ended in a gate rejection',
+    );
+    expect(stillRed).toBeGreaterThan(-1);
+    expect(evidence).toBeGreaterThan(stillRed);
+    expect(rejection).toBeGreaterThan(evidence);
+    expect(prepare).toContain('cat "${WORKDIR}/check-evidence.md"');
+    // The excerpt is untrusted log text: it must land in feedback.md BEFORE
+    // the echo that defangs both workflow-command syntaxes.
+    expect(prepare.indexOf('cat "${WORKDIR}/check-evidence.md"')).toBeLessThan(
+      prepare.indexOf('cat "${WORKDIR}/feedback.md" | sed'),
+    );
+  });
+
+  it('runs the behavioral suite in CI and documents the wire', () => {
+    // Deleting either membership entry would silently disable the only
+    // coverage of the collector (precedent: autofix-status-heartbeat).
+    for (const list of ['HELPER_TESTS_DEP_FREE', 'HELPER_TESTS']) {
+      const line = ciWorkflow
+        .split('\n')
+        .find((entry) => entry.trim().startsWith(`${list}:`));
+      expect(line, list).toContain(
+        '.github/scripts/autofix-check-evidence.test.mjs',
+      );
+    }
+    expect(designDoc).toContain('<a id="af-161"></a>');
+    expect(designDoc).toContain('(#af-161)');
+    expect(workflow).toContain('qwen-autofix.md#af-161');
+    // The agent is told to use the section; without this the evidence is
+    // collected but never read.
+    expect(readAutofixSkill()).toContain('Failed check evidence');
   });
 });
