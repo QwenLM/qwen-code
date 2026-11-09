@@ -536,7 +536,7 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a retry after a model error, and a retry that fails again;
 - a retried tool-result round whose response calls a tool;
 - input queued while a tool runs, which goes out with the tool's result;
-- a Goal whose second continuation reads a file and then proposes that the Goal is complete, which the check accepts;
+- a Goal whose second continuation reads a file and then proposes that the Goal is complete, which the check accepts; the check's request, which does not stream, is compared too;
 - a background shell whose result starts a notification turn, which reads a file;
 - a cron job that fires once, whose turn reads a file;
 - a teammate's report that starts a teammate turn, which reads a file; the leader's requests and the teammate's are each compared in the order that agent sent them;

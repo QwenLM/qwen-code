@@ -61,8 +61,15 @@ interface Scenario {
   laterTurns?: boolean;
   /** Environment for the TUI, over the suite's. */
   env?: Record<string, string>;
-  /** The reply to a request that does not stream, such as a Goal check. */
-  sideReply?: () => FakeOpenAIResponse;
+  /**
+   * The reply to a request that does not stream, such as a Goal check;
+   * `undefined` leaves it to the suite's.
+   */
+  sideReply?: (body: JsonObject) => FakeOpenAIResponse | undefined;
+  /** The requests that do not stream each run must send, when checked. */
+  sideRequests?: number;
+  /** What else differs per run in this scenario. */
+  volatile?: Volatile;
   /**
    * For requests from more than one agent, whose order across agents varies
    * from run to run: which agent sent a request. Each agent's requests are
@@ -95,11 +102,20 @@ interface Scenario {
     messages: JsonObject[],
     dir: string,
     index: number,
-  ) => FakeOpenAIResponse;
+  ) => FakeOpenAIResponse | Promise<FakeOpenAIResponse>;
+}
+
+interface Volatile {
+  /** Fields to leave out. */
+  keys?: string[];
+  /** Text to replace, applied to the JSON text. */
+  text?: Array<[RegExp, string]>;
 }
 
 interface Run {
   requests: unknown[];
+  /** The requests that do not stream, such as a Goal check. */
+  sideRequests: unknown[];
   records: unknown[];
   /** The screen after the last prompt. */
   screen: string;
@@ -166,9 +182,6 @@ const VOLATILE_KEYS = new Set([
   'backupTime',
   // A shell command's process.
   'pid',
-  // When a Goal was set and last changed.
-  'createdAt',
-  'updatedAt',
 ]);
 
 // Timings, such as the telemetry recorded with each response.
@@ -191,31 +204,41 @@ const isDateReminder = (part: unknown) =>
   typeof (part as JsonObject)?.['text'] === 'string' &&
   DATE_REMINDER.test((part as JsonObject)['text'] as string);
 
-/** `dir` is the workspace; `scratch`, which holds it, is the run's home. */
-function normalize(value: unknown, dir: string, scratch: string): unknown {
+/**
+ * `dir` is the workspace; `scratch`, which holds it, is the run's home;
+ * `volatile`, what else differs per run in the scenario.
+ */
+function normalize(
+  value: unknown,
+  dir: string,
+  scratch: string,
+  volatile: Volatile = {},
+): unknown {
   const replaced = JSON.parse(
-    JSON.stringify(value ?? null)
-      .split(dir)
-      .join('<DIR>')
-      .split(scratch)
-      .join('<SCRATCH>')
-      .replace(RANDOM_ID, '<ID>')
-      // A shell command's result names its process group.
-      .replace(/Process Group PGID: \d+/g, 'Process Group PGID: <PGID>')
-      // A background shell's task, its process and the project's runtime
-      // directory, named by a hash of the workspace path.
-      .replace(/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>')
-      .replace(/(pid: |pid |<pid>)\d+/g, '$1<PID>')
-      .replace(/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/')
-      // A cron job's id.
-      .replace(/(Scheduled (?:one-shot task )?)[0-9a-z]{8}\b/g, '$1<CRON>'),
+    (volatile.text ?? []).reduce(
+      (text, [pattern, replacement]) => text.replace(pattern, replacement),
+      JSON.stringify(value ?? null)
+        .split(dir)
+        .join('<DIR>')
+        .split(scratch)
+        .join('<SCRATCH>')
+        .replace(RANDOM_ID, '<ID>')
+        // A shell command's result names its process group.
+        .replace(/Process Group PGID: \d+/g, 'Process Group PGID: <PGID>'),
+    ),
   );
+  const keys = new Set(volatile.keys);
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
     if (node && typeof node === 'object') {
       return Object.fromEntries(
         Object.entries(node as JsonObject)
-          .filter(([key]) => !VOLATILE_KEYS.has(key) && !TIMING_KEY.test(key))
+          .filter(
+            ([key]) =>
+              !VOLATILE_KEYS.has(key) &&
+              !keys.has(key) &&
+              !TIMING_KEY.test(key),
+          )
           .map(([key, child]) => [key, strip(child)]),
       );
     }
@@ -227,22 +250,24 @@ function normalize(value: unknown, dir: string, scratch: string): unknown {
 /**
  * Each request body as the client sent it, without the date reminder: every
  * message field, `reasoning_content` included, the tools offered and the
- * sampling options.
+ * sampling options. `stream` picks the model's rounds or the side requests,
+ * such as a Goal check.
  */
 function modelRequests(
   server: FakeOpenAIServer,
   dir: string,
   scratch: string,
-  agent?: (messages: JsonObject[]) => string,
+  scenario: Scenario,
+  stream = true,
 ): unknown[] {
-  const streamed = server.requests.filter(
-    (request) => request.body['stream'] === true,
+  const sent = server.requests.filter(
+    (request) => (request.body['stream'] === true) === stream,
   );
-  const agentOf = (request: (typeof streamed)[number]) =>
-    agent?.((request.body['messages'] ?? []) as JsonObject[]) ?? '';
-  const agents = [...new Set(streamed.map(agentOf))].sort();
+  const agentOf = (request: (typeof sent)[number]) =>
+    scenario.agent?.((request.body['messages'] ?? []) as JsonObject[]) ?? '';
+  const agents = [...new Set(sent.map(agentOf))].sort();
   return agents
-    .flatMap((name) => streamed.filter((request) => agentOf(request) === name))
+    .flatMap((name) => sent.filter((request) => agentOf(request) === name))
     .map((request) =>
       normalize(
         {
@@ -261,6 +286,7 @@ function modelRequests(
         },
         dir,
         scratch,
+        scenario.volatile,
       ),
     );
 }
@@ -270,6 +296,7 @@ function sessionRecords(
   runtimeDir: string,
   dir: string,
   scratch: string,
+  volatile?: Volatile,
 ): unknown[] {
   return files(runtimeDir)
     .filter((file) => file.endsWith('.jsonl') && file.includes('chats'))
@@ -293,6 +320,7 @@ function sessionRecords(
         },
         dir,
         scratch,
+        volatile,
       ),
     );
 }
@@ -366,7 +394,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
             workspace,
             streamingIndex++,
           )
-        : (scenario.sideReply?.() ?? {
+        : (scenario.sideReply?.(body) ?? {
             content: '{"selected_memories":[]}',
           }),
     );
@@ -493,8 +521,14 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
           .join('')
       : '';
     return {
-      requests: modelRequests(server, workspace, scratch, scenario.agent),
-      records: sessionRecords(runtimeDir, workspace, scratch),
+      requests: modelRequests(server, workspace, scratch, scenario),
+      sideRequests: modelRequests(server, workspace, scratch, scenario, false),
+      records: sessionRecords(
+        runtimeDir,
+        workspace,
+        scratch,
+        scenario.volatile,
+      ),
       screen,
       sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
@@ -506,12 +540,20 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
   const write = (file: string, content: string, id: string) =>
     fakeToolCall('write_file', { file_path: file, content }, id);
 
-  // The teammate scenario's helper, told apart by its task.
+  // The teammate scenario's helper, told apart by its task, which only the
+  // helper's user messages carry; the leader's carry it inside its tool call.
   const HELPER_TASK = 'HELPER TASK:';
   const isHelper = (messages: JsonObject[]) =>
+    messages.some(
+      (message) =>
+        message['role'] === 'user' &&
+        JSON.stringify(message['content']).includes(HELPER_TASK),
+    );
+  // The Goal scenario's check, told apart by its system prompt.
+  const isGoalCheck = (body: JsonObject) =>
     JSON.stringify(
-      messages.find((message) => message['role'] === 'user')?.['content'],
-    ).includes(HELPER_TASK);
+      ((body['messages'] ?? []) as JsonObject[])[0]?.['content'],
+    ).includes('Goal Verifier');
   const deferred = () => {
     let resolve!: () => void;
     const promise = new Promise<void>((done) => (resolve = done));
@@ -804,9 +846,16 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
                   ),
                 ],
               },
-      sideReply: () => ({
-        content: '{"decision":"accept","reason":"The forecast was given."}',
-      }),
+      sideRequests: 1,
+      sideReply: (body) =>
+        isGoalCheck(body)
+          ? {
+              content:
+                '{"decision":"accept","reason":"The forecast was given."}',
+            }
+          : undefined,
+      // When the Goal was set and last changed.
+      volatile: { keys: ['createdAt', 'updatedAt'] },
     },
     {
       // The job outlasts the prompt, so its result starts a turn of its own,
@@ -820,6 +869,15 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       files: { 'job.log': 'job log\n' },
       laterTurns: true,
       recorded: 'The job is done.',
+      // The job's task id, its process and the project's runtime directory,
+      // named by a hash of the workspace path.
+      volatile: {
+        text: [
+          [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
+          [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
+          [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
+        ],
+      },
       reply: (_messages, dir, index) =>
         index === 0
           ? {
@@ -842,10 +900,13 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
               : { content: 'The job is done.' },
     },
     {
-      // The job fires once, a few seconds after the prompt, and its turn
-      // reads a file.
+      // The job fires once, soon after the prompt, and its turn reads a file.
+      // A fire during the prompt's turn waits for it to end, as any
+      // notification does.
       name: 'a cron job whose turn reads a file',
-      sent: 'Read the readme.',
+      // The fired prompt as a user message; the model's own call carries it
+      // only as escaped arguments.
+      sent: '"text":"Read the readme."',
       requests: 4,
       rounds: 4,
       batches: 2,
@@ -854,10 +915,16 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       env: {
         QWEN_CODE_DISABLE_CRON: '0',
         QWEN_CODE_TEST_CRON_FAST: '1',
-        QWEN_CODE_TEST_CRON_DELAY_MS: '4000',
+        QWEN_CODE_TEST_CRON_DELAY_MS: '1000',
       },
       laterTurns: true,
       recorded: 'It says readme body.',
+      // The job's id.
+      volatile: {
+        text: [
+          [/(Scheduled (?:one-shot task )?)[0-9a-z]{8}(?= \()/g, '$1<CRON>'],
+        ],
+      },
       reply: (_messages, dir, index) =>
         index === 0
           ? {
@@ -895,13 +962,13 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       recorded: 'The helper says it is sunny.',
       reply: (messages, dir) => {
         if (isHelper(messages)) {
-          // The helper answers once the leader's turn has ended, so the
-          // report starts a turn of its own on both runs.
-          return {
+          // The helper answers once the leader sent its last round, past the
+          // tool boundary that would take the report: that round calls no
+          // tool, so the report waits for the leader's turn to end and starts
+          // a turn of its own on both runs.
+          return leaderWaiting.promise.then(() => ({
             content: 'HELPER REPORT: it is sunny.',
-            holdAfterChunks: 0,
-            holdUntil: leaderWaiting.promise.then(() => sleep(2_000)),
-          };
+          }));
         }
         if (JSON.stringify(messages).includes('HELPER REPORT'))
           return toolResults(messages) === 2
@@ -983,6 +1050,8 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     expect(shared.sharedBatches).toBe(scenario.batches);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
+      if (scenario.sideRequests !== undefined)
+        expect(run.sideRequests).toHaveLength(scenario.sideRequests);
       if (scenario.shows) expect(run.screen).toContain(scenario.shows);
       else expect(run.records.length).toBeGreaterThan(0);
       if (scenario.recorded)
@@ -991,6 +1060,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         expect(JSON.stringify(run.requests)).toContain(scenario.sent);
     }
     expect(shared.requests).toEqual(current.requests);
+    expect(shared.sideRequests).toEqual(current.sideRequests);
     expect(shared.records).toEqual(current.records);
   });
 });
