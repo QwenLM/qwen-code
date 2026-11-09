@@ -8,6 +8,7 @@ import path from 'node:path';
 import { validateTodos } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import { MANAGED_MODEL_STATISTICS_RESOURCE_KINDS } from '@qwen-code/qwen-code-core/managed-runtime/managed-model-statistics.js';
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
   parseHostedRecoveryResource,
@@ -207,6 +208,7 @@ const RESOURCE_KINDS = new Set([
   'managed-tool-terminal',
   'managed-hosted-model-route',
   'managed-hosted-model-usage',
+  ...MANAGED_MODEL_STATISTICS_RESOURCE_KINDS,
 ]);
 
 function requireValue(value: unknown, message: string): asserts value {
@@ -343,7 +345,7 @@ export async function verifyRecoverySession(
         typeof retiredHead.workspaceId === 'string' &&
         retiredHead.workspaceId.length > 0 &&
         retiredHead.state === 'DELETED' &&
-        [1, 2].includes(retiredHead.storageVersion) &&
+        [1, 2, 3].includes(retiredHead.storageVersion) &&
         retiredHead.writerId === null &&
         retiredHead.writerLeaseUntil === null &&
         retiredHead.latestCheckpointResourceId === null &&
@@ -396,7 +398,7 @@ export async function verifyRecoverySession(
     !head ||
       (head.sessionId === source.sessionId &&
         head.tenantId === source.binding.tenantId &&
-        [1, 2].includes(head.storageVersion) &&
+        [1, 2, 3].includes(head.storageVersion) &&
         head.journalRevision >= 1 &&
         head.compactedThroughRevision === 0 &&
         head.recoveryStatus === 'READY'),

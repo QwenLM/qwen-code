@@ -25,6 +25,9 @@ const { createHttpManagedSessionStores } = await import(
 const { openManagedSession } = await import(
   core('managed-runtime/managed-session-assembly')
 );
+const { enableManagedSessionDiagnostics } = await import(
+  core('managed-runtime/managed-session-diagnostics')
+);
 const { createManagedHarnessHandle } = await import(
   core('managed-runtime/managed-harness-factory')
 );
@@ -228,7 +231,7 @@ try {
       JSON.stringify({
         engine: 'managed',
         sessionId: key.sessionId,
-        toolProfile: 'csi-files-retirement/1',
+        toolProfile: boot.identity.profile,
       }),
     ),
   );
@@ -250,6 +253,8 @@ try {
     requireNew: true,
     create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
   });
+  if (boot.identity.profile === 'csi-files-retirement/2')
+    await enableManagedSessionDiagnostics(session);
   const initialActivation = { ...session.activation };
   let expectedActivation = initialActivation;
   const control = async (action, extra = {}) =>
@@ -274,7 +279,7 @@ try {
   async function history(commandId, preparation, value) {
     const digestContent = {
       schemaVersion: 2,
-      profile: 'csi-files-retirement/1',
+      profile: boot.identity.profile,
       runtimeSessionId: key.sessionId,
       ...value,
       preparation,
@@ -560,6 +565,8 @@ try {
                   journalStore: stores.journalStore,
                   resourceStore: stores.resourceStore,
                 });
+                if (boot.identity.profile === 'csi-files-retirement/2')
+                  await enableManagedSessionDiagnostics(session);
                 assert.equal(
                   (await stores.publication.owner()).writerGeneration,
                   3,

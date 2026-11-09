@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellDiagnosticTrac
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentTraceService;
+import com.alibaba.qwen.code.managedagent.session.ManagedSessionDiagnosticsService;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import org.springframework.http.CacheControl;
@@ -18,12 +19,37 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class ManagedDiagnosticsController {
+    private final ManagedSessionDiagnosticsService diagnostics;
     private final ManagedSessionResourcesService resources;
     private final ManagedAgentTraceService traces;
 
-    public ManagedDiagnosticsController(ManagedSessionResourcesService resources, ManagedAgentTraceService traces) {
+    public ManagedDiagnosticsController(ManagedSessionDiagnosticsService diagnostics,
+            ManagedSessionResourcesService resources, ManagedAgentTraceService traces) {
+        this.diagnostics = diagnostics;
         this.resources = resources;
         this.traces = traces;
+    }
+
+    @GetMapping("/v1/agents/sessions/{sessionId}/context-usage")
+    public ResponseEntity<JsonNode> context(TenantContext tenant, @PathVariable String sessionId) {
+        return noStore(diagnostics.context(tenant.tenantId(), tenant.requireActorId(), sessionId));
+    }
+
+    @PostMapping("/api/agent/web-shell/v1/session-context-usage/query")
+    public ResponseEntity<JsonNode> queryContext(TenantContext tenant,
+            @Valid @RequestBody WebShellSessionRequest request) {
+        return context(tenant, request.sessionId());
+    }
+
+    @GetMapping("/v1/agents/sessions/{sessionId}/stats")
+    public ResponseEntity<JsonNode> statistics(TenantContext tenant, @PathVariable String sessionId) {
+        return noStore(diagnostics.statistics(tenant.tenantId(), tenant.requireActorId(), sessionId));
+    }
+
+    @PostMapping("/api/agent/web-shell/v1/session-stats/query")
+    public ResponseEntity<JsonNode> queryStatistics(TenantContext tenant,
+            @Valid @RequestBody WebShellSessionRequest request) {
+        return statistics(tenant, request.sessionId());
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/resources")
