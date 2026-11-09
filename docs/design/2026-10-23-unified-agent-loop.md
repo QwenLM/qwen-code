@@ -431,6 +431,8 @@ Until the turn sends the round, the batch keeps the scheduler and keeps the TUI 
 
 A retry with Ctrl+Y already runs on the shared round and, from PR 3b-2b, awaits its batch. PR 3c-1 adds the retry scenarios to the Ink parity suite, with a retried tool-result round whose response calls a tool, and a scenario for input queued while a tool runs.
 
+PR 3c-2 covers the turns the TUI starts on its own: a Goal's continuations, a background task's notification, a cron fire and a teammate's report. Each is a `submitQuery` call that the TUI's idle scheduling makes with its own send type, so each already runs on the shared round and the shared batch, and from PR 3c-1 the turn sends the round its batch continues with. The scheduling around these turns stays the TUI's, as on the other surfaces. PR 3c-2 adds a scenario for each kind of turn to the Ink parity suite, with a tool batch inside the turn. They pass unchanged, so the TUI's code does not change.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -534,6 +536,10 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a retry after a model error, and a retry that fails again;
 - a retried tool-result round whose response calls a tool;
 - input queued while a tool runs, which goes out with the tool's result;
+- a Goal whose second continuation reads a file and then proposes that the Goal is complete, which the check accepts;
+- a background shell whose result starts a notification turn, which reads a file;
+- a cron job that fires once, whose turn reads a file;
+- a teammate's report that starts a teammate turn, which reads a file; the leader's requests and the teammate's are each compared in the order that agent sent them;
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 
