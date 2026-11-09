@@ -32587,3 +32587,90 @@ describe('in-round self-review A/B (af-156)', () => {
     expect(designDoc).toContain('(#af-156)');
   });
 });
+
+describe('failed-check evidence (af-161)', () => {
+  const prepareStart = workflow.indexOf(
+    "      - name: 'Prepare branch and feedback'",
+  );
+  const prepare = workflow.slice(
+    prepareStart,
+    workflow.indexOf(
+      "      - name: 'Post autofix status comment'",
+      prepareStart,
+    ),
+  );
+  const collectorCall = 'node .github/scripts/autofix-check-evidence.mjs';
+
+  it('collects from the trusted base, before the PR branch is checked out', () => {
+    // The collector imports the patrol's log scrubber, so BOTH files must
+    // resolve from the trusted checkout. Below the checkout they would be
+    // branch-supplied code running with the PAT in env (af-041/af-158).
+    expect(prepare).toContain(collectorCall);
+    const callAt = prepare.indexOf(collectorCall);
+    expect(callAt).toBeGreaterThan(-1);
+    expect(callAt).toBeLessThan(prepare.indexOf('git checkout -B "${BRANCH}"'));
+    expect(callAt).toBeLessThan(
+      prepare.indexOf("echo 'Restoring tracked build output"),
+    );
+    // A staged RUNNER_TEMP copy would need a digest and would still execute
+    // after branch code has run; the working-tree call at this position is
+    // what makes staging unnecessary.
+    expect(prepare).not.toContain('RUNNER_TEMP}/autofix-check-evidence');
+  });
+
+  it('degrades to less evidence, never to a failed round', () => {
+    expect(prepare).toContain('--json statusCheckRollup,headRefOid');
+    expect(prepare).toContain(
+      `|| echo '{}' > "\${WORKDIR}/check-evidence-input.json"`,
+    );
+    const call = prepare.slice(
+      prepare.indexOf(collectorCall),
+      prepare.indexOf("echo 'Restoring tracked build output"),
+    );
+    expect(call).toContain('--checks "${WORKDIR}/check-evidence-input.json"');
+    expect(call).toContain('> "${WORKDIR}/check-evidence.md"');
+    // stderr rides the whole-WORKDIR artifact upload instead of the round log.
+    expect(call).toContain('2>> "${WORKDIR}/check-evidence.log"');
+    expect(call).toContain('|| true');
+  });
+
+  it('feeds the section after the name-only lists and before the gate rejection', () => {
+    const guard = 'if [[ -s "${WORKDIR}/check-evidence.md" ]]; then';
+    expect(prepare).toContain(guard);
+    const stillRed = prepare.indexOf(
+      '## Still-red checks (persisting from before the last evaluation)',
+    );
+    const evidence = prepare.indexOf(guard);
+    const rejection = prepare.indexOf(
+      '# If the LAST round ended in a gate rejection',
+    );
+    expect(stillRed).toBeGreaterThan(-1);
+    expect(evidence).toBeGreaterThan(stillRed);
+    expect(rejection).toBeGreaterThan(evidence);
+    expect(prepare).toContain('cat "${WORKDIR}/check-evidence.md"');
+    // The excerpt is untrusted log text: it must land in feedback.md BEFORE
+    // the echo that defangs both workflow-command syntaxes.
+    expect(prepare.indexOf('cat "${WORKDIR}/check-evidence.md"')).toBeLessThan(
+      prepare.indexOf('cat "${WORKDIR}/feedback.md" | sed'),
+    );
+  });
+
+  it('runs the behavioral suite in CI and documents the wire', () => {
+    // Deleting either membership entry would silently disable the only
+    // coverage of the collector (precedent: autofix-status-heartbeat).
+    for (const list of ['HELPER_TESTS_DEP_FREE', 'HELPER_TESTS']) {
+      const line = ciWorkflow
+        .split('\n')
+        .find((entry) => entry.trim().startsWith(`${list}:`));
+      expect(line, list).toContain(
+        '.github/scripts/autofix-check-evidence.test.mjs',
+      );
+    }
+    expect(designDoc).toContain('<a id="af-161"></a>');
+    expect(designDoc).toContain('(#af-161)');
+    expect(workflow).toContain('qwen-autofix.md#af-161');
+    // The agent is told to use the section; without this the evidence is
+    // collected but never read.
+    expect(readAutofixSkill()).toContain('Failed check evidence');
+  });
+});
