@@ -66,7 +66,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     void requireSubmitterRole(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            store.requireSessionOwnership(session.tenantId(),
+            store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
         }
@@ -92,7 +92,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
             throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions accept only their delegated input");
         }
         if (session.workspace() == null) {
-            store.requireSessionOwnership(session.tenantId(),
+            store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
         }
@@ -187,7 +187,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     void requireLegacyWorkspace(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            store.requireSessionOwnership(session.tenantId(),
+            store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
         }

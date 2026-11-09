@@ -215,23 +215,23 @@ class ManagedApprovalSelectionTest {
                 "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"api\","
                         + "\"approvalMode\":\"auto-edit\",\"workspace\":{\"workspaceId\":\"ws\"}}";
         String response =
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+                mvc.perform(
                                 post(BASE + "/sessions/create")
                                         .header(TenantContextFilter.HEADER, tenant)
                                         .principal(actor(tenant))
                                         .contentType(MediaType.APPLICATION_JSON)
-                                        .content(body), "owner"))
+                                        .content(body))
                         .andExpect(status().isAccepted())
                         .andReturn()
                         .getResponse()
                         .getContentAsString();
         String id = json.readTree(response).path("sessionId").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
+        mvc.perform(
                         post(BASE + "/sessions/get")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .principal(actor(tenant))
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"sessionId\":\"" + id + "\"}"), "owner"))
+                                .content("{\"sessionId\":\"" + id + "\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.approvalMode").value("auto-edit"));
         mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(

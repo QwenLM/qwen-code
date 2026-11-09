@@ -421,17 +421,16 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        if (principal == null) {
-            throw new ManagedAgentException(401,
-                    "actor_required", "A trusted actor is required.");
+        if (principal != null) {
+            requirePrincipalTenant(tenantId, principal);
         }
-        requirePrincipalTenant(tenantId, principal);
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
         return insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                null, principal.userId(), pin, null, false, null, principal);
+                null, principal == null ? null : principal.userId(), pin, null,
+                false, null, principal);
     }
 
     @Override
@@ -450,6 +449,20 @@ public class ManagedAgentStore implements AgentStateStore {
                 && ManagedSessionPrincipal.matches(
                         ManagedSessionPrincipal.find(jdbc, tenantId, sessionId),
                         principal);
+    }
+
+    @Override
+    public void requireSessionAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    @Override
+    public void requireSessionReadAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
+                principal);
     }
 
     @Override
@@ -1522,10 +1535,6 @@ public class ManagedAgentStore implements AgentStateStore {
             SessionPrincipal principal) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
-        if (resolved == null && principal == null) {
-            throw new ManagedAgentException(401,
-                    "actor_required", "A trusted actor is required.");
-        }
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
         String runtimeRequestKey =
@@ -1594,11 +1603,17 @@ public class ManagedAgentStore implements AgentStateStore {
                     payloadDigest, now);
         }
         if (resolved == null) {
-            ManagedSessionPrincipal.insert(jdbc, tenantId, sessionId,
-                    principal, now);
+            // A present principal writes the durable ownership row; the legacy
+            // actorless arm creates without one and stamps the command receipt
+            // with the nullable creator key.
+            if (principal != null) {
+                ManagedSessionPrincipal.insert(jdbc, tenantId, sessionId,
+                        principal, now);
+            }
             insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                     sessionId, turnId, "COMPLETED", null,
-                    ManagedSessionPrincipal.actorKey(principal), now);
+                    principal == null ? actorKey
+                            : ManagedSessionPrincipal.actorKey(principal), now);
         } else {
             ManagedReceipts.insertCreation(jdbc, tenantId, actorKey,
                     idempotencyKey, requestDigest, sessionId, turnId, now);
@@ -1656,7 +1671,7 @@ public class ManagedAgentStore implements AgentStateStore {
         requirePublicChildImmutable(session);
         if (session.workspace() == null) {
             principal = resolveWritePrincipal(tenantId, sessionId, principal);
-            actorId = principal.userId();
+            actorId = principal == null ? null : principal.userId();
         }
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -1787,7 +1802,7 @@ public class ManagedAgentStore implements AgentStateStore {
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             principal = resolveWritePrincipal(tenantId, sessionId, principal);
-            actorId = principal.userId();
+            actorId = principal == null ? null : principal.userId();
         }
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
@@ -1866,7 +1881,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
-            requireSessionOwnership(tenantId, sessionId, principal);
+            requireSessionAuthority(tenantId, sessionId, principal);
         }
         // Tenant and Session locks serialize admission without gap-locking missing index entries.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
@@ -2002,7 +2017,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private void requireRenameReplayOwner(SessionRecord session,
             CommandRecord previous, String actorId, SessionPrincipal principal) {
         if (session.workspace() == null) {
-            requireSessionOwnership(session.tenantId(), session.sessionId(),
+            requireSessionAuthority(session.tenantId(), session.sessionId(),
                     principal);
             return;
         }
@@ -2294,7 +2309,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
-            requireSessionOwnership(tenantId, sessionId, principal);
+            requireSessionAuthority(tenantId, sessionId, principal);
         }
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
@@ -4793,8 +4808,8 @@ public class ManagedAgentStore implements AgentStateStore {
     /**
      * Bound Sessions keep Workspace read grants. Unbound Sessions require
      * the immutable ownership row to match tenant, user and actor presence
-     * plus subject exactly; legacy rows without an ownership record remain
-     * invisible.
+     * plus subject exactly; a legacy Session that never wrote a row and
+     * carries no structured creation receipt lists tenant-wide.
      */
     @Override
     public SessionPage listSessions(String tenantId,
@@ -4826,8 +4841,30 @@ public class ManagedAgentStore implements AgentStateStore {
         arguments.add(principal == null ? null
                 : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
                         tenantId, principal.userId()));
-        String ownershipClause = "";
+        // A legacy unbound Session — one that never wrote an ownership row —
+        // lists tenant-wide. The CREATE_SESSION receipt is an exclusion mark,
+        // not a required one: a principal-created Session stamps the non-empty
+        // structured principal key, which never equals the raw creator key, so
+        // a deleted row cannot resurrect the Session into the page. A legacy
+        // create (raw creator key or empty UNATTRIBUTED key) and the oldest
+        // rows that predate the receipt altogether carry no such mark and stay
+        // visible.
+        String legacyUnbound = " (ma_session.workspace_id IS NULL AND NOT"
+                + " EXISTS (SELECT 1 FROM ma_session_principal sp WHERE"
+                + " sp.tenant_id = ma_session.tenant_id AND"
+                + " sp.session_id = ma_session.session_id) AND NOT EXISTS"
+                + " (SELECT 1 FROM ma_request_receipt r WHERE"
+                + " r.tenant_id = ma_session.tenant_id AND"
+                + " r.session_id = ma_session.session_id AND"
+                + " r.namespace = 'SESSION_COMMAND' AND"
+                + " r.operation = 'CREATE_SESSION' AND"
+                + " r.actor_id IS NOT NULL AND LENGTH(r.actor_id) > 0 AND"
+                + " (ma_session.creator_actor_key IS NULL OR"
+                + " r.actor_id <> ma_session.creator_actor_key)))";
+        String ownershipClause;
         if (principal != null) {
+            // A present ownership row is the sole authority over an unbound
+            // Session; the legacy arm below adds the tenant-wide no-row rows.
             ownershipClause = " OR EXISTS (SELECT 1 FROM"
                     + " ma_session_principal sp WHERE"
                     + " ma_session.workspace_id IS NULL AND sp.tenant_id ="
@@ -4836,11 +4873,16 @@ public class ManagedAgentStore implements AgentStateStore {
                     + ManagedSessionPrincipal.VERSION
                     + " AND sp.user_id = ? AND sp.is_actor_present = ? AND"
                     + " (sp.actor_subject_id = ? OR"
-                    + " (sp.actor_subject_id IS NULL AND ? IS NULL)))";
+                    + " (sp.actor_subject_id IS NULL AND ? IS NULL)))"
+                    + " OR" + legacyUnbound;
             arguments.add(principal.userId());
             arguments.add(principal.actorPresent());
             arguments.add(principal.actorSubjectId());
             arguments.add(principal.actorSubjectId());
+        } else {
+            // The anonymous arm sees only the tenant-wide legacy rows; a
+            // row-present Session is its owner's alone.
+            ownershipClause = " OR" + legacyUnbound;
         }
         String ownerClause = "";
         if (ownerOnly) {
@@ -7535,26 +7577,50 @@ public class ManagedAgentStore implements AgentStateStore {
     // Background execution continues already-admitted work through its
     // operation and lease APIs. New commands on an unbound Session must
     // carry the exact durable owner; a missing principal cannot borrow it.
+    // The legacy tenant-header arm (null principal) may still write a Session
+    // that has no ownership row, but never one that has a durable owner.
     private SessionPrincipal resolveWritePrincipal(String tenantId,
             String sessionId, SessionPrincipal principal) {
-        requireSessionOwnership(tenantId, sessionId, principal);
+        if (principal == null) {
+            if (ManagedSessionPrincipal.find(jdbc, tenantId, sessionId) != null) {
+                throw new ManagedAgentException(404, "session_not_found",
+                        "The Session was not found.");
+            }
+            return null;
+        }
+        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
+                principal);
         return principal;
     }
 
     private void requireMutationReceiptGrant(String tenantId,
             SessionRecord requested, CommandRecord command, String actorId,
             SessionPrincipal principal) {
-        SessionRecord recorded = command.sessionId()
-                .equals(requested.sessionId()) ? requested
-                : requireSession(tenantId, command.sessionId());
-        if (recorded.workspace() == null) {
-            requireSessionOwnership(tenantId, recorded.sessionId(), principal);
-        } else if (!recorded.sessionId().equals(requested.sessionId())
-                && !workspaces.canRead(tenantId, actorId,
-                        recorded.workspace().getWorkspaceId())) {
-            throw new ManagedAgentException(404, "session_not_found",
-                    "The Session was not found.");
+        if (command.sessionId().equals(requested.sessionId())) {
+            if (requested.workspace() == null) {
+                ManagedSessionPrincipal.requireAuthority(jdbc, tenantId,
+                        requested.sessionId(), principal);
+            }
+            return;
         }
+        // Cross-Session reuse of a tenant-global key, matching the service
+        // pre-read (requireRecordedSessionGrant) so the answer does not depend
+        // on whether the receipt was visible before the insert.
+        if (requested.workspace() == null) {
+            // Unbound Sessions are private: gate on the recorded Session's
+            // authority to hide a foreign key's existence (404); the owner's
+            // own collision falls through to idempotency_conflict.
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId,
+                    command.sessionId(), principal);
+        } else if (!workspaces.createdSession(tenantId, actorId,
+                requested.sessionId())) {
+            // Bound Workspace Sessions gate on the caller's own requested
+            // Session, never the recorded Session's grant.
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        throw new ManagedAgentException(409, "idempotency_conflict",
+                "The idempotency key was reused with different content.");
     }
 
     private static void requirePrincipalTenant(String tenantId,

@@ -98,7 +98,8 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(1, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             // public_child_agents_version is INT UNSIGNED, so Connector/J
-            // boxes it as Long while the signed tinyint stays Integer (R3-27).
+            // boxes it as Long while TINYINT UNSIGNED (is_plan_enabled) stays
+            // Integer (R3-27).
             assertThat(upgradedSession).containsEntry("is_plan_enabled", 0)
                     .containsEntry("public_child_agents_version", 0L);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
@@ -175,6 +176,8 @@ class WorkspaceCreationSchemaMySqlIT {
                 receipt(connection, "existing", "SESSION_COMMAND");
                 statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                         + " VALUES ('tenant','session','qwen-code',1,1)");
+                statement.execute("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,"
+                        + "stream_id,covered_sequence,gmt_modified) VALUES ('tenant','session','SESSION','',0,1)");
                 statement.execute("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,"
                         + "payload_digest,status,gmt_create,gmt_modified) VALUES ('tenant','session','turn',"
                         + "'prompt','[]','digest','COMPLETED',1,1)");
@@ -283,6 +286,62 @@ class WorkspaceCreationSchemaMySqlIT {
                 statement.execute("UPDATE ma_session SET model_id='m',model_revision=1");
                 statement.execute("UPDATE ma_turn SET model_id='m',model_revision=1");
             }
+            // The same invalid values must be refused at the owning store's
+            // admission wiring, not only by the rule unit above (R4-7): the
+            // half-selected model rows are planted underneath the store and
+            // its locked-copy validate gates must refuse to admit them.
+            var storeJdbc = new JdbcTemplate(source);
+            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                    storeJdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
+                    java.time.Clock.systemUTC(), ignored -> {},
+                    new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(storeJdbc),
+                    new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(),
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            storeJdbc.update("UPDATE ma_session SET model_id='m', model_revision=0"
+                    + " WHERE tenant_id='tenant' AND session_id='session'");
+            var storeTransactions = new org.springframework.transaction.support.TransactionTemplate(
+                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+            var storeSessionRejected = assertThrows(IllegalArgumentException.class,
+                    () -> storeTransactions.execute(status -> store.beginOperation("tenant", "session",
+                            com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.CLOSE,
+                            "", "close-refused", "digest")));
+            assertTrue(storeSessionRejected.getMessage().contains("ck_ma_session_model_selection"));
+            storeJdbc.update("UPDATE ma_session SET model_id=NULL, model_revision=0"
+                    + " WHERE tenant_id='tenant' AND session_id='session'");
+            // A create with initial input drives insertTurn's admission
+            // gates; the wrapping update() proxy plants the half-selected
+            // model on the just-inserted Session row between the two
+            // statements. insertTurn validates the locked Session copy
+            // before building the mirrored Turn candidate, so the paired
+            // gate refuses the same invalid model pair there.
+            var plantingJdbc = new JdbcTemplate(source) {
+                private boolean planted;
+
+                @Override
+                public int update(String sql, Object... args) {
+                    int updated = super.update(sql, args);
+                    if (!planted && sql.startsWith("INSERT INTO ma_event_stream")) {
+                        planted = true;
+                        super.update("UPDATE ma_session SET model_id='m', model_revision=0"
+                                + " WHERE tenant_id='tenant' AND model_id IS NULL"
+                                + " AND session_id NOT IN ('session')");
+                    }
+                    return updated;
+                }
+            };
+            var plantingStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                    plantingJdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
+                    java.time.Clock.systemUTC(), ignored -> {},
+                    new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(plantingJdbc),
+                    new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(),
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            var storeTurnRejected = assertThrows(IllegalArgumentException.class,
+                    () -> storeTransactions.execute(status -> plantingStore.insertSessionCommand(
+                            "tenant", "CREATE_SESSION",
+                            "create-turn-refused", "digest", "qwen-code", null, null,
+                            java.util.List.of(java.util.Map.of("type", "text", "text", "hello")),
+                            null)));
+            assertTrue(storeTurnRejected.getMessage().contains("model_selection"));
         }
     }
 

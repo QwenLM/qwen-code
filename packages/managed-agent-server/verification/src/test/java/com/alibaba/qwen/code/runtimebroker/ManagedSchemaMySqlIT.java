@@ -70,6 +70,36 @@ class ManagedSchemaMySqlIT {
         }
     }
 
+    // R4-1: a body-declared UNIQUE key rebuilt out of band with a column
+    // prefix still lists the same columns, so only the SUB_PART probe
+    // catches it — the shortened key would collide distinct business keys.
+    @Test
+    void validateRefusesAUniqueKeyRebuiltWithAColumnPrefix() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            ManagedSchema.initialize(database.source());
+            ManagedSchema.validate(database.source());
+            try (var connection = database.source().getConnection();
+                    var statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE ma_session"
+                        + " DROP INDEX uk_ma_session_business_key,"
+                        + " ADD CONSTRAINT uk_ma_session_business_key"
+                        + " UNIQUE (tenant_id, session_id(16))");
+            }
+            var error = assertThrows(IllegalStateException.class,
+                    () -> ManagedSchema.validate(database.source()));
+            assertTrue(rootMessage(error).contains("index prefix differs"),
+                    rootMessage(error));
+        }
+    }
+
+    private static String rootMessage(Throwable error) {
+        StringBuilder message = new StringBuilder();
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            message.append(current.getMessage()).append('\n');
+        }
+        return message.toString();
+    }
+
     private static void verifyBaselineAndConstraints(DataSource source) throws Exception {
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
@@ -151,10 +181,6 @@ class ManagedSchemaMySqlIT {
                     "ma_operation", ManagedSchemaIntegrity.row("operation_kind", "CLOSE ",
                             "claim_generation", 0L, "attempt_count", 0L, "payload_version", 1L,
                             "execution_mode", "SYNC", "is_verification_ready", false)));
-            statement.execute("INSERT INTO ma_resource_ref"
-                    + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
-                    + " VALUES ('scope','JOURNAL','scope',1,'missing','tenant','session',"
-                    + ManagedSchemaTime.SQL_NOW + ")");
             byte[] largeBody = new byte[17 * 1024 * 1024];
             largeBody[0] = 1;
             largeBody[largeBody.length - 1] = 2;

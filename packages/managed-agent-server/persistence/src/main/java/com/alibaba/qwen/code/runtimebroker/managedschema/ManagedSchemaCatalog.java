@@ -332,15 +332,20 @@ final class ManagedSchemaCatalog {
         var unique = UNIQUE.matcher(body);
         while (unique.find()) {
             List<String> required = columns(unique.group(1));
-            boolean found =
+            String matched =
                     uniqueIndexes.stream()
-                            .anyMatch(
+                            .filter(
                                     index ->
                                             new ArrayList<>(indexes.get(index).values())
-                                                    .equals(required));
-            if (!found) {
+                                                    .equals(required))
+                            .findFirst()
+                            .orElse(null);
+            if (matched == null) {
                 throw new SQLException("Managed schema unique key is missing: " + name + required);
             }
+            // Body-declared unique keys enforce uniqueness too: a prefix
+            // rebuilt out of band collides distinct business keys (R4-1).
+            validateIndexPrefix(connection, name, matched, unique.group(1));
         }
         var index = INDEX.matcher(ddl);
         while (index.find()) {
@@ -361,6 +366,7 @@ final class ManagedSchemaCatalog {
                     || !new ArrayList<>(actual.values()).equals(columns(inline.group(2)))) {
                 throw new SQLException("Managed schema index differs: " + inline.group(1));
             }
+            validateIndexPrefix(connection, name, inline.group(1), inline.group(2));
         }
     }
 

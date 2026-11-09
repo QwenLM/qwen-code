@@ -20,6 +20,6 @@ public class ManagedHookController {
     @GetMapping("/v1/agents/sessions/{sessionId}/hook-catalog")
     public ResponseEntity<JsonNode> get(TenantContext tenant, @PathVariable String sessionId) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(service.get(tenant.requirePrincipal(), sessionId));
+                .body(service.get(tenant.tenantId(), tenant.actorId(), sessionId));
     }
 }

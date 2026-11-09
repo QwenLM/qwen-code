@@ -110,14 +110,21 @@ public class SessionLifecycleService {
     // own contract, every other kind with the command operation.
     public Object getPublicOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        return getPublicOperation(principal(tenantId, actorId), sessionId,
-                operationId);
+        return getPublicOperation(tenantId, principal(tenantId, actorId),
+                sessionId, operationId);
     }
 
     public Object getPublicOperation(SessionPrincipal principal,
             String sessionId, String operationId) {
-        OperationRecord operation = operation(
-                principal == null ? null : principal.tenantId(), principal,
+        return getPublicOperation(principal == null ? null : principal.tenantId(),
+                principal, sessionId, operationId);
+    }
+
+    // The tenant stays explicit so an anonymous caller still reads inside its
+    // own tenant; the read grant admits a legacy no-row Session tenant-wide.
+    private Object getPublicOperation(String tenantId, SessionPrincipal principal,
+            String sessionId, String operationId) {
+        OperationRecord operation = operation(tenantId, principal,
                 sessionId, operationId);
         if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
             return compressions.publicOperation(operation, false);
@@ -129,14 +136,19 @@ public class SessionLifecycleService {
 
     public Object getWebShellOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        return getWebShellOperation(principal(tenantId, actorId), sessionId,
-                operationId);
+        return getWebShellOperation(tenantId, principal(tenantId, actorId),
+                sessionId, operationId);
     }
 
     public Object getWebShellOperation(SessionPrincipal principal,
             String sessionId, String operationId) {
-        OperationRecord operation = operation(
-                principal == null ? null : principal.tenantId(), principal,
+        return getWebShellOperation(principal == null ? null : principal.tenantId(),
+                principal, sessionId, operationId);
+    }
+
+    private Object getWebShellOperation(String tenantId, SessionPrincipal principal,
+            String sessionId, String operationId) {
+        OperationRecord operation = operation(tenantId, principal,
                 sessionId, operationId);
         if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
             return compressions.webOperation(operation, false);
@@ -247,8 +259,11 @@ public class SessionLifecycleService {
 
     private String principalDigest(SessionPrincipal principal) {
         if (principal == null) {
-            throw new ManagedAgentException(404, "session_not_found",
-                    "The Session was not found.");
+            // An anonymous caller admitted to a legacy no-row Session has no
+            // principal identity; the operation is scoped to the tenant-wide
+            // anonymous actor rather than refused. A row-present Session never
+            // reaches here anonymously — its authority gate answers 404 first.
+            return digests.digest(Map.of("anonymous", "legacy"));
         }
         Map<String, Object> identity = new java.util.LinkedHashMap<>();
         identity.put("tenantId", principal.tenantId());

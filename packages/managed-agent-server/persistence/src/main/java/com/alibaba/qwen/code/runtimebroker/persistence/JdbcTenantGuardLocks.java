@@ -17,6 +17,7 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /** 按整数主键锁定已有 guard；首次创建在原连接的事务边界内串行化。 */
 public final class JdbcTenantGuardLocks {
@@ -60,6 +61,13 @@ public final class JdbcTenantGuardLocks {
         GuardKey key = new GuardKey(tenant, domain);
         Long id = scope == null ? null : scope.identities.get(key);
         if (id == null) {
+            // The plain probe never gap-locks a missing key, so cold
+            // bootstraps and nested REQUIRES_NEW transactions never queue on
+            // each other's gaps. It may pin the REPEATABLE READ snapshot
+            // before the lock waits below, so every decision read a caller
+            // takes after the guard must be a current read (requireLive is
+            // FOR UPDATE) — the pinned snapshot never decides liveness
+            // (R4-2).
             id = findId(connection, tenant, domain, timeoutSeconds, false);
         }
         if (id != null) {
@@ -74,8 +82,8 @@ public final class JdbcTenantGuardLocks {
         }
         String mutex = ManagedSchemaKeys.key("managed-tenant-guard-bootstrap", connection.getCatalog(),
                 tenant, domain.value());
-        if (!scope.mutexes.contains(mutex)) {
-            acquireMutex(connection, mutex, timeoutSeconds);
+        boolean mutexHeld = scope.mutexes.contains(mutex) || tryAcquireMutex(connection, mutex);
+        if (mutexHeld) {
             scope.mutexes.add(mutex);
         }
         if (!create) {
@@ -83,15 +91,33 @@ public final class JdbcTenantGuardLocks {
             // 同一事务后续显式初始化仍持有该键互斥锁，不会与其它初始化竞争。
             return false;
         }
+        if (!mutexHeld) {
+            // Another transaction holds this key's bootstrap mutex: it has
+            // inserted the guard row and not committed yet, so the plain
+            // probe's miss is a stale view, not proof of absence. Resolve
+            // with the locking read: the unique-index equality queues on the
+            // creator's uncommitted record (record-only, no gap), a wait
+            // visible to InnoDB lock views and deadlock detection, and a
+            // current read that pins no snapshot (R4-2). A duplicate INSERT
+            // here instead would take shared next-key locks that deadlock
+            // against the creator bootstrapping the sibling domain.
+            id = awaitContendedGuard(connection, tenant, domain, mutex, timeoutSeconds);
+            if (id != null) {
+                lockId(connection, tenant, domain, id, timeoutSeconds);
+                acquireMutex(connection, mutex, timeoutSeconds);
+                scope.mutexes.add(mutex);
+                scope.identities.put(key, id);
+                return true;
+            }
+            // The mutex holder rolled its bootstrap back; take the mutex and
+            // fall through to create the row.
+            acquireMutex(connection, mutex, timeoutSeconds);
+            scope.mutexes.add(mutex);
+        }
         // 不先做缺键的锁定读，避免不同租户在复合副索引上持有重叠 gap 锁。
         // 同一业务键的首次 INSERT 由原连接互斥锁串行化；RR 旧快照只会走重复键分支。
-        try (PreparedStatement insert = connection.prepareStatement(
-                "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, ?)")) {
-            insert.setQueryTimeout(timeoutSeconds);
-            insert.setString(1, ManagedSchemaKeys.key(tenant));
-            JdbcRepositorySupport.setIdentity(insert, 2, tenant);
-            insert.setString(3, domain.value());
-            insert.executeUpdate();
+        try {
+            insertGuard(connection, tenant, domain, timeoutSeconds);
             id = findId(connection, tenant, domain, timeoutSeconds, false);
             if (id == null) {
                 throw new SQLException("Created tenant guard is missing");
@@ -112,6 +138,52 @@ public final class JdbcTenantGuardLocks {
         lockId(connection, tenant, domain, id, timeoutSeconds);
         scope.identities.put(key, id);
         return true;
+    }
+
+    private static void insertGuard(Connection connection, String tenant, GuardDomain domain,
+            int timeoutSeconds) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement(
+                "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, ?)")) {
+            insert.setQueryTimeout(timeoutSeconds);
+            insert.setString(1, ManagedSchemaKeys.key(tenant));
+            JdbcRepositorySupport.setIdentity(insert, 2, tenant);
+            insert.setString(3, domain.value());
+            insert.executeUpdate();
+        }
+    }
+
+    /**
+     * Waits for a guard row another transaction is bootstrapping under its
+     * per-key mutex. The creator may sit between taking the mutex and
+     * inserting the row, so the locking read only runs once the mutex has
+     * come free once or a short grace period has elapsed — probing a still
+     * missing key FOR UPDATE would gap-lock the range the creator is about
+     * to insert into and wedge it behind this transaction.
+     */
+    private static Long awaitContendedGuard(Connection connection, String tenant, GuardDomain domain,
+            String mutex, int timeoutSeconds) throws SQLException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds == 0 ? 5 : timeoutSeconds);
+        long grace = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(250);
+        while (System.nanoTime() < deadline) {
+            if (tryAcquireMutex(connection, mutex)) {
+                // The creator's transaction ended: its row is committed (or
+                // rolled back). Release immediately — the caller re-acquires
+                // after locking the row — and fall through to the current
+                // read, which now sees a stable index.
+                releaseMutex(connection, mutex);
+                break;
+            }
+            if (System.nanoTime() >= grace) {
+                break;
+            }
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new SQLException("Interrupted while acquiring the tenant guard", interrupted);
+            }
+        }
+        return findId(connection, tenant, domain, timeoutSeconds, true);
     }
 
     private static Long findId(Connection connection, String tenant, GuardDomain domain,
@@ -227,6 +299,18 @@ public final class JdbcTenantGuardLocks {
                 if (result.getInt(1) != 1) {
                     throw new SQLTimeoutException("Tenant guard bootstrap lock timed out", "HY000", 1205);
                 }
+            }
+        }
+    }
+
+    private static boolean tryAcquireMutex(Connection connection, String mutex) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT GET_LOCK(?, 0)")) {
+            statement.setString(1, mutex);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next() || result.getObject(1) == null) {
+                    throw new SQLException("Tenant guard bootstrap lock is unavailable");
+                }
+                return result.getInt(1) == 1;
             }
         }
     }

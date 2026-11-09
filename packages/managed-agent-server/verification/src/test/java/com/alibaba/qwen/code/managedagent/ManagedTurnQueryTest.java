@@ -439,7 +439,7 @@ class ManagedTurnQueryTest {
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-a', ?, 'OPERATOR')", tenant,
                 "actor-a".getBytes(StandardCharsets.UTF_8));
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/v1/agents/sessions").header(TENANT, tenant)
                         .header("Idempotency-Key", "bound")
                         .principal(actor(tenant, "actor-a"))
@@ -447,28 +447,28 @@ class ManagedTurnQueryTest {
                         .content("""
                                 {"agent_id":"qwen-code","input":[],
                                  "workspace":{"workspace_id":"ws-a"}}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
         turn(tenant, sessionId, "turn_bound", "COMPLETED", 1_000, 2_000L,
                 null);
 
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+        mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
                         .header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-a")), "owner"))
+                        .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[0].id").value("turn_bound"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+        mvc.perform(get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
                         "turn_bound").header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-a")), "owner"))
+                        .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk());
-        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, tenant).principal(actor(tenant, "actor-b")), "owner")),
+        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
+                .header(TENANT, tenant).principal(actor(tenant, "actor-b"))),
                 404, "session_not_found");
-        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns/{turn}",
+        error(mvc.perform(get("/v1/agents/sessions/{id}/turns/{turn}",
                 sessionId, "turn_bound").header(TENANT, tenant)
-                .principal(actor(tenant, "actor-b")), "owner")), 404,
+                .principal(actor(tenant, "actor-b"))), 404,
                 "session_not_found");
     }
 

@@ -166,6 +166,12 @@ class JdbcTenantGuardLocksMySqlIT {
             JdbcTenantGuardLocks.lock(connection, "shared", GuardDomain.RUNTIME_PLACEMENT, 5);
             JdbcTenantGuardLocks.lock(connection, "shared", GuardDomain.OUTPUT_PUBLICATION, 5);
             JdbcTenantGuardLocks.lock(connection, "shared", GuardDomain.RUNTIME_PLACEMENT, 5);
+            // Both guards must really be held on this connection while the
+            // mutexes are live, so the duplicate-key fallback in acquire
+            // (findId -> lockId) is what the case certifies, not just the
+            // row count after commit.
+            assertOwned(connection, "shared", GuardDomain.RUNTIME_PLACEMENT);
+            assertOwned(connection, "shared", GuardDomain.OUTPUT_PUBLICATION);
             return null;
         });
     }

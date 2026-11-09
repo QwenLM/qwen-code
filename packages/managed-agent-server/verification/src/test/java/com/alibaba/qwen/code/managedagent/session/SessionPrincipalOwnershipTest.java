@@ -237,6 +237,7 @@ class SessionPrincipalOwnershipTest {
         var tasks = new ManagedTaskService(f.service, records, events);
         f.tx.executeWithoutResult(status -> {
             String id = f.create(SessionPrincipal.ofUser("tenant", "user"), "create");
+            f.legacyState(id);
             // A null actor keeps the trusted internal tenant-scoped read
             // (R2-5): the pages load, and only a missing task 404s. The
             // HTTP boundary passes its verified principal and never
@@ -261,12 +262,34 @@ class SessionPrincipalOwnershipTest {
             // 404, never the recorded tenant's page (R2-4).
             denied(() -> tasks.listPublicTasks("other-tenant", null, id, null, 10));
             denied(() -> tasks.queryWebShellTasks("other-tenant", null, id, null, 10));
-            // A named non-owner still meets the ownership gate's 404.
-            assertThatThrownBy(() -> tasks.listPublicTasks("tenant", "intruder", id, null, 10))
+            // The unified authority: a genuine legacy no-row Session reads
+            // tenant-wide for any named caller; only a row-present Session
+            // hides itself from a non-owner (pinned by the ownership tests).
+            assertThat(tasks.listPublicTasks("tenant", "intruder", id, null, 10).data()).isEmpty();
+        });
+    }
+
+    @Test
+    void principalOnlyReadRefusesNullWhileTheTenantScopedOverloadKeepsTheCallerTenant() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(SessionPrincipal.ofUser("tenant", "user"), "create");
+            f.legacyState(id);
+            // The principal-only overload has no tenant argument, so a null
+            // principal must be refused outright instead of resolving the
+            // PUBLIC Session by global id across tenants (R2-4).
+            assertThatThrownBy(() -> f.service.requireReadableSession(
+                    (SessionPrincipal) null, id))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                        assertThat(error.getStatus()).isEqualTo(404);
-                        assertThat(error.getCode()).isEqualTo("session_not_found");
+                        assertThat(error.getStatus()).isEqualTo(401);
+                        assertThat(error.getCode()).isEqualTo("actor_required");
                     });
+            // The tenant-scoped overload keeps the principal-less internal
+            // read for the Session's own tenant and 404s a foreign one.
+            assertThat(f.service.requireReadableSession("tenant",
+                    (SessionPrincipal) null, id).sessionId()).isEqualTo(id);
+            denied(() -> f.service.requireReadableSession("other-tenant",
+                    (SessionPrincipal) null, id));
         });
     }
 
@@ -536,6 +559,17 @@ class SessionPrincipalOwnershipTest {
         String create(SessionPrincipal principal, String key) {
             return service.createSession(principal, key, "qwen-code", null,
                     "private", Map.of(), List.of()).sessionId();
+        }
+
+        // Creation requires a trusted actor; the anonymous probes model the
+        // historical row-less state, so drop the ownership row and clear the
+        // structured CREATE_SESSION receipt mark right after the create.
+        void legacyState(String sessionId) {
+            jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id=? AND session_id=?",
+                    "tenant", sessionId);
+            jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id=? AND session_id=?"
+                    + " AND namespace='SESSION_COMMAND' AND operation='CREATE_SESSION'",
+                    "tenant", sessionId);
         }
 
         long count(String table) {

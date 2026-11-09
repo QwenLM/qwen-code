@@ -151,9 +151,15 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static void requireLive(JdbcTemplate jdbc, String tenant, String session) {
+        // FOR UPDATE makes this a current read: a writer whose REPEATABLE
+        // READ snapshot was pinned before it queued on the tenant guard must
+        // still see a retirement committed underneath that wait, otherwise
+        // it answers managed_session_not_writable instead of the retirement's
+        // own refusal (R4-2). The caller already holds the root/CAS fence, so
+        // the extra row lock takes no new ordering edge.
         if (!jdbc.query(
                         "SELECT retirement_generation FROM ma_session WHERE tenant_key = ? AND"
-                                + " session_key = ? AND retired_at IS NOT NULL",
+                                + " session_key = ? AND retired_at IS NOT NULL FOR UPDATE",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         hash(tenant),
                         hash(session))

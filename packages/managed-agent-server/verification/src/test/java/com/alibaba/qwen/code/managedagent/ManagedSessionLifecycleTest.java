@@ -347,12 +347,12 @@ class ManagedSessionLifecycleTest {
         JsonNode close = admit(post("/v1/agents/sessions/{id}/close", first),
                 tenant, "shared-key");
         String closeId = close.get("id").asText();
-        JsonNode webReplay = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        JsonNode webReplay = objectMapper.readTree(mvc.perform(post(
                         WEB_SHELL + "/sessions/close").header(TENANT, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"sessionId":"%s","idempotencyKey":"shared-key"}
-                                """.formatted(first)), "owner"))
+                                """.formatted(first)))
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString());
         assertThat(webReplay.get("operationId").asText()).isEqualTo(closeId);
@@ -1137,7 +1137,7 @@ class ManagedSessionLifecycleTest {
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-a', ?, 'OPERATOR')", tenant,
                 "actor-a".getBytes(StandardCharsets.UTF_8));
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/v1/agents/sessions").header(TENANT, tenant)
                         .header("Idempotency-Key", "bound")
                         .principal(actor(tenant, "actor-a"))
@@ -1145,13 +1145,13 @@ class ManagedSessionLifecycleTest {
                         .content("""
                                 {"agent_id":"qwen-code","input":[],
                                  "workspace":{"workspace_id":"ws-a"}}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}", sessionId)
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
                         .header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-a")), "owner"))
+                        .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.capabilities.session_lifecycle")
                         .value(false));
@@ -1167,23 +1167,23 @@ class ManagedSessionLifecycleTest {
                         .principal(actor(tenant, "actor-a")), tenant, "bound-delete")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant)
+        mvc.perform(post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant)
                         .principal(actor(tenant, "actor-b"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"sessionId":"%s","idempotencyKey":"bound"}
-                                """.formatted(sessionId)), "owner"))
+                                """.formatted(sessionId)))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("session_not_found"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
+        mvc.perform(get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
                         "op_missing").header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-a")), "owner"))
+                        .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
                         .value("operation_not_found"));
-        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
+        mvc.perform(get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
                         "op_missing").header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-b")), "owner"))
+                        .principal(actor(tenant, "actor-b")))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("session_not_found"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
@@ -1197,26 +1197,29 @@ class ManagedSessionLifecycleTest {
     }
 
     private String emptySession(String tenant) throws Exception {
-        return objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
+        String id = objectMapper.readTree(mvc.perform(post("/v1/agents/sessions").principal(actor(tenant, "actor-a"))
                         .header(TENANT, tenant)
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
+        legacyState(tenant, id);
+        return id;
     }
 
     // A Session whose completed Turn attached it to the Harness.
     private String attachedSession(String tenant) throws Exception {
-        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
+        String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/v1/agents/sessions").header(TENANT, tenant)
+                        .principal(actor(tenant, "actor-a"))
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"agent_id":"qwen-code",
                                  "input":[{"type":"input_text","text":"hi"}]}
-                                """), "owner"))
+                                """))
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
@@ -1225,13 +1228,14 @@ class ManagedSessionLifecycleTest {
                         .containsKey(sessionId)
                         && store.requireSession(tenant, sessionId)
                                 .harnessBootId() != null);
+        legacyState(tenant, sessionId);
         return sessionId;
     }
 
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,
             String tenant, String idempotencyKey) throws Exception {
-        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(request.header(TENANT, tenant)
-                .header("Idempotency-Key", idempotencyKey), "owner"));
+        return mvc.perform(request.header(TENANT, tenant)
+                .header("Idempotency-Key", idempotencyKey));
     }
 
     private JsonNode admit(MockHttpServletRequestBuilder request,
@@ -1284,10 +1288,10 @@ class ManagedSessionLifecycleTest {
     private String sessionStatus(String tenant, String sessionId,
             String actorId)
             throws Exception {
-        return objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get(
+        return objectMapper.readTree(mvc.perform(get(
                         "/v1/agents/sessions/{id}", sessionId)
                         .header(TENANT, tenant)
-                        .principal(actor(tenant, actorId)), "owner"))
+                        .principal(actor(tenant, actorId)))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString())
                 .get("status").asText();
@@ -1355,4 +1359,14 @@ class ManagedSessionLifecycleTest {
             drainFailures.set(count);
         }
     }
+
+    // Creation requires a trusted actor, but these probes mutate anonymously
+    // afterwards: restore the genuine legacy row-less state (ownership row
+    // deleted, structured receipt mark cleared) right after the create.
+    private void legacyState(String tenant, String sessionId) {
+        jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND' AND operation = 'CREATE_SESSION'", tenant, sessionId);
+    }
+
 }

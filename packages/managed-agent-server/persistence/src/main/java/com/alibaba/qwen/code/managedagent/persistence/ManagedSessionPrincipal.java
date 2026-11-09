@@ -63,11 +63,70 @@ public final class ManagedSessionPrincipal {
     }
 
     /**
+     * The unified authority over an unbound Session. A present ownership row
+     * is the sole authority: deleting it revokes access even for the creator,
+     * and an anonymous caller never matches a row. A legacy Session that never
+     * wrote a row stays tenant-wide — anonymous callers included — so its
+     * action gate, where one exists, refuses a foreign actor; a principal-
+     * created Session whose row was deleted is invisible, its structured
+     * creation receipt marking it past deletion.
+     */
+    public static void requireAuthority(JdbcTemplate jdbc, String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        if (principal != null && !principal.tenantId().equals(tenantId)) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+        Row row = find(jdbc, tenantId, sessionId);
+        if (row != null) {
+            if (!matches(row, principal)) {
+                throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                        404, "session_not_found", "The Session was not found.");
+            }
+            return;
+        }
+        if (!legacyCreation(jdbc, tenantId, sessionId)) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+    }
+
+    /**
+     * Whether the Session was created without a principal (legacy). The
+     * CREATE_SESSION receipt is an exclusion mark, not a required one: a
+     * principal-created Session stamps the structured principal key, which is
+     * non-empty and never equals the Session's raw creator_actor_key, a durable
+     * mark that survives deletion of the ownership row. A legacy create (raw
+     * creator key or empty UNATTRIBUTED key) and the oldest rows that predate
+     * the receipt altogether carry no such mark and stay tenant-wide.
+     */
+    public static boolean legacyCreation(JdbcTemplate jdbc, String tenantId,
+            String sessionId) {
+        Integer principalCreated = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_request_receipt r JOIN ma_session s"
+                        + " ON s.tenant_id = r.tenant_id AND"
+                        + " s.session_id = r.session_id WHERE r.tenant_id = ?"
+                        + " AND r.session_id = ? AND r.namespace ="
+                        + " 'SESSION_COMMAND' AND r.operation = 'CREATE_SESSION'"
+                        + " AND r.actor_id IS NOT NULL AND LENGTH(r.actor_id) > 0"
+                        + " AND (s.creator_actor_key IS NULL OR"
+                        + " r.actor_id <> s.creator_actor_key)",
+                Integer.class, tenantId, sessionId);
+        return principalCreated == null || principalCreated == 0;
+    }
+
+    /**
      * The receipt stamp for an unbound Session. It carries the full
      * principal rather than the two-member Workspace actor key, which
      * cannot represent the business actor distinction.
      */
     public static byte[] actorKey(SessionPrincipal principal) {
+        if (principal == null) {
+            // An anonymous caller admitted to a legacy no-row Session stamps
+            // the unattributed marker — the same empty key an actorless create
+            // writes — rather than a structured principal key.
+            return new byte[0];
+        }
         String joined = principal.userId()
                 + "\0" + (principal.actorPresent() ? "1" : "0")
                 + "\0" + (principal.actorSubjectId() == null ? ""

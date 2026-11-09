@@ -682,17 +682,12 @@ class ManagedActionsTest {
                     journal.change("decided", call.getArgument(3));
                     throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
                 });
-        // The unbound arm hides the Session from a non-owner behind the
-        // visibility gate (404); only the Workspace-operator arm reaches
-        // the answer refusal (403). The builder runs as "other" directly —
-        // the fixture wrapper is authoritative and would install "owner".
         mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "other")
                         .header("Idempotency-Key", "answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().is(shell ? 403 : 404))
-                .andExpect(jsonPath("$.error.code")
-                        .value(shell ? "action_forbidden" : "session_not_found"));
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
         JsonNode admitted =
                 readAccepted(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
@@ -1214,41 +1209,45 @@ class ManagedActionsTest {
     @Test
     void hostedSessionsAnswerThroughTheirRecordedCreator() throws Exception {
         String tenant = tenant();
-        // The hosted Session keeps its recorded creator and answers 202
-        // through it — the behaviour this case exists to certify (R2-5).
-        String hosted = hostedSession(tenant, "owner");
-        ActionJournal open = action(tenant, hosted,
+        // Creation now requires a trusted actor; the legacy row-less state
+        // is a historical one, so the fixture drops the ownership row.
+        String anonymous = hostedSession(tenant, "creator");
+        jdbc.update("DELETE FROM ma_session_principal"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, anonymous);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND'"
+                + " AND operation = 'CREATE_SESSION'", tenant, anonymous);
+        jdbc.update("UPDATE ma_session SET creator_actor_key = NULL,"
+                + " owner_actor_key = NULL WHERE tenant_id = ?"
+                + " AND session_id = ?", tenant, anonymous);
+        ActionJournal open = action(tenant, anonymous,
                 System.currentTimeMillis(), 9007199254740991L);
-        readAccepted(auth(post(path(hosted, open.id) + "/responses"),
-                tenant, "owner")
-                .header("Idempotency-Key", "creator-answer")
+        // No recorded creator: the tenant-scoped caller answers, matching
+        // the read semantics of a non-Workspace Session.
+        readAccepted(auth(post(path(anonymous, open.id) + "/responses"),
+                tenant, "anyone")
+                .header("Idempotency-Key", "open-answer")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(response("allow")));
 
         String owned = hostedSession(tenant, "owner");
         ActionJournal journal = action(tenant, owned,
                 System.currentTimeMillis(), 9007199254740991L);
-        // A non-owner never reaches the answer refusal: the ownership
-        // visibility gate hides the unbound Session behind a 404 first. The
-        // builder really runs as "other" — auth() installs that principal.
         mvc.perform(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "other")
                         .header("Idempotency-Key", "foreign-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.error.code").value("session_not_found"));
-        // Principal-less on purpose: the fixture wrapper would install the
-        // recorded creator as the caller and the refusal would never run.
-        // The respond endpoint requires a principal, so the unauthenticated
-        // caller is refused at the boundary with 401 actor_required.
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
         mvc.perform(post(path(owned, journal.id) + "/responses")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "anonymous-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.error.code").value("actor_required"));
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
         readAccepted(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "owner")
                         .header("Idempotency-Key", "owner-answer")
@@ -1302,13 +1301,34 @@ class ManagedActionsTest {
     private String session(String tenant) throws Exception {
         String session =
                 readAccepted(
-                                post("/v1/agents/sessions")
+                                post("/v1/agents/sessions").principal(new AuthenticatedTenantActor() {
+                                    public String tenantId() {
+                                        return tenant;
+                                    }
+
+                                    public String actorId() {
+                                        return "actor-a";
+                                    }
+
+                                    public String getName() {
+                                        return "actor-a";
+                                    }
+                                })
                                         .header(TenantContextFilter.HEADER, tenant)
                                         .header("Idempotency-Key", UUID.randomUUID().toString())
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                         .path("id")
                         .asText();
+        // The fixture's recorded creator is the SQL "owner" below; drop the
+        // create-time ownership row so the action surface reads it as the
+        // historical creator-recorded state it models.
+        jdbc.update("DELETE FROM ma_session_principal"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND'"
+                + " AND operation = 'CREATE_SESSION'", tenant, session);
         String key = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
                         + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,gmt_create,gmt_modified)"
@@ -1318,14 +1338,15 @@ class ManagedActionsTest {
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("owner"), "owner", key,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(key), "sha256:test",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), session, System.currentTimeMillis(), System.currentTimeMillis());
-        jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_session SET creator_actor_key=?, owner_actor_key=NULL"
+                + " WHERE tenant_id=? AND session_id=?",
                 "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), tenant, session);
         return session;
     }
 
     private JsonNode read(MockHttpServletRequestBuilder request) throws Exception {
         return json.readTree(
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(request, "owner"))
+                mvc.perform(request)
                         .andExpect(status().isOk())
                         .andReturn()
                         .getResponse()
@@ -1334,7 +1355,7 @@ class ManagedActionsTest {
 
     private JsonNode readAccepted(MockHttpServletRequestBuilder request) throws Exception {
         return json.readTree(
-                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(request, "owner"))
+                mvc.perform(request)
                         .andExpect(status().isAccepted())
                         .andReturn()
                         .getResponse()
