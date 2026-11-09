@@ -35,7 +35,7 @@ export const plugin: ChannelPlugin = {
         key: 'sandbox',
         label: 'Sandbox Environment',
         kind: 'boolean',
-        default: false,
+        default: 'false',
         description: 'Use the QQ sandbox API instead of production',
       },
       {
@@ -62,7 +62,7 @@ export const plugin: ChannelPlugin = {
         key: 'allowMention',
         label: 'Allow Mention Passthrough',
         kind: 'boolean',
-        default: true,
+        default: 'true',
         description:
           'Keep raw mention tags so the model can mention group members',
       },
@@ -77,7 +77,7 @@ export const plugin: ChannelPlugin = {
         key: 'cron-msg-experimental',
         label: 'Experimental Scheduled Messages',
         kind: 'boolean',
-        default: false,
+        default: 'false',
         description:
           'Enable experimental cron message features at your own risk',
       },

@@ -586,8 +586,7 @@ interface ChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
   options?: readonly ChannelConfigFieldOption[];
-  /** Boolean kinds may declare a boolean default; all others use a string. */
-  default?: string | boolean;
+  default?: string;
   description?: string;
 }
 

@@ -593,6 +593,57 @@ describe('channel registry', () => {
     },
   );
 
+  it.each([
+    ['null', null],
+    ['a non-object', 'qr'],
+    ['an object without start', {}],
+  ])(
+    'strips management when qrLogin is %s instead of throwing',
+    async (_label, qrLogin) => {
+      const type = `invalid-qr-login-${_label.replace(/[^a-z]+/g, '-')}`;
+      const plugin = {
+        channelType: type,
+        displayName: type,
+        management: { fields: [], qrLogin },
+        createChannel() {
+          throw new Error('not used');
+        },
+      } as unknown as ChannelPlugin;
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      registerPlugin(plugin);
+
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Channel management metadata must declare qrLogin.start as a function.',
+        ),
+      );
+      stderr.mockRestore();
+
+      const registered = await getPlugin(type);
+      expect(registered?.management).toBeUndefined();
+    },
+  );
+
+  it('keeps management when qrLogin declares a start function', async () => {
+    const plugin = {
+      channelType: 'valid-qr-login',
+      displayName: 'valid-qr-login',
+      management: { fields: [], qrLogin: { start: () => () => {} } },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+
+    registerPlugin(plugin);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-qr-login',
+    );
+    expect(entry?.manageable).toBe(true);
+    expect(entry?.supportsQrLogin).toBe(true);
+  });
+
   it('registers a plugin whose management descriptor lacks a fields array without management metadata', async () => {
     const plugin = {
       channelType: 'invalid-missing-fields-array',

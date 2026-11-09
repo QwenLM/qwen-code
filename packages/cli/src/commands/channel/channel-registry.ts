@@ -211,16 +211,8 @@ function assertManagementField(
       `Channel field "${path}" must declare a string description.`,
     );
   }
-  if (field.default !== undefined) {
-    if (field.kind === 'boolean') {
-      if (typeof field.default !== 'boolean') {
-        throw new Error(
-          `Channel field "${path}" must declare a boolean default.`,
-        );
-      }
-    } else if (typeof field.default !== 'string') {
-      throw new Error(`Channel field "${path}" must declare a string default.`);
-    }
+  if (field.default !== undefined && typeof field.default !== 'string') {
+    throw new Error(`Channel field "${path}" must declare a string default.`);
   }
   const envResolvable = Boolean(field.envResolvable);
   const required = Boolean(field.required);
@@ -341,7 +333,8 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
   }
   if (
     management.qrLogin !== undefined &&
-    (typeof management.qrLogin !== 'object' ||
+    (management.qrLogin === null ||
+      typeof management.qrLogin !== 'object' ||
       typeof management.qrLogin.start !== 'function')
   ) {
     throw new Error(

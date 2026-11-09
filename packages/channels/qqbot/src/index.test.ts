@@ -55,17 +55,21 @@ describe('QQ management descriptor', () => {
     expect(plugin.requiredConfigFields).toEqual([]);
   });
 
-  it('declares allowMention with a boolean true default matching the adapter', () => {
+  it('declares allowMention default-on in the form the editor reads', () => {
     // QQChannel reads `allowMention !== false`, so an editor that writes the
-    // zero value would silently disable mention passthrough.
+    // zero value would silently disable mention passthrough. The management
+    // editor resolves a boolean default via `field.default === 'true'`, so the
+    // string form is load-bearing, not cosmetic.
     expect(field('allowMention')?.kind).toBe('boolean');
-    expect(field('allowMention')?.default).toBe(true);
+    expect(field('allowMention')?.default).toBe('true');
   });
 
-  it('declares boolean defaults as booleans, not strings', () => {
+  it('declares every boolean default as a string, matching the shared editor', () => {
     for (const key of ['sandbox', 'allowMention', 'cron-msg-experimental']) {
-      expect(typeof field(key)?.default).toBe('boolean');
+      expect(typeof field(key)?.default).toBe('string');
     }
+    expect(field('sandbox')?.default).toBe('false');
+    expect(field('cron-msg-experimental')?.default).toBe('false');
   });
 });
 

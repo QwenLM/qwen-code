@@ -11,7 +11,7 @@ tests; `channel-base`, `channel-qqbot` and `channel-email` build, and the
 
 **Not implemented:** Layer 3 (daemon login-session resource and routes), Layer 4
 (SDK plumbing), Layer 5 (Web Shell UI, allowlist, i18n), the shared
-`requireMention` control, and the editor's use of boolean defaults. QQ is
+`requireMention` control. QQ is
 therefore still invisible in Web Shell, and no browser scan works yet. The
 `qrcode` dependency was not added. No end-to-end or manual scan verification has
 been performed.
@@ -157,9 +157,10 @@ authentication** — the bearer token is the auth boundary
 
 In scope: the `channels/base` contract additions, the QQ management descriptor and
 login capability, a workspace-scoped login-session resource in the daemon, SDK
-plumbing, and the Web Shell editor UI including English and Chinese copy. Two
-shared surfaces are deliberately touched: boolean field defaults and the group
-section's `requireMention` control, both of which affect every adapter.
+plumbing, and the Web Shell editor UI including English and Chinese copy. One
+shared surface is deliberately touched: the group section's `requireMention`
+control, which affects every adapter. The boolean-default contract change an
+earlier draft proposed was withdrawn (D6).
 
 Out of scope: QR login for any other adapter; changing the CLI scan flow;
 promoting channel routes into the OpenAPI guide surface; a dedicated SSE
@@ -274,16 +275,17 @@ boundary. The threat worth stating plainly is that whoever scans the code binds
 their own bot, so a leaked URL could point a workspace's channel at an
 attacker-controlled bot.
 
-**D6 — Boolean defaults need contract support.** `allowMention` is read as
-`!== false`, so its effective default is true
-(`packages/channels/qqbot/src/QQChannel.ts:659`). The editor initializes absent
-booleans to `false` and `assignField` writes that value unconditionally
-(`packages/web-shell/client/components/channels/channel-editor-state.ts`), so
-exposing the field today would silently disable mention passthrough on every
-save. Allowing a boolean `default` requires touching the descriptor type,
-`assertManagementField` (which currently rejects non-string defaults,
-`packages/cli/src/commands/channel/channel-registry.ts:213-215`), and the editor's
-initial-value logic together.
+**D6 — Boolean defaults use the existing string convention.** `allowMention` is
+read as `!== false`, so its effective default is true
+(`packages/channels/qqbot/src/QQChannel.ts:1145`). An earlier draft of this design
+proposed widening the descriptor's `default` to `string | boolean`. That was
+withdrawn: upstream already resolves a boolean default in the management editor
+via `field.default === 'true'`, and GitHub declares `prCommentWatch: 'true'` and
+`deliverToBoundSessions: 'false'` in that form. Widening the type and rejecting
+string defaults on boolean kinds stripped GitHub's and email's entire management
+surface, which was measured by A/B on the real registry. QQ therefore declares
+`default: 'true'` / `'false'` like its siblings, and no shared contract, editor, or
+SDK default type changes are needed.
 
 **D7 — Cross-field constraints become editor-visible validation.**
 `groupAllPolicy` of `keyword` or `all` needs `sessionScope: 'thread'` for

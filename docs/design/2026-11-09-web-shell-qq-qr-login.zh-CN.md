@@ -9,8 +9,8 @@
 `channel-registry` 与 `qqbot` 测试套件通过。
 
 **尚未实现:** 第 3 层(daemon 登录会话资源与路由)、第 4 层(SDK 接线)、
-第 5 层(Web Shell UI、白名单、i18n)、共享 `requireMention` 控件,以及编辑器对
-布尔默认值的使用。因此 QQ 目前在 Web Shell 中仍不可见,浏览器扫码尚不可用。
+第 5 层(Web Shell UI、白名单、i18n)、共享 `requireMention` 控件。因此 QQ 目前在
+Web Shell 中仍不可见,浏览器扫码尚不可用。
 `qrcode` 依赖未添加。未执行任何端到端或人工扫码验证。
 
 下文的调研结论于 2026-11-09 从工作树中读取得到并附带引用出处。
@@ -139,9 +139,9 @@ OAuth device flow 提供了可模仿的入口形状:POST 启动,新流程返回 
 ## 范围边界
 
 范围内:`channels/base` 的契约新增、QQ 管理描述符与登录能力、daemon 中按 workspace
-隔离的登录会话资源、SDK 接线,以及 Web Shell 编辑器 UI(含中英文文案)。有两处共享
-面被有意改动:布尔字段默认值,以及群组区的 `requireMention` 控件 —— 两者都影响所有
-适配器。
+隔离的登录会话资源、SDK 接线,以及 Web Shell 编辑器 UI(含中英文文案)。只有一处共享
+面被有意改动:群组区的 `requireMention` 控件,它影响所有适配器。早期草稿提议的布尔
+默认值契约改动已撤回(见 D6)。
 
 范围外:为其他适配器提供扫码登录;改动 CLI 扫码流程;把渠道路由提升到 OpenAPI guide
 面;专用 SSE 子资源;迁移已经存放在凭据文件中的凭据。
@@ -235,14 +235,15 @@ Device flow 是 daemon 全局的,因为 OAuth 凭据是进程级的。而 QQ 登
 边界。值得直说的威胁是:谁扫码就绑定谁的机器人,因此 URL 泄漏可能把某 workspace 的
 渠道指向攻击者控制的机器人。
 
-**D6 —— 布尔默认值需要契约支持。** `allowMention` 的读取方式是 `!== false`,
-因此其有效默认值是 true
-(`packages/channels/qqbot/src/QQChannel.ts:659`)。编辑器把缺省布尔初始化为
-`false`,且 `assignField` 无条件写入该值
-(`packages/web-shell/client/components/channels/channel-editor-state.ts`),
-所以今天就暴露该字段会在每次保存时静默关闭 mention 透传。允许布尔 `default`
-需要同步改动描述符类型、`assertManagementField`(它目前拒绝非字符串默认值,
-`packages/cli/src/commands/channel/channel-registry.ts:213-215`)以及编辑器的初值逻辑。
+**D6 —— 布尔默认值沿用既有的字符串约定。** `allowMention` 的读取方式是
+`!== false`,因此其有效默认值是 true
+(`packages/channels/qqbot/src/QQChannel.ts:1145`)。本设计的早期草稿曾提议把描述符的
+`default` 放宽为 `string | boolean`,该提议已撤回:上游的管理编辑器本就通过
+`field.default === 'true'` 解析布尔默认值,而 GitHub 正是以该形式声明
+`prCommentWatch: 'true'` 与 `deliverToBoundSessions: 'false'`。放宽类型并拒绝布尔
+kind 上的字符串默认值,会剥离 GitHub 与 email 的整个管理面 —— 这一点已在真实
+registry 上做过 A/B 实测。因此 QQ 与兄弟适配器一样声明 `default: 'true'` / `'false'`,
+不需要改动任何共享契约、编辑器或 SDK 的默认值类型。
 
 **D7 —— 跨字段约束变成编辑器可见的校验。**
 `groupAllPolicy` 取 `keyword` 或 `all` 时需要 `sessionScope: 'thread'` 以获得
