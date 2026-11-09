@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -52,7 +53,7 @@ class ManagedSessionNativeReadTest {
     private StoreLockTrace trace;
     private JdbcTemplate jdbc;
     private TransactionTemplate transactions;
-    private ManagedSessionStore store;
+    private JdbcManagedSessionStore store;
     private String session;
     private RuntimeBindingRecord binding;
     private JdbcRuntimeBindingRepository bindings;
@@ -91,9 +92,9 @@ class ManagedSessionNativeReadTest {
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 300_000L)));
         jdbc.update(
                 "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", 946684800000)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), session, BYTES.length,
+                ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
+                ManagedSessionStore.sessionScopeKey("tenant", session), session, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
     }
 
@@ -270,10 +271,10 @@ class ManagedSessionNativeReadTest {
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "ordinary-writer", 60_000L)));
         jdbc.update(
                 "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, 'ordinary-resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?, 'ordinary-fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", ordinary),
+                ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey("tenant", ordinary),
                         "ordinary-resource"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", ordinary), ordinary, BYTES.length,
+                ManagedSessionStore.sessionScopeKey("tenant", ordinary), ordinary, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
         assertThat(store.readOwnerResource("tenant", "workspace", ordinary, "ordinary-resource", TOKEN).bytes())
                 .isEqualTo(BYTES);

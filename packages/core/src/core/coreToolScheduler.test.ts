@@ -9690,7 +9690,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
 
   it.each([
     [ToolNames.SHELL, 'git status'],
-    [ToolNames.MONITOR, "/bin/bash -c 'git status &'"],
+    [ToolNames.MONITOR, "/bin/bash -c 'git status &' ignored"],
   ])('executes read-only %s calls without a prompt', async (name, command) => {
     const getConfirmationDetails = vi.fn();
     const execute = vi.fn().mockResolvedValue(textResult('ok'));

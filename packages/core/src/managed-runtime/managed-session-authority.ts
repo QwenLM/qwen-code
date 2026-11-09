@@ -510,7 +510,7 @@ export class LocalManagedSessionAuthority {
   private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private retirementPreparation?: Promise<readonly unknown[]>;
-  private readonly eventIds = new Set<string>();
+  private readonly eventIds = new Map<string, ManagedSessionEvent>();
   private readonly latestByKind = new Map<
     ManagedSessionEventKind,
     ManagedSessionEvent
@@ -769,7 +769,7 @@ export class LocalManagedSessionAuthority {
     );
     const branches = await authority.validateRecoveryFacts(scan.events);
     for (const event of scan.events) {
-      authority.eventIds.add(event.eventId);
+      authority.eventIds.set(event.eventId, event);
       if (event.kind === 'domain.committed') {
         authority.recordDomainEvent(event);
       }
@@ -860,6 +860,14 @@ export class LocalManagedSessionAuthority {
     kind: ManagedSessionEventKind,
   ): ManagedSessionEvent | undefined {
     return this.latestByKind.get(kind);
+  }
+
+  hasCommittedEvent(eventId: string): boolean {
+    return this.eventIds.has(eventId);
+  }
+
+  committedEvent(eventId: string): ManagedSessionEvent | undefined {
+    return this.eventIds.get(eventId);
   }
 
   /**
@@ -1339,6 +1347,7 @@ export class LocalManagedSessionAuthority {
         readonly outcome: string;
         readonly stopReason: string | null;
         readonly resultRef: ManagedSessionDurableRef;
+        readonly usageRef?: ManagedSessionDurableRef | null;
         readonly occurredAt: number;
         readonly eventId: string;
       };
@@ -1454,7 +1463,7 @@ export class LocalManagedSessionAuthority {
               outcome: request.turn.outcome,
               stopReason: request.turn.stopReason,
               resultRef: request.turn.resultRef,
-              usageRef: null,
+              usageRef: request.turn.usageRef ?? null,
               pendingOwnersRef: null,
             },
           },
@@ -3234,7 +3243,11 @@ export class LocalManagedSessionAuthority {
       refs = [command.argsRef, command.replyRef];
     } else if (domain === 'history_maintenance') {
       const maintenance = parseHistoryMaintenance(record);
-      refs = [maintenance.requestRef, maintenance.candidateRef];
+      refs = [
+        maintenance.requestRef,
+        maintenance.candidateRef,
+        ...(maintenance.schemaVersion === 2 ? [maintenance.modelStatsRef] : []),
+      ];
     } else if (domain === 'team_task') {
       const task = parseTeamTask(record);
       refs = [task.descriptionRef, task.metadataRef];
@@ -3586,7 +3599,7 @@ export class LocalManagedSessionAuthority {
     this.lastRecordUuid = lastRecordUuid;
     for (const event of events) {
       this.events.push(event);
-      this.eventIds.add(event.eventId);
+      this.eventIds.set(event.eventId, event);
       this.indexCommittedEvent(event);
       if (event.kind === 'activation.changed') {
         this.activation = managedSessionActivationStateFrom(event);

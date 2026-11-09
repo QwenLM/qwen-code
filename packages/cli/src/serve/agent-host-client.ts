@@ -19,7 +19,7 @@
  * stops on the coordinator is aborted here and posts no result.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,7 +45,10 @@ import type { WorkspaceGenerationGuard } from './workspace-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { sessionAgentNativeSessionId } from '../runtime/agent-session-source.js';
 import {
+  AGENT_HOST_ALREADY_ENROLLED,
   AGENT_HOST_CREDENTIAL_REJECTED,
+  AGENT_HOST_ENROLLMENT_REFUSED,
+  AGENT_HOST_PROPOSED_SECRET_PATTERN,
   AGENT_HOST_REPLACEMENT_REQUIRED,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import {
@@ -208,6 +211,225 @@ async function writeCredential(
   }
 }
 
+/**
+ * A secret this Host saved before it enrolled, and the tokens (as hashes)
+ * it was sent with, which tell an enrollment a command ran from another
+ * command's.
+ */
+interface EnrollmentSecret {
+  secret: string;
+  tokenHashes: string[];
+}
+
+/** How many of the tokens a saved secret was sent with it keeps. */
+const MAX_ENROLLMENT_TOKENS = 8;
+
+/** How a saved enrollment secret names its token. */
+function enrollmentTokenHash(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * The secret this Host enrolls with, saved before it enrolls: the
+ * coordinator keeps only its hash and spends the token in the same step, so
+ * a secret that reached disk only from the answer was lost with an answer
+ * that never came (a timeout, a dropped connection, this daemon stopping, a
+ * failed save). A retry sends the saved one again, and the coordinator
+ * answers it as the enrollment that went through. One that `enrolled`
+ * already holds is from a finished enrollment, so a new one is made. The
+ * secret returned is recorded as sent with `tokenHash`, so a rerun of this
+ * command finds it. `replacing`: the saved one is of no use (a Replace found
+ * it enrolled), so a new one replaces it, unless another enrollment of this
+ * connection already did.
+ */
+async function enrollmentSecret(
+  filePath: string,
+  enrolled: AgentHostCredential | undefined,
+  tokenHash: string,
+  replacing?: string,
+): Promise<EnrollmentSecret> {
+  return withEnrollmentSecret(filePath, async (save) => {
+    const kept = await readEnrollmentSecret(filePath);
+    if (
+      kept !== undefined &&
+      (replacing === undefined
+        ? kept.secret !== enrolled?.secret
+        : kept.secret !== replacing)
+    ) {
+      if (kept.tokenHashes.includes(tokenHash)) return kept;
+      const sent = {
+        secret: kept.secret,
+        tokenHashes: [...kept.tokenHashes, tokenHash].slice(
+          -MAX_ENROLLMENT_TOKENS,
+        ),
+      };
+      await save(sent);
+      return sent;
+    }
+    const made = {
+      secret: randomBytes(32).toString('base64url'),
+      tokenHashes: [tokenHash],
+    };
+    await save(made);
+    return made;
+  });
+}
+
+/**
+ * Puts `earlier` back in place of `refused`, the secret a Replace was
+ * refused outright with after it replaced `earlier`: that Replace did
+ * nothing, and the retry that finishes the earlier enrollment needs it. Only
+ * while the file still holds `refused`, under one lock.
+ */
+async function swapBackEnrollmentSecret(
+  filePath: string,
+  refused: string,
+  earlier: EnrollmentSecret,
+): Promise<void> {
+  await withEnrollmentSecret(filePath, async (save) => {
+    const saved = await readEnrollmentSecret(filePath).catch(() => undefined);
+    if (saved?.secret === refused) await save(earlier);
+  }).catch((error: unknown) =>
+    writeStderrLine(
+      `Agent Host enrollment secret could not be put back: ${extractErrorMessage(error)}`,
+    ),
+  );
+}
+
+/** Runs `run` under the saved secret's lock, with a way to save one. */
+async function withEnrollmentSecret<T>(
+  filePath: string,
+  run: (save: (saved: EnrollmentSecret) => Promise<void>) => Promise<T>,
+): Promise<T> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const lock = await lockCredential(filePath);
+  const temporary = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    return await run(async (saved) => {
+      await fs.writeFile(
+        temporary,
+        `${JSON.stringify({ schemaVersion: 1, ...saved }, null, 2)}\n`,
+        { mode: 0o600, flag: 'wx' },
+      );
+      lock.assertHeld();
+      await fs.rename(temporary, filePath);
+      lock.assertHeld();
+    });
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    await lock
+      .release()
+      .catch((error: unknown) =>
+        writeStderrLine(
+          `Agent Host enrollment secret cleanup failed: ${extractErrorMessage(error)}`,
+        ),
+      );
+  }
+}
+
+/**
+ * Undefined when none is saved. One that cannot be read, or is not one this
+ * version wrote, stops the enrollment rather than being replaced: an
+ * enrollment may hold it.
+ */
+async function readEnrollmentSecret(
+  filePath: string,
+): Promise<EnrollmentSecret | undefined> {
+  let text: string;
+  try {
+    text = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    value = undefined;
+  }
+  const {
+    schemaVersion,
+    secret,
+    tokenHashes = [],
+  } = (typeof value === 'object' && value !== null ? value : {}) as {
+    schemaVersion?: unknown;
+    secret?: unknown;
+    tokenHashes?: unknown;
+  };
+  if (
+    schemaVersion !== 1 ||
+    typeof secret !== 'string' ||
+    !AGENT_HOST_PROPOSED_SECRET_PATTERN.test(secret) ||
+    !Array.isArray(tokenHashes) ||
+    tokenHashes.length > MAX_ENROLLMENT_TOKENS ||
+    !tokenHashes.every(
+      (hash) => typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash),
+    )
+  ) {
+    throw Object.assign(
+      new Error(`Malformed Agent Host enrollment secret: ${filePath}`),
+      { code: MALFORMED_ENROLLMENT_SECRET },
+    );
+  }
+  return { secret, tokenHashes: tokenHashes as string[] };
+}
+
+const MALFORMED_ENROLLMENT_SECRET = 'EMALFORMEDSECRET';
+
+/** The enroll route's answer to an enrollment the coordinator turned down. */
+function isEnrollmentRefusal(error: unknown): boolean {
+  return (
+    (error as { status?: number }).status === 401 &&
+    (error as Error).message === AGENT_HOST_ENROLLMENT_REFUSED
+  );
+}
+
+/**
+ * Drops the saved enrollment secret `secret`, not one another enrollment of
+ * this connection saved meanwhile. A failure is only logged: a secret a
+ * saved credential holds is never enrolled again.
+ *
+ * `revoked`: `secret` was revoked, so a file that cannot be read (or is not
+ * one) goes too, as it may hold it, and a failure is thrown: the caller
+ * keeps the credential, so the next attempt drops both.
+ */
+async function clearEnrollmentSecret(
+  filePath: string,
+  secret: string,
+  revoked = false,
+): Promise<void> {
+  try {
+    const lock = await lockCredential(filePath);
+    try {
+      let saved: EnrollmentSecret | undefined;
+      let unreadable = false;
+      try {
+        saved = await readEnrollmentSecret(filePath);
+      } catch (error) {
+        if (
+          !revoked &&
+          (error as { code?: unknown }).code !== MALFORMED_ENROLLMENT_SECRET
+        ) {
+          throw error;
+        }
+        unreadable = revoked;
+      }
+      if (saved?.secret === secret || unreadable) {
+        lock.assertHeld();
+        await fs.rm(filePath, { force: true });
+      }
+    } finally {
+      await lock.release();
+    }
+  } catch (error) {
+    if (revoked) throw error;
+    writeStderrLine(
+      `Agent Host enrollment secret cleanup failed: ${extractErrorMessage(error)}`,
+    );
+  }
+}
+
 async function lockCredential(filePath: string) {
   let compromised: Error | undefined;
   const release = await lockfile.lock(filePath, {
@@ -314,11 +536,17 @@ function credentialFiles(
   serverUrl: string,
   workspaceId: string,
   workspaceCwd: string,
-): { legacy: string; current: string } {
+): { legacy: string; current: string; enrollment: string } {
   const legacy = credentialPath(serverUrl, workspaceId, workspaceCwd);
   // Old clients delete their legacy file on revocation without checking its
   // identity. Keep updated credentials outside that deletion path.
-  return { legacy, current: legacy.replace(/\.json$/, '.v2.json') };
+  return {
+    legacy,
+    current: legacy.replace(/\.json$/, '.v2.json'),
+    // Its own file: an older client reading the credential would refuse a
+    // record without a Host id.
+    enrollment: legacy.replace(/\.json$/, '.enrolling.json'),
+  };
 }
 
 /**
@@ -630,9 +858,13 @@ async function connectAgentHost(
   const filePath = files.current;
   const legacyFilePath = files.legacy;
   const savedCurrentCredential = await readCredential(filePath);
-  let credential =
+  const savedCredential =
     savedCurrentCredential ?? (await readCredential(legacyFilePath));
+  let credential = savedCredential;
   const discardRevokedCredential = async (expected: AgentHostCredential) => {
+    // Its enrollment secret first, should that have stayed: enrolled again
+    // once the credential is gone, it would bring the revoked secret back.
+    await clearEnrollmentSecret(files.enrollment, expected.secret, true);
     await removeRevokedCredential(filePath, expected);
     await removeRevokedCredential(legacyFilePath, expected);
   };
@@ -703,8 +935,7 @@ async function connectAgentHost(
         ...(enrollmentToken ? { enrollmentToken } : {}),
       }),
     });
-  if (credential && options.enrollmentToken) {
-    const savedCredential = credential;
+  if (savedCredential && options.enrollmentToken) {
     try {
       await sendHeartbeat(savedCredential, options.enrollmentToken);
     } catch (error) {
@@ -717,12 +948,30 @@ async function connectAgentHost(
         if ((error as { status?: number }).status !== 401) throw error;
         try {
           await sendHeartbeat(savedCredential);
-          throw new Error('Invalid or expired Agent Host enrollment token.');
         } catch (credentialError) {
           if (!isRevocation(credentialError)) {
             throw credentialError;
           }
           await discardRevokedCredential(savedCredential);
+          credential = undefined;
+        }
+        if (credential) {
+          // The saved credential works, and the token was spent. A Replace
+          // this command ran (the secret was sent with this token), whose
+          // answer was lost, left a secret of its own: sent again, it is
+          // answered as that enrollment. Another command's is not taken.
+          const pending = await readEnrollmentSecret(files.enrollment).catch(
+            () => undefined,
+          );
+          if (
+            pending === undefined ||
+            pending.secret === savedCredential.secret ||
+            !pending.tokenHashes.includes(
+              enrollmentTokenHash(options.enrollmentToken),
+            )
+          ) {
+            throw new Error('Invalid or expired Agent Host enrollment token.');
+          }
           credential = undefined;
         }
       }
@@ -735,22 +984,82 @@ async function connectAgentHost(
         'No saved Agent Host credential. Set QWEN_AGENT_HOST_ENROLLMENT_TOKEN once.',
       );
     }
-    const enrolled = await requestJson<{
-      host: { id: string };
-      secret: string;
-    }>(`${serverUrl}/agent-hosts/enroll`, {
-      method: 'POST',
-      signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        workspaceId: options.workspaceId,
-        token: options.enrollmentToken,
-        name: options.name?.trim() || os.hostname(),
-        workspaceCwd: options.workspaceCwd,
-        providers: providersFor(probes),
-      }),
-    });
+    const enrollmentToken = options.enrollmentToken;
+    const enroll = async (secret: string, keepOnRefusal = false) => {
+      try {
+        return await requestJson<{
+          host: { id: string };
+          secret: string;
+        }>(`${serverUrl}/agent-hosts/enroll`, {
+          method: 'POST',
+          signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            workspaceId: options.workspaceId,
+            token: enrollmentToken,
+            name: options.name?.trim() || os.hostname(),
+            workspaceCwd: options.workspaceCwd,
+            providers: providersFor(probes),
+            secret,
+          }),
+        });
+      } catch (error) {
+        // Refused outright, it enrolled nothing with this secret (a staged
+        // replacement under it takes a new one through its capability), and
+        // kept it would carry a failed join's identity into the next. A
+        // coordinator that could not complete says nothing of that.
+        if (isEnrollmentRefusal(error) && !keepOnRefusal) {
+          await clearEnrollmentSecret(files.enrollment, secret);
+        }
+        throw error;
+      }
+    };
+    const tokenHash = enrollmentTokenHash(enrollmentToken);
+    // Saved first: a save that fails here leaves the token unspent.
+    let proposed = await enrollmentSecret(
+      files.enrollment,
+      savedCredential,
+      tokenHash,
+    );
     assertOpen();
+    let enrolled: Awaited<ReturnType<typeof enroll>>;
+    try {
+      enrolled = await enroll(proposed.secret);
+    } catch (error) {
+      if (
+        (error as { status?: number }).status !== 409 ||
+        (error as Error).message !== AGENT_HOST_ALREADY_ENROLLED
+      ) {
+        throw error;
+      }
+      // A Replace, and this Host's saved secret already enrolled it (an
+      // earlier join whose answer was lost): the Replace takes one of its own.
+      const earlier = proposed;
+      assertOpen();
+      proposed = await enrollmentSecret(
+        files.enrollment,
+        savedCredential,
+        tokenHash,
+        earlier.secret,
+      );
+      assertOpen();
+      try {
+        enrolled = await enroll(proposed.secret, true);
+      } catch (retryError) {
+        // Refused outright (expired, or its target gone), the Replace did
+        // nothing, and the earlier enrollment still needs its secret.
+        if (isEnrollmentRefusal(retryError)) {
+          await swapBackEnrollmentSecret(
+            files.enrollment,
+            proposed.secret,
+            earlier,
+          );
+        }
+        throw retryError;
+      }
+    }
+    assertOpen();
+    // An older coordinator ignores the proposed secret and mints its own.
     credential = {
       schemaVersion: 1,
       serverUrl,
@@ -759,6 +1068,7 @@ async function connectAgentHost(
       secret: enrolled.secret,
     };
     await writeCredential(filePath, credential, savedCurrentCredential);
+    await clearEnrollmentSecret(files.enrollment, proposed.secret);
   } else if (!savedCurrentCredential) {
     await writeCredential(filePath, credential, undefined);
   }

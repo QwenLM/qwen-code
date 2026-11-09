@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFile
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -31,7 +32,7 @@ public class WorkspaceFileStore {
     @org.springframework.beans.factory.annotation.Autowired
     public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
 
-    private final ManagedWorkspaceRegistry registry;
+    private final JdbcManagedWorkspaceRegistry registry;
     private final WorkspaceStorageGuard guard;
     private final SshWorkspaceFiles ssh;
     private final ManagedAgentSettings properties;
@@ -41,7 +42,7 @@ public class WorkspaceFileStore {
     private final ObjectMapper mapper;
     private final java.util.concurrent.Semaphore reads = new java.util.concurrent.Semaphore(4);
 
-    public WorkspaceFileStore(ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard,
+    public WorkspaceFileStore(JdbcManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard,
             SshWorkspaceFiles ssh, ManagedAgentSettings properties, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper) {
         this.registry = registry;
@@ -209,8 +210,8 @@ public class WorkspaceFileStore {
         Map<String, Object> sessionFileScope = null;
         long worktreeRevision = 0;
         if (locator.sessionId() != null) {
-            SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
-            var worktree = SessionWorktreeStore.descriptor(worktreeFiles, jdbc, tenant, locator.sessionId());
+            JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
+            var worktree = JdbcSessionWorktreeStore.descriptor(worktreeFiles, jdbc, tenant, locator.sessionId());
             if (worktree != null) {
                 String prefix = ".qwen-managed-worktrees/" + worktree.worktreeId();
                 if (!binding.getCwdRelative().equals(prefix) && !binding.getCwdRelative().startsWith(prefix + "/")) {
@@ -221,7 +222,7 @@ public class WorkspaceFileStore {
                 try {
                     var identity = java.nio.file.Files.readAttributes(java.nio.file.Path.of((String) root.get("root"))
                             .resolve(".qwen-managed-worktrees").resolve(worktree.worktreeId()), "unix:dev,ino", java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                    SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
+                    JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
                     sessionFileScope = Map.of("sessionId", locator.sessionId(), "contextDigest", binding.getContextDigest(),
                             "worktreeId", worktree.worktreeId(), "worktreeRevision", worktreeRevision, "cwdRelative", binding.getCwdRelative(),
                             "worktreeRootIdentity", Map.of("device", Long.toUnsignedString(((Number) identity.get("dev")).longValue()),
@@ -259,8 +260,10 @@ public class WorkspaceFileStore {
 
     private ContextBinding sessionBinding(String tenant, String actor, String sessionId, boolean lock) {
         var bindings = jdbc.query("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?"
-                        + " AND status <> 'DELETED'" + (lock ? " FOR UPDATE" : ""),
-                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId);
+                        + " AND status <> 'DELETED' AND (owner_only = 0 OR COALESCE(owner_actor_key, creator_actor_key) = ?)"
+                        + (lock ? " FOR UPDATE" : ""),
+                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId,
+                ManagedWorkspaceRegistry.actorKey(tenant, actor));
         if (bindings.size() != 1 || bindings.getFirst() == null
                 || !registry.accessOf(tenant, actor, bindings.getFirst().getWorkspaceId()).canCreate()) {
             throw sessionNotFound();

@@ -13,6 +13,8 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
 import { ManagedHookActivationController } from './managed-hook-activation.js';
+import { enableManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import { enableManagedExecutionDiagnostics } from './managed-execution-diagnostics.js';
 import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
@@ -90,6 +92,123 @@ const TOKEN_B = 'b'.repeat(32);
 
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
+
+  it('scopes personal memory operations to the acquired writer and never sends provider selectors', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+      requestUrl(input).endsWith('/memory:query')
+        ? jsonResponse({
+            status: 'found',
+            memoryId: 'entry',
+            content: 'synthetic',
+          })
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const query = {
+        operation: 'get' as const,
+        inputId: 'input',
+        callId: 'call',
+        memoryId: 'entry',
+      };
+      await expect(stores.memory(query)).rejects.toThrow();
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.memory(query)).resolves.toMatchObject({
+        status: 'found',
+      });
+      const requests = fetchFn.mock.calls.filter(([input]) =>
+        requestUrl(input).endsWith('/memory:query'),
+      );
+      expect(requests).toHaveLength(1);
+      const init = requests[0]![1];
+      expect(JSON.parse(String(init?.body))).toEqual({
+        ...query,
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+      });
+      expect(
+        new Headers(init?.headers).get('X-Qwen-Managed-Writer-Token'),
+      ).toBe(TOKEN_A);
+      expect(new Headers(init?.headers).get('X-Qwen-Tenant-Id')).toBe(
+        SESSION_KEY.tenantId,
+      );
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it('does not automatically retry a personal memory write after a lost reply', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/memory:query'))
+        throw new TypeError('lost memory reply');
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(
+        stores.memory({
+          operation: 'remember',
+          inputId: 'input',
+          callId: 'call',
+          content: 'synthetic',
+        }),
+      ).rejects.toBeInstanceOf(ManagedSessionStoreTransportError);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/memory:query'),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it.each([
+    ['synthetic-private-invalid-json', 'invalid JSON'],
+    ['x'.repeat(65537), 'byte limit'],
+  ])(
+    'bounds and redacts invalid personal memory responses',
+    async (body, reason) => {
+      const server = new FakeManagedSessionStore();
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: async (input, init) =>
+          requestUrl(input).endsWith('/memory:query')
+            ? new Response(body, { headers: { 'Cache-Control': 'no-store' } })
+            : server.fetch(input, init),
+      });
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const failure = await stores
+          .memory({ operation: 'binding' })
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(Error);
+        expect(String(failure)).not.toContain(body);
+        expect(String(failure)).toContain(reason);
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
 
   it('reads a model configuration only with an acquired writer and a bound digest', async () => {
     const server = new FakeManagedSessionStore();
@@ -875,15 +994,19 @@ describe('HTTP Managed Session store', () => {
 
   // Boots a writer whose ordinary renewals after boot are processed by the
   // Store but have their answers held until release(); with refuseRenewal
-  // the held answer is a 409 instead, and the request never reaches the
-  // Store. It records the leases the Store granted, counts the ordinary
-  // renewals and acquires the client sends after boot and, optionally,
-  // holds those acquires too. With fenceActivationRenewal, activation
-  // renewals after boot meet the lifecycle claim fence without reaching the
-  // Store; acquires and ordinary renewals are not fenced.
+  // the held answer is a refusal instead, and the request never reaches the
+  // Store. The refusal is a 409 writer conflict or, with another
+  // refusalStatus, that status as Store unavailable. It records the leases
+  // the Store granted, counts the ordinary renewals and acquires the client
+  // sends after boot and, optionally, holds those acquires too. It also
+  // counts the renewal timers the client arms, and which of them are
+  // retries. With fenceActivationRenewal, activation renewals after boot
+  // meet the lifecycle claim fence without reaching the Store; acquires and
+  // ordinary renewals are not fenced.
   async function bootWithHeldRenewalAnswer(options: {
     holdAcquires: boolean;
     refuseRenewal?: boolean;
+    refusalStatus?: number;
     fenceActivationRenewal?: boolean;
   }) {
     const server = new FakeManagedSessionStore();
@@ -932,14 +1055,22 @@ describe('HTTP Managed Session store', () => {
       if (ordinaryRenewal && options.refuseRenewal) {
         observed.refusedRenewals++;
         await gates.renewal;
+        const status = options.refusalStatus ?? 409;
         return jsonResponse(
-          {
-            error: {
-              code: 'managed_session_writer_conflict',
-              message: 'The writer lease has lapsed.',
-            },
-          },
-          409,
+          status === 409
+            ? {
+                error: {
+                  code: 'managed_session_writer_conflict',
+                  message: 'The writer lease has lapsed.',
+                },
+              }
+            : {
+                error: {
+                  code: 'store_unavailable',
+                  message: 'The Session Store is unavailable.',
+                },
+              },
+          status,
         );
       }
       const response = await server.fetch(input, init);
@@ -961,22 +1092,45 @@ describe('HTTP Managed Session store', () => {
     });
     // The client is a plain field of the journal store; spying on it is the
     // only way to see that the lapse was handled while the answer was held,
-    // and reading its grant the only way to see which grant object it holds.
+    // and reading its grant and timer the only way to see which grant object
+    // it holds and whether a renewal is armed.
     const client = (
       stores.journalStore as unknown as {
         client: {
           reacquireWriter(): Promise<void>;
+          scheduleRenewal(retrying?: boolean): void;
           grant?: { leaseUntil: number };
+          renewTimer?: unknown;
         };
       }
     ).client;
     const reacquire = vi.spyOn(client, 'reacquireWriter');
+    const scheduleRenewal = client.scheduleRenewal.bind(client);
+    const armed = { timers: 0, retries: 0 };
+    let afterNextArm: (() => void) | undefined;
+    vi.spyOn(client, 'scheduleRenewal').mockImplementation((retrying) => {
+      scheduleRenewal(retrying);
+      if (client.renewTimer === undefined) return;
+      armed.timers++;
+      if (retrying) armed.retries++;
+      const after = afterNextArm;
+      afterNextArm = undefined;
+      after?.();
+    });
     return {
       server,
       stores,
       authority,
       journal,
       grant: () => client.grant,
+      renewTimer: () => client.renewTimer,
+      armed,
+      scheduleRenewal: (retrying?: boolean) => client.scheduleRenewal(retrying),
+      // Runs once, synchronously, right after the next timer is armed and
+      // before scheduleRenewal returns to the client.
+      afterNextArm: (run: () => void) => {
+        afterNextArm = run;
+      },
       observed,
       reacquire,
       release: () => releaseRenewal(),
@@ -1152,6 +1306,150 @@ describe('HTTP Managed Session store', () => {
       expect(rig.observed.ordinaryRenewals).toBe(2);
     } finally {
       rig.release();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // reacquireWriter has dropped the grant for an acquire the Store holds,
+  // after the wait re-armed the timer at most 500 ms out. No renewal may be
+  // armed or fire until the acquire answers: renewWriter() would find no
+  // grant, and its requireGrant() would throw out of the timer callback as
+  // an uncaught exception. Once the acquire and the activation renewal have
+  // answered, a timer is armed again.
+  async function expectNoRenewalWhileAcquireHeld(
+    rig: Awaited<ReturnType<typeof bootWithHeldRenewalAnswer>>,
+    renewal: Promise<unknown>,
+  ) {
+    expect(rig.observed.acquiresAfterBoot).toBe(1);
+    expect(rig.grant()).toBeUndefined();
+    expect(rig.renewTimer()).toBeUndefined();
+    // A renewal asked for now must not arm either. One that the timer
+    // joined after a lifecycle authority change can fail only after the
+    // drop, and its transient-error handler then asks for a retry.
+    rig.scheduleRenewal(true);
+    expect(rig.renewTimer()).toBeUndefined();
+    const timerError = await vi.advanceTimersByTimeAsync(600).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(timerError).toBeUndefined();
+    rig.releaseAcquire();
+    await renewal;
+    expect(rig.authority.currentActivation!.renewalSeq).toBe(1);
+    expect(rig.renewTimer()).toBeDefined();
+  }
+
+  it('leaves no renewal timer armed while the acquire that replaces a lapsed grant is held, after a renewal retry was armed', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({
+      holdAcquires: true,
+      refuseRenewal: true,
+      refusalStatus: 503,
+    });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(rig.observed.refusedRenewals).toBe(1);
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      // The timer started this renewal, so the 503 schedules a retry before
+      // reacquireWriter resumes. After a wall-clock step back the lapsed
+      // lease looks live, so that retry is armed, 500 ms out (1000 ms left
+      // on the lease, less 500). The refusal did not move the lease, so the
+      // grant is still dropped for an acquire. The fake Store's 300 s leases
+      // put the clock far past the request's own 30 s retry budget, so the
+      // request gives up on the 503 at once instead of retrying it.
+      vi.setSystemTime(rig.observed.bootLeaseUntil - 1000);
+      rig.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.armed.retries).toBe(1);
+      await expectNoRenewalWhileAcquireHeld(rig, renewal);
+    } finally {
+      rig.release();
+      rig.releaseAcquire();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves no renewal timer armed while the acquire that replaces a lapsed grant is held, after a renewal answered with an earlier lease', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      // The wall clock steps back a second just before the scheduled
+      // renewal, so the fake Store renews to a lease that ends before the
+      // boot lease; its answer is held. (A real Store keeps the later of the
+      // two and answers with the boot lease itself. Either way the lease
+      // does not move past the lapsed one.)
+      vi.setSystemTime(Date.now() - 1000);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(rig.server.renewCount).toBe(1);
+      expect(rig.observed.renewedLeaseUntil).toBeLessThan(
+        rig.observed.bootLeaseUntil,
+      );
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      // After another step back the renewed lease looks live when its
+      // answer arrives, so the renewal arms the next one, 500 ms out (1000
+      // ms left on the lease, less 500). That lease did not move past the
+      // lapsed one, so the grant is still dropped for an acquire.
+      vi.setSystemTime(rig.observed.renewedLeaseUntil - 1000);
+      const armedBefore = rig.armed.timers;
+      rig.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.armed.timers - armedBefore).toBe(1);
+      expect(rig.armed.retries).toBe(0);
+      await expectNoRenewalWhileAcquireHeld(rig, renewal);
+    } finally {
+      rig.release();
+      rig.releaseAcquire();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves no renewal timer armed while the acquire that replaces a lapsed grant is held, after a renewed lease ended as its answer arrived', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(rig.server.renewCount).toBe(1);
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      // The renewed lease moved past the lapsed one and has 1 ms left when
+      // its answer arms the next renewal, 250 ms out (the floor). The clock,
+      // moving only forward, crosses that millisecond before reacquireWriter
+      // checks the lease, so it has lapsed and the grant is dropped for an
+      // acquire.
+      expect(rig.observed.renewedLeaseUntil).toBeGreaterThan(
+        rig.observed.bootLeaseUntil,
+      );
+      vi.setSystemTime(rig.observed.renewedLeaseUntil - 1);
+      rig.afterNextArm(() => vi.setSystemTime(rig.observed.renewedLeaseUntil));
+      const armedBefore = rig.armed.timers;
+      rig.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.armed.timers - armedBefore).toBe(1);
+      expect(rig.armed.retries).toBe(0);
+      await expectNoRenewalWhileAcquireHeld(rig, renewal);
+    } finally {
+      rig.release();
+      rig.releaseAcquire();
       await renewal?.catch(() => undefined);
       await rig.stores.stopLocal();
       vi.clearAllTimers();
@@ -1769,6 +2067,125 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
+  it.each([1, 2, 3])(
+    'requires storage 3 before committing model statistics (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { stores, session } = await bootStoresAndSession(server);
+      try {
+        if (version === 3) server.headOverrides['storageVersion'] = 3;
+        expect(stores.supportsModelDiagnostics()).toBe(version === 3);
+        await enableManagedSessionDiagnostics(session);
+        await new ManagedHookActivationController(session).runTurn(
+          'diagnostics-turn',
+          async (scope) => {
+            const complete = await scope.beginMainAttempt('model');
+            if (version === 3) await complete(true, []);
+            else
+              await expect(complete(true, [])).rejects.toThrow(
+                'storage version 3',
+              );
+          },
+        );
+        const event = session.authority.lastEventOfKind('model.attempt')!;
+        expect(event.payload['state']).toBe(
+          version === 3 ? 'output_committed' : 'started',
+        );
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
+  it.each([1, 2, 3, 4])(
+    'requires storage 4 before committing execution diagnostics (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { stores, session } = await bootStoresAndSession(server);
+      try {
+        expect(stores.supportsExecutionDiagnostics()).toBe(version === 4);
+        if (version === 4) server.headOverrides['storageVersion'] = 4;
+        await enableManagedExecutionDiagnostics(session);
+        const record = {
+          uuid: 'activity-request',
+          parentUuid: null,
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'assistant' as const,
+          cwd: '/workspace',
+          version: 'test',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'call', name: 'read_file', args: {} } },
+            ],
+          },
+        };
+        if (version === 4) {
+          await session.sink.write(record);
+          expect(
+            session.authority.lastEventOfKind('message.committed')?.payload[
+              'diagnosticsRef'
+            ],
+          ).toBeDefined();
+        } else {
+          await expect(session.sink.write(record)).rejects.toThrow(
+            'storage version 4',
+          );
+          expect(
+            session.authority.lastEventOfKind('message.committed'),
+          ).toBeUndefined();
+        }
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
+  it('continues writing and cold restores after diagnostics promote storage to version 3', async () => {
+    const server = new FakeManagedSessionStore();
+    server.supportedStorageVersion = 3;
+    server.enforceReaderCeiling = true;
+    const first = await bootStoresAndSession(server);
+    try {
+      await enableManagedSessionDiagnostics(first.session);
+      await new ManagedHookActivationController(first.session).runTurn(
+        'diagnostics-before-promotion',
+        async (scope) => {
+          const complete = await scope.beginMainAttempt('model');
+          await complete(true, []);
+          server.headOverrides['storageVersion'] = 3;
+        },
+      );
+      await appendMessage(
+        first.session,
+        1,
+        await first.session.resources.publish('managed-message', MESSAGE_BODY),
+      );
+    } finally {
+      await first.session.close().catch(() => undefined);
+    }
+    const second = await bootStoresAndSession(server);
+    try {
+      await enableManagedSessionDiagnostics(second.session);
+      expect(second.stores.supportsModelDiagnostics()).toBe(true);
+      await appendMessage(
+        second.session,
+        2,
+        await second.session.resources.publish('managed-message', MESSAGE_BODY),
+      );
+      expect(
+        second.session.authority.lastEventOfKind('message.committed')?.payload[
+          'messageId'
+        ],
+      ).toBe('m-2');
+    } finally {
+      await second.session.close();
+    }
+  });
+
   it.each([undefined, 1, 2])(
     'requires Store acknowledgement before a bounded retraction (version=%s)',
     async (version) => {
@@ -1902,7 +2319,7 @@ describe('HTTP Managed Session store', () => {
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
         expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '2',
+          '4',
         );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
@@ -7269,6 +7686,7 @@ describe('HTTP Managed Session store', () => {
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
     ['storageVersion', 3],
+    ['storageVersion', 4],
     ['state', 'SEALED'],
     ['writerGeneration', 2],
     ['compactedThroughRevision', 1],
@@ -8057,6 +8475,7 @@ class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   private activationLease?: ManagedSessionActivationLease;
   supportedStorageVersion: number | undefined = 2;
+  enforceReaderCeiling = false;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   readonly headOverrides: Record<string, unknown> = {};
@@ -8081,6 +8500,21 @@ class FakeManagedSessionStore {
     const headers = new Headers(init?.headers);
     expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
     expect(headers.get('X-Qwen-Managed-Writer-Token')).toMatch(/^[ab]{32}$/);
+    if (
+      this.enforceReaderCeiling &&
+      Number(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version') ?? 1) <
+        Number(this.headOverrides['storageVersion'] ?? 1)
+    )
+      return jsonResponse(
+        {
+          error: {
+            code: 'managed_session_reader_unsupported',
+            message:
+              'This reader cannot read the Managed Session storage version.',
+          },
+        },
+        409,
+      );
     const suffix = url.pathname.slice(
       url.pathname.indexOf('/internal/managed-session-store/v1/sessions/') +
         `/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}`
