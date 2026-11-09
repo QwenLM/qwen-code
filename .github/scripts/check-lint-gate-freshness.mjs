@@ -286,8 +286,12 @@ async function narrowsToPrettierIgnore({
       ),
     ),
   );
-  // A truncated tree is a partial answer; never narrow on one.
-  if (baseTree.truncated || headTree.truncated) return false;
+  // A truncated tree is a partial answer; never narrow on one. Throw rather
+  // than return false so the caller's catch annotates it — the same reason the
+  // extraction miss throws. A silent false here is the "narrowing quietly
+  // stopped working" shape the warning exists to prevent.
+  if (baseTree.truncated || headTree.truncated)
+    throw new Error('the recursive tree is truncated');
   const baseBlobs = scopeFileBlobs(baseTree);
   const headBlobs = scopeFileBlobs(headTree);
   for (const [path, sha] of baseBlobs) {
