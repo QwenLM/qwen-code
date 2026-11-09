@@ -191,15 +191,21 @@ for (const pageRecords of [16, 200]) {
     page,
     baseURL,
   }) => {
+    let restoreCPUThrottle: () => Promise<unknown> = async () => {};
     if (pageRecords === 200) {
       // 4x CPU throttling over a 2,400-record fixture ran at 75-91% of the
       // shared 60s budget and timed out on all 3 attempts on CI (#11736); the
       // 120s budget held on hosted runners but not on the loaded ECS pool —
       // on 2026-10-26 it timed out on all attempts of three unrelated PR runs
       // (40285903183, 40297391221, 40337428619), each 367/368 green otherwise.
+      // The budget only moved because the throttle also covered the final
+      // click-to-live phase, where it buys no realism and the 20s expect
+      // window is what actually expires (#15697).
       test.setTimeout(300_000);
       const client = await page.context().newCDPSession(page);
       await client.send('Emulation.setCPUThrottlingRate', { rate: 4 });
+      restoreCPUThrottle = () =>
+        client.send('Emulation.setCPUThrottlingRate', { rate: 1 });
     }
     const fixture = await historyScenario(page, baseURL, pageRecords);
     const ordinal = (fixture.count - 2 * pageRecords) / 2;
@@ -292,11 +298,16 @@ for (const pageRecords of [16, 200]) {
     await page.waitForTimeout(250);
     expect(await readingAnchor(viewport)).toEqual(anchor);
     await expect(viewport).not.toContainText('BACKGROUND LIVE answer');
+    // The live locator matches nothing until React commits the returnToLive()
+    // transition, so it is bounded by the global 20s expect window rather
+    // than the test budget (#15697).
+    await restoreCPUThrottle();
     await page
       .getByRole('button', { name: /Scroll to bottom|回到底部/ })
       .click();
-    await expect(page.locator('[data-history-viewport="live"]')).toContainText(
-      'BACKGROUND LIVE answer',
-    );
+    const liveViewport = page.locator('[data-history-viewport="live"]');
+    await expect(liveViewport).toContainText('BACKGROUND LIVE answer', {
+      timeout: 120_000,
+    });
   });
 }
