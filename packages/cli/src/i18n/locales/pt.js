@@ -1526,6 +1526,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Tokens de Entrada',
   'Output Tokens': 'Tokens de Saída',
+  'Output (incl. Reasoning)': 'Saída (com raciocínio)',
   'Savings Highlight:': 'Destaque de Economia:',
   'of input tokens were served from the cache, reducing costs.':
     'de tokens de entrada foram servidos do cache, reduzindo custos.',
