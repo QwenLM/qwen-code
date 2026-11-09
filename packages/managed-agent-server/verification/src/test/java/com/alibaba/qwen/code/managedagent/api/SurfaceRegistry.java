@@ -29,6 +29,14 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_LIST)),
     INTERNAL_MEMORY_QUERY(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/memory:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_MEMORY_QUERY)),
+    PUBLIC_SESSION_CONTEXT_USAGE(Method.GET, "/v1/agents/sessions/{sessionId}/context-usage",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_CONTEXT_USAGE)),
+    WEBSHELL_SESSION_CONTEXT_USAGE(Method.POST, "/api/agent/web-shell/v1/session-context-usage/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_CONTEXT_USAGE)),
+    PUBLIC_SESSION_MODEL_STATISTICS(Method.GET, "/v1/agents/sessions/{sessionId}/stats",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_MODEL_STATISTICS)),
+    WEBSHELL_SESSION_MODEL_STATISTICS(Method.POST, "/api/agent/web-shell/v1/session-stats/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_MODEL_STATISTICS)),
     PUBLIC_SESSION_RESOURCES(Method.GET, "/v1/agents/sessions/{sessionId}/resources",
             Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_RESOURCES)),
     WEBSHELL_SESSION_RESOURCES(Method.POST, "/api/agent/web-shell/v1/session-resources/query",
@@ -718,7 +726,7 @@ public enum SurfaceRegistry {
      */
     public enum Capability {
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
-        SESSION_RESOURCES, SESSION_AGENT_TRACE,
+        SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,

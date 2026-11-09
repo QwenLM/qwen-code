@@ -1147,6 +1147,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-context-usage/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticContextUsage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-stats/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained. Passive persisted Session read; never starts a Runtime, Harness or MCP discovery. Requires an authenticated actor and current Session read access. */
+        post: operations["querySessionDiagnosticModelStatistics"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/session-resources/query": {
         parameters: {
             query?: never;
@@ -2741,6 +2775,144 @@ export interface components {
             workspaceId: string;
             worktreeId: string;
             idempotencyKey: string;
+        };
+        ManagedModelStatisticsBucket: {
+            requests: {
+                total: number;
+                success: number;
+                error: number;
+                cancelled: number;
+                interrupted: number;
+            };
+            tokens: {
+                prompt: number;
+                candidates: number;
+                total: number;
+                cached: number;
+                thoughts: number;
+            };
+            usageKnown: {
+                prompt: number;
+                candidates: number;
+                total: number;
+                cached: number;
+                thoughts: number;
+            };
+            latencyMs: number;
+            timing: {
+                ttftCount: number;
+                totalTtftMs: number;
+                generationCount: number;
+                totalGenerationMs: number;
+                throughputOutputTokens: number;
+            };
+            failures: {
+                http: number;
+                transport: number;
+                timeout: number;
+                other: number;
+            };
+            backoffRetries: number;
+        };
+        ManagedModelStatisticsSnapshot: {
+            /** @constant */
+            version: 1;
+            snapshotRevision: number;
+            observedAt: number;
+            coverage: {
+                gaps: string[];
+            };
+            totals: components["schemas"]["ManagedModelStatisticsBucket"];
+            sources: {
+                main: components["schemas"]["ManagedModelStatisticsBucket"];
+                hook: components["schemas"]["ManagedModelStatisticsBucket"];
+                compression: components["schemas"]["ManagedModelStatisticsBucket"];
+            };
+            models: {
+                key: string;
+                name: string | null;
+                nameTruncated: boolean;
+                metrics: components["schemas"]["ManagedModelStatisticsBucket"];
+            }[];
+            overflow: components["schemas"]["ManagedModelStatisticsBucket"];
+            recent: {
+                executionId: string;
+                /** @enum {string} */
+                source: "main" | "hook" | "compression";
+                modelKey: string;
+                at: number;
+                /** @enum {string} */
+                outcome: "success" | "error" | "cancelled" | "interrupted";
+                durationMs: number;
+                ttftMs: number | null;
+                generationMs: number | null;
+                outputTokens: number | null;
+                failureKind: ("http" | "transport" | "timeout" | "other") | null;
+                statusCode: number | null;
+                backoffRetryOrdinal: number;
+            }[];
+            modelBreakdownOmitted: boolean;
+            samplesTruncated: boolean;
+        };
+        ManagedContextUsageSnapshot: {
+            /** @constant */
+            version: 1;
+            attemptId: string;
+            turnId: string;
+            model: string;
+            observedAt: number;
+            inputTokens: number | null;
+            cachedTokens: number | null;
+            contextWindowSize: number | null;
+            breakdown: {
+                systemPrompt: number;
+                builtinTools: number;
+                mcpTools: number;
+                instructionFiles: number;
+                memoryFiles: number;
+                skills: number;
+                startupContext: number;
+                messages: number;
+            };
+            thresholds: {
+                warn: number;
+                auto: number;
+                hard: number;
+            } | null;
+            details: {
+                /** @enum {string} */
+                category: "systemPrompt" | "builtinTools" | "mcpTools" | "instructionFiles" | "memoryFiles" | "skills" | "startupContext" | "messages";
+                name: string;
+                tokens: number;
+            }[];
+            attributionComplete: boolean;
+            detailsTruncated: boolean;
+        };
+        ManagedDiagnosticContextUsage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            sourceSequence: string | null;
+            stale: boolean;
+            staleReasons: string[];
+            /** @constant */
+            estimated: true;
+            context: components["schemas"]["ManagedContextUsageSnapshot"] | null;
+        };
+        ManagedDiagnosticStats: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            readRevision: string | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            sourceSequence: string | null;
+            statistics: components["schemas"]["ManagedModelStatisticsSnapshot"] | null;
         };
         ManagedDiagnosticSkill: {
             name: string;
@@ -5227,6 +5399,68 @@ export interface operations {
             409: components["responses"]["MessageProjectionChanged"];
             413: components["responses"]["MessagePageTooLarge"];
             503: components["responses"]["MessageProjectionPending"];
+        };
+    };
+    querySessionDiagnosticContextUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description The last durably committed main-model request. Category counts are estimates; provider totals and freshness are independent. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticContextUsage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionDiagnosticModelStatistics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable model statistics owned by this Session, including Hook and compression calls. Child Session totals are separate. Coverage gaps are retained. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticStats"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     querySessionDiagnosticResources: {

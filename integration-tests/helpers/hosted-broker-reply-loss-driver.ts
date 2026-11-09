@@ -422,6 +422,7 @@ try {
         );
         assert.deepEqual(entry.fields, {
           ...original.fields,
+          ...(entry.fields['drain'] === true ? { drain: true } : {}),
           requestId: entry.fields['requestId'],
           // Detach may drain the same binding while paying its cleanup debt.
           ...(entry.fields['drain'] === true ? { drain: true } : {}),

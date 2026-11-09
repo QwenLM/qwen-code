@@ -42,6 +42,11 @@ import {
   runPrWatchObservationTick,
   type PrWatchObservationTickDeps,
 } from './pr-watch-observation.js';
+import {
+  createPrWatchDrainState,
+  runPrWatchDrainTick,
+  type PrWatchDrainDeps,
+} from './pr-watch-drain.js';
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
@@ -498,6 +503,13 @@ export function startSessionPrRefreshTimer(deps: {
    */
   getPrWatchDeps?: () => PrWatchObservationTickDeps | undefined;
   /**
+   * Resolved per tick for the daemon PR-state watch delivery drain (master
+   * §4/§5). Only read when the observation switch is on; the daemon parks the
+   * admission, restore, bindings-scan and self-push access on the serve app
+   * with the enablement increment. Unpopulated, the drain is inert.
+   */
+  getPrDrainDeps?: () => PrWatchDrainDeps | undefined;
+  /**
    * Test seam overriding {@link SESSION_PR_WATCH_OBSERVATION_ENABLED} so a
    * fixture can exercise the on path. The daemon omits it, so production
    * stays governed by the internal constant (off).
@@ -519,6 +531,9 @@ export function startSessionPrRefreshTimer(deps: {
   // persistent deadline overrun starves no workspace (master design §1).
   const githubSweepOffsets = new Map<string, number>();
   let watchTickCount = 0;
+  // Retained binding rows, in-flight marks and restore slots for the delivery
+  // drain, kept across ticks (master §4/§5).
+  const prDrainState = createPrWatchDrainState();
   let running = false;
   const tick = async (): Promise<void> => {
     if (running) return;
@@ -567,6 +582,34 @@ export function startSessionPrRefreshTimer(deps: {
           }
           for (const cwd of [...githubSweepOffsets.keys()]) {
             if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
+          }
+          // Delivery drain (master §4/§5): runs after the observation so it
+          // can deliver the transitions this tick detected. Behind the same
+          // off switch and its own unpopulated deps seam, so it is inert until
+          // the enablement increment. Restores run off-tick inside the drain.
+          const drainDeps = deps.getPrDrainDeps?.();
+          if (drainDeps) {
+            // `listAll()` omits every non-active entry, so a draining or
+            // transitioning workspace's bindings are unknown, not absent.
+            // Tell the drain before it makes a complete-scan deletion.
+            const coveragePartial = deps.workspaceRegistry
+              .listAllEntries()
+              .some(
+                (entry) => entry.state !== 'active' || !entry.current?.runtime,
+              );
+            try {
+              await runPrWatchDrainTick(
+                ordered,
+                drainDeps,
+                prDrainState,
+                coveragePartial,
+              );
+            } catch (error) {
+              if (error instanceof DaemonDrainingError) return;
+              process.stderr.write(
+                `[serve] PR watch drain tick failed: ${String(error)}\n`,
+              );
+            }
           }
         }
       }

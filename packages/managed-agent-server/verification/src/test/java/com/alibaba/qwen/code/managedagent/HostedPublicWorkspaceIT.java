@@ -173,8 +173,11 @@ class HostedPublicWorkspaceIT {
                     String.class, tenant, session, turn)).isEqualTo("COMPLETED");
         });
         assertThat(modelRequests).hasSize(2);
-        assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
-                .toString()).contains("G0_USER_QUESTION_DONE");
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(request("POST", "/api/agent/web-shell/v1/transcript/query", Map.of("sessionId", session), null, "actor", 200)
+                    .toString()).contains("G0_USER_QUESTION_DONE");
+        });
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?", Long.class, session)).isZero();
     }
 
@@ -186,6 +189,7 @@ class HostedPublicWorkspaceIT {
         publicChildQuestions = true;
         approvals = true;
         shell = true;
+        approvals = true;
         definitionApproval = true;
         shellLifecycleV2 = true;
         Path root = boot().getFirst().resolve("child");

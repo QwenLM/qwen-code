@@ -110,7 +110,7 @@ class WorkspaceCsiSessionMainTest {
         assertThat(first.replayed()).isFalse();
         assertThat(UUID.fromString(first.sessionId()).toString()).isEqualTo(first.sessionId());
         var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session");
-        assertThat(row.get("tool_profile")).isEqualTo(CsiFilesRetirementProfile.PROFILE);
+        assertThat(row.get("tool_profile")).isEqualTo(CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE);
         assertThat(row.get("runtime_request_key")).isEqualTo(first.runtimeRequestKey());
         assertThat(row.get("workspace_generation")).isEqualTo(3L);
         assertThat(row.get("workspace_storage_id")).isEqualTo("storage");

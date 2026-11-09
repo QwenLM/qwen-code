@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
   ManagedDiagnosticAgentTrace,
+  ManagedDiagnosticContextUsage,
   ManagedDiagnosticResources,
+  ManagedDiagnosticStats,
   ManagedDiagnosticsProvider,
 } from './managed-agent-provider';
 
-export type ManagedDiagnosticsTab = 'resources' | 'agents';
+export type ManagedDiagnosticsTab =
+  | 'context'
+  | 'statistics'
+  | 'resources'
+  | 'agents';
 export type ManagedDiagnosticsSnapshot =
+  | { kind: 'context'; value: ManagedDiagnosticContextUsage }
+  | { kind: 'statistics'; value: ManagedDiagnosticStats }
   | { kind: 'resources'; value: ManagedDiagnosticResources }
   | { kind: 'agents'; value: ManagedDiagnosticAgentTrace };
 
@@ -50,6 +58,16 @@ export function useManagedDiagnostics({
     const read = async (): Promise<ManagedDiagnosticsSnapshot> => {
       const options = { clientId, signal: abort.signal };
       switch (tab) {
+        case 'context':
+          return {
+            kind: tab,
+            value: await provider.getContextUsage(sessionId, options),
+          };
+        case 'statistics':
+          return {
+            kind: tab,
+            value: await provider.getStatistics(sessionId, options),
+          };
         case 'resources':
           return {
             kind: tab,
@@ -97,7 +115,7 @@ export function useManagedDiagnostics({
       if (document.visibilityState === 'visible') void refresh();
     };
     void refresh();
-    const polling = running && tab === 'agents';
+    const polling = running && (tab === 'statistics' || tab === 'agents');
     const timer = polling
       ? window.setInterval(visibleRefresh, 5_000)
       : undefined;
