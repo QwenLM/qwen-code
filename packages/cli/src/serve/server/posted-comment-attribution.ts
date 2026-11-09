@@ -421,25 +421,103 @@ function creationSegment(command: string): string | undefined {
 }
 
 /**
- * Whether the creation's output cannot be proven to be the result we see. When
- * the chain runs more than one `gh`/`curl` command, another command may have
- * produced the comment-shaped output we parse — a read before the creation
- * (`read && create` parses the read's object first), a read after it
- * (`create >/dev/null && read` sees only the read's output), or any of the many
- * read shapes (collection list, single-comment endpoint, `gh pr view --comments`
- * / `--json comments`, …). Enumerating read syntaxes cannot prove that no other
- * command contributed comment output, so attribute nothing whenever a second
- * `gh`/`curl` command is present; command order alone does not prove authorship.
- * A non-API companion (e.g. `| tee`) does not make it ambiguous. A shell
- * conditional/loop is also ambiguous: static analysis cannot prove which branch
- * executed, so a creation appearing in `if …; then …` / `case …` may never have
- * run while the visible output came from the condition or another branch
- * (`if gh api …; then gh pr comment … >/dev/null`, `if false; then …; else cat`).
- * Attribute nothing when a control keyword is present.
+ * Split a (heredoc-stripped) command into INDEPENDENT commands on `;`, `&&`,
+ * `||`, a backgrounding `&`, and newlines — but NOT on a pipe `|`, which keeps a
+ * pipeline together (a downstream filter such as `tee` passes the creation's
+ * output through). Quote- and comment-aware, like segmentation.
+ */
+function splitIndependentCommands(command: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (
+      ch === '#' &&
+      (i === 0 || /\s/.test(command[i - 1]!) || current.trim() === '')
+    ) {
+      while (
+        i + 1 < command.length &&
+        command[i + 1] !== '\n' &&
+        command[i + 1] !== '\r'
+      ) {
+        i++;
+      }
+      continue;
+    }
+    if (ch === ';' || ch === '\n' || ch === '\r') {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    if (ch === '|') {
+      if (command[i + 1] === '|') {
+        parts.push(current);
+        current = '';
+        i++;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === '&') {
+      if (command[i + 1] === '&') {
+        parts.push(current);
+        current = '';
+        i++;
+      } else if (command[i + 1] === '>' || current.endsWith('>')) {
+        current += ch;
+      } else {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
+/**
+ * Whether the command redirects its STDOUT (so it contributes no visible
+ * output). A `>`/`1>`/`>>`/`&>` redirect sends stdout away; a `2>` (or other
+ * non-1 fd) redirect only touches stderr and leaves stdout visible. Operate on
+ * a quote-stripped probe so a `>` inside a body does not count.
+ */
+function hasStdoutRedirect(probe: string): boolean {
+  return /(?:^|[^\d])(?:1?>|&>)/.test(probe);
+}
+
+/**
+ * Whether the creation's output cannot be proven to be the result we see. The
+ * visible stdout must be provably the creation's: attribute only when exactly
+ * ONE independent command writes to stdout and that command leads with the
+ * creation. Any other stdout-producing command — before OR after the creation,
+ * API or not (`cat url.txt` prints a comment URL just as a read does) — makes
+ * the origin unprovable. A command whose stdout is redirected (`> file`,
+ * `>/dev/null`, `&>`) or a pure assignment contributes no visible output and
+ * does not block: the heredoc that writes the body to a file still lets the
+ * creation that follows it attribute. A stderr-only redirect (`2>`) does NOT
+ * silence stdout. A pipe keeps a pipeline together (`create | tee` passes the
+ * creation's output through). A shell conditional/loop is ambiguous (static
+ * analysis cannot prove which branch executed). When the source cannot be
+ * proven, attribute nothing (fail-open: the author may self-echo once, but a
+ * mere reader is never credited with comments it only read).
  */
 function creationOutputIsAmbiguous(command: string): boolean {
-  const rawSegments = commandSegments(command);
-  const segments = rawSegments.map((segment) =>
+  const stripped = stripHeredocBodies(command);
+  const segments = commandSegments(stripped).map((segment) =>
     stripQuotedSpans(stripShellComment(segment)),
   );
   if (
@@ -455,27 +533,28 @@ function creationOutputIsAmbiguous(command: string): boolean {
     API_COMMAND_LEAD.test(segment),
   );
   if (apiCommands.length >= 2) return true;
-  // Structural source proof: the visible output is produced by the first
-  // command whose stdout is not redirected. If a command BEFORE the creation
-  // writes to stdout (no `>` redirect), the comment-shaped result we parse may
-  // be that command's read/print (`cat url.txt` then create) rather than the
-  // creation's — attribute nothing. A preceding command whose stdout is
-  // redirected contributes no visible output, so it does not block: the heredoc
-  // that writes the body to a file (`cat > note.md <<EOF`) still lets the
-  // creation that follows it attribute.
-  const creationIdx = rawSegments.findIndex((segment) =>
-    segmentIsCreation(segment),
-  );
-  if (creationIdx > 0) {
-    for (let k = 0; k < creationIdx; k++) {
-      const probe = segments[k]!.trim();
-      if (probe === '') continue;
-      // A stdout redirect or a pure assignment contributes no visible output.
-      if (!/>/.test(probe) && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(probe)) {
-        return true;
-      }
+  // Structural source proof over the WHOLE command: count the independent
+  // commands that write to stdout; the creation must be the only one.
+  const producers: string[] = [];
+  for (const independent of splitIndependentCommands(stripped)) {
+    const probe = stripQuotedSpans(stripShellComment(independent)).trim();
+    if (probe === '') continue;
+    if (hasStdoutRedirect(probe)) continue;
+    // A pure assignment produces no stdout; an env-prefixed creation does (and
+    // is recognised as a creation, so it is not excluded here).
+    if (
+      !segmentIsCreation(independent) &&
+      /^[A-Za-z_][A-Za-z0-9_]*=/.test(probe)
+    ) {
+      continue;
     }
+    producers.push(independent);
   }
+  if (producers.length !== 1) return true;
+  const stages = commandSegments(producers[0]!).filter(
+    (stage) => stage.trim() !== '',
+  );
+  if (stages.length === 0 || !segmentIsCreation(stages[0]!)) return true;
   return false;
 }
 

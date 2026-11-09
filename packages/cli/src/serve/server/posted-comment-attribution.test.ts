@@ -491,6 +491,38 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
+  it('does not treat a stderr-only redirect as silencing stdout (R2-1)', () => {
+    // `cat url.txt 2>/dev/null` redirects only stderr; its stdout (the comment
+    // URL) is still visible, and the creation's own stdout is redirected away,
+    // so the visible result is the read's — attribute nothing.
+    const entry = shellResult(
+      'cat url.txt 2>/dev/null; gh pr comment 42 --body hi >/dev/null',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not credit a read printed AFTER the redirected creation (R2-1)', () => {
+    // The source proof covers the whole command, not just the prefix: the cat
+    // after the creation is the visible stdout source, not the creation.
+    const entry = shellResult(
+      'gh pr comment 42 --body hi >/dev/null; cat url.txt',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not attribute a two-heredoc body printed back by cat (H1 is over-attribution)', () => {
+    // The second heredoc body (creation-shaped text + URL) is written to the
+    // file and printed by `cat note.md`; no gh runs. The visible output is not
+    // provably a creation's, so attribute nothing.
+    const entry = shellResult(
+      "cat >note.md <<'A' <<'B'\nignored\nA\ngh pr comment 42 --body hi\nhttps://github.com/o/r/pull/42#issuecomment-111\nB\ncat note.md",
+      'gh pr comment 42 --body hi\nhttps://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
   it('does not scan a heredoc with an escaped delimiter as a creation', () => {
     // <<\EOF is <<'EOF': the body is data, and the example creation inside it
     // must not attribute.
@@ -537,21 +569,21 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
-  it('does not re-read a herestring as a heredoc when its word matches a later line', () => {
-    // Without the <<< branch the trailing << pair starts a heredoc whose
-    // delimiter is the later `x` line, swallowing the creation in between.
+  it('does not re-read a herestring as a heredoc (redirected herestring then create)', () => {
+    // The <<< is a herestring, not a heredoc; the redirected cat contributes no
+    // visible stdout, so the creation is the provable source.
     const entry = shellResult(
-      'cat <<< x >/dev/null\ngh pr comment 42 --body hi\nx',
+      'cat <<< x >/dev/null\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
   it('treats a # at the very start of the command as a comment', () => {
-    // The i===0 word boundary: without it the leading comment's <<'EOF' starts
-    // heredoc consumption that swallows the creation before the EOF line.
+    // The i===0 word boundary: the leading comment (even one mentioning
+    // <<'EOF') is ignored, leaving the creation as the sole stdout source.
     const entry = shellResult(
-      "# Use <<'EOF' note\ngh pr comment 42 --body hi\nEOF",
+      "# Use <<'EOF' note\ngh pr comment 42 --body hi",
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);

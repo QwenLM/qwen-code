@@ -6095,12 +6095,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
     eventClass: string | undefined,
     laneClass?: string,
+    excludeSessionIds?: ReadonlySet<string>,
   ): InboundTaskRecord['delivery'] {
     if (!this.boundRoleAware) {
-      return this.resolveBoundDelivery(chatId, issueNumber);
+      const legacy = this.resolveBoundDelivery(chatId, issueNumber);
+      if (legacy && excludeSessionIds?.has(legacy.sessionId)) return undefined;
+      return legacy;
     }
     const winner = this.boundFollowersOf(chatId, issueNumber)
       .filter((follower) => follower.role === delivery.role)
+      .filter((follower) => !excludeSessionIds?.has(follower.summary.sessionId))
       .reduce<{ summary: PrBindingSummary; role?: PrBindingRole } | undefined>(
         (best, follower) =>
           !best ||
@@ -6326,6 +6330,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         task.issueNumber,
         this.boundEventClass(envelope),
         this.boundLaneClass(task.dedupe),
+        task.authorExclude ? new Set(task.authorExclude) : undefined,
       );
       // The ROLE is part of the target, not just the session: a deferred
       // legacy delivery whose binding was re-roled in the meantime must not
