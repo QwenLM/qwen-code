@@ -4401,7 +4401,11 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): { owns: (id: string) => boolean } {
+): {
+  owns: (id: string) => boolean;
+  accepting: () => boolean;
+  beginOperation?: () => () => void;
+} {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
   // daemon owns them and stops them at shutdown.
@@ -13638,6 +13642,8 @@ export function registerHostedHarnessSessionRoutes(
     void close(req, res, true);
   });
   return {
+    accepting: acceptingWork,
+    beginOperation: instance?.beginOperation,
     owns: (id) =>
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),

@@ -1215,6 +1215,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspace-extensions/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires Workspace operator and deployment publishing permission before consuming bounded input. Prepares without a Session, publishes immutable bytes and does not activate content. Retry the same input/version/target and key, or query the actor-scoped operation. */
+        post: operations["importWebShellExtensionPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/inspection/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires publishing permission. Inspects exact published canonical bytes without hydrating settings, starting a Runtime or executing components. Literal credential fields are redacted; redaction markers must not be republished. */
+        post: operations["inspectWebShellExtensionPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/operations/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership. */
+        post: operations["lookupWebShellExtensionOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/operations/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership. */
+        post: operations["lookupWebShellSessionExtensionOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspace-extensions/imports/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires publishing permission. Previews validated normalized input without publishing a catalog revision or activating a Session. Retain exact input bytes, target, compiler version and source digest for the later explicit import. */
+        post: operations["previewWebShellExtensionImport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2623,6 +2708,10 @@ export interface components {
         ManagedExtensionPackageCatalog: {
             supported: boolean;
             extensions: components["schemas"]["ManagedExtensionPackage"][];
+            selfService?: {
+                supported: boolean;
+                canPublish: boolean;
+            };
         };
         ManagedExtensionPackageSettings: {
             /** Format: int64 */
@@ -2689,6 +2778,10 @@ export interface components {
             extensions: components["schemas"]["ManagedExtensionPackagePin"][];
             requestedExtensions: components["schemas"]["ManagedExtensionPackagePin"][];
             operation?: components["schemas"]["ManagedExtensionApplyOperation"];
+            selfService?: {
+                supported: boolean;
+                canApply: boolean;
+            };
         };
         WebShellExtensionSessionQuery: {
             sessionId: string;
@@ -3017,6 +3110,52 @@ export interface components {
             sessionId: string;
             cursor?: string | null;
             limit?: number | null;
+        };
+        ManagedExtensionImportMetadata: {
+            /** @enum {string} */
+            sourceKind: "skill" | "extension" | "mcp";
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+            sourceDigest: string;
+            /** @enum {integer} */
+            compilerVersion: 1;
+            packageName?: string;
+        };
+        ManagedExtensionPackageInspection: {
+            manifest: components["schemas"]["ManagedExtensionPackageManifest"];
+            fileCount: number;
+            files: string[];
+            truncated: boolean;
+            skills: {
+                name: string;
+                description: string;
+            }[];
+            mcpServers: {
+                name: string;
+                recipe: {
+                    [key: string]: unknown;
+                };
+                redacted: boolean;
+            }[];
+            settings: {
+                name: string;
+                envVar: string;
+                sensitive?: boolean;
+            }[];
+        };
+        WebShellExtensionOperationLookup: {
+            workspaceId: string;
+            /** @enum {string} */
+            kind: "publish" | "settings";
+            idempotencyKey: string;
+        };
+        WebShellExtensionApplyLookup: {
+            sessionId: string;
+            idempotencyKey: string;
         };
     };
     responses: {
@@ -5521,6 +5660,197 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    importWebShellExtensionPackage: {
+        parameters: {
+            query: {
+                /** @description URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler. */
+                metadata: string;
+                extensionId?: string;
+                workspaceId: string;
+            };
+            header: {
+                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Package imports require unencoded application/octet-stream bytes. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    inspectWebShellExtensionPackage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionPackageQuery"];
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageInspection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Inspection queries require application/json. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    lookupWebShellExtensionOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionOperationLookup"];
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    lookupWebShellSessionExtensionOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExtensionApplyLookup"];
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionManagementSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    previewWebShellExtensionImport: {
+        parameters: {
+            query: {
+                /** @description URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler. */
+                metadata: string;
+                workspaceId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Verified result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageInspection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Package imports require unencoded application/octet-stream bytes. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
         };
     };
 }
