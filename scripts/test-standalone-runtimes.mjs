@@ -54,18 +54,33 @@ const run = (bin, args, options = {}) => {
   return result.stdout.trim();
 };
 
-// A setup phase shares one deadline across its downloads, extractions and
-// probes: each call spends what remains instead of inheriting run()'s 300 s
+// A setup phase shares one deadline across downloads, retry backoff,
+// extractions and probes: each call spends what remains instead of run()'s 300 s
 // default, and fetchVerifiedArchive's per-attempt 300 s signal is replaced by
 // the same budget. Wrapped here rather than by lowering run()'s default, which
 // also serves the worker/updater fixtures.
 const makeSetupBudget = () => {
   const deadline = Date.now() + SETUP_TIMEOUT_MS;
-  const remaining = () => Math.max(1, deadline - Date.now());
+  const remaining = () => {
+    const ms = deadline - Date.now();
+    if (ms <= 0) {
+      throw new DOMException(
+        'Standalone runtime setup timed out',
+        'TimeoutError',
+      );
+    }
+    return ms;
+  };
   return {
     run: (bin, args) => run(bin, args, { timeout: remaining() }),
     fetch: (url, init) =>
       fetch(url, { ...init, signal: AbortSignal.timeout(remaining()) }),
+    sleep: async (ms) => {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(ms, remaining())),
+      );
+      remaining();
+    },
   };
 };
 
@@ -998,6 +1013,7 @@ async function ci() {
     return fetchVerifiedArchive(url, filename, pin, {
       cacheDir,
       fetchImpl: setup.fetch,
+      sleep: setup.sleep,
     });
   };
   try {
@@ -1009,44 +1025,54 @@ async function ci() {
       digests || (node && bun),
       `no pinned runtime archives for ${platform}; set PINNED_NODE and PINNED_BUN`,
     );
+    const nodeFilename = `node-v${NODE_VERSION}-${process.platform}-${process.arch}.tar.gz`;
+    const nodeBase =
+      process.env.QWEN_TEST_NODE_BASE_URL ||
+      `https://nodejs.org/dist/v${NODE_VERSION}/`;
     if (!node) {
-      const filename = `node-v${NODE_VERSION}-${process.platform}-${process.arch}.tar.gz`;
-      const base =
-        process.env.QWEN_TEST_NODE_BASE_URL ||
-        `https://nodejs.org/dist/v${NODE_VERSION}/`;
-      const source = new URL(base);
+      const source = new URL(nodeBase);
       assert.equal(source.protocol, 'https:', 'runtime source must use HTTPS');
       assert.equal(
         source.username + source.password,
         '',
         'runtime source must not contain credentials',
       );
-      assert(base.endsWith('/'), 'runtime source must end with /');
-      const bytes = await fetchArchive(base + filename, filename, {
-        digest: (data) => createHash('sha256').update(data).digest('hex'),
-        expected: digests.node,
-      });
+      assert(nodeBase.endsWith('/'), 'runtime source must end with /');
+    }
+    const bunName = `bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
+    const bunFilename = `${bunName}-${BUN_VERSION}.tgz`;
+    // The independent downloads share one setup deadline. Finish both before
+    // synchronous tar extraction can block the other response's I/O.
+    const [nodeBytes, bunBytes] = await Promise.all([
+      node
+        ? undefined
+        : fetchArchive(nodeBase + nodeFilename, nodeFilename, {
+            digest: (data) => createHash('sha256').update(data).digest('hex'),
+            expected: digests.node,
+          }),
+      bun
+        ? undefined
+        : fetchArchive(
+            `https://registry.npmjs.org/@oven/${bunName}/-/${bunFilename}`,
+            bunFilename,
+            {
+              digest: (data) =>
+                'sha512-' + createHash('sha512').update(data).digest('base64'),
+              expected: digests.bun,
+            },
+          ),
+    ]);
+    if (!node) {
       const archive = path.join(root, 'node.tgz');
-      fs.writeFileSync(archive, bytes);
+      fs.writeFileSync(archive, nodeBytes);
       setup.run('tar', ['-xzf', archive, '-C', root]);
-      node = path.join(root, filename.slice(0, -7), 'bin/node');
+      node = path.join(root, nodeFilename.slice(0, -7), 'bin/node');
     }
     if (!bun) {
-      const name = `bun-${process.platform}-${process.arch === 'arm64' ? 'aarch64' : process.arch}`;
-      const filename = `${name}-${BUN_VERSION}.tgz`;
-      const bytes = await fetchArchive(
-        `https://registry.npmjs.org/@oven/${name}/-/${filename}`,
-        filename,
-        {
-          digest: (data) =>
-            'sha512-' + createHash('sha512').update(data).digest('base64'),
-          expected: digests.bun,
-        },
-      );
       const dir = path.join(root, 'bun');
       fs.mkdirSync(dir);
       const archive = path.join(root, 'bun.tgz');
-      fs.writeFileSync(archive, bytes);
+      fs.writeFileSync(archive, bunBytes);
       setup.run('tar', ['-xzf', archive, '-C', dir]);
       bun = path.join(dir, 'package/bin/bun');
     }

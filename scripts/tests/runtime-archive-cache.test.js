@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 import {
   fetchVerifiedArchive,
@@ -278,6 +279,87 @@ describe('fetchVerifiedArchive', () => {
   );
 });
 
+describe('standalone runtime setup deadline', () => {
+  const source = fs.readFileSync(
+    path.join(ROOT, 'scripts/test-standalone-runtimes.mjs'),
+    'utf8',
+  );
+  const factory = source.slice(
+    source.indexOf('const makeSetupBudget = () => {'),
+    source.indexOf('\nasync function worker('),
+  );
+  const createBudget = (fetch = vi.fn(), run = vi.fn()) =>
+    runInNewContext(`${factory}\nmakeSetupBudget()`, {
+      SETUP_TIMEOUT_MS: 100,
+      Date,
+      DOMException,
+      AbortSignal,
+      setTimeout,
+      fetch,
+      run,
+    });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('passes only the remaining time to setup commands', async () => {
+    const run = vi.fn();
+    const budget = createBudget(undefined, run);
+    await vi.advanceTimersByTimeAsync(40);
+    budget.run('tar', ['-xzf', 'runtime.tgz']);
+    expect(run).toHaveBeenCalledWith('tar', ['-xzf', 'runtime.tgz'], {
+      timeout: 60,
+    });
+  });
+
+  it('starts no fetch or command after the setup deadline', async () => {
+    const fetch = vi.fn();
+    const run = vi.fn();
+    const budget = createBudget(fetch, run);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(() => budget.fetch(URL, {})).toThrow('setup timed out');
+    expect(() => budget.run('tar', [])).toThrow('setup timed out');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('lets a retry wait spend time inside the same setup deadline', async () => {
+    const run = vi.fn();
+    const budget = createBudget(undefined, run);
+    const waited = budget.sleep(30);
+    await vi.advanceTimersByTimeAsync(30);
+    await waited;
+    budget.run('tar', []);
+    expect(run).toHaveBeenCalledWith('tar', [], { timeout: 70 });
+  });
+
+  it('ends archive backoff at the deadline without another fetch', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const fetch = vi.fn().mockRejectedValue(new Error('network unavailable'));
+    const budget = createBudget(fetch);
+    let settled = false;
+    const outcome = fetchVerifiedArchive(URL, FILENAME, PIN, {
+      fetchImpl: budget.fetch,
+      sleep: budget.sleep,
+    }).catch((error) => {
+      settled = true;
+      return error;
+    });
+    // The normal first backoff is 5000 ms; only 100 ms remains here.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
+    expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('standalone runtime cache wiring', () => {
   const CACHE_STEP =
     'Configure persistent standalone runtime cache (self-hosted)';
@@ -320,10 +402,12 @@ describe('standalone runtime cache wiring', () => {
       'const cacheDir = process.env.QWEN_STANDALONE_RUNTIME_CACHE;',
     );
     expect(script).toMatch(
-      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,\s*sleep: setup\.sleep,?\s*\}\)/,
     );
+    const lastFetch = script.lastIndexOf('fetchArchive(');
+    expect(lastFetch).toBeGreaterThanOrEqual(0);
     expect(script.indexOf('sweepRuntimeCache(cacheDir, used)')).toBeGreaterThan(
-      script.lastIndexOf('await fetchArchive('),
+      lastFetch,
     );
     expect(script).toMatch(
       /spawnSync\(node, \[script\], \{\s*env: \{\s*\.\.\.process\.env,\s*PINNED_NODE: node,\s*PINNED_BUN: bun,\s*NODE_USE_ENV_PROXY: '0',\s*\}/,

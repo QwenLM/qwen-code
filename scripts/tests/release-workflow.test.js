@@ -3415,11 +3415,11 @@ esac`,
     // the shared setup budget instead of inheriting the 300 s run() default.
     expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
     expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
-    // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
-    // must fail the next phase at 1 ms rather than disarm its cap.
-    expect(
-      source.match(/Math\.max\(1, deadline - Date\.now\(\)\)/g),
-    ).toHaveLength(1);
+    // A spent setup budget must reject before starting another request or
+    // passing timeout 0 (unbounded) to spawnSync.
+    expect(source).toMatch(
+      /const ms = deadline - Date\.now\(\);\s*if \(ms <= 0\) \{\s*throw new DOMException\(/,
+    );
     // Both entry points must take their setup I/O from the one factory, and
     // that factory must close both wrappers over the shared deadline.
     expect(
@@ -3455,7 +3455,7 @@ esac`,
     // The slice's fetch must be the implementation the archive fetch uses,
     // not a helper left behind after the wiring was removed.
     expect(setupSlices[0]).toMatch(
-      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,\s*sleep: setup\.sleep,?\s*\}\)/,
     );
     const workerMs = Number(worker[1].replaceAll('_', ''));
     const setupMs = Number(setup[1].replaceAll('_', ''));
