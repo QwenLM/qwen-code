@@ -16,10 +16,13 @@
 // claim the same version, naming them, in milliseconds and with no database.
 
 import { existsSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import {
   LOCATIONS,
+  compareMigrationVersions,
   isMigrationFile,
+  isMigrationPath,
   migrationFiles,
   migrationVersion,
 } from './flyway-migration-utils.js';
@@ -187,8 +190,77 @@ for (const [version, group] of claimants) {
   );
   for (const { module } of group) collided.add(module);
 }
+const outOfOrder = new Set();
+const baseRef = process.env.FLYWAY_BASE_REF;
+if (baseRef) {
+  const relativeModules = modules.map(
+    (module) =>
+      path
+        .relative(process.cwd(), path.resolve(module))
+        .split(path.sep)
+        .join('/') || '.',
+  );
+  let baseEntries;
+  try {
+    baseEntries = execFileSync(
+      'git',
+      ['ls-tree', '-r', '--name-only', '-z', baseRef, '--', ...relativeModules],
+      { encoding: 'utf8' },
+    )
+      .split('\0')
+      .filter(Boolean);
+  } catch {
+    console.error(
+      `::error::could not read migration baseline ${boundWorkflowPath(baseRef)}`,
+    );
+    process.exit(1);
+  }
+  if (baseEntries.length === 0) {
+    console.error(
+      `::error::baseline ${boundWorkflowPath(baseRef)} has no files under ` +
+        `${relativeModules.map(boundWorkflowPath).join(', ')}; ordering not enforced`,
+    );
+    process.exit(1);
+  }
+  const baseFiles = baseEntries.filter((file) =>
+    isMigrationPath(relativeModules, file),
+  );
+  const onBase = new Set(baseFiles.map((file) => path.resolve(file)));
+  const newestVersion = baseFiles
+    .map((file) => migrationVersion(path.posix.basename(file)))
+    .sort(compareMigrationVersions)
+    .at(-1);
+  if (newestVersion === undefined) {
+    console.log(
+      `ordering not checked: baseline ${boundWorkflowPath(baseRef)} has no migrations under ` +
+        relativeModules.map(boundWorkflowPath).join(', '),
+    );
+  }
+  for (const [version, group] of claimants) {
+    if (
+      newestVersion === undefined ||
+      compareMigrationVersions(version, newestVersion) > 0
+    )
+      continue;
+    for (const { module, file } of group) {
+      if (onBase.has(path.resolve(file))) continue;
+      failed = true;
+      outOfOrder.add(module);
+      console.error(
+        `::error::${boundWorkflowPath(module)}: V${version} is not above V${newestVersion} (newest on base): ${boundWorkflowPath(file)}`,
+      );
+    }
+  }
+} else {
+  console.log('ordering not checked: FLYWAY_BASE_REF is unset');
+  if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
+    console.warn(
+      '::warning::Flyway migration ordering was not checked: workflow_dispatch has no PR or merge-queue baseline; this run checks version uniqueness only.',
+    );
+  }
+}
 for (const { module, count, errored } of scanned) {
-  if (errored || collided.has(module)) continue;
+  if (errored || collided.has(module) || outOfOrder.has(module)) continue;
   console.log(`${module}: ${count} migrations, all versions unique`);
 }
 process.exitCode = failed ? 1 : 0;
