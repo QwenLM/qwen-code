@@ -40,6 +40,11 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
+import {
+  enableManagedExecutionDiagnostics,
+  parseManagedExecutionEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import {
   hostedShellLaneAttachesChildAgents,
@@ -153,23 +158,26 @@ function createTurn(
     session,
     createManagedHarnessHandle(session),
     promptName,
-    async (type, messageParts, model, identity) => {
+    async (type, messageParts, model, identity, diagnostics) => {
       const uuid = identity?.uuid ?? randomUUID();
-      await session.sink.write({
-        uuid,
-        parentUuid: null,
-        sessionId: sessionKey.sessionId,
-        timestamp: identity?.timestamp ?? new Date().toISOString(),
-        model,
-        type,
-        cwd: root,
-        version: 'test',
-        daemonPromptId: promptName,
-        message: {
-          role: type === 'assistant' ? 'model' : 'user',
-          parts: messageParts,
+      await session.sink.write(
+        {
+          uuid,
+          parentUuid: null,
+          sessionId: sessionKey.sessionId,
+          timestamp: identity?.timestamp ?? new Date().toISOString(),
+          model,
+          type,
+          cwd: root,
+          version: 'test',
+          daemonPromptId: promptName,
+          message: {
+            role: type === 'assistant' ? 'model' : 'user',
+            parts: messageParts,
+          },
         },
-      });
+        diagnostics,
+      );
       return uuid;
     },
     messageFitsInline,
@@ -905,6 +913,7 @@ it('says the outcome is unavailable for a worktree receipt off the shape', async
 });
 
 it('keeps the merge outcome when it folds an oversized worktree answer', async () => {
+  await enableManagedExecutionDiagnostics(session);
   messageFitsInline.mockImplementation(
     (_type, parts, _model) => JSON.stringify(parts).length < 65536,
   );
@@ -918,6 +927,19 @@ it('keeps the merge outcome when it folds an oversized worktree answer', async (
   expect(answer).toMatch(
     /\[child workspace\] merged into this Workspace as uncommitted changes\.$/,
   );
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    execution: 'success',
+    delivery: 'partial',
+  });
 });
 
 it('refuses v1-unsupported agent arguments with a named scope', async () => {
@@ -999,6 +1021,7 @@ it('commits the launch intent on the sent arm and answers with the task id', asy
 });
 
 it('refuses a fifth concurrent launch with the count limit', async () => {
+  await enableManagedExecutionDiagnostics(session);
   const turn = createTurn();
   for (let index = 0; index < 4; index++) {
     await executeAgent(
@@ -1014,6 +1037,19 @@ it('refuses a fifth concurrent launch with the count limit', async () => {
     call({ description: 'task 5', prompt: 'work 5' }, 'call-5'),
   );
   expect(JSON.stringify(responses)).toContain('count_limit');
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    admission: 'denied',
+    execution: 'not_started',
+  });
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     4,
   );

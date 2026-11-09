@@ -732,6 +732,20 @@ export function managedSessionKeysEqual(
   );
 }
 
+/** Whether two references name the same resource with the same identity. */
+export function managedSessionDurableRefsEqual(
+  left: ManagedSessionDurableRef,
+  right: ManagedSessionDurableRef,
+): boolean {
+  return (
+    left.resourceId === right.resourceId &&
+    left.kind === right.kind &&
+    left.schemaVersion === right.schemaVersion &&
+    left.byteLength === right.byteLength &&
+    left.digest === right.digest
+  );
+}
+
 export function assertManagedSessionDurableRef(
   value: ManagedSessionJsonValue | undefined,
   label: string,
@@ -949,8 +963,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         contentRef: 'ref',
         modelAttemptId: 'idOrNull',
         parentMessageId: 'idOrNull',
+        diagnosticsRef: 'ref',
       },
-      optional: ['modelAttemptId'],
+      optional: ['modelAttemptId', 'diagnosticsRef'],
     },
     'tool.intent': {
       fields: {
@@ -960,7 +975,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         toolDefinitionRef: 'ref',
         argsRef: 'ref',
         outcomeSource: 'text',
+        diagnosticsRef: 'ref',
       },
+      optional: ['diagnosticsRef'],
     },
     'message.delta': {
       fields: {

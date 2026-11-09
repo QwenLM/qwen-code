@@ -17,6 +17,7 @@ import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import { captureManagedContext } from '@qwen-code/qwen-code-core/managed-runtime/managed-context-snapshot.js';
 
 import type { Content, Part } from '@google/genai';
 import { classifyAction } from '@qwen-code/qwen-code-core/permissions/classifier.js';
@@ -308,6 +309,7 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setChildModelResolver'
         | 'planModeInstructions'
         | 'todoInstructions'
+        | 'diagnosticMcpToolNames'
       >
     >;
   workspaceContext?: { read(): string | undefined };
@@ -1057,9 +1059,10 @@ async function runPreparedHostedHarnessTextTurn(
       let modelFailure = true;
       let completeAttempt:
         | Awaited<ReturnType<ManagedHookModelScope['beginMainAttempt']>>
-        | undefined = input.prepareModel
-        ? undefined
-        : await input.modelScope?.beginMainAttempt(config.getModel());
+        | undefined =
+        input.prepareModel || input.modelScope?.diagnosticsEnabled
+          ? undefined
+          : await input.modelScope?.beginMainAttempt(config.getModel());
       let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
       let contextWindowSize =
@@ -1068,12 +1071,61 @@ async function runPreparedHostedHarnessTextTurn(
         prepared,
         captureUnsupported,
       ) => {
-        await captureChildRoute(prepared);
         const activeConfig = config.getContentGeneratorConfig();
         contextWindowSize =
           prepared.providerPin === llmPreparedProviderPin(activeConfig)
             ? activeConfig?.contextWindowSize
             : undefined;
+        const contextSnapshot = input.modelScope?.diagnosticsEnabled
+          ? captureManagedContext({
+              prepared,
+              turnId: input.promptId,
+              contextWindowSize,
+              autoCompactThreshold: config.getAutoCompactThreshold(),
+              mcpToolNames:
+                input.toolTurn?.diagnosticMcpToolNames?.() ?? new Set(),
+              origins: [
+                {
+                  category: 'instructionFiles',
+                  name: 'Agent instructions',
+                  text: input.agentInstructions
+                    ? `# Agent instructions\n\n${input.agentInstructions}`
+                    : undefined,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Extension instructions',
+                  text: input.extensionInstructions,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Workspace instructions',
+                  text: input.workspaceContext?.read(),
+                },
+                {
+                  category: 'skills',
+                  name: 'Skill catalog',
+                  text: input.skills?.instructions(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Plan instructions',
+                  text: input.toolTurn?.planModeInstructions?.(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Todo context',
+                  text: todoContext,
+                },
+                {
+                  category: 'memoryFiles',
+                  name: 'Auto memory',
+                  text: config.getAutoMemoryPrompt(),
+                },
+              ],
+            })
+          : undefined;
+        await captureChildRoute(prepared);
         if (completeAttempt) {
           const previous = completeAttempt;
           completeAttempt = undefined;
@@ -1089,12 +1141,18 @@ async function runPreparedHostedHarnessTextTurn(
         completeAttempt = await input.modelScope?.beginMainAttempt(
           prepared.request.model,
           recoveryRef,
+          ...(contextSnapshot ? ([contextSnapshot] as const) : []),
         );
         modelOccurrence = completeAttempt?.attemptId ?? modelOccurrence;
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
+      prepare.maxSnapshotBytes =
+        input.prepareModel ||
+        input.publicChildModelRoute ||
+        input.toolTurn?.capturesChildModelRoute?.()
+          ? HOSTED_MODEL_REQUEST_BYTES
+          : 0;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {
@@ -1122,6 +1180,7 @@ async function runPreparedHostedHarnessTextTurn(
               // handling below retracts the orphaned prefix (#13319).
               retractDeliveredOutputOnRetry: true,
               ...(input.prepareModel ||
+              input.modelScope?.diagnosticsEnabled ||
               input.publicChildModelRoute ||
               input.toolTurn?.capturesChildModelRoute?.()
                 ? { onPreparedRequest: prepare }
