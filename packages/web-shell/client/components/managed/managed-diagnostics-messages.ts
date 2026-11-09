@@ -2,7 +2,7 @@ import { useI18n } from '../../i18n';
 
 const messages = {
   title: ['Session diagnostics', '会话诊断'],
-  context: ['Context', 'Context'],
+  context: ['Context', '上下文'],
   statistics: ['Model statistics', '模型统计'],
   resources: ['Resources', '资源'],
   agents: ['Child agents', '子代理'],
