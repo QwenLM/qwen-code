@@ -118,15 +118,17 @@ export function ManagedExtensionsManagerPage({
         management?.list(workspaceId, { clientId, signal }),
         management?.query(sessionId, { clientId, signal }),
         view === 'skills' && provider.skills
-          ? provider.skills
-              .list(sessionId, { clientId, signal })
-              .catch(() => undefined)
+          ? provider.skills.list(sessionId, { clientId, signal }).then(
+              (value) => ({ value }),
+              () => ({ failed: true as const }),
+            )
           : Promise.resolve(undefined),
       ]);
       if (current !== generation.current || signal.aborted) return;
       setCatalog(nextCatalog);
       setSnapshot(nextSnapshot);
-      setStaticSkills(nextSkills);
+      if (nextSkills && 'failed' in nextSkills) setError(true);
+      else setStaticSkills(nextSkills?.value);
       setSelection(
         nextSnapshot?.operation
           ? nextSnapshot.requestedExtensions

@@ -49,6 +49,9 @@ public class ManagedExtensionManagementService {
     public JsonNode query(String tenant, String actor, String sessionId, String operationId) {
         SessionRecord session = sessions.requireReadableSession(tenant, actor, sessionId);
         if (session.workspace() == null) {
+            if (operationId != null) {
+                throw missing();
+            }
             return empty(sessionId, false);
         }
         boolean supported = packages.list(tenant, actor, session.workspace().getWorkspaceId()).supported()

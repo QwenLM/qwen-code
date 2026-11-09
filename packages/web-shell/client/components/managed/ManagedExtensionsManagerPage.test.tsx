@@ -65,7 +65,11 @@ function provider() {
     value: { extensions } as unknown as ManagedAgentProvider,
   };
 }
-async function render(value: ManagedAgentProvider, sessionId = 'session-a') {
+async function render(
+  value: ManagedAgentProvider,
+  sessionId = 'session-a',
+  view: 'extensions' | 'mcp' | 'skills' = 'extensions',
+) {
   await act(async () =>
     root.render(
       <I18nProvider language="en">
@@ -73,6 +77,7 @@ async function render(value: ManagedAgentProvider, sessionId = 'session-a') {
           provider={value}
           workspaceId="workspace"
           sessionId={sessionId}
+          view={view}
           onClose={vi.fn()}
         />
       </I18nProvider>,
@@ -92,6 +97,34 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
+});
+
+it('keeps the last good static skills and shows an error when refresh fails', async () => {
+  const target = provider();
+  const list = vi
+    .fn()
+    .mockResolvedValueOnce({
+      skills: [{ name: 'fixed-skill', description: 'Fixed instructions' }],
+    })
+    .mockRejectedValueOnce(new Error('request failed'));
+  target.value.skills = { list } as unknown as ManagedAgentProvider['skills'];
+  await render(target.value, 'session-a', 'skills');
+  await vi.waitFor(() =>
+    expect(container.textContent).toContain('fixed-skill'),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+      .click(),
+  );
+  await vi.waitFor(() =>
+    expect(container.textContent).toContain(
+      'The request could not be confirmed. Refresh status or retry the original request.',
+    ),
+  );
+  expect(container.textContent).toContain('fixed-skill');
+  expect(target.extensions.list).toHaveBeenCalledTimes(2);
+  expect(target.extensions.query).toHaveBeenCalledTimes(2);
 });
 
 it('limits checkbox and saved-settings additions to 32 selected packages', async () => {

@@ -335,6 +335,7 @@ describe('Managed MCP recipe validation', () => {
     { command: 'node', args: [1] },
     { url: 'file:///etc/passwd' },
     { url: 'https://user:password@example.test/mcp' },
+    { url: 'https://example.test/mcp', type: ['sse'] },
     {
       url: 'https://example.test/mcp',
       headers: { X: 'value\r\nInjected: true' },

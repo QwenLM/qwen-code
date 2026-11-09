@@ -202,6 +202,9 @@ function ManagedMcpManagerContent({
     inspection: ManagedExtensionInspection;
   }>();
   const [packageError, setPackageError] = useState(false);
+  const [unopenableExtensionIds, setUnopenableExtensionIds] = useState<
+    string[]
+  >([]);
   const loadPackages = useCallback(
     async (signal?: AbortSignal) => {
       if (!provider.extensions || !workspaceId || !sessionId) return;
@@ -215,6 +218,7 @@ function ManagedMcpManagerContent({
   );
   useEffect(() => {
     const abort = new AbortController();
+    setUnopenableExtensionIds([]);
     void loadPackages(abort.signal).catch(() => {
       if (!abort.signal.aborted) setPackageError(true);
     });
@@ -233,8 +237,14 @@ function ManagedMcpManagerContent({
       server.serverId.startsWith(`${pin.extensionId}:`),
     );
   const openPackage = async (extensionId: string) => {
-    if (!provider.extensions?.inspect || !workspaceId) {
+    const reject = () => {
+      setUnopenableExtensionIds((current) =>
+        current.includes(extensionId) ? current : [...current, extensionId],
+      );
       setPackageError(true);
+    };
+    if (!provider.extensions?.inspect || !workspaceId) {
+      reject();
       return;
     }
     const pin =
@@ -245,7 +255,7 @@ function ManagedMcpManagerContent({
         (entry) => entry.pin.extensionId === extensionId,
       )?.pin;
     if (!pin) {
-      setPackageError(true);
+      reject();
       return;
     }
     setPackageError(false);
@@ -260,13 +270,16 @@ function ManagedMcpManagerContent({
         )
       ) {
         if (onOpenExtensions) onOpenExtensions();
-        else setPackageError(true);
+        else reject();
         return;
       }
+      setUnopenableExtensionIds((current) =>
+        current.filter((candidate) => candidate !== extensionId),
+      );
       setPackageEditor({ extensionId, inspection });
       setShowInstaller(true);
     } catch {
-      setPackageError(true);
+      reject();
     }
   };
   const disabled =
@@ -304,6 +317,10 @@ function ManagedMcpManagerContent({
       sessionId,
   );
   const canEditPackage = canInstallPackages && !!provider.extensions?.inspect;
+  const canOpenOwnedPackage =
+    owned &&
+    canEditPackage &&
+    !unopenableExtensionIds.includes(owned.extensionId);
 
   return (
     <div className="flex min-w-0 flex-col gap-5 pb-6" data-managed-mcp-manager>
@@ -487,7 +504,7 @@ function ManagedMcpManagerContent({
                 <code className="break-all text-xs text-muted-foreground">
                   {server.definitionDigest}
                 </code>
-                {owned && canEditPackage && (
+                {canOpenOwnedPackage && (
                   <div className="grid gap-2">
                     <p className="text-sm text-muted-foreground">
                       {t('managed.install.ownedMcp')}
@@ -500,7 +517,7 @@ function ManagedMcpManagerContent({
                     </Button>
                   </div>
                 )}
-                {server.state !== 'removed' && (!owned || !canEditPackage) && (
+                {server.state !== 'removed' && !canOpenOwnedPackage && (
                   <div className="flex flex-wrap gap-2">
                     <Button
                       variant="outline"

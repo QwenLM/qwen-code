@@ -64,7 +64,8 @@ export function parseManagedMcpRecipe(
         Number(recipe['timeout']) < 1 ||
         Number(recipe['timeout']) > 600_000)) ||
     (recipe['type'] !== undefined &&
-      !['stdio', 'sse', 'http'].includes(String(recipe['type'])))
+      (typeof recipe['type'] !== 'string' ||
+        !['stdio', 'sse', 'http'].includes(recipe['type'])))
   )
     invalid();
   if (recipe['command'] !== undefined) {
