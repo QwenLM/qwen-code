@@ -1177,13 +1177,15 @@ describe('TurnOutputs artifact downloads', () => {
   it.each([
     ['file:///tmp/diagram.html', false, 'Open'],
     ['file:///tmp/diagram.html', true, 'Preview'],
-    ['https://example.com/diagram.html', false, 'Preview'],
+    ['https://example.com/diagram.html', false, 'Open'],
+    ['https://example.com/diagram.html', true, 'Preview'],
   ])(
     'labels a published artifact (url=%s, snapshot=%s) %s',
     (url, snapshot, label) => {
-      // A file:// publication cannot be framed by the preview, so it keeps
-      // Open unless it is a saved web-preview snapshot; an http(s) URL opens
-      // a live preview tab and keeps Preview.
+      // Only a saved web-preview snapshot promises Preview; a live preview
+      // tab also needs the webPreview panel and an accepted URL, which the
+      // card cannot verify, so any other publication keeps Open regardless
+      // of its URL scheme.
       const container = document.createElement('div');
       document.body.appendChild(container);
       const root = createRoot(container);
