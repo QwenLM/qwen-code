@@ -153,7 +153,11 @@ still carries it falls back to the default.
   all job writes go to the container writable layer.
 - Network policy outside the host and unmodifiable from the container blocks the
   management interface, sensitive intranets, instance credentials and metadata;
-  configure only the GitHub, npm and image-service egress actually required.
+  configure only the GitHub, npm, image-service and Debian-archive egress
+  actually required. The Debian archive (or the mirror the image's
+  `ARG DEBIAN_MIRROR` selects) is a hard requirement, not an optional extra:
+  the visuals capture's unguarded `playwright install --with-deps` step runs
+  `apt-get` against it on every pooled fork run.
 - Access granted to the old trusted runners must be verified on the GitHub side.
   Neither labels nor PR-modifiable YAML are an authorization boundary; an
   external PR must not route back into a sensitive pool by editing runs-on.

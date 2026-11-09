@@ -119,7 +119,10 @@ HTTP 403/429 时 30 秒到 300 秒），重试次数不再对应固定时长。�
   privileged、host PID 或 host network。容器内无需逐命令白名单。
 - 镜像不声明持久 VOLUME，首期不创建任务卷；全部任务写入容器可写层。
 - 宿主机外/容器无法修改的网络策略阻止访问管理接口、敏感内网、实例凭证和
-  元数据；配置实际需要的 GitHub、npm、镜像服务出口。
+  元数据；配置实际需要的 GitHub、npm、镜像服务与 Debian 归档出口。Debian
+  归档（或镜像 `ARG DEBIAN_MIRROR` 选定的镜像站）是硬性前提而非可选项：
+  visuals capture 中未加守卫的 `playwright install --with-deps` 步骤在每个
+  池上 fork 运行中都要通过 `apt-get` 访问它。
 - 旧可信 runner 的访问权必须在 GitHub 侧检查。标签和 PR 可修改的 YAML 都
   不是授权边界；外部 PR 不得通过修改 runs-on 绕回敏感池。
 - 不因启用自托管 runner 而开放 fork secrets，也不引入执行 PR 代码的

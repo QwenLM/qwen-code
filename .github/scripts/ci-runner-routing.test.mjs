@@ -61,9 +61,29 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
 // label, unwrapped here to the array it names. Any term the substitutions
 // do not recognise fails loud, so an edited expression is re-read here
 // instead of silently outgrowing the matrix.
-function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
+function evalRunsOn(
+  expression,
+  { ecsDisabled, eventName, sameRepo, assoc, forkVarsEmpty = false },
+) {
+  // A push / merge_group / dispatch run has no pull_request payload at
+  // all: head.repo and author_association read '', so model the absent
+  // payload instead of the caller's sameRepo/assoc flags. Workflows whose
+  // fork arm really receives empty repository variables opt in through
+  // forkVarsEmpty (the visuals capture); the default keeps the populated
+  // switch state the other lanes' matrices exercise.
+  const prEvent = eventName === 'pull_request';
+  // pull_request_target and pull_request_review carry a PR payload too;
+  // only push / merge_group / dispatch / schedule run without one.
+  const hasPrPayload =
+    prEvent ||
+    eventName === 'pull_request_target' ||
+    eventName === 'pull_request_review';
+  const varsEmpty = prEvent && !sameRepo && forkVarsEmpty;
   const substitutions = [
-    [/vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/, String(!ecsDisabled)],
+    [
+      /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
+      String(varsEmpty ? true : !ecsDisabled),
+    ],
     [
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
@@ -91,15 +111,15 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
     [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
-      String(sameRepo),
+      String(hasPrPayload && sameRepo),
     ],
     [
       /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
-      String(!sameRepo),
+      String(!hasPrPayload || !sameRepo),
     ],
     [
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
-      String(TRUSTED.includes(assoc)),
+      String(hasPrPayload && TRUSTED.includes(assoc)),
     ],
     [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
   ];
@@ -894,15 +914,19 @@ describe('credential-free jobs on the disposable pool', () => {
       'capture must keep the fork clause: only fork PRs route to the disposable pool',
     );
     for (const assoc of ASSOCIATIONS) {
-      // Fork PR: the disposable pool, whoever authored it.
+      const trusted = TRUSTED.includes(assoc);
+      // Fork PR: the disposable pool for UNTRUSTED authors only — the same
+      // classification ci.yml's pick_runner applies. A MEMBER's fork PR
+      // stays on the hosted lane like its unit-CI jobs.
       assert.deepEqual(
         evalRunsOn(runsOn, {
           ecsDisabled: false,
           eventName: 'pull_request',
           sameRepo: false,
           assoc,
+          forkVarsEmpty: true,
         }),
-        EPHEMERAL,
+        trusted ? JSON.parse(HOSTED) : EPHEMERAL,
         `capture fork assoc='${assoc}'`,
       );
       // Same-repo PR: stays hosted — the disposable pool must never serve
@@ -919,16 +943,37 @@ describe('credential-free jobs on the disposable pool', () => {
           `capture same-repo assoc='${assoc}' ecsDisabled=${ecsDisabled}`,
         );
       }
-      // Kill-switch reverts fork runs to hosted too.
+      // Fork runs receive EMPTY repository variables, so the kill-switch
+      // cannot reach them: both switch values keep an untrusted fork on
+      // the pool. The real fork-path escape is changing this selector on
+      // main (design doc, fork section).
+      for (const ecsDisabled of [false, true]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled,
+            eventName: 'pull_request',
+            sameRepo: false,
+            assoc,
+            forkVarsEmpty: true,
+          }),
+          trusted ? JSON.parse(HOSTED) : EPHEMERAL,
+          `fork capture ignores the unreachable kill-switch assoc='${assoc}' ecsDisabled=${ecsDisabled}`,
+        );
+      }
+    }
+    // A non-PR trigger has no pull_request payload: head.repo reads '' and
+    // the fork clause alone would be true. The event gate keeps a future
+    // push / merge_group / dispatch render on the hosted lane.
+    for (const eventName of ['push', 'merge_group', 'workflow_dispatch']) {
       assert.deepEqual(
         evalRunsOn(runsOn, {
-          ecsDisabled: true,
-          eventName: 'pull_request',
+          ecsDisabled: false,
+          eventName,
           sameRepo: false,
-          assoc,
+          assoc: 'NONE',
         }),
         JSON.parse(HOSTED),
-        `kill-switch must revert fork capture to hosted assoc='${assoc}'`,
+        `capture without a PR payload stays hosted (${eventName})`,
       );
     }
     // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
@@ -954,7 +999,7 @@ describe('credential-free jobs on the disposable pool', () => {
     const assertNoForeignSecrets = (exprs) => {
       for (const expr of exprs) {
         if (!/\bsecrets\b/.test(expr)) continue;
-        const stripped = expr.replaceAll('secrets.GITHUB_TOKEN', '');
+        const stripped = expr.replace(/\bsecrets\.GITHUB_TOKEN\b/g, '');
         assert.ok(
           !/\bsecrets\b/.test(stripped),
           `expression reaches beyond the read-only event token: ${expr}`,
@@ -967,6 +1012,7 @@ describe('credential-free jobs on the disposable pool', () => {
       "${{ secrets['MODEL_KEY'] }}",
       '${{ secrets["MODEL_KEY"] }}',
       '${{ toJSON(secrets) }}',
+      '${{ secrets.GITHUB_TOKEN_BACKUP }}',
     ]) {
       assert.throws(
         () => assertNoForeignSecrets([bad.slice(3, -3)]),
@@ -1008,6 +1054,21 @@ describe('credential-free jobs on the disposable pool', () => {
       String(s.run || '').includes('check-disk-floor.sh'),
     );
     assert.equal(diskFloor?.if, "${{ runner.environment == 'self-hosted' }}");
+    // The floor only protects the installs when it runs BEFORE them: a
+    // reorder below `Install dependencies` samples the filesystem after
+    // the ENOSPC it exists to prevent (run 42478651795). Pin the position,
+    // not just the step's content — checkout may stay above it.
+    const stepIndex = (name) => steps.findIndex((s) => s.name === name);
+    assert.ok(
+      stepIndex('Disk floor gate (self-hosted)') <
+        stepIndex('Install dependencies'),
+      'the disk floor must fail fast before the installs',
+    );
+    assert.ok(
+      stepIndex('Disk floor gate (self-hosted)') <
+        stepIndex('Install base dependencies'),
+      'the disk floor must fail fast before the base install too',
+    );
     // The shared 2 GiB default passed a slot with 14.6 GB free / 89% used
     // and pnpm died on ENOSPC minutes later (run 42478651795). This lane
     // carries its own floor AND a percent ceiling that refuses that shape;
@@ -1022,9 +1083,64 @@ describe('credential-free jobs on the disposable pool', () => {
     // cancels the job before any render. The ceiling is routed like
     // runs-on — runner.environment is not available in timeout-minutes —
     // keyed off the same fork term: pool (fork, not disabled) 90, else 45.
+    const timeoutExpr = String(doc.jobs.capture['timeout-minutes']);
+    const evalTimeout = (inputs) => {
+      // Same substitution machinery as evalRunsOn, but the winning operand
+      // is a number: evaluate the skeleton directly.
+      const prEvent = inputs.eventName === 'pull_request';
+      const forkVarsEmpty = prEvent && !inputs.sameRepo;
+      let expr = timeoutExpr.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
+      expr = expr
+        .replace(
+          /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
+          String(forkVarsEmpty ? true : !inputs.ecsDisabled),
+        )
+        .replace(/github\.event_name == 'pull_request'/, String(prEvent))
+        .replace(
+          /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
+          String(!prEvent || !inputs.sameRepo),
+        )
+        .replace(
+          /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
+          String(prEvent && TRUSTED.includes(inputs.assoc)),
+        );
+      assert.doesNotMatch(expr, /github\.|vars\.|contains\(|fromJSON\(/);
+      return new Function(`return (${expr});`)();
+    };
+    for (const assoc of ASSOCIATIONS) {
+      const trusted = TRUSTED.includes(assoc);
+      // The ceiling stays paired with runs-on: only the untrusted fork
+      // pool arm gets 90; trusted, same-repo and non-PR runs keep 45.
+      assert.equal(
+        evalTimeout({
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        trusted ? 45 : 90,
+        `timeout fork assoc='${assoc}'`,
+      );
+      assert.equal(
+        evalTimeout({
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: true,
+          assoc,
+        }),
+        45,
+        `timeout same-repo assoc='${assoc}'`,
+      );
+    }
     assert.equal(
-      String(doc.jobs.capture['timeout-minutes']),
-      "${{ (github.event.pull_request.head.repo.full_name != github.repository && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 45 }}",
+      evalTimeout({
+        ecsDisabled: false,
+        eventName: 'push',
+        sameRepo: false,
+        assoc: 'NONE',
+      }),
+      45,
+      'timeout without a PR payload keeps the hosted cap',
     );
     // Unpinned workers size Chromium from the HOST's cores inside a 4-CPU
     // container: the first pooled run lost its runner to CPU/memory
@@ -1047,6 +1163,18 @@ describe('credential-free jobs on the disposable pool', () => {
       String(s.run || '').includes('fonts-dejavu-core'),
     );
     assert.equal(fonts?.if, "${{ runner.environment == 'self-hosted' }}");
+    // The baseline must exist before the first render and after the
+    // Playwright install whose --with-deps leg it complements.
+    assert.ok(
+      stepIndex('Install Playwright Chromium') <
+        stepIndex('Install font baseline and ffmpeg (self-hosted)'),
+      'the font baseline complements the Playwright install',
+    );
+    assert.ok(
+      stepIndex('Install font baseline and ffmpeg (self-hosted)') <
+        stepIndex('Capture screenshots and flow recordings (after / PR head)'),
+      'the font baseline must be installed before the first render',
+    );
     assert.match(
       String(fonts.run),
       /apt-get install -y --no-install-recommends fonts-dejavu-core ffmpeg; then/,

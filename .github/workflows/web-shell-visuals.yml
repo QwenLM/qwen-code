@@ -56,17 +56,22 @@ jobs:
   capture:
     name: 'Capture web-shell visuals (ubuntu-latest, Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    # The disposable pool exists for untrusted fork PRs only (design doc:
-    # "Trusted and same-repository PR routes stay unchanged"). Same-repo PRs
-    # stay on the hosted lane, where this job ran before. Fork runs receive
-    # empty repository variables, so the kill-switch cannot reach them; the
-    # fork-path escape is changing this selector on main.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request.head.repo.full_name != github.repository) && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # The disposable pool exists for untrusted fork PRs only — the same
+    # trusted-author classification ci.yml's pick_runner uses (design doc:
+    # "Trusted and same-repository PR routes stay unchanged"). Same-repo
+    # PRs and fork PRs authored by OWNER/MEMBER/COLLABORATOR stay on the
+    # hosted lane, where this job ran before. The pull_request gate keeps a
+    # future push/merge_group/dispatch trigger (absent PR payload) on the
+    # hosted lane too. Fork runs receive empty repository variables, so the
+    # kill-switch cannot reach them; the fork-path escape is changing this
+    # selector on main.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name == ''pull_request'' && github.event.pull_request.head.repo.full_name != github.repository && !contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Cold-store pool runs measured 22m+ installs before any render, so the
-    # fork pool arm gets 90 and same-repo/hosted keeps 45. runner.environment
-    # is not available here; key off the same fork term runs-on reads.
+    # untrusted fork pool arm gets 90 and same-repo/hosted keeps 45.
+    # runner.environment is not available here; key off the same terms
+    # runs-on reads — the two expressions must stay paired.
     # Rationale and measurements: docs/design/2026-11-07-ephemeral-container-runners.md.
-    timeout-minutes: "${{ (github.event.pull_request.head.repo.full_name != github.repository && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 45 }}"
+    timeout-minutes: '${{ (github.event_name == ''pull_request'' && github.event.pull_request.head.repo.full_name != github.repository && !contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && 90 || 45 }}'
     steps:
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
