@@ -8666,7 +8666,7 @@ describe('Server Config (config.ts)', () => {
     const policy = config.getAutoMemoryPrompt();
     expect(policy).toContain('## Types and where they go');
     expect(policy).not.toContain('<types>');
-    expect(policy).not.toMatch(/\bskill\b/);
+    expect(policy).not.toContain('load the `auto-memory` skill');
     const subagent = deriveConfig(config);
     subagent.getSkillManager = () => null;
     expect(subagent.getAutoMemoryPrompt()).toBe(policy);

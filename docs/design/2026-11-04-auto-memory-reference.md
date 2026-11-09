@@ -34,7 +34,7 @@ The full guidance stays in the prompt constants (`TYPES_SECTION_INDIVIDUAL` with
 
 The first version put the full guidance in a bundled `auto-memory` skill. The resident policy ended with a pointer telling the model to load it before saving, the skill was listed in `<available_skills>`, and a route resolver gave subagents without the Skill tool the full policy instead.
 
-A behavior eval on 2026-11-09 compared that pointer route with the resident policy alone. It used Token Plan `qwen3.8-max` and `qwen3.8-flash`, headless `-p --yolo`, an isolated HOME and project per run, and nine scenarios: saving to the right tier with valid metadata (s1–s3), refusing to store a fact the code already shows (s4), updating instead of duplicating (s5), forgetting (s6), checking a stale memory against the code (s7), honoring "don't use memory" (s8), and an unrelated task (s9). Each run was graded from the memory files on disk and the main model's tool calls.
+The initial behavior eval on 2026-11-09 compared that pointer route with the resident policy alone. It used Token Plan `qwen3.8-max` and `qwen3.8-flash` in headless `-p --yolo` mode with an isolated HOME and project per run. The nine scenarios covered saving to the right tier with valid metadata (s1–s3), refusing to store a fact the code already shows (s4), updating instead of duplicating (s5), forgetting (s6), checking a stale memory against the code (s7), honoring "don't use memory" (s8), and an unrelated task (s9). Each run was graded from the memory files on disk and the main model's tool calls.
 
 | Scenario                             | Pointer + skill | Resident only |
 | ------------------------------------ | --------------- | ------------- |
@@ -49,9 +49,9 @@ The one s1 miss saved the preference as `user` instead of `feedback`, in the rig
 | Save needed (s1–s3, s5)      | 88.2k (19.2k uncached, 5.1 model turns) | 57.7k (16.8k uncached, 3.8 model turns) |
 | No save needed               | 61.0k (17.6k uncached)                  | 52.3k (16.2k uncached)                  |
 
-So the reference added an extra round and about 15k characters of history to every save, without a measurable gain in what was saved. The resident policy alone is the design.
+Loading the reference added about 15k characters to the conversation history. A separate confirmation run used this PR's bundled build with default settings. It averaged 67.5k input tokens on save runs and 56.5k on no-save runs. It passed all six s1 trials, saved a reference with just one keyword in one s3 trial (5/6 passed), and refused to store the derivable fact in 6/12 s4 trials. The design uses the resident policy alone to reduce input tokens.
 
-A shorter, more compressed policy (about 3.6k characters) was tried in the same eval. It saved no further tokens, because the frontmatter template and the category list take most of the resident text, and it lost s4 more often unless it kept "not even when the user asks". The resident wording is kept as it is.
+A shorter, more compressed policy (about 3.6k characters) was tried in the initial eval. It saved no further tokens, because the frontmatter template and the category list take most of the resident text, and it lost s4 more often unless it kept "not even when the user asks". The resident wording is kept as it is.
 
 ## 4. Measured effect
 
@@ -67,7 +67,7 @@ The default session sends 11,417 fewer characters per request than before #16303
 
 ## 5. Risks
 
-- **Weaker metadata.** A save works from the resident policy alone, so keywords or body shape may be somewhat weaker than with the full guidance. The resident policy keeps the frontmatter template, the category names and the body rule; the writer's validation messages still quote `MEMORY_METADATA_ITEM_BOUNDS`; the background extractor and Dream keep working from the full rules. The eval found no difference in saved metadata.
+- **Weaker metadata.** The resident policy keeps the frontmatter template, category names, and body rule. Background extraction and Dream still use the full guidance. Legacy file writes accept a one-keyword memory like the s3 miss. The structured-recall readiness scan counts it as a migration candidate, and the migration agent uses `MEMORY_METADATA_ITEM_BOUNDS` in its repair prompt.
 - **Derivable facts on request.** When the user explicitly asks to remember something the code already shows, the smaller model often saves it anyway. That held for every variant in the eval, including the full policy (`qwen3.8-flash` 0/6 with the full policy, 2/6 with the resident one), so it is a separate improvement, not a regression from this design. On `qwen3.8-max` the pointer route did slightly better here (6/6, against 9/12 over two runs of the resident policy); across both models it loaded the skill in 3 of its 12 s4 runs.
 
 ## 6. Validation
@@ -76,4 +76,4 @@ The default session sends 11,417 fewer characters per request than before #16303
   - `memory/prompt.test.ts`: the resident policy keeps each rule listed in section 2, leaves out the detailed type guidance, and stays within its size budget;
   - `config/config.test.ts`: the session and a derived Config without a skill manager get the same resident policy;
   - `skills/bundled-skills.integration.test.ts`: the bundled listing stays within 6,800 characters.
-- **Behavior:** the eval in section 3, plus a confirmation run of the shipped build over the same scenarios; results are in the PR.
+- **Behavior.** Section 3 describes the initial eval and the bundled-build confirmation. The full confirmation results are in [PR #16739](https://github.com/QwenLM/qwen-code/pull/16739).
