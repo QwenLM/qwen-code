@@ -1,102 +1,79 @@
-# 把主会话的 auto-memory 指南移入内置参考 skill
+# 主会话的常驻 Auto-Memory 策略
 
 [English](2026-11-04-auto-memory-reference.md) | [简体中文](2026-11-04-auto-memory-reference.zh-CN.md)
 
-**状态：** 实现 [#16291](https://github.com/QwenLM/qwen-code/issues/16291)，属于 [#12028](https://github.com/QwenLM/qwen-code/issues/12028) 和 [#12781](https://github.com/QwenLM/qwen-code/issues/12781)。复用 [#12323](https://github.com/QwenLM/qwen-code/pull/12323) 与 [#11013](https://github.com/QwenLM/qwen-code/issues/11013) 的内置参考路由。
+**状态：** 实现 [#16291](https://github.com/QwenLM/qwen-code/issues/16291)。属于 [#12028](https://github.com/QwenLM/qwen-code/issues/12028) 和 [#12781](https://github.com/QwenLM/qwen-code/issues/12781) 的一部分。第一版（[#16303](https://github.com/QwenLM/qwen-code/pull/16303)）还附带了一个内置的 `auto-memory` 参考 skill，会话在保存前加载它；第 3 节说明为什么去掉了它。
 
 ## 1. 问题
 
-默认配置下（`memory.enableManagedAutoMemory: true`），主会话的 system prompt 在每个界面的每次请求里都带着 `# auto memory` 段，界面包括 Ink、OpenTUI、headless 与 SDK、ACP，子 agent 也会继承。在 main 上（2026-11-04）抓取一次 `qwen -p` 请求：system prompt 共 35,792 字符，这一段占 16,140 字符（45%），其中 `## Types of memory` 一节就有 7,939 字符。
+默认配置下（`memory.enableManagedAutoMemory: true`），每个界面（Ink、OpenTUI、headless 与 SDK、ACP）的每次请求，主会话的 system prompt 都带着一段 `# auto memory`，子 agent 也会继承。2026-11-04 在 main 上抓到的一次 `qwen -p` 请求，system prompt 共 35,792 字符，其中这一段占 16,140 字符（45%），仅 `## Types of memory` 就有 7,939 字符。
 
-主模型自己写 memory 的轮次很少，大多是用户明确要求记住或忘掉某件事的时候；其余 memory 由后台抽取 agent 用它自己的 prompt 写入。所以详细的类型说明和示例只在这少数几轮用得上，费用却由每一次请求承担。
+主模型自己写 memory 的轮次很少，大多是用户要求记住或忘掉某件事的时候；其余 memory 由后台抽取 agent 用它自己的 prompt 写入。所以详细的类型说明和示例只在这少数几轮用得上，却每次请求都要付费。
 
-## 2. 移走了什么，保留了什么
+## 2. 设计
 
-主会话现在使用 `buildResidentAutoMemoryPrompt`（`memory/prompt.ts`）生成的**常驻策略**。它保留会话不加载任何东西也能正确保存和使用 memory 所需的内容：
+主会话使用 `buildResidentAutoMemoryPrompt`（`memory/prompt.ts`）生成的**常驻策略**。它包含会话正确保存和使用 memory 所需的内容：
 
-- catalog 说明，以及 USER、PROJECT 目录（开启 team memory 时还有 TEAM）；
-- 用户要求记住或忘掉时立即处理；
+- catalog 说明，以及 USER / PROJECT（开启时还有 TEAM）目录；
+- 立即处理"记住"和"忘掉"的请求；
 - 四种类型各一行，附上决定目录的 scope，以及 **Why:** / **How to apply:** 正文规则；
-- 开启 team memory 时：TEAM 的路由、禁止把密钥存入 TEAM，以及 team 索引是自动生成的；
-- 不保存哪些内容（一句话），并说明即使用户要求也不例外；
-- 保存的两个步骤、原样的 frontmatter 模板，以及 category 名称；
-- 去重，删除错误的 memory；
-- 何时读取 memory、遵守“不要用 memory”的要求，以及依赖某条 memory 或推荐它提到的文件、函数、flag 之前先核实当前状态；
-- 一个指向 `auto-memory` skill 的指针。
+- 开启 team memory 时：TEAM 的路由规则、禁止把机密写入 TEAM、team 索引自动生成；
+- 一句话说明哪些内容不保存，并说明即使用户要求也是如此；
+- 保存的两个步骤、原样的 frontmatter 模板和 category 名称；
+- 去重，以及删除错误的 memory；
+- 何时读取 memory、遵从"忽略 memory"的要求、在依赖某条 memory 或推荐其中提到的文件、函数、开关之前先核对当前状态。
 
-**内置 `auto-memory` skill**（`skills/bundled/auto-memory/SKILL.md`）收录以下常量的全文：
+所有读取方拿到同一份文本。legacy 刷新时构建一次，`Config.getAutoMemoryPrompt()` 直接返回它，因此主会话和每个子 agent 的派生 Config 看到的是同一份策略，与子 agent 能用哪些工具无关。structured recall（[#12947](https://github.com/QwenLM/qwen-code/issues/12947)）仍使用它自己的简短 prompt。
 
-- `TYPES_SECTION_INDIVIDUAL`，包括全部示例；
-- `MEMORY_CATEGORY_SECTION`、`WHAT_NOT_TO_SAVE_SECTION` 和 `WHEN_TO_ACCESS_SECTION`；
-- `MEMORY_WRITING_RULES`，即 keyword、usage_scenario 与正文长度规则，连同 `MEMORY_METADATA_ITEM_BOUNDS`；
-- `TEAM_SCOPE_SECTION`、`TRUSTING_RECALL_SECTION` 和 `MEMORY_PERSISTENCE_SECTION`。
+完整指南仍保留在 prompt 常量中（`TYPES_SECTION_INDIVIDUAL` 及其示例、`MEMORY_CATEGORY_SECTION`、`WHAT_NOT_TO_SAVE_SECTION`、`WHEN_TO_ACCESS_SECTION`、`MEMORY_WRITING_RULES`、`TEAM_SCOPE_SECTION`、`TRUSTING_RECALL_SECTION`、`MEMORY_PERSISTENCE_SECTION`）：
 
-这些常量仍是唯一来源，因为其他 prompt 也由它们生成：
+- 抽取、Dream、User Dream、`/remember` 和导入 agent 依旧由它们构建 prompt；
+- `buildManagedAutoMemoryPrompt` 在所有参数组合下的输出与 #16303 之前相同。
 
-- 抽取、Dream、User Dream、`/remember` 和导入 agent 依旧用完整常量构建自己的 prompt。
-- `buildManagedAutoMemoryPrompt` 在所有参数组合下的输出逐字节不变。这次重构只是把 `TEAM_SCOPE_SECTION`、`MEMORY_WRITING_RULES` 和 `MEMORY_PERSISTENCE_SECTION` 提取为常量。
-- `SKILL.test.ts` 断言每个常量的每一行都在 skill 里，参考内容因此不会与这些 agent 收到的内容脱节。
-- 它还断言每个移走的锚点都不出现在常驻策略和 skill 的 frontmatter 中，每个保留的锚点都出现在常驻策略中。
+## 3. 为什么不再使用内置参考
 
-## 3. 路由如何决定
+第一版把完整指南放进内置的 `auto-memory` skill。常驻策略末尾有一个指针，要求模型在保存前加载它；这个 skill 会列在 `<available_skills>` 中；另有一个路由解析器，让没有 Skill 工具的子 agent 改用完整策略。
 
-`MainSessionAutoMemoryPolicy`（`skills/auto-memory-skill.ts`）调用 `resolveBundledReferenceRoute`，与 Workflow、Agent 工具用的是同一个解析器：
+2026-11-09 做了一次行为评测，对比"指针路由"和"只有常驻策略"。评测使用 Token Plan 的 `qwen3.8-max` 与 `qwen3.8-flash`，headless `-p --yolo`，每次运行使用隔离的 HOME 和项目，共九个场景：保存到正确层级且元数据合法（s1–s3）、拒绝保存代码里已能看到的事实（s4）、更新而非重复（s5）、忘掉（s6）、对照代码核实过期 memory（s7）、遵从"不要使用 memory"（s8），以及无关任务（s9）。每次运行依据磁盘上的 memory 文件和主模型的工具调用评分。
 
-| 路由                                                                    | 主会话策略                           |
-| ----------------------------------------------------------------------- | ------------------------------------ |
-| `skill`                                                                 | 常驻策略 + 指针                      |
-| `skill-via-tool-search`                                                 | 常驻策略 + 指针 + tool_search 桥接句 |
-| `inline`（没有任何途径加载 skill）                                      | 完整策略，与改动前相同               |
-| `withheld`（`skills.disabled` 列出 `auto-memory`，或关闭了 bundled 层） | 只有常驻策略                         |
+| 场景                             | 指针 + skill | 只有常驻策略 |
+| -------------------------------- | ------------ | ------------ |
+| s1 记住个人偏好                  | 6/6          | 5/6          |
+| s2、s3、s5–s9                    | 42/42        | 42/42        |
+| s4 拒绝保存可推导的事实（12 次） | 8/12         | 7/12         |
 
-这里按路由决定，而不是按工具描述使用的 surface 决定。那个 surface 在参考文件读不到时会退回为指针，但完整策略并不需要这个文件。
+s1 唯一一次失败是把偏好存成了 `user` 而不是 `feedback`，目录正确，其余均合法。指针路由下，18 次显式保存中有 14 次加载了 skill；没加载的那几次同样通过。
 
-**何时决定路由。** 刷新时只保存策略的输入，`Config.getAutoMemoryPrompt()` 每次被读取时，按读取它的那个 Config 解析路由；每种路由的文本只构建一次。需要这样做的情况有三种：
+| 每次运行的平均输入 token | 指针 + skill                          | 只有常驻策略                          |
+| ------------------------ | ------------------------------------- | ------------------------------------- |
+| 需要保存（s1–s3、s5）    | 88.2k（未缓存 19.2k，5.1 轮模型调用） | 57.7k（未缓存 16.8k，3.8 轮模型调用） |
+| 不需要保存               | 61.0k（未缓存 17.6k）                 | 52.3k（未缓存 16.2k）                 |
 
-- 第一次刷新运行在会话启动时，早于工具注册表的创建，看不到 Skill 工具。
-- 子 agent 通过从会话 Config 派生出的 Config 读取策略。工具策略里没有 `skill` 的子 agent 不持有 skill manager（[#12424](https://github.com/QwenLM/qwen-code/issues/12424)），所以它的路由是 `inline`，拿到完整策略。
-- 两次刷新之间 Skill 工具可能变得不可用，例如通过 `tools.disabled`；下一次请求就会跟上。
+也就是说，这个参考让每次保存多一轮调用、历史里多约 15k 字符，却没有带来可测量的保存质量提升。因此设计改为只使用常驻策略。
 
-**列表。** 只有开启 managed auto-memory 且召回处于 legacy 模式时才列出这个 skill。否则 `Config.isSkillEnabled` 会把它隐藏；`SkillManager` 在列表和按名加载时都使用这个开关，与 `generated-ui` 的处理方式一样。daemon 的 skills 目录根据工作区设置回答同一个问题。
-
-**审批。** 写入私有 memory 目录不需要审批，所以加载这个参考也不能需要，否则每次保存都会先弹一次确认。Skill 工具默认会询问；当名字解析到 bundled 的 `auto-memory` 时直接放行，它是只读文本，没有 `allowedTools`，也没有 hooks。同名的项目、用户或扩展 skill 优先级更高，加载它们仍会询问；权限规则照常在此之上生效。
+同一次评测还试了一个压缩得更短的策略（约 3.6k 字符）。它没有进一步节省 token，因为常驻文本的大部分是 frontmatter 模板和 category 列表；而且除非保留"即使用户要求也不保存"这句，它在 s4 上失败得更多。所以常驻策略的措辞保持不变。
 
 ## 4. 实测效果
 
-长度单位为字符，使用常见路径（`/home/alice/.qwen/memories` 与 `/home/alice/.qwen/projects/-home-alice-work-app/memory`）：
+长度单位为字符，路径取典型值（`/home/alice/.qwen/memories` 与 `/home/alice/.qwen/projects/-home-alice-work-app/memory`）：
 
-| 形态                         | 未开 team | 开启 team |
-| ---------------------------- | --------- | --------- |
-| 改动前（完整策略）           | 15,868    | 17,243    |
-| 指针路由                     | 4,686     | 5,470     |
-| 经 tool_search 的指针        | 4,804     | 5,588     |
-| withheld                     | 4,451     | 5,235     |
-| inline（没有途径加载 skill） | 15,868    | 17,243    |
+| 形态                    | 未开 team | 开启 team |
+| ----------------------- | --------- | --------- |
+| #16303 之前（完整策略） | 15,868    | 17,243    |
+| #16303 指针路由         | 4,686     | 5,470     |
+| 常驻策略                | 4,451     | 5,235     |
 
-默认会话**每次请求减少 11,182 字符（约 2.8k tokens）**。
-
-列表上的代价很小：
-
-- 这个 skill 在 `<available_skills>` 中增加一个 233 字符的条目。
-- 为此 `BUNDLED_LISTING_BUDGET` 从 6,800 调到 7,050，原因记录在 `bundled-skills.integration.test.ts` 中。
-
-一旦加载了 skill，它的正文（约 14.6k 字符）会一直留在该会话的历史里，直到压缩。只有保存或整理 memory 的会话才承担这部分。
+默认会话每次请求比 #16303 之前少发送 11,417 字符。与指针路由相比，还去掉了 235 字符的指针和 233 字符的 `<available_skills>` 条目；`BUNDLED_LISTING_BUDGET` 回到 6,800。
 
 ## 5. 风险
 
-- **元数据变弱。** 不加载 skill 就保存时，keyword 可能选得差一些，正文结构也可能松散一些。有三点限制了这一影响：
-  - 常驻策略保留了 frontmatter 模板、category 名称和正文规则。
-  - 写入校验的提示信息仍会引用 `MEMORY_METADATA_ITEM_BOUNDS`。
-  - 后台抽取和 Dream 仍按完整规则工作。
-- **结构化召回。** 与结构化召回（[#12947](https://github.com/QwenLM/qwen-code/issues/12947)）互不影响，它的 prompt 本来就很短。本改动只涉及默认的 legacy 路径，结构化召回下也不会列出这个 skill。
+- **元数据可能变弱。** 保存只依据常驻策略，keyword 或正文结构可能比依据完整指南时稍弱。常驻策略保留了 frontmatter 模板、category 名称和正文规则；写入校验的提示仍引用 `MEMORY_METADATA_ITEM_BOUNDS`；后台抽取和 Dream 仍使用完整规则。评测中保存的元数据没有差异。
+- **用户要求保存可推导的事实。** 当用户明确要求记住代码里已能看到的内容时，较小的模型常常照存。评测中所有方案都是如此，包括完整策略（`qwen3.8-flash` 在完整策略下 0/6，常驻策略下 2/6），所以这是另一项待改进的问题，不是本设计带来的回退。在 `qwen3.8-max` 上，指针路由在这一项略好（6/6，常驻策略两轮合计 9/12）；两个模型合计，它在 12 次 s4 运行中有 3 次加载了 skill。
 
 ## 6. 验证
 
 - **单元测试：**
-  - `skills/bundled/auto-memory/SKILL.test.ts`：skill 包含每个常量的每一行，以及双向锚点；
-  - `skills/auto-memory-skill.test.ts`：四种路由、读取方 Config 的路由，以及体积预算；
-  - `config/config.test.ts`：各路由下的策略、没有 Skill 工具的注册表、没有 skill manager 的派生 Config，以及列表开关；
-  - `tools/skill.test.ts`：加载 bundled 参考无需询问，被同名 skill 覆盖时仍会询问；
-  - `memory/prompt.test.ts` 与 `skills/bundled-skills.integration.test.ts`。
-- **逐字节一致：** `buildManagedAutoMemoryPrompt` 的输出在五种参数组合下与 merge base 对比，全部一致。
-- **行为：** 用真实模型在九个场景下做改动前后对比。场景覆盖：保存到正确的层级且元数据合法、绝对日期、reference、拒绝保存可推导的内容、更新而非重复、忘掉、对照代码核实过时的 memory、遵守“不要用 memory”，以及一个既不应加载 skill、也不应写 memory 的无关任务。结果写在 PR 中。
+  - `memory/prompt.test.ts`：常驻策略保留第 2 节列出的每条规则、不含详细类型说明，并且不超出体积预算；
+  - `config/config.test.ts`：主会话和没有 skill manager 的派生 Config 拿到同一份常驻策略；
+  - `skills/bundled-skills.integration.test.ts`：内置 skill 列表不超过 6,800 字符。
+- **行为：** 第 3 节的评测，以及用实际发布的构建在相同场景上做的一次确认运行；结果见 PR。
