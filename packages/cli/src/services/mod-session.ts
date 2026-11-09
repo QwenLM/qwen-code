@@ -50,10 +50,6 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
-import {
-  getGenAiUsageProvenance,
-  outputTokenCount,
-} from '@qwen-code/qwen-code-core/telemetry/gen-ai-usage.js';
 import type { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   EVENT_API_RESPONSE,
@@ -75,6 +71,7 @@ import {
 import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
+import { completeModModel, modModelUsage } from './mod-model.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 
 const logger = createDebugLogger('MODS');
@@ -434,6 +431,8 @@ export class ModSession implements ICommandLoader {
           this.terminal && this.terminal.runsPrompts?.() !== true
             ? undefined
             : (prompt) => this.queuePrompt(prompt),
+          (input, modelSignal) =>
+            completeModModel(this.config, input, modelSignal),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -1236,42 +1235,22 @@ export class ModSession implements ICommandLoader {
 
 // A provider's count as the Mods take it: a whole number, or 0 when it is
 // missing or not a count at all.
-function tokenCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : 0;
-}
-
-// The API's four counts. Cache writes are known only where the provider
-// reports them apart, as Anthropic's does.
+// The API's four counts, summed over the turn's responses.
 function addTurnUsage(
   usage: RunningTurn['usage'],
   metadata: GenerateContentResponseUsageMetadata | undefined,
   authType: string | undefined,
 ): RunningTurn['usage'] {
   if (!metadata) return usage;
-  const prompt = tokenCount(metadata.promptTokenCount);
-  const read = tokenCount(metadata.cachedContentTokenCount);
-  const written = tokenCount(
-    getGenAiUsageProvenance(metadata)?.cacheCreationInputTokens,
-  );
-  // Counted as the session's billable output counts it.
-  const output = outputTokenCount(
-    {
-      input: prompt,
-      output: tokenCount(metadata.candidatesTokenCount),
-      thoughts: tokenCount(metadata.thoughtsTokenCount),
-      total: tokenCount(metadata.totalTokenCount),
-    },
-    authType,
-  );
+  const added = modModelUsage(metadata, authType);
   return {
-    input_tokens:
-      (usage?.input_tokens ?? 0) + Math.max(0, prompt - read - written),
-    output_tokens: (usage?.output_tokens ?? 0) + output,
-    cache_read_input_tokens: (usage?.cache_read_input_tokens ?? 0) + read,
+    input_tokens: (usage?.input_tokens ?? 0) + added.input_tokens,
+    output_tokens: (usage?.output_tokens ?? 0) + added.output_tokens,
+    cache_read_input_tokens:
+      (usage?.cache_read_input_tokens ?? 0) + added.cache_read_input_tokens,
     cache_creation_input_tokens:
-      (usage?.cache_creation_input_tokens ?? 0) + written,
+      (usage?.cache_creation_input_tokens ?? 0) +
+      added.cache_creation_input_tokens,
   };
 }
 

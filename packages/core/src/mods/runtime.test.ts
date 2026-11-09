@@ -6,9 +6,12 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime, type ModPromptQueue } from './runtime.js';
+import { ModBudget } from './dispatch.js';
 import {
   MOD_MAX_BYTES,
   type ModLog,
+  type ModModelCompleteInput,
+  type ModModelHost,
   type ModOptions,
   type ModQueuedPrompt,
   type ModSessionFacts,
@@ -430,6 +433,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'clock.sleep',
             'command.register',
             'command.run',
+            'model.complete',
             'session.cwd',
             'session.end',
             'session.id',
@@ -1609,5 +1613,223 @@ describe('ModRuntime with the real QuickJS worker', () => {
       /timed out/,
     );
     expect(Date.now() - started).toBeLessThan(3000);
+  });
+  describe('$.model.complete', () => {
+    const usage = {
+      input_tokens: 3,
+      output_tokens: 2,
+      cache_read_input_tokens: 1,
+      cache_creation_input_tokens: 0,
+    };
+    const createModels = async (sources: string[], host?: ModModelHost) => {
+      const runtime = await ModRuntime.createGroup(
+        sources.map((source, index) => ({
+          id: `mod-${index}`,
+          name: `mod-${index}`,
+          source: { root: '/fixture', entry: '/fixture/mod.js', source },
+          options: {},
+        })),
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        'terminal',
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        host,
+      );
+      runtimes.push(runtime);
+      return runtime;
+    };
+    // A command that runs the requests its args name, one result each.
+    const asker = (requests: string) =>
+      fixture(`
+        const results = [];
+        for (const request of ${requests}) {
+          try { results.push(await $.model.complete(request)); }
+          catch (error) { results.push(String(error)); }
+        }
+        return {text: JSON.stringify(results)};`);
+
+    it('runs a request on the host, its blocks joined and kept beside it', async () => {
+      const asked: ModModelCompleteInput[] = [];
+      const runtime = await createModels(
+        [
+          asker(`[{model: 'haiku', prompt: [{text: 'A', cache: true}, {text: 'B'}],
+            system: 'S', maxTokens: 10, effort: 'low', timeoutMs: 5000},
+            {model: 'm', prompt: 'p'}]`),
+        ],
+        async (input) => {
+          asked.push(input);
+          return input.prompt === 'p'
+            ? { isAnswered: false, reason: 'empty-reply', usage }
+            : { isAnswered: true, text: 'answer', usage };
+        },
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([
+        { isAnswered: true, text: 'answer', usage },
+        { isAnswered: false, reason: 'empty-reply', usage },
+      ]);
+      expect(asked).toEqual([
+        {
+          model: 'haiku',
+          prompt: 'AB',
+          system: 'S',
+          promptBlocks: [{ text: 'A', cache: true }, { text: 'B' }],
+          maxTokens: 10,
+          effort: 'low',
+          timeoutMs: 5000,
+        },
+        { model: 'm', prompt: 'p' },
+      ]);
+    });
+
+    it('rejects a request it will not send, and one the host refuses', async () => {
+      const host = vi.fn<ModModelHost>(async (input) => {
+        throw new Error(
+          `model ${JSON.stringify(input.model)} is not configured`,
+        );
+      });
+      const requests = `[{model: 'm'}, {model: '', prompt: 'p'},
+        {model: 'm', prompt: 'p', maxTokens: 64001},
+        {model: 'm', prompt: 'p', maxTokens: 1.5},
+        {model: 'm', prompt: 'p', effort: 'huge'},
+        {model: 'm', prompt: 'p', timeoutMs: 0},
+        {model: 'm', prompt: [{text: 'p', cache: false}]},
+        {model: 'm', prompt: 'p', tools: []},
+        {model: 'gone', prompt: 'p'}]`;
+      const runtime = await createModels([asker(requests)], host);
+      const results = JSON.parse(
+        await runtime.runCommand('hello', '', signal()),
+      );
+      expect(results.slice(0, 8)).toEqual(
+        Array(8).fill(expect.stringContaining('Mod model.complete')),
+      );
+      expect(results[2]).toContain('over the limit of 64000');
+      expect(results[8]).toContain(
+        'Mod model.complete: model "gone" is not configured',
+      );
+      expect(host).toHaveBeenCalledTimes(1);
+      const unhosted = await createModels([
+        asker(`[{model: 'm', prompt: 'p'}]`),
+      ]);
+      expect(
+        JSON.parse(await unhosted.runCommand('hello', '', signal())),
+      ).toEqual([expect.stringContaining('this host runs no model calls')]);
+    });
+
+    it('lets another plugin rewrite, answer or deny model.complete', async () => {
+      const asked: ModModelCompleteInput[] = [];
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('model.complete', ($, e, next) =>
+              e.prompt === 'mock'
+                ? {value: {isAnswered: true, text: 'mocked', usage: {input_tokens: 0,
+                    output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0}}}
+                : e.prompt === 'deny'
+                  ? {deny: 'no model calls here'}
+                  : next({...e, prompt: e.prompt + '!', system: null}));
+          }`,
+          asker(`[{model: 'm', prompt: 'mock'}, {model: 'm', prompt: 'deny'},
+            {model: 'm', prompt: 'x', system: 'S'}]`),
+        ],
+        async (input) => {
+          asked.push(input);
+          return { isAnswered: true, text: input.prompt, usage };
+        },
+      );
+      const results = JSON.parse(
+        await runtime.runCommand('hello', '', signal()),
+      );
+      expect(results[0]).toMatchObject({ isAnswered: true, text: 'mocked' });
+      expect(results[1]).toContain('no model calls here');
+      expect(results[2]).toEqual({ isAnswered: true, text: 'x!', usage });
+      expect(asked).toEqual([{ model: 'm', prompt: 'x!' }]);
+    });
+
+    it("cuts the call when the caller's signal aborts", async () => {
+      const cut: boolean[] = [];
+      const runtime = await createModels(
+        [
+          fixture(`
+            const listeners = [];
+            const stop = {aborted: false, addEventListener: (type, f) => listeners.push(f),
+              removeEventListener: () => {}};
+            const running = $.model.complete({model: 'm', prompt: 'slow'}, {signal: stop});
+            await $.clock.sleep(30);
+            stop.aborted = true;
+            for (const listener of listeners) listener();
+            const before = await $.model.complete({model: 'm', prompt: 'never'}, {signal: stop});
+            return {text: JSON.stringify([await running, before])};`),
+        ],
+        (input, hostSignal) =>
+          new Promise((resolve) => {
+            hostSignal.addEventListener('abort', () => {
+              cut.push(true);
+              resolve({ isAnswered: true, text: 'late', usage });
+            });
+          }),
+      );
+      const aborted = {
+        isAnswered: false,
+        reason: 'aborted',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      };
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual([aborted, aborted]);
+      // One request was made and cut; the already-aborted one was never sent.
+      expect(cut).toEqual([true]);
+    });
+
+    it('stops the dispatch clock while the host runs the call', async () => {
+      const pause = vi.spyOn(ModBudget.prototype, 'pause');
+      try {
+        const runtime = await createModels(
+          [asker(`[{model: 'm', prompt: 'p'}]`)],
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            return { isAnswered: true, text: 'done', usage };
+          },
+        );
+        pause.mockClear();
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([{ isAnswered: true, text: 'done', usage }]);
+        expect(pause).toHaveBeenCalled();
+      } finally {
+        pause.mockRestore();
+      }
+    });
+
+    it('lists model.complete as a method only where the host runs it', async () => {
+      const version = fixture(
+        'return {text: JSON.stringify((await $.session.version()).qwen.methods)};',
+      );
+      const hosted = await createModels([version], async () => ({
+        isAnswered: true,
+        text: '',
+        usage,
+      }));
+      expect(
+        JSON.parse(await hosted.runCommand('hello', '', signal())),
+      ).toContain('model.complete');
+      const unhosted = await createModels([version]);
+      expect(
+        JSON.parse(await unhosted.runCommand('hello', '', signal())),
+      ).not.toContain('model.complete');
+    });
   });
 });

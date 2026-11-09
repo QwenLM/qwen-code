@@ -152,7 +152,8 @@ export const MOD_GUEST_FACTORY = String.raw`
       hook.caught = handler;
     }});
   };
-  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(json => {
+  let modelTokens = 0;
+  const call = (id, frames, kind, value, extra) => bridge(id, kind, encode({ ...extra, value, frames })).then(json => {
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
   });
@@ -186,6 +187,24 @@ export const MOD_GUEST_FACTORY = String.raw`
             signal.addEventListener('abort', abort);
             waiting.then(resolve, reject).finally(() => signal.removeEventListener?.('abort', abort));
           });
+        }
+      },
+      model: {
+        // The signal stays here, as a sleep's does; aborting it cuts the
+        // call, which then resolves aborted. No hook reads it.
+        complete: async (request, options = {}) => {
+          if (!object(options) || keys(options).some(k => k !== 'signal')) throw new Error('Invalid Mod model.complete options');
+          const { signal } = options;
+          if (signal !== undefined && (!object(signal) || typeof signal.addEventListener !== 'function')) throw new Error('Invalid Mod model.complete signal');
+          if (signal?.aborted) return frozen({ isAnswered: false, reason: 'aborted', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+          const token = ++modelTokens;
+          const abort = () => { call(id, frames, 'model.abort', {}, { token }).catch(() => {}); };
+          signal?.addEventListener('abort', abort);
+          try {
+            return await call(id, frames, 'model.complete', request, { token });
+          } finally {
+            signal?.removeEventListener?.('abort', abort);
+          }
         }
       },
       // Async, so an input too large for the bridge rejects like a wrong shape.
