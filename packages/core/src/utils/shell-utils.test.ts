@@ -824,6 +824,8 @@ describe('detectSelfKillCommand', () => {
     expectEach(detectSelfKillCommand, true, [
       "sh -c $(printf -- --) 'pkill -f qwen'",
       'sh -c `printf -- --` "pkill -f qwen"',
+      "sh -c $(printf -- --) $'pkill -f qwen'",
+      'sh -c `printf -- --` pkill\\ -f\\ qwen',
     ]);
   });
 
@@ -1053,6 +1055,24 @@ describe('normalizeMonitorCommand', () => {
       analysisCommand: 'ls -l',
       safetyCommand: 'ls -l',
       spawnCommand: "sh -c $'--\\0x' 'ls -l'",
+      strippedTrailingAmp: false,
+    });
+  });
+
+  // The brace token expands into `--` AND the script, so keeping it in the
+  // spawn command already covers the payload; appending the payload again
+  // would run a different argv than the user wrote.
+  it('spawns a brace-expanded terminator once', () => {
+    expect(normalizeMonitorCommand("sh -c {--,'ls -l'}")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l',
+      spawnCommand: "sh -c {--,'ls -l'}",
+      strippedTrailingAmp: false,
+    });
+    expect(normalizeMonitorCommand("sh -c {--,'ls -l'} arg")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l arg',
+      spawnCommand: "sh -c {--,'ls -l'} arg",
       strippedTrailingAmp: false,
     });
   });

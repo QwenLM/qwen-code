@@ -802,6 +802,18 @@ function shellWordQuoteRemoval(
 }
 
 /**
+ * The word the shell hands a consumer: quote removal plus ANSI-C decoding
+ * when the whole word is static. A word carrying an expansion keeps its
+ * quote-stripped spelling.
+ */
+function resolveShellWord(token: string): string {
+  const removed = shellWordQuoteRemoval(token);
+  return removed !== null && !removed.hasExpansion
+    ? removed.text
+    : stripSymmetricQuotes(token).value;
+}
+
+/**
  * The words an unquoted top-level `{a,b}` word expands to, or null when the
  * word is not a brace list. Bash expands braces before it hands the words to
  * the shell, so `{--,'script'}` is the terminator `--` plus the script.
@@ -929,11 +941,9 @@ export function stripShellWrapper(command: string): string {
       // The resolved word, not its spelling: an ANSI-C or locale payload
       // (`$'cat > /etc/motd'`, `$"…"`) is the script bash runs, so the
       // operators and paths inside it stay visible to the callers.
-      const removed = shellWrapperCommandConsumesRest(wrapperToken.token)
-        ? null
-        : shellWordQuoteRemoval(commandToken.token);
-      const innerCommand =
-        removed !== null && !removed.hasExpansion ? removed.text : value;
+      const innerCommand = shellWrapperCommandConsumesRest(wrapperToken.token)
+        ? value
+        : resolveShellWord(commandToken.token);
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return markerRest.trimStart() || trimmed;
       }
@@ -963,9 +973,7 @@ export function stripShellWrapper(command: string): string {
  * payload is readable, no next word exists, or the wrapper is cmd-style
  * (R7-9). The base reading of stripShellWrapper stays unchanged.
  */
-export function unresolvedWrapperAlternatePayload(
-  command: string,
-): string | null {
+function unresolvedWrapperAlternatePayload(command: string): string | null {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
   while (true) {
@@ -990,8 +998,7 @@ export function unresolvedWrapperAlternatePayload(
       if (removed === null || !removed.hasExpansion) return null;
       const next = takeLeadingToken(payload.rest);
       if (!next) return null;
-      const { value } = stripSymmetricQuotes(next.token);
-      return value || null;
+      return resolveShellWord(next.token) || null;
     }
     const normalized = getNormalizedShellToken(token.token);
     if (!isShellWrapperFlagToken(normalized)) return null;
@@ -1657,6 +1664,8 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
+  /** The `-c` terminator token itself expands into the script word. */
+  payloadInTerminator?: boolean;
 }
 
 export interface NormalizedMonitorCommand {
@@ -1925,13 +1934,16 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
       // spelling of `--` hands `-c` the NEXT word, except for cmd/PowerShell
       // which have no option parser.
       let markerRest = token.rest;
+      let payloadInTerminator = false;
       const afterTerminator = shellWrapperCommandConsumesRest(
         wrapperToken.token,
       )
         ? null
         : restAfterOptionTerminator(markerRest);
       if (afterTerminator !== null) {
-        wrapperTokens.push(takeLeadingToken(markerRest)!.token);
+        const terminatorToken = takeLeadingToken(markerRest)!.token;
+        wrapperTokens.push(terminatorToken);
+        payloadInTerminator = braceAlternatives(terminatorToken) !== null;
         markerRest = afterTerminator;
       }
       const commandToken = takeLeadingToken(markerRest);
@@ -1951,6 +1963,7 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
+        payloadInTerminator,
       };
     }
 
@@ -1981,8 +1994,13 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    innerArgsSuffix,
+    payloadInTerminator,
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -2000,12 +2018,11 @@ export function normalizeMonitorCommand(
   const alternatePayload = wrapperTokens
     ? unresolvedWrapperAlternatePayload(command)
     : null;
+  const removedInner = wrapperTokens
+    ? shellWordQuoteRemoval(innerCommand)
+    : null;
   const payloadUnresolved =
-    wrapperTokens !== undefined &&
-    (() => {
-      const removed = shellWordQuoteRemoval(innerCommand);
-      return removed !== null && removed.hasExpansion && !innerQuote;
-    })();
+    removedInner !== null && removedInner.hasExpansion && !innerQuote;
   const safetyParts = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
@@ -2025,9 +2042,11 @@ export function normalizeMonitorCommand(
   const spawnCommand = wrapperTokens
     ? [
         wrapperTokens.join(' '),
-        innerQuote
-          ? `${innerQuote}${analysisCommand}${innerQuote}`
-          : analysisCommand,
+        payloadInTerminator
+          ? ''
+          : innerQuote
+            ? `${innerQuote}${analysisCommand}${innerQuote}`
+            : analysisCommand,
         normalizedInnerArgsSuffix,
       ]
         .filter(Boolean)
