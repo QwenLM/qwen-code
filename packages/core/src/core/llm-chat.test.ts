@@ -2591,6 +2591,29 @@ describe('LlmChat', async () => {
       expectRecordedMessage(recordAssistantTurn, [{ text: '(empty content)' }]);
     });
 
+    // #16146: the quiet-acceptance arming must track the effective budget, not
+    // the built-in default. With a model that caps maxOutputValidationRetries
+    // below the default, the retry loop stops earlier, so arming on the fixed
+    // default would never fire and the quiet completion would fail instead of
+    // being accepted on its own final attempt.
+    it('arms quiet acceptance at a configured sub-default retry budget (#16146)', async () => {
+      vi.useFakeTimers();
+      mockGeneratorConfig({ maxOutputValidationRetries: 2 });
+      streamMock().mockImplementation(async () => streamOf(stopResponse([])));
+      const { events, recordAssistantTurn, runChat } = await runToolResult(
+        'prompt-id-tool-result-quiet-budget-two',
+        70_000,
+      );
+
+      // Budget 2, not the built-in default of 5: one initial + two retries,
+      // then the armed final attempt accepts the quiet completion.
+      expectStreamCalls(3);
+      expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+      expect(hasRetry(events)).toBe(true);
+      expect(runChat.getHistory().at(-1)).toEqual(modelText('(empty content)'));
+      expectRecordedMessage(recordAssistantTurn, [{ text: '(empty content)' }]);
+    });
+
     // The armed (final, one-shot-acceptance) attempt is rescheduled or
     // consumed by another error class; the attempt that follows must still
     // carry the acceptance instead of running un-armed into the exhausted

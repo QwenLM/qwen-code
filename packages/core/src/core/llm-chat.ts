@@ -4285,9 +4285,12 @@ export class LlmChat {
           // transient budget entitles the next attempt to acceptance. A
           // tag-leak-only exhaustion must not arm — a quiet ending still
           // has its full retry-first budget ahead of it (#7039).
+          // Compare against the effective budget, not the built-in default:
+          // the retry loop below counts against `modelOutputValidationRetries`
+          // (config-overridable), so arming on the hard-coded default would
+          // desync the two whenever the model sets a different cap (#16146).
           if (
-            transientInvalidStreamRetryCount >=
-            INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+            transientInvalidStreamRetryCount >= modelOutputValidationRetries
           ) {
             acceptQuietToolResultCompletionOnNextAttempt = true;
           }
@@ -5424,6 +5427,11 @@ export class LlmChat {
               if (attemptState.params.config?.abortSignal?.aborted) throw error;
               attemptState.rollback();
               if (!(error instanceof InvalidStreamError)) throw error;
+              // Honour the same generation-config opt-out as the main send
+              // loop: with output validation retry disabled, surface the
+              // invalid stream to the caller instead of retrying the
+              // continuation (the main loop guards this at the retry branch).
+              if (skipModelOutputValidationRetry) throw error;
 
               const maxContinuationRetries =
                 error.type === 'PROTOCOL_TAG_LEAK'
@@ -5446,11 +5454,10 @@ export class LlmChat {
               // Same arming rule as the main send loop (#9026): keyed to
               // the transient bucket only (quiet completions surface as a
               // transient-type error), so a tag-leak-only exhaustion does
-              // not arm prematurely (#7039 retry-first).
-              if (
-                transientRetryCount >=
-                INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
-              ) {
+              // not arm prematurely (#7039 retry-first). Compare against the
+              // effective budget, not the built-in default, to stay in sync
+              // with `maxContinuationRetries` above when the cap is overridden.
+              if (transientRetryCount >= modelOutputValidationRetries) {
                 acceptQuietToolResultCompletionOnNextAttempt = true;
               }
               const delayMs = invalidStreamRetryDelayMs(
