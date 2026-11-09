@@ -98,7 +98,7 @@ class ManagedStoreDecompositionTest {
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
                 insertPublicChildSessionCommand/9::REQUIRED:DEFAULT:false replayChildSessionCommand/4::REQUIRED:DEFAULT:false findChildLineage/2:-
                 workspaceSessionOptions/2::REQUIRED:DEFAULT:false supportsPlanMode/1:- hasMcpServers/1:-
-                requireMcpManagement/4::REQUIRED:DEFAULT:false requireMcpSettingsCommit/3::MANDATORY:DEFAULT:false requireExtensionManagement/5::REQUIRED:DEFAULT:false
+                requireMcpManagement/4::REQUIRED:DEFAULT:false requireMcpSettingsCommit/3::MANDATORY:DEFAULT:false requireExtensionManagement/5::REQUIRED:DEFAULT:false canApplyExtensions/1:-
                 requireConfigurationCommit/4::MANDATORY:DEFAULT:false insertTurnCommand/7::REQUIRED:DEFAULT:false insertTurnCommand/8::REQUIRED:DEFAULT:false
                 insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false beginSessionRename/5::REQUIRED:DEFAULT:false
                 beginSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/3::REQUIRED:DEFAULT:false

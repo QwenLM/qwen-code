@@ -22,6 +22,7 @@ import {
   MANAGED_MESSAGE_INLINE_BYTES,
   publishManagedMessageBody,
 } from './managed-message-chunks.js';
+import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import { getManagedSessionDiagnostics } from './managed-session-diagnostics.js';
 import type { ManagedInvocationObservation } from './managed-execution-diagnostics.js';
@@ -513,6 +514,11 @@ export class ManagedSessionRecordSink {
   /** Reader-facing records rebuilt from the authoritative log. */
   project(throughSequence?: number): Promise<ChatRecord[]> {
     return this.projection.project(throughSequence);
+  }
+
+  /** See `ManagedSessionMessageProjection.rememberBody`. */
+  rememberMessageBody(ref: ManagedSessionDurableRef, body: Buffer): void {
+    this.projection.rememberBody(ref, body);
   }
 
   projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {

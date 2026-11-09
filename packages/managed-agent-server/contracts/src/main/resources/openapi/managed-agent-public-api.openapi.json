@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.103.0",
+    "version": "1.104.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
   },
   "servers": [
@@ -8176,6 +8176,724 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/WebShellActivityQueryRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/imports": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "importWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires Workspace operator and deployment publishing permission before consuming bounded input. Prepares without a Session, publishes immutable bytes and does not activate content. Retry the same input/version/target and key, or query the actor-scoped operation.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "description": "Package imports require unencoded application/octet-stream bytes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "extensionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^ext_[a-f0-9-]{36}$"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/imports": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "importWebShellExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires Workspace operator and deployment publishing permission before consuming bounded input. Prepares without a Session, publishes immutable bytes and does not activate content. Retry the same input/version/target and key, or query the actor-scoped operation.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "description": "Package imports require unencoded application/octet-stream bytes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "extensionId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^ext_[a-f0-9-]{36}$"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}/inspection": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "inspectWorkspaceExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Inspects exact published canonical bytes without hydrating settings, starting a Runtime or executing components. Literal credential fields are redacted; redaction markers must not be republished.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "extensionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "packageRevision",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "packageDigest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/inspection/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "inspectWebShellExtensionPackage",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Inspects exact published canonical bytes without hydrating settings, starting a Runtime or executing components. Literal credential fields are redacted; redaction markers must not be republished.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "description": "Inspection queries require application/json.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionPackageQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/operations/lookup": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "lookupWorkspaceExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionOperationLookup"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/operations/lookup": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "lookupWebShellExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionOperationLookup"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/operations/lookup": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "lookupSessionExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionApplyLookup"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/operations/lookup": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "lookupWebShellSessionExtensionOperation",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Read-only actor-scoped lookup by the original idempotency key. Does not resubmit or acquire Runtime ownership.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionManagementSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExtensionApplyLookup"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/imports/preview": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "previewWorkspaceExtensionImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Previews validated normalized input without publishing a catalog revision or activating a Session. Retain exact input bytes, target, compiler version and source digest for the later explicit import.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "description": "Package imports require unencoded application/octet-stream bytes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/workspace-extensions/imports/preview": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "previewWebShellExtensionImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires publishing permission. Previews validated normalized input without publishing a catalog revision or activating a Session. Retain exact input bytes, target, compiler version and source digest for the later explicit import.",
+        "responses": {
+          "200": {
+            "description": "Verified result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "415": {
+            "description": "Package imports require unencoded application/octet-stream bytes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "metadata",
+            "in": "query",
+            "required": true,
+            "description": "URL-encoded JSON ManagedExtensionImportMetadata, at most16KiB. Raw input digest is verified by the Hosted compiler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionImportMetadata"
+                }
+              }
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 104857600
               }
             }
           }
@@ -16955,6 +17673,19 @@
             "items": {
               "$ref": "#/components/schemas/ManagedExtensionPackage"
             }
+          },
+          "selfService": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "supported": {
+                "type": "boolean"
+              },
+              "canPublish": {
+                "type": "boolean"
+              }
+            },
+            "required": ["supported", "canPublish"]
           }
         },
         "required": ["supported", "extensions"]
@@ -17220,6 +17951,19 @@
           },
           "operation": {
             "$ref": "#/components/schemas/ManagedExtensionApplyOperation"
+          },
+          "selfService": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "supported": {
+                "type": "boolean"
+              },
+              "canApply": {
+                "type": "boolean"
+              }
+            },
+            "required": ["supported", "canApply"]
           }
         }
       },
@@ -18748,16 +19492,6 @@
           "settledAt"
         ],
         "properties": {
-          "predecessorTaskId": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "taskId": {
             "type": "string"
           },
@@ -18820,6 +19554,16 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "predecessorTaskId": {
+            "anyOf": [
+              {
+                "type": "string"
               },
               {
                 "type": "null"
@@ -20111,6 +20855,200 @@
             "$ref": "#/components/schemas/ManagedActivitySkillsPage"
           }
         ]
+      },
+      "ManagedExtensionImportMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sourceKind": {
+            "type": "string",
+            "enum": ["skill", "extension", "mcp"]
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "compilerVersion": {
+            "type": "integer",
+            "enum": [1]
+          },
+          "packageName": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          }
+        },
+        "required": ["sourceKind", "target", "sourceDigest", "compilerVersion"]
+      },
+      "ManagedExtensionPackageInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "manifest": {
+            "$ref": "#/components/schemas/ManagedExtensionPackageManifest"
+          },
+          "fileCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "files": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "string"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              },
+              "required": ["name", "description"]
+            }
+          },
+          "mcpServers": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "recipe": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "redacted": {
+                  "type": "boolean"
+                }
+              },
+              "required": ["name", "recipe", "redacted"]
+            }
+          },
+          "settings": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "envVar": {
+                  "type": "string"
+                },
+                "sensitive": {
+                  "type": "boolean"
+                }
+              },
+              "required": ["name", "envVar"]
+            }
+          }
+        },
+        "required": [
+          "manifest",
+          "fileCount",
+          "files",
+          "truncated",
+          "skills",
+          "mcpServers",
+          "settings"
+        ]
+      },
+      "ManagedExtensionOperationLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["publish", "settings"]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["kind", "idempotencyKey"]
+      },
+      "WebShellExtensionOperationLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["publish", "settings"]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["workspaceId", "kind", "idempotencyKey"]
+      },
+      "ManagedExtensionApplyLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["idempotencyKey"]
+      },
+      "WebShellExtensionApplyLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["sessionId", "idempotencyKey"]
       }
     }
   }
