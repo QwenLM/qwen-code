@@ -2467,20 +2467,31 @@ function resolveCdTargetCwd(
 /**
  * True when bash would brace-expand a `cd`/`pushd` target before it runs.
  *
- * Only an unquoted, escaped `{` opens a brace list, and a list needs a comma or
- * a `..` range between the braces. `{a}` therefore stays literal and so does a
- * quoted `'{a,b}'`, which is a real directory name a static cd can resolve.
+ * Only an unquoted, unescaped `{` opens a brace list, and a list needs a comma
+ * or a `..` range between the braces. `{a}` therefore stays literal and so does
+ * a quoted `'{a,b}'`, which is a real directory name a static cd can resolve.
+ *
+ * A target can carry several brace groups, so every `{` is considered: in
+ * `x{a}y{b,c}` the first group is inert but the second still expands into two
+ * words. Stopping at the first group would publish a phantom cwd for the whole
+ * target.
  */
 function canBraceExpand(target: string, bare: string | undefined): boolean {
-  const opening = target.indexOf('{');
-  if (opening === -1) return false;
-  const closing = target.indexOf('}', opening + 1);
-  if (closing === -1) return false;
   // `bare` is undefined when the caller has no per-character marking; a target
   // reached here is always shell-decoded, so assume the braces were typed bare.
-  if (bare !== undefined && bare[opening] !== '1') return false;
-  const body = target.slice(opening + 1, closing);
-  return body.includes(',') || body.includes('..');
+  for (
+    let opening = target.indexOf('{');
+    opening !== -1;
+    opening = target.indexOf('{', opening + 1)
+  ) {
+    const closing = target.indexOf('}', opening + 1);
+    // No closing brace after this `{` means none after any later one either.
+    if (closing === -1) return false;
+    if (bare !== undefined && bare[opening] !== '1') continue;
+    const body = target.slice(opening + 1, closing);
+    if (body.includes(',') || body.includes('..')) return true;
+  }
+  return false;
 }
 
 function toRedirectOperations({

@@ -796,6 +796,26 @@ describe('extractShellOperationsAcrossCommand', () => {
       'cd {a} && echo x > settings.json',
       [write('/repo/{a}/settings.json')],
     ],
+    [
+      'marks a cd target whose second brace group expands as cwd-unknown',
+      'cd {a}{b,c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a cd target with an inert first brace group and an expanding second',
+      'cd x{a}y{b,c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a cd target with a quoted first brace group and an expanding second',
+      "cd '{a}'{b,c} && echo x > settings.json",
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a cd target with an inert first brace group and an expanding range',
+      'cd {a}sub{1..3} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
     // Keep the guessed path, but mark it unsafe to trust as final.
     [
       'marks relative writes after dynamic `cd` targets as cwd-unknown',
