@@ -2419,6 +2419,8 @@ export default {
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
     '没有可供 /advisor 使用的对话上下文',
+  'No conversation context available for /btw':
+    '没有可供 /btw 使用的对话上下文',
   'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一个操作正在进行中，请等待其完成后再运行 /advisor',
@@ -2844,4 +2846,17 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已退出 Qwen，请使用 /auth 登录其他账号。',
   'Tip: Run /usage to see your plan usage.': '提示：运行 /usage 查看套餐用量。',
+  'Copied to clipboard': '已复制到剪贴板',
+  'Copy failed': '复制失败',
+  '(API error: {{error}})': '（API 错误：{{error}}）',
+  'API error': 'API 错误',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒后重试 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 浏览之前的回答',
+  'c copy': 'c 复制',
+  'x clear history': 'x 清空历史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 顺带问一个旁路问题，不打断当前工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型试图调用 {{tool}}，而没有直接回答。请换个问法，或在主对话中提问。）',
 };
