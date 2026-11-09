@@ -12,7 +12,7 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ManagedCsiFileBackend } from './managed-csi-file-backend.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import { matchesCsiFilesProfile } from './managed-csi-file-profile.js';
 import type { ManagedCsiMount } from './managed-csi-mount.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { ManagedToolSet } from './managed-runtime-tool-executor.js';
@@ -47,8 +47,7 @@ export async function composeManagedCsiFiles(options: {
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
       options.ownerSessionId,
     ) ||
-    options.profile !== 'csi-files-retirement/1' ||
-    options.capabilityDigest !== CSI_FILES_RETIREMENT_CAPABILITY_DIGEST
+    !matchesCsiFilesProfile(options.profile, options.capabilityDigest)
   )
     throw new Error('Managed CSI file composition identity is unavailable.');
 
