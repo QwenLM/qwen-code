@@ -643,6 +643,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_resume',
   'unstable_session_resume',
   'session_list',
+  'session_last_user_prompt_sort',
   'session_catalog_batch',
   'session_info',
   'session_source_metadata',
@@ -749,6 +750,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_github_setup',
   'workspace_github_prs',
   'workspace_git_worktrees',
+  'workspace_git_check_ignore',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -867,6 +869,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_github_setup' &&
       f !== 'workspace_github_prs' &&
       f !== 'workspace_git_worktrees' &&
+      f !== 'workspace_git_check_ignore' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -919,6 +922,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_github_setup',
   'workspace_github_prs',
   'workspace_git_worktrees',
+  'workspace_git_check_ignore',
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',
@@ -958,6 +962,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_session_shell',
   'dynamic_workspace_registration',
   'persistent_workspace_registration',
+  'workspace_order',
   'workspace_display_name',
   'scratch_workspace_registration',
   'git_workspace_clone',
@@ -3980,7 +3985,10 @@ describe('createServeApp', () => {
           ).toContain(feature);
           continue;
         }
-        if (feature === 'persistent_workspace_registration') {
+        if (
+          feature === 'persistent_workspace_registration' ||
+          feature === 'workspace_order'
+        ) {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
           ).toBe(true);
@@ -6034,6 +6042,68 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(managed.body.features).toContain('scheduled_task_session_reuse');
+    });
+
+    it('advertises workspace runtime stop only with the full managed stop wiring', async () => {
+      const bridge = Object.assign(fakeBridge(), {
+        stopWorkspaceRuntime: vi.fn(),
+        getRuntimeStopCompletion: vi.fn(),
+        getRuntimeStopSnapshot: vi.fn(),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const runtimeRemoval = {
+        beginDrain: vi.fn(),
+        cancelDrain: vi.fn(),
+        completeDrain: vi.fn(),
+        disposeRuntime: vi.fn().mockResolvedValue(undefined),
+        getActivity: vi.fn(() => ({
+          pendingSessionStarts: 0,
+          channelWorkers: 0,
+          voiceSessions: 0,
+        })),
+      };
+      const wiredDeps = {
+        bridge,
+        workspaceRegistry,
+        managedChildProcesses: {
+          registry: new ProcessRegistry(),
+          policy: createChildHeapPolicy({
+            budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+            mode: 'admit',
+          }),
+        },
+        workspaceRuntimeRemoval: runtimeRemoval,
+        voiceCoordinator: new WorkspaceVoiceCoordinator(),
+        getSessionBridges: () => [bridge],
+        manageScheduledTaskSessions: true,
+      };
+
+      // Every leg of the boot-time conjunction is present: the capabilities
+      // route must advertise the stop surface from that production wiring.
+      const wired = await request(
+        createServeApp(baseOpts, undefined, wiredDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(wired.body.features).toContain('workspace_runtime_stop');
+
+      // Drop exactly one required leg and the same route must stop
+      // advertising it, so a regression in any single leg is observable.
+      const { manageScheduledTaskSessions: _dropped, ...partialDeps } =
+        wiredDeps;
+      const missingLeg = await request(
+        createServeApp(baseOpts, undefined, partialDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingLeg.body.features).not.toContain('workspace_runtime_stop');
     });
 
     it('refuses scheduled task sessions in the Hosted Harness profile', () => {
@@ -27245,6 +27315,60 @@ describe('createServeApp', () => {
   });
 
   describe('GET /session/:id/status', () => {
+    it('enriches the live owner summary with its recorded user time', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-time',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        updatedAt: '2026-05-17T14:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: true,
+      };
+      const timestamp = '2026-05-17T12:30:00.000Z';
+      const read = vi
+        .spyOn(SessionService.prototype, 'getLastUserPromptAt')
+        .mockResolvedValueOnce(timestamp);
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-time/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ...summary, lastUserPromptAt: timestamp });
+      expect(read).toHaveBeenCalledWith('s-time');
+      expect(read.mock.instances[0]?.getProjectRoot()).toBe(WS_BOUND);
+      read.mockRestore();
+    });
+
+    it('still returns the summary when the transcript cannot be read', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-time',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: true,
+      };
+      const read = vi
+        .spyOn(SessionService.prototype, 'getLastUserPromptAt')
+        .mockRejectedValueOnce(new Error('transcript replaced during read'));
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-time/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(summary);
+      read.mockRestore();
+    });
+
     it('200 with the live session summary', async () => {
       const summary: BridgeSessionSummary = {
         sessionId: 's-1',
@@ -46057,6 +46181,53 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it.each([
+    ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],
+    ['qwen3.8-max(qwen-subscription)', 'unregistered-client', 400],
+    ['existing(openai)', 'standalone-client', 200],
+  ] as const)(
+    'switches standalone model %s through its owner for %s',
+    async (modelId, clientId, expectedStatus) => {
+      const sessionId = 'standalone-subscription';
+      const reloadModelProviders = vi.fn(async () => ({ status: 'failed' }));
+      const setup = setupLiveRuntime({
+        summaryImpl: (id) => ({
+          sessionId: id,
+          workspaceCwd: setup.root.canonicalRoot,
+          createdAt: '2026-11-06T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        }),
+        setModelImpl: async (id, _params, context) => {
+          expect(id).toBe(sessionId);
+          expect(context?.clientId).toBe(clientId);
+          if (context?.clientId !== 'standalone-client') {
+            throw new InvalidClientIdError(id, clientId);
+          }
+          return {};
+        },
+      });
+      Object.assign(setup.liveRuntime.workspaceService, {
+        reloadModelProviders,
+      });
+      setup.registry.add(setup.liveRuntime);
+
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/model`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ modelId });
+
+      expect(response.status).toBe(expectedStatus);
+      if (expectedStatus === 400)
+        expect(response.body.code).toBe('invalid_client_id');
+      expect(reloadModelProviders).not.toHaveBeenCalled();
+      expect(setup.liveBridge.setModelCalls).toHaveLength(1);
+      expect(setup.primaryBridge.setModelCalls).toHaveLength(0);
+    },
+  );
 
   it('mounts and advertises standalone sessions only with complete runtime dependencies', async () => {
     const partial = createServeApp(baseOpts, undefined, {

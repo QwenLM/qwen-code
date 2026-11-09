@@ -1,5 +1,9 @@
 package com.alibaba.qwen.code.managedagent.settings;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +27,7 @@ public interface ManagedAgentSettings {
     public List<String> getDefinitionModels();
     public List<? extends ModelOption> getModelCatalog();
     public default List<String> getModelConfigBaseUrls() { return List.of(); }
+    public default boolean isMemoryEnabled() { return false; }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();
@@ -101,6 +106,7 @@ public interface ManagedAgentSettings {
     }
     public interface Extensions {
         public boolean isEnabled();
+        public default boolean isSelfServiceEnabled() { return false; }
         public String getArtifactDirectory();
         public List<String> getAllowedActors();
     }
@@ -166,11 +172,11 @@ public interface ManagedAgentSettings {
         public interface ResidentWorkspace {
             public String workspaceId();
             public long workspaceGeneration();
-            public com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration registration();
-            public com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity protection();
+            public WorkspaceCsiRegistration registration();
+            public ProtectionIdentity protection();
             public String image();
             public List<String> command();
-            public List<com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact> artifacts();
+            public List<WorkerArtifact> artifacts();
         }
         public List<? extends ResidentWorkspace> getResidentWorkspaces();
         public String getResidentKubernetesApiUrl();

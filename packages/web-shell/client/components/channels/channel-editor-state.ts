@@ -56,6 +56,7 @@ export type ChannelEditorValidationCode =
   | 'invalidGroupId'
   | 'invalidOption'
   | 'invalidRepoId'
+  | 'repoFilterRequired'
   | 'conflictingRepoAliases'
   | 'invalidGroupEntry'
   | 'number'
@@ -87,6 +88,154 @@ export function repositoryAllowlistIds(value: string): string[] {
   return [...new Set(toList(value.toLowerCase()))].filter((id) =>
     REPOSITORY_FULL_NAME_RE.test(id),
   );
+}
+
+/** Whether the repository event filter processes a list at all. */
+export function isRepoFilterActive(mode: unknown): boolean {
+  return mode === 'allowlist' || mode === 'blocklist';
+}
+
+const GITHUB_REPOSITORY_URL_RE =
+  /^https?:\/\/[^/]+\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#].*)?$/;
+
+/**
+ * GitHub areas whose two-segment URLs look like `owner/repo` but are not
+ * repositories. Shortening one would silently filter a nonexistent
+ * repository — fatal under an allowlist — so these URLs pass through
+ * unchanged and validation rejects them by name instead.
+ *
+ * Best-effort by construction: a denylist of GitHub's top-level paths cannot
+ * be complete, and a future GitHub area can reintroduce the hazard until it
+ * is added here. The enumerated test over this set keeps every listed root
+ * rejected; the residual risk is documented in the design doc.
+ *
+ * Exported so the test can enumerate every member instead of sampling a few.
+ */
+export const GITHUB_RESERVED_URL_PATHS = new Set([
+  'about',
+  'account',
+  'accounts',
+  'advisories',
+  'apps',
+  'codespaces',
+  'collections',
+  'contact',
+  'copilot',
+  'customer-stories',
+  'discussions',
+  'enterprise',
+  'enterprises',
+  'events',
+  'explore',
+  'features',
+  'followers',
+  'following',
+  'issues',
+  'join',
+  'login',
+  'logout',
+  'marketplace',
+  'mobile',
+  'new',
+  'notifications',
+  'orgs',
+  'organizations',
+  'password_reset',
+  'premium-support',
+  'pricing',
+  'pulls',
+  'readme',
+  'search',
+  'security',
+  'sessions',
+  'settings',
+  'signup',
+  'site',
+  'sponsors',
+  'stars',
+  'team',
+  'topics',
+  'trending',
+  'users',
+  'watching',
+]);
+
+/**
+ * The hosts whose two-segment paths may be repository URLs: github.com, plus
+ * the channel's own GitHub Enterprise WEB host derived from baseUrl. Only the
+ * web host qualifies: an `api.`-prefixed baseUrl host denotes the deployment's
+ * API, so the stripped form is added and the raw API host is NOT (pasting a
+ * REST URL like https://api.github.com/repos/octo/repo must not shorten to
+ * `repos/octo`). The baseUrl's own API path prefix (e.g. /api/v3) is returned
+ * alongside so REST-shaped paths on a shared web+API host are excluded too.
+ * Any other host — gist.github.com, gitlab.com, an arbitrary site — passes
+ * through unchanged for validation to reject.
+ */
+function repositoryUrlContext(baseUrl: string): {
+  hosts: Set<string>;
+  apiPath: string;
+} {
+  const hosts = new Set(['github.com', 'www.github.com']);
+  let apiPath = '';
+  const trimmed = baseUrl.trim();
+  if (trimmed) {
+    try {
+      const url = new URL(trimmed);
+      const host = url.hostname.toLowerCase();
+      hosts.add(host.startsWith('api.') ? host.slice(4) : host);
+      const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+      if (path) apiPath = path;
+    } catch {
+      // A malformed baseUrl is its own field's validation error; only
+      // github.com remains shortenable here.
+    }
+  }
+  return { hosts, apiPath };
+}
+
+/**
+ * Canonicalize the repository filter input: lowercase, deduplicate, strip
+ * trailing sentence punctuation a paste can carry (`.`, `)`, …), and shorten
+ * GitHub web URLs (repository, PR, or issue pages, with an optional `.git`,
+ * trailing path, query, or fragment) to `owner/repo` — only when the URL's
+ * host is the channel's own GitHub web host and its path is not the baseUrl's
+ * API prefix. Entries that are not repository URLs on that host pass through
+ * unchanged so validation can name them. Shared by the validator and the save
+ * path so the two cannot disagree.
+ */
+export function normalizeRepositoryFilterInput(
+  value: string,
+  baseUrl = '',
+): string {
+  const { hosts, apiPath } = repositoryUrlContext(baseUrl);
+  const entries = toList(value)
+    .map((raw) => raw.replace(/[.,;:!?)\]]+$/, ''))
+    .filter(Boolean)
+    .map((entry) => {
+      const match = GITHUB_REPOSITORY_URL_RE.exec(entry);
+      let url: URL | undefined;
+      if (match) {
+        try {
+          url = new URL(entry);
+        } catch {
+          url = undefined;
+        }
+      }
+      const onApiPath =
+        url !== undefined &&
+        apiPath !== '' &&
+        url.pathname.toLowerCase().startsWith(`${apiPath}/`);
+      const shortened =
+        match &&
+        url !== undefined &&
+        hosts.has(url.hostname.toLowerCase()) &&
+        !onApiPath &&
+        !GITHUB_RESERVED_URL_PATHS.has(match[1].toLowerCase())
+          ? `${match[1]}/${match[2]}`
+          : entry;
+      return shortened.toLowerCase();
+    });
+  return [...new Set(entries)].join(', ');
 }
 
 export function toList(value: string): string[] {
@@ -194,7 +343,10 @@ function initialFieldValue(
 ): string | boolean {
   const value = instance?.config[field.key];
   if (field.kind === 'boolean') {
-    return typeof value === 'boolean' ? value : false;
+    // Honour the declared default when the key is absent so a default-on field
+    // (prCommentWatch) is not silently saved as false by every UI edit. An
+    // explicit stored boolean — including false — is preserved verbatim.
+    return typeof value === 'boolean' ? value : field.default === 'true';
   }
   if (field.kind === 'number') {
     return typeof value === 'number' ? String(value) : '';
@@ -224,6 +376,7 @@ function initialFieldValue(
       if (field.key === 'privatePolicy')
         return configuredPrivatePolicy(instance);
       if (field.key === 'groupPolicy') return 'disabled';
+      if (field.key === 'repoFilterMode') return 'off';
       if (field.key === 'outputMode') return field.default ?? '';
       if (field.key === 'dmPolicy') return 'open';
       if (field.key !== 'sessionScope') return '';
@@ -433,6 +586,23 @@ export function validateChannelEditorDraft(
       draft.values['deliverToBoundSessions'] !== true
     ) {
       errors['prWatchEvents'] = 'requiresBoundDelivery';
+    }
+    // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
+    // of owner/repo entries. While the mode is off the list is ignored (and
+    // hidden), matching the runtime's ignore-while-off rule, so a parked list
+    // never strands a save on a field the operator cannot see.
+    if (isRepoFilterActive(draft.values['repoFilterMode'])) {
+      const normalized = normalizeRepositoryFilterInput(
+        String(draft.values['repoFilter'] ?? ''),
+        String(draft.values['baseUrl'] ?? ''),
+      );
+      if (!normalized) {
+        errors['repoFilter'] = 'repoFilterRequired';
+      } else if (
+        toList(normalized).some((id) => !REPOSITORY_FULL_NAME_RE.test(id))
+      ) {
+        errors['repoFilter'] = 'invalidRepoId';
+      }
     }
   }
   if (
@@ -842,6 +1012,22 @@ export function buildChannelUpsertRequest(
       continue;
     }
     assignField(config, field, draft.values[field.key]);
+  }
+  if (
+    repositoryOnly &&
+    isRepoFilterActive(config['repoFilterMode']) &&
+    Array.isArray(config['repoFilter'])
+  ) {
+    // Same canonicalization the validator applied, so pasted URLs reach the
+    // daemon as owner/repo. Gated on the active mode: a parked list stays
+    // exactly as stored on an unrelated save.
+    const normalized = normalizeRepositoryFilterInput(
+      config['repoFilter']
+        .filter((entry): entry is string => typeof entry === 'string')
+        .join(', '),
+      typeof config['baseUrl'] === 'string' ? config['baseUrl'] : '',
+    );
+    config['repoFilter'] = normalized ? normalized.split(', ') : [];
   }
   if (repositoryOnly) {
     // The editor used to persist the injected private-access defaults here

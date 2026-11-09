@@ -349,30 +349,7 @@ public class AutomationLedgerStore
      */
     public SchedulePage listReadableSchedules(String tenantId, String actorId,
             ScheduleCursor cursor, int limit) {
-        if (actorId == null || actorId.isEmpty()) {
-            return new SchedulePage(List.of(), false);
-        }
-        byte[] actorKey;
-        try {
-            actorKey = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
-        } catch (IllegalArgumentException error) {
-            return new SchedulePage(List.of(), false);
-        }
-        String select =
-                "WITH RECURSIVE readable_workspace (tenant_identity, workspace_identity) AS ( SELECT CONCAT(w.tenant_id, '!'), CONCAT(w.workspace_id, '!') FROM ma_workspace w JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id WHERE w.tenant_id = ? AND w.workspace_kind = 'ROOT' AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER') UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!') FROM ma_workspace c JOIN readable_workspace p ON CONCAT(c.tenant_id, '!') = p.tenant_identity AND CONCAT(c.parent_workspace_id, '!') = p.workspace_identity WHERE c.tenant_id = ? AND c.workspace_kind = 'CHILD_GIT') SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s") + " FROM ma_schedule s WHERE s.tenant_id = ? AND EXISTS (SELECT 1 FROM readable_workspace r WHERE r.tenant_identity = CONCAT(s.tenant_id, '!') AND r.workspace_identity = CONCAT(s.workspace_id, '!'))";
-        List<ScheduleRow> rows = cursor == null
-                ? jdbc.query(select + " ORDER BY s.gmt_create DESC,"
-                        + " s.schedule_id DESC LIMIT ?", SCHEDULE, tenantId,
-                        actorKey, tenantId, tenantId, limit + 1)
-                : jdbc.query(select + " AND (s.gmt_create < ?"
-                        + " OR (s.gmt_create = ? AND s.schedule_id < ?))"
-                        + " ORDER BY s.gmt_create DESC, s.schedule_id DESC"
-                        + " LIMIT ?", SCHEDULE, tenantId, actorKey, tenantId, tenantId,
-                        cursor.createdAt(), cursor.createdAt(),
-                        cursor.scheduleId(), limit + 1);
-        boolean hasMore = rows.size() > limit;
-        return new SchedulePage(hasMore ? rows.subList(0, limit) : rows,
-                hasMore);
+        return AutomationScheduleQueries.listReadable(jdbc, SCHEDULE, tenantId, actorId, cursor, limit);
     }
 
     public int countLive(String tenantId, String sessionId) {

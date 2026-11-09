@@ -120,6 +120,11 @@ class ToolPublicationStoreTest {
 
     private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
             ToolPublicationObjectStore objects) {
+        initialize(source, csiWorkspace, objects, false);
+    }
+
+    private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
+            ToolPublicationObjectStore objects, boolean diagnostics) {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         csiRegistration = csiWorkspace
                 ? new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
@@ -134,7 +139,8 @@ class ToolPublicationStoreTest {
         publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
                 publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
-        journal = PublicationJournalFixture.create(source, csiRegistration, objects, publicResults);
+        journal = diagnostics ? PublicationJournalFixture.createWithExecutionDiagnostics(source, objects, publicResults)
+                : PublicationJournalFixture.create(source, csiRegistration, objects, publicResults);
         jdbc = journal.jdbc;
         manager = journal.manager;
         sessions = journal.sessions;
@@ -881,6 +887,7 @@ class ToolPublicationStoreTest {
     void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject(boolean ambient) {
         List<String> lockOrder = new java.util.ArrayList<>();
         Map<String, byte[]> objects = new java.util.HashMap<>();
+        var objectReads = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
@@ -889,6 +896,7 @@ class ToolPublicationStoreTest {
 
             @Override
             public InputStream open(String key) {
+                objectReads.incrementAndGet();
                 return new ByteArrayInputStream(objects.get(key));
             }
 
@@ -933,7 +941,7 @@ class ToolPublicationStoreTest {
                             }
                         });
             }
-        }, false, bucket);
+        }, false, bucket, true);
         reserve();
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -980,6 +988,21 @@ class ToolPublicationStoreTest {
             // 2026-11-04-managed-publication-tenant-guards and -placement).
             assertThat(lockOrder).isEmpty();
         }
+        var diagnostics = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc);
+        JsonNode statistics = diagnostics.findActivityStatistics("tenant-1", "session-1").deepCopy();
+        assertThat(statistics.path("tools").path("requested").asLong()).isEqualTo(1);
+        assertThat(statistics.path("coverageReasons")).contains(JSON.getNodeFactory().textNode("receipt_outcome_not_inline"));
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
+                "tenant-1", "session-1", admission.path("resourceId").asText())).isNull();
+        int readsBeforeRebuild = objectReads.get();
+        new TransactionTemplate(manager).executeWithoutResult(status -> {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD' AND tenant_id = ? AND session_id = ?", "tenant-1", "session-1");
+            jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ?", "tenant-1", "session-1");
+        });
+        sessions.acquireWriter("tenant-1", "session-1", WRITER_TOKEN,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer-1", 300000L));
+        assertThat(diagnostics.findActivityStatistics("tenant-1", "session-1")).isEqualTo(statistics);
+        assertThat(objectReads.get()).isEqualTo(readsBeforeRebuild);
         var changedReplay = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 journal.revision, journal.sequence, "different-transaction", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), journal.sequence + 1, journal.sequence + 1, 1,

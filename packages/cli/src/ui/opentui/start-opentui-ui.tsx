@@ -345,8 +345,7 @@ function OpenTuiEntryApp({
   useKeyboard((key: KeyEvent) => {
     if (
       key.eventType === 'release' ||
-      !key.ctrl ||
-      (key.name !== 'c' && key.name !== 'd')
+      (!matchesCommand(Command.QUIT, key) && !matchesCommand(Command.EXIT, key))
     )
       return;
     if (key.name === 'd' && composerHandle.current?.getText()) return;
@@ -488,6 +487,7 @@ function OpenTuiEntryApp({
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
       onScheduleTool={live.scheduleTool}
+      onRunModPrompt={live.runModPrompt}
       onRetryPrompt={live.retryLastPrompt}
       onInputProcessed={live.notifyInputProcessed}
       onQuit={handleQuit}
@@ -617,12 +617,9 @@ export async function startOpenTuiUI(
     // over stdin; the decoded text is injected into the composer after mount.
     const capturedText = drainCapturedInputAsText();
 
-    // U-6: ink's boot auto-open is "unauthenticated" (useAuth initial state)
-    // plus the one-shot startup authError (useInitializationAuthError);
-    // shouldOpenAuthDialog is never read in ink's production code, so the
-    // behavior contract is exactly these two.
     const initialDialog: OpenTuiDialogRequest | null =
-      initializationResult.authError || config.getAuthType() === undefined
+      !initializationResult.skipStartupAuthDialog &&
+      (initializationResult.authError || config.getAuthType() === undefined)
         ? {
             dialog: 'auth',
             initialError: initializationResult.authError ?? undefined,

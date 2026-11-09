@@ -6,8 +6,14 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
   validateBoundSessionConfig,
+  DEFAULT_PR_WATCH_LIMIT,
+  MAX_PR_WATCH_LIMIT,
+  DEFAULT_PR_WATCH_BUDGET_RESERVE,
+  MAX_PR_WATCH_BUDGET_RESERVE,
+  validateRepoFilterConfig,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
+  REPO_FILTER_MODES,
 } from './GithubAdapter.js';
 
 /**
@@ -140,12 +146,38 @@ export const plugin: ChannelPlugin = {
         })),
       },
       {
+        key: 'repoFilterMode',
+        label: 'Repository Filter',
+        kind: 'enum',
+        default: 'off',
+        description:
+          'Filter incoming notifications by repository: allowlist processes only the listed repositories, blocklist processes all except the listed ones. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+        // Built from the adapter's exported vocabulary so the UI options
+        // cannot drift from the validator (the PR_WATCH_EVENTS pattern).
+        options: REPO_FILTER_MODES.map((value) => ({ value, label: value })),
+      },
+      {
+        key: 'repoFilter',
+        label: 'Filtered Repositories',
+        kind: 'string-list',
+        description:
+          'Comma-separated owner/repo repository names used by the repository filter. Requires Repository Filter to be set to allowlist or blocklist.',
+      },
+      {
         key: 'deliverToBoundSessions',
         label: 'Deliver To PR-Bound Sessions',
         kind: 'boolean',
         description:
           'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
         default: 'false',
+      },
+      {
+        key: 'prCommentWatch',
+        label: 'PR Comment Watch',
+        kind: 'boolean',
+        description:
+          'Poll conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (including comments by the same GitHub account used by another session/agent). Requires Deliver To PR-Bound Sessions. Enabled by default; set false to disable.',
+        default: 'true',
       },
       {
         key: 'prWatchEvents',
@@ -156,6 +188,26 @@ export const plugin: ChannelPlugin = {
         // Built from the adapter's exported vocabulary so the UI options can
         // never drift from the validator/emit path (R2-18).
         options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
+      },
+      {
+        key: 'prWatchLimit',
+        label: 'PR Watch Limit',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_PR_WATCH_LIMIT,
+        default: String(DEFAULT_PR_WATCH_LIMIT),
+        description:
+          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
+      },
+      {
+        key: 'prWatchBudgetReserve',
+        label: 'PR Watch Budget Reserve',
+        kind: 'number',
+        exclusiveMinimum: -1,
+        maximum: MAX_PR_WATCH_BUDGET_RESERVE,
+        default: String(DEFAULT_PR_WATCH_BUDGET_RESERVE),
+        description:
+          'REST requests held back for the interactive notification lane (requires Deliver To PR-Bound Sessions and PR Watch Events). When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour PAT budget. Set 0 to disable the gate. Leave empty for the default.',
       },
       {
         key: 'boundSessionActions',
@@ -172,7 +224,10 @@ export const plugin: ChannelPlugin = {
       if (!token && config['useLocalGh'] !== true) {
         return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
       }
-      return validateBoundSessionConfig(config, 'github');
+      return (
+        validateBoundSessionConfig(config, 'github') ??
+        validateRepoFilterConfig(config, 'github')
+      );
     },
   },
   createChannel: (name, config, bridge, options) =>

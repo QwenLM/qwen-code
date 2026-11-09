@@ -183,6 +183,13 @@ Note: `entry.createdAt` is typed as `string` (ISO 8601), not a number.
 | No SSE subscribers | A connected client is actively listening. Even if it hasn't sent a heartbeat, the SSE connection itself proves liveness.    |
 | Idle duration      | Grace period so briefly-disconnected clients can reconnect without losing their session.                                    |
 
+**Update (2026-11-07):** Channel-owned sessions (`sourceType === 'channel'`) are
+now exempt from the SSE-subscriber guard. A channel worker's event pump is not a
+user watching the session, and leaving it in place pinned every channel session
+until the workspace hit `maxSessions`. See
+[Reclaim Idle Channel Sessions](../channel-session-idle-reclaim.md) for the
+implementation and tests.
+
 ### 4.3 Reap action
 
 For each session that passes the idle predicate, the reaper calls:

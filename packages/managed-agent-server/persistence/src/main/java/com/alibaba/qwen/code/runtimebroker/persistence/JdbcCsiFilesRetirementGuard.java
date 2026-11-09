@@ -16,6 +16,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Original-connection parent fence for the private file-only CSI profile. */
 public final class JdbcCsiFilesRetirementGuard {
     private JdbcCsiFilesRetirementGuard() {
@@ -80,7 +82,7 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     public static boolean isProfile(RuntimeScope scope) {
-        return scope != null && CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest());
+        return CsiFilesRetirementProfile.isProfile(scope);
     }
 
     static boolean requireProvisionPin(Connection connection, RuntimeProvisionRequest request)
@@ -123,11 +125,16 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     /**
-     * Control for tool execution admission and dispatch. A binding outside the
-     * CSI files profile only needs proof that its Session is not CSI-pinned.
-     * The pin lives on the Session root, and profile slots and bindings
-     * require a committed pin, so the root alone decides it: no tenant guard
-     * and no slot or binding lock (design 2026-11-05-managed-dispatch-tenant-guards).
+     * Control for tool execution admission and dispatch, and for operation
+     * lease changes (claim, renew, release), which move no binding out of its
+     * state. A binding outside the CSI files profile only needs proof that its
+     * Session is not CSI-pinned. The pin lives on the Session root, and profile
+     * slots and bindings require a committed pin, so the root alone decides it:
+     * no tenant guard and no slot or binding lock (designs
+     * 2026-11-05-managed-dispatch-tenant-guards and
+     * 2026-11-06-managed-binding-control-tenant-guards). A caller that takes
+     * placement afterwards, as compareAndSet does, must use
+     * {@link #lockBindingControl} instead: placement precedes the root.
      */
     public static Original lockExecutionControl(Connection connection, String bindingId) throws SQLException {
         return lockBindingControl(connection, bindingId, true);
@@ -147,7 +154,7 @@ public final class JdbcCsiFilesRetirementGuard {
                 if (!row.next()) {
                     return null;
                 }
-                profile = CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(
+                profile = CsiFilesRetirementProfile.isCapabilityDigest(
                                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
                                         .identity(row, "capability_digest"));
                 if (!profile && !"session".equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "isolation_class"))) {
@@ -181,14 +188,17 @@ public final class JdbcCsiFilesRetirementGuard {
             // Same refusals as lockManagedSession for an ordinary binding: a pinned
             // Session, a pinned request key, or a leftover profile slot or binding.
             Pin pin = readPin(connection, tenant, session);
-            if (pin != null && (CsiFilesRetirementProfile.PROFILE.equals(pin.profile()) || pin.requestKey() != null)
+            if (pin != null && (CsiFilesRetirementProfile.isProfile(pin.profile()) || pin.requestKey() != null)
                     || hasCsiRuntimeMarker(connection, tenant, session)) {
                 throw unavailable();
             }
             return null;
         }
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, 10);
-        boolean retained = lockRetentionRoot(connection, tenant);
+        // Only a profile binding can be the pinned original that needs the
+        // retention root; any other binding is refused or answered null below
+        // whatever it holds (design 2026-11-06-managed-binding-control-tenant-guards).
+        boolean retained = profile && lockRetentionRoot(connection, tenant);
         Original original = lockManagedSession(connection, tenant, session);
         if (original == null ? profile : !retained || !bindingId.equals(original.bindingId())) {
             throw unavailable();
@@ -196,7 +206,7 @@ public final class JdbcCsiFilesRetirementGuard {
         return original;
     }
 
-    private static boolean sessionRootExists(Connection connection, String tenantId, String sessionId,
+    static boolean sessionRootExists(Connection connection, String tenantId, String sessionId,
             boolean locking) throws SQLException {
         try (PreparedStatement statement = statement(connection,
                 "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?"
@@ -279,7 +289,7 @@ public final class JdbcCsiFilesRetirementGuard {
         List<Slot> slots = new ArrayList<>();
         List<Binding> bindings = new ArrayList<>();
         readRuntimeRows(connection, tenantId, sessionId, true, slots, bindings);
-        if (pin == null || !CsiFilesRetirementProfile.PROFILE.equals(pin.profile())) {
+        if (pin == null || !CsiFilesRetirementProfile.isProfile(pin.profile())) {
             if (pin != null && pin.requestKey() != null
                     || slots.stream().anyMatch(slot -> isProfile(slot.request().getScope()))
                     || bindings.stream().anyMatch(binding -> isProfile(binding.original().request().getScope()))) {
@@ -476,12 +486,12 @@ public final class JdbcCsiFilesRetirementGuard {
         // that spans other tenants' keys, so their first writers could not
         // insert their own roots (#13996).
         try (PreparedStatement statement = statement(connection,
-                        "SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR"
+                        "SELECT is_csi_guard, tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR"
                                 + " UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next() || !rows.getBoolean(1)) {
+                if (!rows.next() || !rows.getBoolean("is_csi_guard") && !CsiFilesRetirementProfile.isProfile(rows.getString("tool_profile"))) {
                     return null;
                 }
             }
@@ -506,7 +516,7 @@ public final class JdbcCsiFilesRetirementGuard {
                     throw unavailable();
                 }
                 String profile = rows.getString("tool_profile");
-                if (!CsiFilesRetirementProfile.PROFILE.equals(profile)) {
+                if (!CsiFilesRetirementProfile.isProfile(profile)) {
                     return new Pin(profile, rows.getString("runtime_request_key"), null, sessionId);
                 }
                 if (!"qwen-code".equals(
@@ -536,9 +546,9 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     private static void requirePin(Pin pin, RuntimeProvisionRequest request) {
-        if (pin == null || !CsiFilesRetirementProfile.PROFILE.equals(pin.profile())
+        if (pin == null || !CsiFilesRetirementProfile.isProfile(pin.profile())
                 || !request.equals(CsiFilesRetirementProfile.request(pin.context(),
-                        request.getScope().getCanonicalCwd(), pin.sessionId()))
+                        request.getScope().getCanonicalCwd(), pin.sessionId(), pin.profile()))
                 || !request.requestKey().equals(pin.requestKey())) {
             throw unavailable();
         }
@@ -563,12 +573,6 @@ public final class JdbcCsiFilesRetirementGuard {
                         row, "workspace_generation"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "canonical_cwd"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
                         row, "capability_digest"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "isolation_class"));
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void requireTransaction(Connection connection) throws SQLException {

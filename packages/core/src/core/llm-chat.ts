@@ -41,6 +41,7 @@ import {
   type HeartbeatInfo,
 } from '../utils/retry.js';
 import { beginRetryWait } from '../utils/retry-wait.js';
+import { movePromptContextAheadOfUserText } from './prompt-context-order.js';
 import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
@@ -2945,9 +2946,16 @@ export class LlmChat {
       this.unaccountedMemorySnapshots.add(snapshot);
     }
     // Recovery controls are removed after continuation and cannot own a durable snapshot.
-    return snapshot && !retainMemorySnapshot
-      ? appendAutoMemoryContext(request, catalog)
-      : request;
+    const withCatalog =
+      snapshot && !retainMemorySnapshot
+        ? appendAutoMemoryContext(request, catalog)
+        : request;
+    // Every user entry in this request copy is reordered the same way, so an
+    // entry's wire shape does not depend on its position; stored history keeps
+    // the shape the transcript and resume read.
+    return currentUserContent
+      ? movePromptContextAheadOfUserText(withCatalog)
+      : withCatalog;
   }
 
   /**
@@ -6020,8 +6028,9 @@ export class LlmChat {
         };
         const overBudget =
           onPreparedRequest.maxSnapshotBytes !== undefined &&
-          Buffer.byteLength(JSON.stringify(prepared)) >
-            onPreparedRequest.maxSnapshotBytes;
+          (onPreparedRequest.maxSnapshotBytes <= 0 ||
+            Buffer.byteLength(JSON.stringify(prepared)) >
+              onPreparedRequest.maxSnapshotBytes);
         await onPreparedRequest(
           overBudget ? prepared : structuredClone(prepared),
           continuationInFlight ||
@@ -7003,6 +7012,7 @@ export class LlmChat {
       currentUserTurn?.role === 'user' &&
       currentUserTurn.parts?.some((part) => part.functionResponse) === true;
     let deferredFinishReason: FinishReason | undefined;
+    let deferredFinishMessage: string | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -7222,7 +7232,11 @@ export class LlmChat {
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
               deferredFinishReason ??= candidate.finishReason;
+              deferredFinishMessage ??= candidate.finishMessage;
               delete candidate.finishReason;
+              // The message is replayed with the deferred reason at the end of
+              // the stream; keeping it here would ship a notice with no reason.
+              delete candidate.finishMessage;
             }
           }
         }
@@ -7859,7 +7873,14 @@ export class LlmChat {
     abortSignal?.throwIfAborted();
     if (deferredFinishReason) {
       yield {
-        candidates: [{ finishReason: deferredFinishReason }],
+        candidates: [
+          {
+            finishReason: deferredFinishReason,
+            ...(deferredFinishMessage
+              ? { finishMessage: deferredFinishMessage }
+              : {}),
+          },
+        ],
         usageMetadata,
       } as GenerateContentResponse;
     }

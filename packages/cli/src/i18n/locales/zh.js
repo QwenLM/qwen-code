@@ -22,8 +22,6 @@ export default {
   '{{count}} hours': '{{count}}小时',
   Retry: '重试',
   'Connecting…': '正在连接…',
-  'Could not connect Qwen Subscription. Please try again.':
-    '无法连接 Qwen 订阅，请重试。',
   'Loading models from provider…': '正在加载服务商模型…',
   'Recommended models · provider list unavailable, showing built-ins':
     '推荐模型 · 无法获取服务商列表，显示内置模型',
@@ -2057,6 +2055,7 @@ export default {
   'Model Usage': '模型使用情况',
   'Input Tokens': '输入 token 数',
   'Output Tokens': '输出 token 数',
+  'Output (incl. Reasoning)': '输出（含推理）',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
     '从缓存载入 token ，降低了成本',

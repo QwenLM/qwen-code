@@ -45,6 +45,8 @@ public class ManagedNativeJournalSnapshots {
     static final String PAYLOAD_FORMAT = "committed-prefix-v1";
     static final int MAX_PAGE_BYTES = 16 * 1024 * 1024;
     private static final String OWNER = "NATIVE_SNAPSHOT";
+    /** Claim attempts for one publication: the initial try plus deadlock retries. */
+    private static final int CLAIM_ATTEMPTS = 3;
     private final JdbcTemplate jdbc;
     private final ManagedSessionStore sessions;
     private final ObjectMapper json;
@@ -89,7 +91,21 @@ public class ManagedNativeJournalSnapshots {
         Basis basis = isolated.execute(status -> new Basis(sessions.lockSnapshotWriter(tenant, session, token, request),
                 retention.read(tenant, session)));
         try {
-            return isolated.execute(status -> build(tenant, session, token, request, basis));
+            // Build is retried when InnoDB rolls it back as a deadlock victim,
+            // wherever in Build that happens. For two publishers of the same
+            // snapshot that both find no manifest row, the claim's upsert is
+            // where they can still meet (see claim); the retry's locking read
+            // then waits for the winner's row and answers the replay
+            // descriptor, unless the winner rolled back too.
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    return isolated.execute(status -> build(tenant, session, token, request, basis));
+                } catch (RuntimeException error) {
+                    if (attempt >= CLAIM_ATTEMPTS || !JournalFencing.deadlockVictim(error)) {
+                        throw error;
+                    }
+                }
+            }
         } finally {
             isolated.executeWithoutResult(status -> basis.lease().close());
         }
@@ -392,8 +408,8 @@ public class ManagedNativeJournalSnapshots {
             case "input.accepted" -> List.of("contentRef", "admissionRef");
             case "activation.changed" -> List.of("installRef", "boundaryRef");
             case "model.attempt" -> List.of("routeRef", "inputCheckpointRef", "usageRef", "recoveryRef");
-            case "message.committed" -> List.of("contentRef");
-            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef");
+            case "message.committed" -> List.of("contentRef", "diagnosticsRef");
+            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef", "diagnosticsRef");
             case "hosted.batch.planned" -> List.of("planRef");
             case "hosted.cleanup" -> List.of("descriptorRef");
             case "action.changed" -> List.of("optionsRef", "decisionRef");
@@ -442,6 +458,11 @@ public class ManagedNativeJournalSnapshots {
                     && resource.schemaVersion() == next.path("schemaVersion").asInt(-1)
                     && resource.byteLength() == next.path("byteLength").asLong(-1)
                     && resource.digest().equals(next.path("digest").asText()), "managed_session_snapshot_corrupt");
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+                require(resource.schemaVersion() == 1, "managed_session_snapshot_corrupt");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(
+                        resource.kind(), decode(resource.bytes(), JsonNode.class));
+            }
             if (seen.add(id) && structured(resource.kind())) {
                 JsonNode body = decode(resource.bytes(), JsonNode.class);
                 if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
@@ -494,19 +515,43 @@ public class ManagedNativeJournalSnapshots {
         return new StoredResource(id, kind, 1, bytes.length, digest, bytes);
     }
 
+    /**
+     * Claims the manifest row. A second publication of the same snapshot
+     * waits here until the first commits and then replays it, or, when the
+     * first rolls back, finds no row and claims it itself. The wait lasts at
+     * most innodb_lock_wait_timeout from when it queues: a Build that holds
+     * the row longer fails the waiting publication with a lock wait timeout
+     * (MySQL error 1205), which publish does not retry; it retries only
+     * deadlock victims (1213).
+     *
+     * <p>An upsert that meets the first publication's uncommitted row queues
+     * for it with a next-key lock, since resource_key is a secondary unique
+     * index. The first Build's page inserts can fall into that lock's gap,
+     * and InnoDB then rolls the waiting publication back, once per such
+     * insert while it waits. So the claim first locks the row by key: at READ
+     * COMMITTED, which publications run at, that takes the row's record lock
+     * when the row exists, committed or not, waiting while another
+     * transaction holds it, and takes no lock when it does not; only a
+     * missing row is upserted. Two publications that both pass the read
+     * before either row exists can still meet in the upsert; publish retries
+     * the one rolled back.
+     */
     private void claim(String tenant, String workspace, String session, String snapshotId) {
         String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
         String id = manifestId(scope, snapshotId);
+        String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id);
         byte[] pending = "{}".getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
-                + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id), scope, tenant, workspace, session, id, MANIFEST_KIND,
-                pending.length, DigestUtils.sha256Hex(pending), pending);
+        if (jdbc.queryForList("SELECT 1 FROM ma_resource WHERE resource_key = ? FOR UPDATE", Integer.class, key).isEmpty()) {
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+                    + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
+                    + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
+                    + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
+                    key, scope, tenant, workspace, session, id, MANIFEST_KIND,
+                    pending.length, DigestUtils.sha256Hex(pending), pending);
+        }
         var rows = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                 + " storage_kind, state, object_key, object_version_id, encryption_key_id FROM ma_resource WHERE resource_key = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id));
+                key);
         require(rows.size() == 1 && tenant.equals(rows.getFirst().get("tenant_id"))
                 && workspace.equals(rows.getFirst().get("workspace_id")) && session.equals(rows.getFirst().get("session_id"))
                 && id.equals(rows.getFirst().get("resource_id")) && MANIFEST_KIND.equals(rows.getFirst().get("kind"))

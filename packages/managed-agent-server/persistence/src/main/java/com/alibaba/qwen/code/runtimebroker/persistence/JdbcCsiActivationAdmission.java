@@ -24,6 +24,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Shared native CSI journal semantics for live admission and read-only historical inspection. */
 public final class JdbcCsiActivationAdmission {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -118,7 +120,7 @@ public final class JdbcCsiActivationAdmission {
                 "SELECT capability_digest FROM ma_runtime_binding WHERE binding_id = ?")) {
             JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
             try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "capability_digest"))) {
+                if (!row.next() || !CsiFilesRetirementProfile.isCapabilityDigest(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "capability_digest"))) {
                     return;
                 }
             }
@@ -503,7 +505,7 @@ public final class JdbcCsiActivationAdmission {
                 require(head.next() && original.request().getIsolationKey().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(head, "harness_session_id"))
                         && original.request().getScope().getWorkspaceId().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(head, "workspace_id"))
                         && "ACTIVE".equals(head.getString("state")) && head.getLong("writer_generation") > 0
-                        && head.getInt("storage_version") == 1
+                        && CsiFilesRetirementProfile.supportsStorage(original.request().getScope(), head.getInt("storage_version"))
                         && head.getLong("compacted_through_revision") == 0
                         && "READY".equals(head.getString("recovery_status")));
                 require(ManagedSchemaTime.timestamp(head, "writer_lease_until") != null);
@@ -945,12 +947,6 @@ public final class JdbcCsiActivationAdmission {
         }
     }
 
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
-    }
-
     record JournalRead(long started) {
         static final JournalRead LIVE = new JournalRead(0);
 
@@ -962,7 +958,7 @@ public final class JdbcCsiActivationAdmission {
 
         PreparedStatement statement(Connection connection, String sql) throws SQLException {
             if (started == 0) {
-                return JdbcCsiActivationAdmission.statement(connection, sql + " FOR UPDATE");
+                return JdbcRepositorySupport.statement(connection, sql + " FOR UPDATE");
             }
             requireHistorical(connection);
             var result = connection.prepareStatement(sql);

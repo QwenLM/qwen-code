@@ -23,8 +23,6 @@ export default {
   '{{count}} hours': '{{count}} hours',
   Retry: 'Retry',
   'Connecting…': 'Connecting…',
-  'Could not connect Qwen Subscription. Please try again.':
-    'Could not connect Qwen Subscription. Please try again.',
   'Loading models from provider…': 'Loading models from provider…',
   'Recommended models · provider list unavailable, showing built-ins':
     'Recommended models · provider list unavailable, showing built-ins',
@@ -2144,6 +2142,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Input Tokens',
   'Output Tokens': 'Output Tokens',
+  'Output (incl. Reasoning)': 'Output (incl. Reasoning)',
   'Savings Highlight:': 'Savings Highlight:',
   'of input tokens were served from the cache, reducing costs.':
     'of input tokens were served from the cache, reducing costs.',

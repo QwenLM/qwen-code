@@ -21,7 +21,10 @@ export interface RecentSessionEntry {
   workspaceCwd?: string;
 }
 
-export function sortRecentSessions(entries: RecentSessionEntry[]) {
+export function sortRecentSessions(
+  entries: RecentSessionEntry[],
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
+) {
   const unique = new Map<string, RecentSessionEntry>();
   for (const entry of entries) {
     const { session } = entry;
@@ -38,10 +41,14 @@ export function sortRecentSessions(entries: RecentSessionEntry[]) {
     unique.set(JSON.stringify([entry.workspaceCwd, session.sessionId]), entry);
   }
   const activity = (session: DaemonSessionSummary) =>
-    Math.max(
-      Date.parse(session.updatedAt ?? '') || 0,
-      Date.parse(session.createdAt ?? '') || 0,
-    );
+    sortBy === 'lastUserPromptAt'
+      ? Number.isFinite(Date.parse(session.lastUserPromptAt ?? ''))
+        ? Date.parse(session.lastUserPromptAt!)
+        : Number.MIN_SAFE_INTEGER
+      : Math.max(
+          Date.parse(session.updatedAt ?? '') || 0,
+          Date.parse(session.createdAt ?? '') || 0,
+        );
   return [...unique.values()]
     .sort(
       (a, b) =>
@@ -56,6 +63,7 @@ export function sortRecentSessions(entries: RecentSessionEntry[]) {
 async function readRecentPage(
   load: (cursor?: string) => Promise<DaemonSessionListPage>,
   workspaceCwd?: string,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): Promise<RecentSessionEntry[]> {
   let cursor: string | undefined;
   const entries: RecentSessionEntry[] = [];
@@ -65,11 +73,12 @@ async function readRecentPage(
       ...page.sessions.map((session) => ({ session, workspaceCwd })),
     );
     cursor = page.nextCursor;
-  } while (cursor && sortRecentSessions(entries).length < LIMIT);
-  return sortRecentSessions(entries);
+  } while (cursor && sortRecentSessions(entries, sortBy).length < LIMIT);
+  return sortRecentSessions(entries, sortBy);
 }
 
 interface RecentSessionsProps {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   client: DaemonClient;
   workspaces: DaemonWorkspaceCapability[];
   includeStandalone: boolean;
@@ -85,6 +94,7 @@ interface RecentSessionsProps {
 }
 
 export function RecentSessions({
+  sortBy,
   client,
   workspaces,
   includeStandalone,
@@ -120,6 +130,7 @@ export function RecentSessions({
     includeStandalone,
     sourceMetadataEnabled,
     organizationEnabled,
+    sortBy,
   ]);
 
   useEffect(() => {
@@ -133,6 +144,7 @@ export function RecentSessions({
           (cursor) =>
             client.listWorkspaceSessionsPage(cwd, {
               archiveState: 'active',
+              ...(sortBy !== undefined ? { sortBy } : {}),
               ...(organizationEnabled
                 ? { view: 'organized' as const, group: 'all' }
                 : {}),
@@ -141,16 +153,21 @@ export function RecentSessions({
               ...(sourceMetadataEnabled ? { sourceType: 'default' } : {}),
             }),
           cwd,
+          sortBy,
         ),
       );
       if (includeStandalone)
         requests.push(
-          readRecentPage((cursor) =>
-            client.listStandaloneSessionsPage({
-              archiveState: 'active',
-              pageSize: 50,
-              cursor,
-            }),
+          readRecentPage(
+            (cursor) =>
+              client.listStandaloneSessionsPage({
+                archiveState: 'active',
+                ...(sortBy !== undefined ? { sortBy } : {}),
+                pageSize: 50,
+                cursor,
+              }),
+            undefined,
+            sortBy,
           ),
         );
       const results = await Promise.allSettled(requests);
@@ -160,6 +177,7 @@ export function RecentSessions({
           results.flatMap((result) =>
             result.status === 'fulfilled' ? result.value : [],
           ),
+          sortBy,
         ),
       );
       setFailed(results.some((result) => result.status === 'rejected'));
@@ -179,6 +197,7 @@ export function RecentSessions({
     includeStandalone,
     sourceMetadataEnabled,
     organizationEnabled,
+    sortBy,
     expanded,
     refreshPaused,
     currentSessionId,

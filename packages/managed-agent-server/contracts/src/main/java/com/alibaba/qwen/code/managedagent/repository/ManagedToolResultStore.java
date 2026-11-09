@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationC
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -45,7 +46,7 @@ public interface ManagedToolResultStore {
             String beforeId, int limit);
 
     public static String identity(String prefix, String... values) {
-        var digest = new java.io.ByteArrayOutputStream();
+        var digest = new ByteArrayOutputStream();
         for (String value : values) {
             byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
             digest.writeBytes(ByteBuffer.allocate(4).putInt(bytes.length).array());

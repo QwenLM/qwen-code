@@ -49,6 +49,33 @@ interface Scenario {
   approvals?: Array<'allow' | 'deny'>;
   /** Presses Esc once this text is on screen. */
   cancelOn?: string;
+  /** Submits `input` once `on` is on screen, while the turn runs. */
+  queue?: { on: string; input: string };
+  /** Presses Ctrl+Y this many times after the prompt, each after a turn. */
+  retries?: number;
+  /**
+   * The session starts turns of its own after the prompts, a Goal's
+   * continuations, a background task's notification or a cron fire: waits
+   * until it has sent all `requests`.
+   */
+  laterTurns?: boolean;
+  /** Environment for the TUI, over the suite's. */
+  env?: Record<string, string>;
+  /**
+   * The reply to a request that does not stream, such as a Goal check;
+   * `undefined` leaves it to the suite's.
+   */
+  sideReply?: (body: JsonObject) => FakeOpenAIResponse | undefined;
+  /** The requests that do not stream each run must send, when checked. */
+  sideRequests?: number;
+  /** What else differs per run in this scenario. */
+  volatile?: Volatile;
+  /**
+   * For requests from more than one agent, whose order across agents varies
+   * from run to run: which agent sent a request. Each agent's requests are
+   * compared in the order it sent them.
+   */
+  agent?: (messages: JsonObject[]) => string;
   /** The model requests each run must send, retries included. */
   requests: number;
   /**
@@ -75,11 +102,20 @@ interface Scenario {
     messages: JsonObject[],
     dir: string,
     index: number,
-  ) => FakeOpenAIResponse;
+  ) => FakeOpenAIResponse | Promise<FakeOpenAIResponse>;
+}
+
+interface Volatile {
+  /** Fields to leave out. */
+  keys?: string[];
+  /** Text to replace, applied to the JSON text. */
+  text?: Array<[RegExp, string]>;
 }
 
 interface Run {
   requests: unknown[];
+  /** The requests that do not stream, such as a Goal check. */
+  sideRequests: unknown[];
   records: unknown[];
   /** The screen after the last prompt. */
   screen: string;
@@ -144,6 +180,8 @@ const VOLATILE_KEYS = new Set([
   'event.timestamp',
   // When a write backed up the file it replaced.
   'backupTime',
+  // A shell command's process.
+  'pid',
 ]);
 
 // Timings, such as the telemetry recorded with each response.
@@ -166,22 +204,41 @@ const isDateReminder = (part: unknown) =>
   typeof (part as JsonObject)?.['text'] === 'string' &&
   DATE_REMINDER.test((part as JsonObject)['text'] as string);
 
-/** `dir` is the workspace; `scratch`, which holds it, is the run's home. */
-function normalize(value: unknown, dir: string, scratch: string): unknown {
+/**
+ * `dir` is the workspace; `scratch`, which holds it, is the run's home;
+ * `volatile`, what else differs per run in the scenario.
+ */
+function normalize(
+  value: unknown,
+  dir: string,
+  scratch: string,
+  volatile: Volatile = {},
+): unknown {
   const replaced = JSON.parse(
-    JSON.stringify(value ?? null)
-      .split(dir)
-      .join('<DIR>')
-      .split(scratch)
-      .join('<SCRATCH>')
-      .replace(RANDOM_ID, '<ID>'),
+    (volatile.text ?? []).reduce(
+      (text, [pattern, replacement]) => text.replace(pattern, replacement),
+      JSON.stringify(value ?? null)
+        .split(dir)
+        .join('<DIR>')
+        .split(scratch)
+        .join('<SCRATCH>')
+        .replace(RANDOM_ID, '<ID>')
+        // A shell command's result names its process group.
+        .replace(/Process Group PGID: \d+/g, 'Process Group PGID: <PGID>'),
+    ),
   );
+  const keys = new Set(volatile.keys);
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
     if (node && typeof node === 'object') {
       return Object.fromEntries(
         Object.entries(node as JsonObject)
-          .filter(([key]) => !VOLATILE_KEYS.has(key) && !TIMING_KEY.test(key))
+          .filter(
+            ([key]) =>
+              !VOLATILE_KEYS.has(key) &&
+              !keys.has(key) &&
+              !TIMING_KEY.test(key),
+          )
           .map(([key, child]) => [key, strip(child)]),
       );
     }
@@ -193,15 +250,24 @@ function normalize(value: unknown, dir: string, scratch: string): unknown {
 /**
  * Each request body as the client sent it, without the date reminder: every
  * message field, `reasoning_content` included, the tools offered and the
- * sampling options.
+ * sampling options. `stream` picks the model's rounds or the side requests,
+ * such as a Goal check.
  */
 function modelRequests(
   server: FakeOpenAIServer,
   dir: string,
   scratch: string,
+  scenario: Scenario,
+  stream = true,
 ): unknown[] {
-  return server.requests
-    .filter((request) => request.body['stream'] === true)
+  const sent = server.requests.filter(
+    (request) => (request.body['stream'] === true) === stream,
+  );
+  const agentOf = (request: (typeof sent)[number]) =>
+    scenario.agent?.((request.body['messages'] ?? []) as JsonObject[]) ?? '';
+  const agents = [...new Set(sent.map(agentOf))].sort();
+  return agents
+    .flatMap((name) => sent.filter((request) => agentOf(request) === name))
     .map((request) =>
       normalize(
         {
@@ -220,6 +286,7 @@ function modelRequests(
         },
         dir,
         scratch,
+        scenario.volatile,
       ),
     );
 }
@@ -229,6 +296,7 @@ function sessionRecords(
   runtimeDir: string,
   dir: string,
   scratch: string,
+  volatile?: Volatile,
 ): unknown[] {
   return files(runtimeDir)
     .filter((file) => file.endsWith('.jsonl') && file.includes('chats'))
@@ -252,6 +320,7 @@ function sessionRecords(
         },
         dir,
         scratch,
+        volatile,
       ),
     );
 }
@@ -325,7 +394,9 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
             workspace,
             streamingIndex++,
           )
-        : { content: '{"selected_memories":[]}' },
+        : (scenario.sideReply?.(body) ?? {
+            content: '{"selected_memories":[]}',
+          }),
     );
     session = await InteractiveSession.start({
       cwd: workspace,
@@ -349,6 +420,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         QWEN_DEBUG_LOG_FILE: '1',
         NO_PROXY: 'localhost,127.0.0.1',
         no_proxy: 'localhost,127.0.0.1',
+        ...scenario.env,
         ...(shared ? { QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '1' } : {}),
       },
       args: [
@@ -369,6 +441,20 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       'initialization completes',
     );
     await session.idle(300, 5_000);
+
+    // A turn is over once the spinner stops and no request is in flight.
+    const turnEnds = async () => {
+      await sleep(500);
+      await session!.idle(2_000, 90_000);
+      await until(
+        () =>
+          server!.requests.every(
+            (request) => request.transport.closedAt !== undefined,
+          ),
+        'model requests complete',
+      );
+      await session!.idle(1_000, 30_000);
+    };
 
     for (const prompt of scenario.prompts) {
       await session.send(prompt);
@@ -395,17 +481,29 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         await sleep(1_500);
         session.pressKey('\x1b');
       }
-      // A turn is over once the spinner stops and no request is in flight.
-      await sleep(500);
-      await session.idle(2_000, 90_000);
+      if (scenario.queue) {
+        await until(
+          async () => (await session!.viewport()).includes(scenario.queue!.on),
+          'the tool starts',
+        );
+        await sleep(1_000);
+        await session.send(scenario.queue.input);
+      }
+      await turnEnds();
+      for (let retry = 0; retry < (scenario.retries ?? 0); retry++) {
+        session.pressKey('\x19');
+        await turnEnds();
+      }
+    }
+    if (scenario.laterTurns) {
       await until(
         () =>
-          server!.requests.every(
-            (request) => request.transport.closedAt !== undefined,
-          ),
-        'model requests complete',
+          server!.requests.filter((request) => request.body['stream'] === true)
+            .length >= scenario.requests,
+        'the session starts its later turns',
+        90_000,
       );
-      await session.idle(1_000, 30_000);
+      await turnEnds();
     }
 
     const screen = await session.screen();
@@ -423,8 +521,14 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
           .join('')
       : '';
     return {
-      requests: modelRequests(server, workspace, scratch),
-      records: sessionRecords(runtimeDir, workspace, scratch),
+      requests: modelRequests(server, workspace, scratch, scenario),
+      sideRequests: modelRequests(server, workspace, scratch, scenario, false),
+      records: sessionRecords(
+        runtimeDir,
+        workspace,
+        scratch,
+        scenario.volatile,
+      ),
       screen,
       sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
@@ -435,6 +539,27 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     fakeToolCall('read_file', { file_path: file }, id);
   const write = (file: string, content: string, id: string) =>
     fakeToolCall('write_file', { file_path: file, content }, id);
+
+  // The teammate scenario's helper, told apart by its task, which only the
+  // helper's user messages carry; the leader's carry it inside its tool call.
+  const HELPER_TASK = 'HELPER TASK:';
+  const isHelper = (messages: JsonObject[]) =>
+    messages.some(
+      (message) =>
+        message['role'] === 'user' &&
+        JSON.stringify(message['content']).includes(HELPER_TASK),
+    );
+  // The Goal scenario's check, told apart by its system prompt.
+  const isGoalCheck = (body: JsonObject) =>
+    JSON.stringify(
+      ((body['messages'] ?? []) as JsonObject[])[0]?.['content'],
+    ).includes('Goal Verifier');
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => (resolve = done));
+    return { promise, resolve };
+  };
+  let leaderWaiting = deferred();
 
   const scenarios: Scenario[] = [
     {
@@ -624,6 +749,261 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       reply: () => ({ errorContent: 'upstream exploded' }),
     },
     {
+      name: 'a retry after a model error',
+      requests: 2,
+      rounds: 2,
+      batches: 0,
+      prompts: ['Fail once.'],
+      retries: 1,
+      recorded: 'Recovered.',
+      reply: (_messages, _dir, index) =>
+        index === 0
+          ? { errorContent: 'upstream exploded' }
+          : { content: 'Recovered.' },
+    },
+    {
+      name: 'a retry that fails again',
+      requests: 3,
+      rounds: 3,
+      batches: 0,
+      prompts: ['Fail twice.'],
+      retries: 2,
+      recorded: 'Recovered.',
+      reply: (_messages, _dir, index) =>
+        index < 2
+          ? { errorContent: 'upstream exploded' }
+          : { content: 'Recovered.' },
+    },
+    {
+      // The retried tool-result round calls another tool, whose batch the
+      // retry's turn runs and continues.
+      name: 'a retried tool-result round that calls a tool',
+      requests: 4,
+      rounds: 4,
+      batches: 2,
+      prompts: ['Read both files.'],
+      files: { 'a.txt': 'alpha\n', 'b.txt': 'beta\n' },
+      retries: 1,
+      recorded: 'Both read.',
+      reply: (_messages, dir, index) =>
+        index === 0
+          ? { toolCalls: [read(join(dir, 'a.txt'), 'call_a')] }
+          : index === 1
+            ? { errorContent: 'upstream exploded' }
+            : index === 2
+              ? { toolCalls: [read(join(dir, 'b.txt'), 'call_b')] }
+              : { content: 'Both read.' },
+    },
+    {
+      // Input submitted while a tool runs goes out with its result.
+      name: 'input queued while a tool runs',
+      requests: 2,
+      rounds: 2,
+      batches: 1,
+      prompts: ['Run the slow command.'],
+      queue: { on: 'queue-now', input: 'Also mention the weather.' },
+      sent: 'Also mention the weather.',
+      reply: (messages) =>
+        toolResults(messages) === 0
+          ? {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  {
+                    command:
+                      'echo queue-now && node -e "setTimeout(() => {}, 5000)"',
+                    is_background: false,
+                  },
+                  'call_slow',
+                ),
+              ],
+            }
+          : { content: 'Done, and it is sunny.' },
+    },
+    {
+      // The first continuation stops on its own; the second reads the
+      // forecast and then proposes that the Goal is complete, which the
+      // check accepts.
+      name: 'a Goal its second continuation completes',
+      recorded: 'verifier_accept',
+      requests: 3,
+      rounds: 3,
+      batches: 2,
+      prompts: ['/goal Report the weather.'],
+      files: { 'forecast.txt': 'sunny\n' },
+      laterTurns: true,
+      reply: (_messages, dir, index) =>
+        index === 0
+          ? { content: 'Checking the forecast.' }
+          : index === 1
+            ? { toolCalls: [read(join(dir, 'forecast.txt'), 'call_read')] }
+            : {
+                toolCalls: [
+                  fakeToolCall(
+                    'update_goal',
+                    { status: 'complete', reason: 'The forecast is sunny.' },
+                    'call_goal',
+                  ),
+                ],
+              },
+      sideRequests: 1,
+      sideReply: (body) =>
+        isGoalCheck(body)
+          ? {
+              content:
+                '{"decision":"accept","reason":"The forecast was given."}',
+            }
+          : undefined,
+      // When the Goal was set and last changed.
+      volatile: { keys: ['createdAt', 'updatedAt'] },
+    },
+    {
+      // The job outlasts the prompt, so its result starts a turn of its own,
+      // which reads the job's log.
+      name: 'a background shell whose result starts a notification turn',
+      sent: '<task-notification>',
+      requests: 4,
+      rounds: 4,
+      batches: 2,
+      prompts: ['Run the job in the background.'],
+      files: { 'job.log': 'job log\n' },
+      laterTurns: true,
+      recorded: 'The job is done.',
+      // The job's task id, its process and the project's runtime directory,
+      // named by a hash of the workspace path.
+      volatile: {
+        text: [
+          [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
+          [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
+          [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
+        ],
+      },
+      reply: (_messages, dir, index) =>
+        index === 0
+          ? {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  {
+                    command: 'sleep 3; echo job done',
+                    description: 'Run the job',
+                    is_background: true,
+                  },
+                  'call_job',
+                ),
+              ],
+            }
+          : index === 1
+            ? { content: 'The job is running.' }
+            : index === 2
+              ? { toolCalls: [read(join(dir, 'job.log'), 'call_log')] }
+              : { content: 'The job is done.' },
+    },
+    {
+      // The job fires once, soon after the prompt, and its turn reads a file.
+      // A fire during the prompt's turn waits for it to end, as any
+      // notification does.
+      name: 'a cron job whose turn reads a file',
+      // The fired prompt as a user message; the model's own call carries it
+      // only as escaped arguments.
+      sent: '"text":"Read the readme."',
+      requests: 4,
+      rounds: 4,
+      batches: 2,
+      prompts: ['Remind me to read the readme.'],
+      files: { 'readme.txt': 'readme body\n' },
+      env: {
+        QWEN_CODE_DISABLE_CRON: '0',
+        QWEN_CODE_TEST_CRON_FAST: '1',
+        QWEN_CODE_TEST_CRON_DELAY_MS: '1000',
+      },
+      laterTurns: true,
+      recorded: 'It says readme body.',
+      // The job's id.
+      volatile: {
+        text: [
+          [/(Scheduled (?:one-shot task )?)[0-9a-z]{8}(?= \()/g, '$1<CRON>'],
+        ],
+      },
+      reply: (_messages, dir, index) =>
+        index === 0
+          ? {
+              toolCalls: [
+                fakeToolCall(
+                  'cron_create',
+                  {
+                    cron: '0 0 1 1 *',
+                    prompt: 'Read the readme.',
+                    recurring: false,
+                  },
+                  'call_cron',
+                ),
+              ],
+            }
+          : index === 1
+            ? { content: 'Scheduled.' }
+            : index === 2
+              ? { toolCalls: [read(join(dir, 'readme.txt'), 'call_read')] }
+              : { content: 'It says readme body.' },
+    },
+    {
+      // A teammate's final answer reaches the leader once its turn ended,
+      // and starts a teammate turn, which reads a file.
+      name: 'a teammate report that starts a teammate turn',
+      sent: '<teammate_message',
+      requests: 6,
+      rounds: 5,
+      batches: 3,
+      prompts: ['Ask a helper to check the weather.'],
+      files: { 'weather.txt': 'sunny\n' },
+      env: { QWEN_CODE_ENABLE_AGENT_TEAM: '1' },
+      laterTurns: true,
+      agent: (messages) => (isHelper(messages) ? 'helper' : 'leader'),
+      recorded: 'The helper says it is sunny.',
+      reply: (messages, dir) => {
+        if (isHelper(messages)) {
+          // The helper answers once the leader sent its last round, past the
+          // tool boundary that would take the report: that round calls no
+          // tool, so the report waits for the leader's turn to end and starts
+          // a turn of its own on both runs.
+          return leaderWaiting.promise.then(() => ({
+            content: 'HELPER REPORT: it is sunny.',
+          }));
+        }
+        if (JSON.stringify(messages).includes('HELPER REPORT'))
+          return toolResults(messages) === 2
+            ? { toolCalls: [read(join(dir, 'weather.txt'), 'call_read')] }
+            : { content: 'The helper says it is sunny.' };
+        switch (toolResults(messages)) {
+          case 0:
+            leaderWaiting = deferred();
+            return {
+              toolCalls: [
+                fakeToolCall('team_create', { team_name: 'crew' }, 'call_team'),
+              ],
+            };
+          case 1:
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'agent',
+                  {
+                    name: 'helper',
+                    subagent_type: 'general-purpose',
+                    description: 'Check the weather',
+                    prompt: `${HELPER_TASK} Check the weather.`,
+                  },
+                  'call_helper',
+                ),
+              ],
+            };
+          default:
+            leaderWaiting.resolve();
+            return { content: 'Waiting for the helper.' };
+        }
+      },
+    },
+    {
       name: 'a UserPromptSubmit hook that blocks',
       requests: 0,
       rounds: 1,
@@ -670,6 +1050,8 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     expect(shared.sharedBatches).toBe(scenario.batches);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
+      if (scenario.sideRequests !== undefined)
+        expect(run.sideRequests).toHaveLength(scenario.sideRequests);
       if (scenario.shows) expect(run.screen).toContain(scenario.shows);
       else expect(run.records.length).toBeGreaterThan(0);
       if (scenario.recorded)
@@ -678,6 +1060,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         expect(JSON.stringify(run.requests)).toContain(scenario.sent);
     }
     expect(shared.requests).toEqual(current.requests);
+    expect(shared.sideRequests).toEqual(current.sideRequests);
     expect(shared.records).toEqual(current.records);
   });
 });
