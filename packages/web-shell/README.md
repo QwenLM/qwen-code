@@ -5,7 +5,11 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 ## 宿主已有 Managed Session
 
-`ManagedAgentWebShell` 支持注入 `managedAgentProvider`，省略时仍创建 Java provider。
+`ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略它时必须同时传 `baseUrl`，
+由它创建内置 Java provider。两者都给不出时渲染的是 shell 自己的错误回退界面（守卫
+的错误信息只打到 `console.error`，不会抛给宿主），不会把请求解析到
+`<origin>/undefined`。恢复需要宿主重新提供 `baseUrl` 或新的 provider：边界只通过
+`resetKeys` 清除错误，回退界面自带的「重试」会用相同 props 重渲染并再次落到同一错误。
 宿主传 `hostSessionOnly: true` 时只打开显式给定的 `sessionId`，隐藏内部会话列表、
 New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建。官方消息列表和 composer
 沿用 provider 的真实 capabilities；四 API 宿主应设置 `canCancel: false`、省略不支持的
@@ -14,7 +18,8 @@ New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建
 非 React 宿主可使用本地 ESM 入口：
 
 ```ts
-import { renderManagedAgentWebShell } from './managed-host/index.js';
+// 相对于产物目录根（dist-managed-host/）；该目录已整体提供给宿主。
+import { renderManagedAgentWebShell } from './index.js';
 
 const shell = renderManagedAgentWebShell(container, {
   managedAgentProvider: provider,
@@ -26,11 +31,16 @@ const shell = renderManagedAgentWebShell(container, {
 // update 接受完整的新 props；宿主销毁时调用 shell.unmount()。
 ```
 
-在包内执行 `npx vite build --config vite.lib.config.ts --mode managed-host`，输出
-`dist/managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
+在包内执行 `npm run build:managed-host`，输出
+`dist-managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
 复用原有 scoped CSS 注入，无需单独 CSS 或 import map。需提供整个输出目录。
-该入口仅随源码提供：没有接入 `build`、`exports` 和 `files`，不随 npm 包发布（
-`dist/types/managed-host.d.ts` 也在发布产物之外），需要时按上述命令自行构建。
+该模式**不在**包的 `build` 里，避免给每次本地构建和全新克隆的 `prepare` 增加一次完整
+打包；防腐坏由独立 CI 任务 `Web Shell Managed Host Build` 承担，只在入口、构建配置或
+锁文件变化时触发。产物目录在 `dist/` 之外，普通应用构建清空 `dist/` 不会删掉它。
+入口仍未接入 `exports` 和 `files`，不随 npm 包发布（`dist/types/managed-host.d.ts`
+也在发布产物之外）。
+`navigationTarget` / `archivedNavigationTarget` 指向 shell 容器之外的宿主插槽时，
+入口会把列表包进带作用域标记的容器并同步主题变量，宿主无需自行引入 CSS。
 自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与
 storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
 [宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。
