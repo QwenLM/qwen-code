@@ -594,19 +594,6 @@ function trimBashEdgeSeparators(command: string): string {
   return command.slice(start, end);
 }
 
-/**
- * Decode the escapes an ANSI-C word (`$'…'`) applies, so a payload hidden
- * behind `\n` is analysed as the two commands bash runs.
- *
- * Bash decodes the simple escapes in `ANSI_C_SIMPLE`; an escape it does not
- * know keeps its backslash. Mapping
- * `\x3b` to `x` produced a word bash never runs (`--amendx3btrue`) while bash
- * ran `--amend; true`, so the numeric forms are decoded for real.
- *
- * Lives here rather than in `shell-semantics.ts` because the wrapper stripper
- * below needs the same decoder and shell-semantics already imports this module
- * (#16075 review, R11-2: importing back would create a cycle).
- */
 const ANSI_C_SIMPLE: Record<string, string> = {
   a: '\x07',
   b: '\b',
@@ -623,16 +610,19 @@ const ANSI_C_SIMPLE: Record<string, string> = {
   '?': '?',
 };
 
+/**
+ * Decode one ANSI-C (`$'…'`) escape at `index`, or null when the backslash
+ * starts no escape bash knows (bash then keeps it literal). Shared with the
+ * shell-semantics tokenizer, which imports this module already.
+ */
 export function decodeAnsiCEscape(
   body: string,
   index: number,
-): { text: string; length: number; bytes?: number[] } | null {
+): { text: string; length: number } | null {
   if (body[index] !== '\\' || index + 1 >= body.length) return null;
   const next = body[index + 1]!;
   const simple = ANSI_C_SIMPLE[next];
-  if (simple !== undefined) {
-    return { text: simple, bytes: [...Buffer.from(simple, 'utf8')], length: 2 };
-  }
+  if (simple !== undefined) return { text: simple, length: 2 };
   if (next === 'x' || next === 'u' || next === 'U') {
     const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
     const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
@@ -641,340 +631,94 @@ export function decodeAnsiCEscape(
     if (digits) {
       const code = parseInt(digits, 16);
       const length = 2 + digits.length;
-      // `String.fromCodePoint` throws above U+10FFFF, but bash does not reject
-      // the word: it keeps widening the UTF-8 form — four bytes to
-      // U+1FFFFF, five to U+3FFFFFF, six beyond (`printf %s $'\U00110000'`
-      // is `f4908080`, `\U00200000` is `f888808080`, `\UFFFFFFFF` is
-      // `ffbfbfbfbfbf`, exit 0, on bash 5.3.20). Emit those bytes so the
-      // resolved word is the word the shell builds rather than throwing
-      // out of the permission guard
-      // (#16540 review, R3-3).
+      // `String.fromCodePoint` throws above U+10FFFF; keep the escape literal
+      // instead of throwing out of the permission guard.
       if (next !== 'x' && code > 0x10ffff) {
-        if (code > 0x3ffffff) {
-          return {
-            text: body.slice(index, index + length),
-            bytes: [
-              (0xfc | (code >> 30)) & 0xff,
-              0x80 | ((code >> 24) & 0x3f),
-              0x80 | ((code >> 18) & 0x3f),
-              0x80 | ((code >> 12) & 0x3f),
-              0x80 | ((code >> 6) & 0x3f),
-              0x80 | (code & 0x3f),
-            ],
-            length,
-          };
-        }
-        if (code > 0x1fffff) {
-          return {
-            text: body.slice(index, index + length),
-            bytes: [
-              0xf8 | (code >> 24),
-              0x80 | ((code >> 18) & 0x3f),
-              0x80 | ((code >> 12) & 0x3f),
-              0x80 | ((code >> 6) & 0x3f),
-              0x80 | (code & 0x3f),
-            ],
-            length,
-          };
-        }
-        return {
-          text: body.slice(index, index + length),
-          bytes: [
-            0xf0 | (code >> 18),
-            0x80 | ((code >> 12) & 0x3f),
-            0x80 | ((code >> 6) & 0x3f),
-            0x80 | (code & 0x3f),
-          ],
-          length,
-        };
+        return { text: body.slice(index, index + length), length };
       }
-      // bash writes BYTES for `\xHH` (and octal below); decoding each byte as
-      // U+00xx turned a UTF-8 sequence into mojibake, so the byte is carried
-      // alongside the legacy text form (#16540 review, R1-4).
-      const bytes =
-        next === 'x'
-          ? [code & 0xff]
-          : next !== 'x' && code >= 0xd800 && code <= 0xdfff
-            ? // A lone surrogate: bash writes the three-byte WTF-8 form
-              // (`$'\uD800'` is `ed a0 80`), while String.fromCodePoint's
-              // UTF-8 encode replaced it with U+FFFD — a write target no rule
-              // keyed on the real bytes could match (#16540 review, R3-3).
-              [
-                0xe0 | (code >> 12),
-                0x80 | ((code >> 6) & 0x3f),
-                0x80 | (code & 0x3f),
-              ]
-            : [...Buffer.from(String.fromCodePoint(code), 'utf8')];
       return {
         text:
           next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code),
-        bytes,
         length,
       };
     }
   }
-  // `\c` needs an operand letter. At the end of the word bash keeps `\c`
-  // literal; when the tokenizer passes the raw command, the next character
-  // is then the CLOSING quote, and consuming it as the operand left the
-  // ANSI-C state open and swallowed the rest of the command line
-  // (#16075 review, R8-2 / R10-1).
+  // `\c` needs an operand letter; at the end of the word (or right before the
+  // closing quote of the raw command) bash keeps it literal. Consuming the
+  // closing quote as the operand would swallow the rest of the command line.
   if (next === 'c' && index + 2 < body.length && body[index + 2] !== "'") {
-    const operand = body[index + 2]!;
-    const code =
-      operand === '?'
-        ? 0x7f // `\c?` is DEL in bash, not the 0x1F mask (#16540 review, R1-6)
-        : operand.toUpperCase().charCodeAt(0) & 0x1f;
-    return { text: String.fromCharCode(code), bytes: [code], length: 3 };
+    return {
+      text: String.fromCharCode(
+        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
+      ),
+      length: 3,
+    };
   }
   if (next >= '0' && next <= '7') {
     const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
-    const code = parseInt(digits, 8) & 0xff;
     return {
-      text: String.fromCharCode(code),
-      bytes: [code],
+      text: String.fromCharCode(parseInt(digits, 8) & 0xff),
       length: 1 + digits.length,
     };
   }
   return null;
 }
 
-export function decodeAnsiCWord(body: string): string {
-  return Buffer.from(decodeAnsiCBytes(body)).toString('utf8');
-}
-
 /**
- * The BYTES bash builds from one ANSI-C segment. The string form cannot
- * represent them: `\xff`, `\xfe` and `\777` are distinct write targets that
- * all collapse to U+FFFD through a UTF-8 decode, so a rule keyed on the real
- * path never matches (#16540 review, R3-3). Callers that join adjacent
- * segments accumulate these bytes and decode once, which is also what makes
- * a UTF-8 sequence split across segments (`$'\xe4\xbd'$'\xa0'` → 你) come out
- * right (#16540 review, R2-7). Each byte is carried as one char code, a
- * latin1-style byte string.
+ * Decode a whole ANSI-C word body. A NUL ends the word bash builds:
+ * `$'--\0x'` is the word `--`; the rest of the segment is dropped.
  */
-export function decodeAnsiCBytes(body: string): number[] {
-  // bash builds BYTES from an ANSI-C word and hands them to the program, so a
-  // multi-byte UTF-8 sequence spelled `\xc3\xa9` is `é`, not `Ã©`
-  // (#16540 review, R1-4). Literal characters and `\u`/`\U` code points are
-  // encoded to bytes too, and the word is decoded as UTF-8 at the end.
-  const bytes: number[] = [];
-  const pushText = (text: string) => {
-    for (const byte of Buffer.from(text, 'utf8')) bytes.push(byte);
-  };
+function decodeAnsiCWord(body: string): string {
+  let out = '';
   for (let index = 0; index < body.length; index++) {
     const escape = decodeAnsiCEscape(body, index);
     if (!escape) {
-      // Unknown escape: bash keeps the backslash and the letter. A literal
-      // non-BMP character arrives as a surrogate pair, and encoding each UTF-16
-      // unit on its own turns both halves into U+FFFD, so the decoded word is
-      // not the word bash builds (#16540 review, R2-2).
-      const codePoint = body.codePointAt(index)!;
-      pushText(String.fromCodePoint(codePoint));
-      if (codePoint > 0xffff) index++;
+      out += body[index]!;
       continue;
     }
-    // A NUL ends the word bash builds: `$'--\0x'` is the word `--`, so the
-    // rest of THIS ANSI-C segment is dropped. The truncation stays inside the
-    // segment — bash appends any following concatenation segment (`f $'a\0b'c`
-    // is `ac`), and the caller decodes each segment separately (#16075 R11-2).
     if (escape.text === '\0') break;
-    if (escape.bytes) bytes.push(...escape.bytes);
-    else pushText(escape.text);
-    // After `\c\` the operand backslash is consumed and the character it
-    // escapes is LITERAL text, not a new escape: bash writes 61 1c 74 62 for
-    // both `$'a\c\\tb'` and `$'a\c\tb'`, so the `t` is a `t` and not a TAB
-    // (#16540 review, R3-3).
-    if (
-      escape.length === 3 &&
-      body[index + 2] === '\\' &&
-      index + 3 < body.length
-    ) {
-      let at = index + 3;
-      // That literal character can itself be a backslash, which then escapes
-      // the character after it: bash writes 61 1c 74 62 for BOTH `$'a\c\tb'`
-      // and `$'a\c\\tb'`, so the extra backslash is consumed rather than
-      // emitted (#16540 review, R3-3).
-      if (body[at] === '\\' && at + 1 < body.length) at++;
-      const codePoint = body.codePointAt(at)!;
-      pushText(String.fromCodePoint(codePoint));
-      index = at + (codePoint > 0xffff ? 1 : 0);
-    } else {
-      index += escape.length - 1;
-    }
+    out += escape.text;
+    index += escape.length - 1;
   }
-  return bytes;
+  return out;
 }
 
 /**
- * The word a token denotes once the shell removes its quoting, so an option
- * terminator written `'--'`, `"--"`, `\--`, `$'--'`, `$"--"`, `$'\x2d\x2d'`
- * or the concatenation `-'-'` is the same word as `--` (#16075 review,
- * R6-1 / R8-11 / R11-2).
- *
- * Returns null when the word carries an expansion that cannot be resolved
- * statically (`$TERM`, `$(…)`, backticks) or an unterminated quote: the caller
- * must fail closed rather than hand the token on as a program word.
- *
- * Locale quoting `$"…"` does NOT decode ANSI-C escapes: bash translates the
- * body but keeps the backslashes, so `$"\x2d\x2d"` is the word `\x2d\x2d`
- * and never the terminator `--`. Witnessed on bash 5.3.20: `printf '%s'
- * $"\x2d\x2d"` prints `\x2d\x2d`, and `bash -c '$"\x2d\x2d"'` reports
- * `\x2d\x2d: command not found` — the program name keeps the backslashes, so
- * the word is treated like a double-quoted one (#16540 review, R3-12).
+ * The word a token denotes once the shell removes its quoting, so `'--'`,
+ * `"--"`, `\--`, `$'--'`, `$'\x2d\x2d'` and `-'-'` all read as `--`.
+ * Expansion syntax stays literal text and sets `hasExpansion`; such a word
+ * is not a resolved terminator. Returns null on an unterminated quote.
+ * Locale quoting `$"…"` does NOT decode ANSI-C escapes (bash runs a program
+ * literally named `x2dx2d` for `$"\x2d\x2d"`), so it reads like a
+ * double-quoted word.
  */
-interface QuoteRemovedWord {
-  /** The word with quoting removed; expansion syntax is kept as literal text. */
-  text: string;
-  /** The word carries an expansion (`$…`, backtick) somewhere. */
-  hasExpansion: boolean;
-  /**
-   * Every expansion introducer sits inside a quoted span, so the word is a
-   * single fully quoted word (possibly a concatenation of quoted segments).
-   * Such a word is still the `-c` payload even though its value is not static;
-   * only an UNQUOTED expansion leaves the terminator position truly ambiguous
-   * (#16075 review, R13-1).
-   */
-  fullyQuoted: boolean;
-  /**
-   * Reading the word needed a decode step — an ANSI-C `$'…'` / `$\<newline>'…'`
-   * segment or a locale `$"…"` introducer — so `text` is a value the spelling
-   * does not show. A plainly quoted word is false: its `text` is what quote
-   * removal always gave, and callers that reconstruct a command from the
-   * spelling must keep doing so (#16540 review, R4-6).
-   */
-  decoded: boolean;
-}
-
-/**
- * First index at or after `from` of `target` outside quotes and escapes, or -1.
- * A brace — or an operator — inside `'…'` / `"…"` / `$'…'` is data. Nested groups
- * are not matched (the first unquoted `}` wins), which only makes the callers
- * more conservative.
- */
-function findUnquotedChar(token: string, from: number, target: string): number {
-  let quote: '"' | "'" | '' = '';
-  let ansiC = false;
-  for (let i = from; i < token.length; i++) {
-    const ch = token[i]!;
-    if (quote === "'") {
-      // Inside `$'…'` a backslash escapes the next character, so `\'` does not
-      // close the word; in a plain `'…'` the backslash is literal. Reading both
-      // the same way closed the word early and brace-expanded text that was
-      // still quoted data (#16540 review, R3-5).
-      if (ansiC && ch === '\\') {
-        i++;
-        continue;
-      }
-      if (ch === "'") {
-        quote = '';
-        ansiC = false;
-      }
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === '\\') i++;
-      else if (ch === '"') quote = '';
-      continue;
-    }
-    if (ch === '\\') {
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      ansiC = ch === "'" && opensAnsiCQuote(token, i);
-      continue;
-    }
-    if (ch === target) return i;
-  }
-  return -1;
-}
-
-/**
- * Whether the body of a brace group carries the separator bash needs to expand
- * it: an unquoted `,` (list) or `..` (sequence). A quoted separator is data.
- */
-function hasBraceExpansionSeparator(braceBody: string): boolean {
-  // One scanner for all of it: `findUnquotedChar` already models `'…'`, `"…"`,
-  // backslash escapes and `$'…'` (where `\'` does NOT close the word), so a
-  // separator inside an ANSI-C word is data. The private state machine this used
-  // to carry read `$'a\',b'` as closed at the escaped quote and split the group
-  // in the middle of a word (#16540 review, R3-5).
-  if (findUnquotedChar(braceBody, 0, ',') !== -1) return true;
-  for (
-    let dot = findUnquotedChar(braceBody, 0, '.');
-    dot !== -1;
-    dot = findUnquotedChar(braceBody, dot + 1, '.')
-  ) {
-    if (braceBody[dot + 1] === '.') return true;
-  }
-  return false;
-}
-
-/**
- * Quote removal that keeps expansion syntax as text and reports whether the
- * word is fully quoted. Returns null only on an unterminated quote/escape. The
- * option-terminator test reads the fail-closed projection (a word with any
- * expansion is not a resolved terminator); the wrapper unwrap also needs the
- * quoted-but-dynamic payload text so op extraction and the self-kill gate keep
- * seeing the script the shell runs (#16075 review, R13-1).
- */
-function shellWordQuoteRemoval(token: string): QuoteRemovedWord | null {
+function shellWordQuoteRemoval(
+  token: string,
+): { text: string; hasExpansion: boolean } | null {
   let out = '';
   let hasExpansion = false;
-  let unquotedExpansion = false;
-  let decoded = false;
-  // Bytes of the ANSI-C run being read. Adjacent `$'…'` segments concatenate
-  // at the BYTE level in bash, so a UTF-8 sequence split across them
-  // (`$'\xe4\xbd'$'\xa0'` → 你) must decode once, not per segment
-  // (#16540 review, R2-7). NUL truncation stays per segment.
-  let ansiCRun: number[] | null = null;
-  const flushAnsiCRun = () => {
-    if (ansiCRun === null) return;
-    out += Buffer.from(ansiCRun).toString('utf8');
-    ansiCRun = null;
-  };
   let i = 0;
   const n = token.length;
   while (i < n) {
     const ch = token[i]!;
     if (ch === "'") {
-      // Single-quoted span: verbatim, no expansion, backslash is literal.
       const close = token.indexOf("'", i + 1);
       if (close === -1) return null;
-      flushAnsiCRun();
       out += token.slice(i + 1, close);
       i = close + 1;
       continue;
     }
     if (ch === '\\' && i + 1 < n) {
-      // Unquoted escape: the next character is literal; a continuation
-      // disappears outright.
       if (token[i + 1] === '\n') {
         i += 2;
         continue;
       }
-      flushAnsiCRun();
       out += token[i + 1];
       i += 2;
       continue;
     }
-    // `$\<newline>'…'` is still an ANSI-C word: the backslash-newline is
-    // removed before the quote is read. Reading `token[i + 1]` directly missed
-    // it, so the payload stayed a plain quoted word and the op extraction saw
-    // nothing (#16540 review, R1-11).
-    let ansiCStart = i + 1;
-    while (
-      ansiCStart + 1 < n &&
-      token[ansiCStart] === '\\' &&
-      token[ansiCStart + 1] === '\n'
-    ) {
-      ansiCStart += 2;
-    }
-    if (ch === '$' && ansiCStart < n && token[ansiCStart] === "'") {
-      decoded = true;
-      // ANSI-C word: escapes decode; find the first UNESCAPED closing quote.
-      let j = ansiCStart + 1;
+    if (ch === '$' && i + 1 < n && token[i + 1] === "'") {
+      let j = i + 2;
       let body = '';
       while (j < n) {
         if (token[j] === '\\' && j + 1 < n) {
@@ -986,17 +730,12 @@ function shellWordQuoteRemoval(token: string): QuoteRemovedWord | null {
         body += token[j];
         j++;
       }
-      if (j >= n) return null; // unterminated
-      if (ansiCRun === null) ansiCRun = [];
-      ansiCRun.push(...decodeAnsiCBytes(body));
+      if (j >= n) return null;
+      out += decodeAnsiCWord(body);
       i = j + 1;
       continue;
     }
     if (ch === '"') {
-      flushAnsiCRun();
-      // Double-quoted (or locale `$"…"`, whose introducer was consumed as an
-      // expansion below) span: backslash is special only before $ ` " \ and
-      // newline; everything else keeps both characters.
       i++;
       let closed = false;
       while (i < n) {
@@ -1029,169 +768,53 @@ function shellWordQuoteRemoval(token: string): QuoteRemovedWord | null {
       continue;
     }
     if (ch === '$') {
-      flushAnsiCRun();
-      // Locale quoting: same escape rules as a double-quoted word, no ANSI-C
-      // decoding. Re-enter the loop with the quote handled above. The introducer
-      // can be split by a continuation — `$\<newline>"…"` is still locale
-      // quoting, and reading `token[i + 1]` classified it as an unquoted
-      // expansion, so the payload's writes were never analysed
-      // (#16540 review, R3-4).
-      if (ansiCStart < n && token[ansiCStart] === '"') {
-        decoded = true;
-        i = ansiCStart;
+      if (token[i + 1] === '"') {
+        i++;
         continue;
       }
-      // Parameter / command / arithmetic expansion: not statically resolvable.
       hasExpansion = true;
-      unquotedExpansion = true;
       out += ch;
       i++;
       continue;
     }
     if (ch === '`') {
-      flushAnsiCRun();
       hasExpansion = true;
-      unquotedExpansion = true;
       out += ch;
       i++;
       continue;
     }
-    if (ch === '{') {
-      flushAnsiCRun();
-      // Unquoted brace expansion turns ONE word into several: bash expands
-      // `{--,'cat > /etc/motd'}` to `--` and the payload, so the token is not
-      // the single literal word the static reading assumed. Treat it like an
-      // unquoted `$X` and fail closed (#16540 review, R4-2). A QUOTED brace
-      // word (`'{--,x}'`) is data and never reaches this branch.
-      const close = findUnquotedChar(token, i + 1, '}');
-      if (
-        close !== -1 &&
-        hasBraceExpansionSeparator(token.slice(i + 1, close))
-      ) {
-        hasExpansion = true;
-        unquotedExpansion = true;
-      }
-      out += ch;
-      i++;
-      continue;
-    }
-    flushAnsiCRun();
     out += ch;
     i++;
   }
-  flushAnsiCRun();
-  return { text: out, hasExpansion, fullyQuoted: !unquotedExpansion, decoded };
+  return { text: out, hasExpansion };
 }
 
 /**
- * Expand a word carrying one unquoted brace group (`{a,b}`) into the words the
- * shell builds, each quote-removed. Prefix and suffix are re-attached to every
- * alternative, as bash expands the brace before quote removal — so
- * `{--,'cat > /etc/motd'}""` is still the option terminator plus the script.
- * Returns null when the group is not statically enumerable (nested group,
- * sequence range, dynamic alternative): the caller must then fail closed.
- *
- * Brace expansion runs before quote removal, so `{--,'cat > /etc/motd'}` is TWO
- * words (`--` and the script), not the single opaque word the static reading
- * used to hand back (#16540 review, R4-2).
+ * True when the word right after `-c` is the option terminator `--` in any
+ * quoting bash resolves to that word, including ANSI-C escapes and a NUL
+ * truncation (`$'--\0x'`). A word carrying an expansion is not a resolved
+ * terminator; it keeps the base reading as the payload word.
  */
-/** Whether a resolved word carries literal text besides its expansions. A word
- * that is nothing but expansion (`"$X"`, `"$(printf -- --)"`) can resolve to the
- * `--` terminator or to nothing, so it cannot be read as the script itself
- * (#16540 review, R4-4). */
-function hasLiteralBeyondExpansions(text: string): boolean {
-  const withoutExpansions = text.replace(
-    /\$\{[^}]*\}|\$\([^)]*\)|\$[A-Za-z_@*#0-9?]+|`[^`]*`/g,
-    '',
-  );
-  return withoutExpansions.trim().length > 0;
+function isOptionTerminatorWord(token: string): boolean {
+  const removed = shellWordQuoteRemoval(token);
+  return removed !== null && !removed.hasExpansion && removed.text === '--';
 }
 
-/** Widest brace product this scan enumerates before failing closed; only the
- * first word or two are ever read (#16540 review, R3-6). */
-const BRACE_EXPANSION_WORD_LIMIT = 64;
-
-/** Deepest brace-group chain the scan follows. Six two-part groups already
- * reach the word cap, so anything deeper cannot contribute a word a caller
- * reads — and the per-group recursion otherwise blows the stack on a ~30 KB
- * model-supplied word before the word cap is ever checked (#16540 R5-1). */
-const BRACE_EXPANSION_DEPTH_LIMIT = 8;
-
-function expandBraceWords(token: string, depth = 0): string[] | null {
-  if (depth > BRACE_EXPANSION_DEPTH_LIMIT) return null;
-  const trimmed = token.trim();
-  // An unquoted operator ends the word before any expansion happens: bash reads
-  // `{ls,cat>/tmp/p}` as the word `{ls,cat` plus a redirect, and truncates the
-  // file. Modelled as a brace word the operator disappeared, `stripShellWrapper`
-  // returned `ls`, and a write auto-allowed as read-only. Refuse to expand and
-  // let the caller hand back the whole command (#16540 review, R4-3). Quoted
-  // operators still expand: `{--,'cat > /etc/motd'}` is one word.
-  for (const operator of ['>', '<', '|', ';', '&', '(', ')', '\n']) {
-    if (findUnquotedChar(trimmed, 0, operator) !== -1) return null;
-  }
-  const open = findUnquotedChar(trimmed, 0, '{');
-  if (open === -1) return null;
-  const close = findUnquotedChar(trimmed, open + 1, '}');
-  if (close === -1) return null;
-  const body = trimmed.slice(open + 1, close);
-  if (!hasBraceExpansionSeparator(body)) return null;
-  // Split on UNQUOTED commas with the same scanner the rest of this file uses,
-  // so `$'…'` is one word and a comma inside it is data (#16540 review, R3-5).
-  // An unterminated quote is left to the quote removal below, which returns null
-  // for it and fails the expansion closed.
-  const parts: string[] = [];
-  let start = 0;
-  for (
-    let comma = findUnquotedChar(body, 0, ',');
-    comma !== -1;
-    comma = findUnquotedChar(body, comma + 1, ',')
+/**
+ * The rest after a `-c` option terminator, or null when the first word is
+ * not a resolved `--` or no payload word follows it (a flag-only wrapper
+ * keeps the base reading so the cron gate keeps refusing it).
+ */
+function restAfterOptionTerminator(rest: string): string | null {
+  const terminator = takeLeadingToken(rest);
+  if (
+    terminator &&
+    isOptionTerminatorWord(terminator.token) &&
+    takeLeadingToken(terminator.rest)
   ) {
-    parts.push(body.slice(start, comma));
-    start = comma + 1;
+    return terminator.rest;
   }
-  parts.push(body.slice(start));
-  if (parts.length < 2) return null;
-  // Nested groups (cartesian expansion) are not enumerated.
-  if (parts.some((part) => part.includes('{'))) return null;
-  // Every group multiplies the word count, and only the first word (or the
-  // second, behind a `--`) is ever read. Eighteen two-part groups in a
-  // 98-character wrapper enumerated 2^18 words and blew the stack, so cap the
-  // product and fail closed instead (#16540 review, R3-6).
-  if (parts.length > BRACE_EXPANSION_WORD_LIMIT) return null;
-  const prefix = trimmed.slice(0, open);
-  const suffix = trimmed.slice(close + 1);
-  const words: string[] = [];
-  for (const part of parts) {
-    const candidate = prefix + part + suffix;
-    // A second group in the suffix expands too: `{a,b}{c,d}` is the cartesian
-    // product in that order, and the first word is what the shell runs. Bailing
-    // out here handed the whole command back unchanged, so the payload's
-    // redirect stayed invisible (#16540 review, R3-6).
-    const expanded = expandBraceWords(candidate, depth + 1);
-    if (expanded !== null) {
-      // One push at a time: spreading a large array passes it as arguments and
-      // overflows the stack long before the work is done (#16540 review, R3-6).
-      for (const word of expanded) {
-        words.push(word);
-        if (words.length > BRACE_EXPANSION_WORD_LIMIT) return null;
-      }
-      continue;
-    }
-    const removal = shellWordQuoteRemoval(candidate);
-    if (removal === null || removal.hasExpansion) return null;
-    // The recursion refused a candidate that still carries a group: that is the
-    // cap above, not a leaf word, so the caller must fail closed rather than
-    // analyse a literal brace word (#16540 review, R3-6).
-    if (findUnquotedChar(candidate, 0, '{') !== -1) return null;
-    // bash elides an alternative that resolves to the empty word (`{,x}` is
-    // just `x`), so keeping it made `braceWords[0]` empty and the caller read
-    // the NEXT word — the one bash only passes as `$0` (#16540 review, R5-5).
-    if (removal.text !== '') {
-      words.push(removal.text);
-      if (words.length > BRACE_EXPANSION_WORD_LIMIT) return null;
-    }
-  }
-  return words;
+  return null;
 }
 
 export function stripShellWrapper(command: string): string {
@@ -1221,108 +844,19 @@ export function stripShellWrapper(command: string): string {
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       // `sh -c -- '…'` puts an option terminator before the command string;
-      // reading it as the program handed the guard a lone `--`. Every quoting
-      // of the same word (`'--'`, `"--"`, `\--`, `$'--'`, `$'\x2d\x2d'`,
-      // `-'-'`) is still the terminator to the shell (#16075 review,
-      // R6-1 / R11-2).
+      // reading it as the program handed the guard a lone `--` while bash
+      // ran the next word. Every spelling of the same decoded word counts.
+      // cmd/PowerShell have no option parser: `--` stays a literal program.
       let markerRest = token.rest;
-      const terminator = takeLeadingToken(markerRest);
-      const terminatorQuote = terminator
-        ? shellWordQuoteRemoval(terminator.token)
-        : null;
-      const terminatorWord =
-        terminatorQuote && !terminatorQuote.hasExpansion
-          ? terminatorQuote.text
-          : null;
-      // A brace word expands into several words before the shell reads the
-      // options: `bash -c {--,'cat > /etc/motd'}` is the option terminator
-      // followed by the script, exactly like `bash -c -- 'cat > /etc/motd'`
-      // (witnessed: `bash -c {--,'echo A-RAN'}` prints A-RAN). Handing the brace
-      // word back as one literal word hid the payload's writes from op
-      // extraction (#16540 review, R4-2). Brace expansion is POSIX-shell
-      // syntax; cmd.exe / PowerShell only get their remaining tokens after /c
-      // or -Command.
-      const posixWrapper = !shellWrapperCommandConsumesRest(wrapperToken.token);
-      const braceWords =
-        posixWrapper && terminator ? expandBraceWords(terminator.token) : null;
-      if (braceWords !== null) {
-        const script = braceWords[0] === '--' ? braceWords[1] : braceWords[0];
-        if (script) return script;
-      }
-      if (terminator && terminatorWord === '--' && posixWrapper) {
-        // Only a POSIX shell parses `--` as the option terminator; cmd.exe /
-        // PowerShell hand the rest of the line to the command, where `--` is
-        // the program name — skipping it described a command the shell never
-        // runs (#16540 review, R1-8 / R3-13).
-        markerRest = terminator.rest;
-      } else if (terminator && terminatorWord === null) {
-        // The word carries an expansion we cannot resolve (`sh -c $X 'cmd'`):
-        // it may be the terminator (then 'cmd' is the payload) or the payload
-        // itself (then 'cmd' is only $0). A single FULLY QUOTED word is still
-        // the script the shell runs, so unwrap its quote-removed text — handing
-        // back the whole command made every `stripShellWrapper(x) !== x`
-        // consumer read the wrapper as wrapper-free and drop the payload's
-        // writes / self-kill pattern (#16075 review, R13-1). An UNQUOTED
-        // expansion (`sh -c $TERM 'ls -l'`) keeps handing back the whole
-        // command; the monitor still scans it and the cron gate refuses it via
-        // wrapperPayloadUnresolved.
-        // …but only when the word carries literal content. A word that is
-        // nothing but expansion (`"$X"`, `"$(printf -- --)"`) may itself resolve
-        // to the terminator, and unwrapping it as the script dropped the real
-        // payload — the write and the `pkill -f qwen` self-kill both vanished
-        // (#16540 review, R4-4).
-        if (
-          terminatorQuote?.fullyQuoted &&
-          hasLiteralBeyondExpansions(terminatorQuote.text)
-        ) {
-          return terminatorQuote.text || trimmed;
-        }
-        // The slot may be the terminator or may vanish, and in both readings the
-        // word AFTER it is the script (`bash -c $(echo '--') 'cat > ~/.bashrc'`
-        // writes the file; measured). Handing back the whole command left that
-        // word inside quotes, so op extraction saw nothing and the self-kill gate
-        // stayed silent (#16540 review, R4-5). The monitor path still marks the
-        // wrapper unresolved, so the cron gate refuses it either way.
-        const following = takeLeadingToken(terminator.rest);
-        const followingQuote =
-          following === null ? null : shellWordQuoteRemoval(following.token);
-        if (followingQuote !== null && followingQuote.text !== '') {
-          return followingQuote.text;
-        }
-        return trimmed;
+      if (!shellWrapperCommandConsumesRest(wrapperToken.token)) {
+        markerRest = restAfterOptionTerminator(markerRest) ?? markerRest;
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
-      // The same brace expansion can occupy the payload slot after an explicit
-      // `--` (`bash -c -- {'cat > /etc/motd',x}` runs its first word): the
-      // expansion's first word IS the script.
-      const payloadBraceWords = posixWrapper
-        ? expandBraceWords(commandToken.token)
-        : null;
-      if (payloadBraceWords !== null && payloadBraceWords[0]) {
-        return payloadBraceWords[0];
-      }
-      const payloadQuote = shellWordQuoteRemoval(commandToken.token);
-      const { value, quote } = stripSymmetricQuotes(commandToken.token);
-      // An ANSI-C payload (`bash -c $'cat > /etc/motd'`) is the decoded text
-      // the shell runs, not a quoted literal: handing back the `$'…'` spelling
-      // made op extraction and the self-kill gate miss the payload
-      // (#16540 review, R1-3).
-      // Read the resolved word, not the spelling: a substring test on `$'`
-      // missed both `$\<newline>'…'` and the locale form `$"…"`, so those
-      // payloads came back raw and op extraction saw nothing (#16540 review,
-      // R2-1).
-      // Project the RESOLVED word whenever the token is fully quoted, expansion
-      // or not: `-- "echo ${X}"' > /etc/motd'` resolves to a script whose `>`
-      // sits outside every quoted span, and keeping the spelling meant op
-      // extraction never saw the write. The terminator gate above keeps its own
-      // `!hasExpansion` test, so an unresolvable `-c` slot still fails closed
-      // (#16540 review, R4-6a).
-      const innerCommand =
-        payloadQuote !== null && payloadQuote.fullyQuoted
-          ? payloadQuote.text
-          : value;
-      if (quote === '' && shellWrapperCommandConsumesRest(wrapperToken.token)) {
+      const { value: innerCommand, quote } = stripSymmetricQuotes(
+        commandToken.token,
+      );
+      if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return markerRest.trimStart() || trimmed;
       }
       return innerCommand || trimmed;
@@ -1873,75 +1407,11 @@ export function detectSelfKillCommand(command: string): boolean {
  * at the end at all.
  */
 export function stripTrailingBackgroundAmp(command: string): string {
-  // Escaped-ness is a parity question, not a one-character one: `x\\&` ends
-  // with a literal backslash followed by a real operator, so only an ODD run of
-  // backslashes escapes it (#16540 review, R3-7).
-  if (!endsWithBackgroundAmp(command)) return command;
-  return command.trimEnd().slice(0, -1).trimEnd();
-}
-
-/** The command the monitor spawns for a wrapper whose payload cannot be
- * resolved: the payload word verbatim, with the trailing background `&`
- * normalised away exactly as `stripTrailingBackgroundAmp` does above. Keeping
- * the `&` made the tracked shell fork the payload and exit before it, so
- * `settleFromExit(0)` completed the monitor and a failing payload read as
- * success (#16075 review, R13-1). */
-function buildMonitorSpawnOverride(
-  wrapperTokens: string[],
-  payloadToken: string,
-  rest: string,
-): string {
-  // Normalise the payload WORD, not the joined command: with a positional
-  // argument after the payload (`bash -c "… &" arg0`) the `&` is no longer at
-  // the end of the string, and the tracked shell still backgrounds the payload
-  // (#16540 review, R1-1 second round).
-  const suffix = stripTrailingBackgroundAmp(rest.replace(/^[ \t]+/, ''));
-  return [
-    wrapperTokens.join(' '),
-    stripPayloadBackgroundAmp(payloadToken),
-    suffix,
-  ]
-    .filter(Boolean)
-    .join(' ');
-}
-
-/** Strip the background `&` the monitored shell would run for the payload,
- * whether it sits just inside the payload's closing quote (`bash -c "tail -f
- * $LOG &"`), glued after it (`bash -c "$X"&`), or after the whole command.
- * `&&` and `\&` stay untouched, like `stripTrailingBackgroundAmp`
- * (#16540 review, R1-1). */
-function stripPayloadBackgroundAmp(payloadToken: string): string {
-  // Strip the payload's own background `&` from its script text: spaced before
-  // the closing quote (`"… &"`), glued after it (`"…"&`), or behind an unquoted
-  // prefix (`x"$Y &"`). `&&` and `\&` are not background operators, and an `&`
-  // that ends a NESTED quoted word (`"echo $X '&'"`) is script data — the
-  // trimming below only fires when the last non-space character of the script
-  // text is the bare operator (#16540 review, R1-1 second round / R4-1).
-  const trimmed = payloadToken.trimEnd();
-  // Decide from the RESOLVED script text, never from the spelling. Inside `"…"`
-  // a `\\` is one literal backslash, so `"echo a \\&"` resolves to `echo a \&`
-  // whose `&` is escaped data; parity read off the raw token saw an even run,
-  // stripped the `&` and handed the monitor a command the user never wrote
-  // (#16540 review, R4-9).
-  const removal = shellWordQuoteRemoval(trimmed);
-  const text = removal === null ? trimmed : removal.text;
-  if (!endsWithBackgroundAmp(text)) return trimmed;
-  // And strip at most ONE operator. `$'cat /tmp/x & &'` is a script bash refuses
-  // to parse (exit 2, loudly); trimming both turned it into a runnable command
-  // that backgrounds and exits 0, i.e. a failure the monitor reports as success.
-  // Leave such a payload exactly as the user wrote it and let the caller fail
-  // closed (#16540 review, R4-8).
-  if (endsWithBackgroundAmp(stripTrailingBackgroundAmp(text))) return trimmed;
-  // Anchored at the END of the token, not at its start: an unquoted prefix
-  // (`bash -c x"$Y &"`) still closes with a quoted span whose `&` is the
-  // background operator the tracked shell runs. Leaving it in made the shell
-  // fork the payload and exit before it, so the monitor saw rc 0 for a failing
-  // payload (#16540 review, R4-1).
-  const closing = /[ \t]*&[ \t]*(["'])$/.exec(trimmed);
-  if (closing === null) return stripTrailingBackgroundAmp(trimmed);
-  const ampIndex = closing.index + closing[0].indexOf('&');
-  if (ampIndex > 0 && trimmed[ampIndex - 1] === '&') return trimmed;
-  return `${trimmed.slice(0, closing.index).trimEnd()}${closing[1]}`;
+  const trimmed = command.trimEnd();
+  if (!trimmed.endsWith('&')) return command;
+  if (trimmed.endsWith('&&')) return command;
+  if (trimmed.endsWith('\\&')) return command;
+  return trimmed.slice(0, -1).trimEnd();
 }
 
 export function hasNonFinalTopLevelBackgroundOperator(
@@ -2052,41 +1522,6 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
-  /**
-   * A shell wrapper was recognized, but the word after `-c` carries an
-   * expansion that cannot be resolved statically, so the whole command is
-   * handed back for scanning instead of a payload (#16075 review, R11-2).
-   * The monitor still scans everything; a consumer that reads "normalization
-   * left this command unchanged" as "this is not a wrapper" (the cron gate)
-   * must not: the shell runs the glued script while the rules read raw text.
-   */
-  wrapperPayloadUnresolved?: boolean;
-  /**
-   * Spawn this exact text instead of reconstructing it from the wrapper tokens
-   * and the quote-removed payload. Set when the payload word is a fully quoted
-   * word with a dynamic value: the analysis reads the quote-removed script, but
-   * re-quoting a mixed concatenation faithfully is not possible, so the monitor
-   * spawns the command exactly as written (#16075 review, R13-1).
-   */
-  spawnOverride?: string;
-  /**
-   * The `-c` slot is nothing but an expansion, so which word is the script
-   * cannot be proved statically: if the expansion resolves to `--` (or to
-   * nothing) the word after it is the script, otherwise that word is only `$0`.
-   * An UNQUOTED expansion is also word-split, so it can inject anything.
-   * Analysis still projects the following word so its writes and self-kill
-   * pattern are seen, but no caller may auto-allow on that projection
-   * (#16540 review, R4-4 / R4-5 / round 6).
-   */
-  wrapperScriptUnprovable?: boolean;
-  /**
-   * The payload's background operator cannot be removed without rewriting the
-   * user's bytes (an encoded `\x26`, or two operators where trimming one would
-   * leave a runnable command). The spawn therefore still backgrounds the payload
-   * and the tracked shell exits 0 before it finishes, so the monitor must refuse
-   * the command instead of reporting success (#16540 review, R3-7).
-   */
-  payloadOperatorUnstrippable?: boolean;
 }
 
 export interface NormalizedMonitorCommand {
@@ -2094,19 +1529,6 @@ export interface NormalizedMonitorCommand {
   safetyCommand: string;
   spawnCommand: string;
   strippedTrailingAmp: boolean;
-  /** See {@link ParsedMonitorShellWrapper.wrapperPayloadUnresolved}. */
-  wrapperPayloadUnresolved?: boolean;
-}
-
-/**
- * True when the quote at `quoteIndex` opens an ANSI-C word: `$'…'`, or
- * `$\<newline>'…'`, where the continuation is removed before the quote is read
- * (#16540 review, R1-11 spells the same shape for quote removal).
- */
-function opensAnsiCQuote(token: string, quoteIndex: number): boolean {
-  let j = quoteIndex - 1;
-  while (j >= 1 && token[j] === '\n' && token[j - 1] === '\\') j -= 2;
-  return j >= 0 && token[j] === '$';
 }
 
 function takeLeadingToken(
@@ -2118,11 +1540,6 @@ function takeLeadingToken(
   }
 
   let quote: '"' | "'" | '' = '';
-  // `$'…'` is not a plain single-quoted word: `\'` is an escaped quote rather
-  // than the close, so scanning for the first `'` cut the token in half and the
-  // payload never reached op extraction or the self-kill gate (#16540 review,
-  // R2-3). A plain `'…'` still closes at its first quote.
-  let ansiCQuote = false;
   let escaped = false;
   let inBackticks = false;
   let commandSubstitutionDepth = 0;
@@ -2135,18 +1552,6 @@ function takeLeadingToken(
     }
 
     if (quote === "'") {
-      if (ansiCQuote) {
-        if (escaped) {
-          escaped = false;
-        } else if (char === '\\') {
-          escaped = true;
-        } else if (char === "'") {
-          quote = '';
-          ansiCQuote = false;
-        }
-        idx++;
-        continue;
-      }
       if (char === "'") {
         quote = '';
       }
@@ -2192,7 +1597,6 @@ function takeLeadingToken(
 
     if (char === '"' || char === "'") {
       quote = char;
-      ansiCQuote = char === "'" && opensAnsiCQuote(trimmed, idx);
       idx++;
       continue;
     }
@@ -2370,7 +1774,6 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 
   rest = wrapperToken.rest;
   const wrapperTokens = [...leadingEnvTokens, wrapperToken.token];
-  const posixWrapper = !shellWrapperCommandConsumesRest(wrapperToken.token);
 
   while (true) {
     const token = takeLeadingToken(rest);
@@ -2383,248 +1786,36 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       wrapperTokens.push(token.token);
-      // Same option-terminator reading as stripShellWrapper: every spelling
-      // of `--` (quotes, ANSI-C escapes, concatenation) hands `-c` the NEXT
-      // word (#16075 review, R6-1 / R11-2). An unresolvable expansion there
-      // may be the terminator or the program itself; neither reading is
-      // provable, so hand back the whole command rather than pick one.
+      // Same option-terminator reading as stripShellWrapper: every decoded
+      // spelling of `--` hands `-c` the NEXT word, except for cmd/PowerShell
+      // which have no option parser.
       let markerRest = token.rest;
-      const terminator = takeLeadingToken(markerRest);
-      const terminatorQuote = terminator
-        ? shellWordQuoteRemoval(terminator.token)
-        : null;
-      const terminatorWord =
-        terminatorQuote && !terminatorQuote.hasExpansion
-          ? terminatorQuote.text
-          : null;
-      if (terminator && terminatorWord === null) {
-        // A fully quoted word with a dynamic value is still the script: expose
-        // its quote-removed text for the safety scan and the monitor predicates
-        // while keeping the unresolved flag so the cron gate refuses it, and
-        // spawn the command exactly as written (#16075 review, R13-1). An
-        // unquoted expansion keeps handing back the whole command.
-        if (terminatorQuote?.fullyQuoted) {
-          return {
-            wrapperTokens,
-            innerCommand: terminatorQuote.text,
-            innerQuote: '',
-            innerArgsSuffix: terminator.rest.replace(/^[ \t]+/, ''),
-            wrapperPayloadUnresolved: true,
-            // ANY expansion makes the script unprovable: the inner shell
-            // re-parses the expanded text, so a `;` or newline inside
-            // `${X:=…}` becomes an operator even when literal text surrounds
-            // it (`bash -c "ls ${X:=;rm -rf /tmp/victim}"` ran the rm while
-            // the projection read as read-only) (#16540 review, R5-2).
-            wrapperScriptUnprovable: true,
-            ...(posixWrapper && payloadBackgroundSurvivesStrip(terminator.token)
-              ? { payloadOperatorUnstrippable: true }
-              : {}),
-            spawnOverride: buildMonitorSpawnOverride(
-              wrapperTokens,
-              terminator.token,
-              terminator.rest,
-            ),
-          };
-        }
-        return {
-          innerCommand: trimmed,
-          innerQuote: '',
-          wrapperPayloadUnresolved: true,
-          // Unquoted expansion in the `-c` slot: word splitting applies, so the
-          // script is whatever the variable holds (#16540 review, R4-5). An
-          // empty expansion drops out and the NEXT word becomes the script,
-          // so a background operator sitting there survives into the spawn
-          // exactly like a resolvable payload's (`bash -c $X "exit 1 &"`
-          // forks the payload and exits 0) (#16540 review, R6-4).
-          wrapperScriptUnprovable: true,
-          // The unresolvable terminator may itself be the option terminator
-          // (dropping out and handing the slot to the next word) or the
-          // script; judge this word AND the ones after it either way
-          // (`bash -c $X "exit 1 &"` lands here with $X as the terminator)
-          // (#16540 review, R6-4).
-          ...(posixWrapper &&
-          unquotedSlotBackgrounds(terminator.token, terminator.rest)
-            ? { payloadOperatorUnstrippable: true }
-            : {}),
-        };
-      }
-      if (terminator && terminatorWord === '--' && posixWrapper) {
-        // cmd.exe / PowerShell run `--` as the program name; only a POSIX
-        // shell reads it as the option terminator (#16540 review, R1-8/R3-13).
-        wrapperTokens.push(terminator.token);
-        markerRest = terminator.rest;
+      const afterTerminator = shellWrapperCommandConsumesRest(
+        wrapperToken.token,
+      )
+        ? null
+        : restAfterOptionTerminator(markerRest);
+      if (afterTerminator !== null) {
+        wrapperTokens.push(takeLeadingToken(markerRest)!.token);
+        markerRest = afterTerminator;
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) {
-        // `sh -c --` with no script after it: the shell does not run an empty
-        // program, it refuses outright — `bash -c --` and `sh -c --` both exit 2
-        // with "option requires an argument" and run nothing (witnessed on bash
-        // 5.3.20). There is still no payload this scan can read, so the cron gate
-        // keeps refusing it (#16540 review, R1-7; rationale corrected by R3-11).
         return {
           innerCommand: trimmed,
           innerQuote: '',
-          wrapperPayloadUnresolved: true,
-        };
-      }
-      // The payload after `--` goes through the SAME resolution as the one
-      // before it: an expansion may be the script or may assemble it, so it
-      // fails closed instead of being analysed as literal text
-      // (#16540 review, R1-2).
-      const payloadRemoval = shellWordQuoteRemoval(commandToken.token);
-      // Read the resolved word, not the spelling. `$"…"` (locale) and
-      // `$\<newline>'…'` decode to the script bash runs exactly like `$'…'`, and
-      // a substring test on `$'` left those two as raw text, so the writes bash
-      // performs never reached analysisCommand / safetyCommand
-      // (#16540 review, R2-4). Testing the FIRST CHARACTER for a quote is the
-      // same mistake from the other side: `"echo x"$'\n'"rm -rf /tmp/target"`
-      // starts with `"`, still needs decoding, and the raw fallback let
-      // `stripSymmetricQuotes` delete only the outer characters — the decoded
-      // newline vanished, `rm -rf` classified read-only and auto-allowed with no
-      // prompt (#16540 review, R4-6b). `decoded` is the resolved-word property
-      // both spellings share; a plainly quoted word keeps the path below, where
-      // quote removal and stripSymmetricQuotes already agree.
-      const payloadIsAnsiC =
-        payloadRemoval !== null &&
-        !payloadRemoval.hasExpansion &&
-        payloadRemoval.fullyQuoted &&
-        payloadRemoval.decoded;
-      if (payloadRemoval?.hasExpansion) {
-        if (payloadRemoval.fullyQuoted) {
-          return {
-            wrapperTokens,
-            innerCommand: payloadRemoval.text,
-            innerQuote: '',
-            innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
-            wrapperPayloadUnresolved: true,
-            // Same re-parse reasoning as the terminator slot: literal text
-            // around an expansion does not make the script provable
-            // (#16540 review, R5-2).
-            wrapperScriptUnprovable: true,
-            ...(posixWrapper &&
-            payloadBackgroundSurvivesStrip(commandToken.token)
-              ? { payloadOperatorUnstrippable: true }
-              : {}),
-            spawnOverride: buildMonitorSpawnOverride(
-              wrapperTokens,
-              commandToken.token,
-              commandToken.rest,
-            ),
-          };
-        }
-        return {
-          innerCommand: trimmed,
-          innerQuote: '',
-          wrapperPayloadUnresolved: true,
-          // Unquoted expansion: word splitting applies, so the script is
-          // whatever the variable holds (#16540 review, R5-2). The expansion
-          // may also drop out empty and hand the slot to the NEXT word, so a
-          // background operator in either this token's resolved text or the
-          // following word survives into the spawn (`bash -c $X "exit 1 &"`
-          // forks the payload and exits 0) (#16540 review, R6-4).
-          wrapperScriptUnprovable: true,
-          ...(posixWrapper &&
-          unquotedSlotBackgrounds(commandToken.token, commandToken.rest)
-            ? { payloadOperatorUnstrippable: true }
-            : {}),
         };
       }
       const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
         commandToken.token,
       );
-      // A trailing `&` inside a double-quoted payload is escaped DATA when the
-      // resolved word says so: `"echo a \\&"` is the script `echo a \&`. The
-      // analysis strip below reads the spelling, saw an even backslash run and
-      // rewrote the monitored command into bytes the user never wrote
-      // (#16540 review, R4-9). Hand analysis the resolved text and pin the spawn
-      // to the command as written.
-      if (
-        innerQuote === '"' &&
-        payloadRemoval !== null &&
-        !payloadRemoval.hasExpansion &&
-        payloadRemoval.text !== innerCommand &&
-        endsWithBackgroundAmp(innerCommand) &&
-        !endsWithBackgroundAmp(payloadRemoval.text)
-      ) {
-        return {
-          wrapperTokens,
-          innerCommand: payloadRemoval.text,
-          innerQuote: '',
-          innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
-          spawnOverride: buildMonitorSpawnOverride(
-            wrapperTokens,
-            commandToken.token,
-            commandToken.rest,
-          ),
-        };
-      }
-      // A payload with an UNQUOTED prefix (`x"exit 1 &"`) is not symmetric, so
-      // the reconstruction below would keep it verbatim — including the
-      // background `&` its closing quote holds. Build the spawn from the token
-      // itself so the operator is normalised away while the user's quoting
-      // stays (#16540 review, R4-1).
-      const backgroundAmpBehindPrefix =
-        posixWrapper &&
-        payloadRemoval !== null &&
-        innerQuote === '' &&
-        !/^["']/.test(commandToken.token) &&
-        stripPayloadBackgroundAmp(commandToken.token) !== commandToken.token;
-      // Decide from the RESOLVED payload, not from the spelling: a payload whose
-      // quote-removed text ends in a real operator backgrounds whatever the
-      // token looks like (`"exit 1"' &'` is two quoted parts, so neither the
-      // prefix rule nor the ANSI-C rule caught it) (#16540 review, R3-7).
-      const payloadEndsInBackgroundOperator =
-        posixWrapper &&
-        payloadRemoval !== null &&
-        !payloadRemoval.hasExpansion &&
-        endsWithBackgroundAmp(payloadRemoval.text);
-      // Some spellings cannot be trimmed at all: an encoded operator
-      // (`$'exit 1 \x26'`) has no literal `&` in the token, and `"exit 1 &"&`
-      // resolves to a trailing `&&`. Refuse to certify those instead of
-      // reporting a strip that did not happen — the tracked shell would fork the
-      // payload and exit 0, and settleFromExit(0) would call it success
-      // (#16540 review, R3-7).
-      const trimmedPayloadRemoval = shellWordQuoteRemoval(
-        stripPayloadBackgroundAmp(commandToken.token),
-      );
-      const payloadAmpUnremovable =
-        posixWrapper &&
-        trimmedPayloadRemoval !== null &&
-        !trimmedPayloadRemoval.hasExpansion &&
-        resolvedTextBackgrounds(trimmedPayloadRemoval.text);
-      // An ANSI-C payload is the decoded text for op extraction and the
-      // self-kill gate, while the command still spawns as written
-      // (#16540 review, R1-3).
-      const decodedPayload =
-        payloadIsAnsiC && payloadRemoval ? payloadRemoval.text : innerCommand;
       return {
         wrapperTokens,
-        innerCommand:
-          backgroundAmpBehindPrefix && payloadRemoval
-            ? payloadRemoval.text
-            : decodedPayload,
-        innerQuote:
-          payloadIsAnsiC || backgroundAmpBehindPrefix ? '' : innerQuote,
+        innerCommand,
+        innerQuote,
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
-        ...(payloadAmpUnremovable
-          ? {
-              wrapperPayloadUnresolved: true,
-              payloadOperatorUnstrippable: true,
-            }
-          : {}),
-        ...(payloadIsAnsiC ||
-        backgroundAmpBehindPrefix ||
-        payloadEndsInBackgroundOperator
-          ? {
-              spawnOverride: buildMonitorSpawnOverride(
-                wrapperTokens,
-                commandToken.token,
-                commandToken.rest,
-              ),
-            }
-          : {}),
       };
     }
 
@@ -2652,56 +1843,11 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
   }
 }
 
-/**
- * Whether the command is a shell wrapper whose `-c` slot cannot be resolved
- * statically, so the word analysis projects is not provably the script bash
- * runs — it may be only `$0`, and an unquoted expansion is word-split. Projecting
- * it is still right for op extraction (the write and the self-kill pattern are
- * real), but a permission gate must not auto-allow on it: `sh -c $TERM 'ls -l'`
- * read as read-only `ls -l` and executed with no prompt (#16540 review, round 6).
- */
-export function hasUnprovableWrapperScript(command: string): boolean {
-  return parseMonitorShellWrapper(command).wrapperScriptUnprovable === true;
-}
-
-/**
- * Whether the payload's background operator survives into the spawn command.
- * The tracked shell would then fork the payload and exit before it ran, so
- * `settleFromExit(0)` reports success for a failure nobody observed: the monitor
- * must refuse the command rather than run it (#16540 review, R3-7). A payload
- * whose operator WAS stripped (`bash -c "tail -f $LOG &"`) is not affected.
- */
-export function hasUnstrippablePayloadOperator(command: string): boolean {
-  if (parseMonitorShellWrapper(command).payloadOperatorUnstrippable === true) {
-    return true;
-  }
-  // The head-only parse misses a wrapper behind a prefix (`nohup bash -c
-  // 'exit 1 &'`, `sudo`, `timeout 5`): the spawn keeps the payload's `&`, the
-  // tracked shell exits 0, and the monitor reports success for a failure
-  // nobody observed. Judge the spawn itself for those; a head wrapper was
-  // already judged above, where an operator that WAS stripped is fine
-  // (#16540 review, R6-4).
-  const normalized = normalizeMonitorCommand(command);
-  if (normalized.spawnCommand === normalized.analysisCommand) {
-    // No wrapper at the head was unwrapped: the spawn is the command as
-    // typed (or its amp-stripped form), and a background anywhere in it
-    // forks work the monitor cannot observe.
-    return backgroundsAnyPart(normalized.spawnCommand);
-  }
-  return false;
-}
-
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const {
-    wrapperTokens,
-    innerCommand,
-    innerQuote,
-    innerArgsSuffix,
-    wrapperPayloadUnresolved,
-    spawnOverride,
-  } = parseMonitorShellWrapper(command);
+  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
+    parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -2724,26 +1870,23 @@ export function normalizeMonitorCommand(
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
-  const spawnCommand =
-    spawnOverride ??
-    (wrapperTokens
-      ? [
-          wrapperTokens.join(' '),
-          innerQuote
-            ? `${innerQuote}${analysisCommand}${innerQuote}`
-            : analysisCommand,
-          normalizedInnerArgsSuffix,
-        ]
-          .filter(Boolean)
-          .join(' ')
-      : analysisCommand);
+  const spawnCommand = wrapperTokens
+    ? [
+        wrapperTokens.join(' '),
+        innerQuote
+          ? `${innerQuote}${analysisCommand}${innerQuote}`
+          : analysisCommand,
+        normalizedInnerArgsSuffix,
+      ]
+        .filter(Boolean)
+        .join(' ')
+    : analysisCommand;
 
   return {
     analysisCommand,
     safetyCommand,
     spawnCommand,
     strippedTrailingAmp,
-    ...(wrapperPayloadUnresolved ? { wrapperPayloadUnresolved: true } : {}),
   };
 }
 
@@ -2848,184 +1991,6 @@ function backgroundsAtLevel(command: string, dropComments: boolean): boolean {
  * of `&&`, and not escaped by an odd run of backslashes (`\&` is a literal
  * ampersand; `\\&` is a literal backslash, then a backgrounding `&`).
  */
-/**
- * Whether the resolved script text ends in something that backgrounds the
- * payload: a real (parity-checked) `&`, or a trailing `&&` — which is either a
- * syntax error or two operators concatenated across a quote boundary
- * (`"exit 1 &"&` resolves to `exit 1 &&`). Both make the tracked shell exit
- * before the payload's own status is known (#16540 review, R3-7).
- */
-function resolvedTextBackgrounds(text: string): boolean {
-  const trimmed = text.trimEnd();
-  return endsWithBackgroundAmp(trimmed) || trimmed.endsWith('&&');
-}
-
-/**
- * Whether the payload still backgrounds after the spawn-side strip attempted
- * on it: either the strip could not remove the operator at all (an encoded
- * `\x26`, two operators), or the word carries an expansion whose value may
- * append one (`bash -c "$X"$'\x26'`). The tracked shell would fork the payload
- * and exit 0 before it finished, so every return path that pins a
- * `spawnOverride` must consult this, not just the final one (#16540 R5-3).
- */
-function payloadBackgroundSurvivesStrip(payloadToken: string): boolean {
-  const stripped = stripPayloadBackgroundAmp(payloadToken);
-  const before = shellWordQuoteRemoval(payloadToken);
-  const after = shellWordQuoteRemoval(stripped);
-  if (after === null) return true;
-  // An operator visible in the resolved text after the strip survives it
-  // (`"tail -f $LOG &"&` resolves to a trailing `&&`).
-  if (resolvedTextBackgrounds(after.text)) return true;
-  // The strip removed a literal trailing operator (`"tail -f $LOG &"` →
-  // `"tail -f $LOG"`): the spawn no longer backgrounds, stay accepted.
-  if (before !== null && before.text !== after.text) return false;
-  // Nothing was stripped and the word carries an expansion: the operator may
-  // hide inside the expansion's VALUE (`"$X"$'\x26'`, `"$X"` with X='… &'),
-  // which no static strip can remove — refuse instead of certifying. But an
-  // expansion with LITERAL text after it (`"tail -f $LOG"`) cannot end in an
-  // operator whatever the value holds: the trailing literal decides the
-  // word's end, and refusing it denied the dynamic watches the monitor
-  // exists for (`bash -c "tail -f $LOG"` threw about an operator it does not
-  // contain) (#16540 review, R6-2).
-  return after.hasExpansion && !endsWithLiteralAfterExpansion(payloadToken);
-}
-
-/**
- * The words after an unquoted `-c` expansion: the expansion may drop out
- * empty and hand the script slot to the FIRST of them (`bash -c $X "exit 1 &"`
- * runs `exit 1 &`), so that word's operator survives into the spawn just
- * like a resolvable payload's (#16540 review, R6-4).
- */
-function followingWordBackgrounds(rest: string): boolean {
-  const next = takeLeadingToken(rest.trimStart());
-  if (next == null) return false;
-  // The empty expansion drops out and this word becomes the `-c` script AS
-  // WRITTEN: the spawn keeps its quotes, so no spawn-side strip applies and
-  // any background operator in it forks the payload unobserved
-  // (`bash -c $X "exit 1 &"` exits 0 while the payload fails detached).
-  // The head spelling's strip does not run here — the parser already
-  // returned the command unchanged (#16540 review, R6-4).
-  const removal = shellWordQuoteRemoval(next.token);
-  if (removal === null) return true;
-  return (
-    resolvedTextBackgrounds(removal.text) ||
-    hasNonFinalTopLevelBackgroundOperator(removal.text) ||
-    (removal.hasExpansion && !endsWithLiteralAfterExpansion(next.token))
-  );
-}
-
-/**
- * The two readings of an unquoted expansion in the `-c`/terminator slot:
- * its VALUE becomes the script (an operator may hide inside it), or it
- * drops out empty and a following word does. An expansion glued to
- * surrounding text (`x$Y`) contributes to ONE word, so only the value
- * reading applies; a standalone `$X` may vanish entirely
- * (#16540 review, R6-4).
- */
-function unquotedSlotBackgrounds(token: string, rest: string): boolean {
-  const standalone =
-    /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$/.test(token);
-  if (!standalone) {
-    // Glued to surrounding text (`x$Y`), the expansion contributes to ONE
-    // word: its value may append an operator no static strip can remove.
-    return payloadBackgroundSurvivesStrip(token);
-  }
-  const next = takeLeadingToken(rest.trimStart());
-  if (next == null) {
-    // No following word: the expansion IS the script, and its value may
-    // end in an operator.
-    return payloadBackgroundSurvivesStrip(token);
-  }
-  // A following word exists, so the expansion is at most $0 — data, not
-  // the script. The empty-expansion reading hands the slot to that word
-  // AS WRITTEN, quotes included, so any operator in it forks the payload
-  // unobserved (#16540 review, R6-4).
-  return followingWordBackgrounds(rest);
-}
-
-/**
- * Whether the token's last character is literal payload text — not part of
- * an expansion — so no expansion value can append a background operator to
- * the resolved word. The closing quote of a span whose body ends in literal
- * text counts (`"tail -f $LOG"` ends in `G"`); a word ending INSIDE an
- * expansion (`"$X"`, `"$X"$'\x26'`) does not (#16540 review, R6-2).
- */
-function endsWithLiteralAfterExpansion(token: string): boolean {
-  const trimmed = token.trimEnd();
-  if (trimmed === '') return false;
-  let quote: '"' | "'" | '' = '';
-  let lastExpansionEnd = -1;
-  for (let i = 0; i < trimmed.length; i++) {
-    const ch = trimmed[i]!;
-    if (quote === "'") {
-      if (ch === "'") quote = '';
-      continue;
-    }
-    if (ch === '\\') {
-      i++;
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === '"') {
-        quote = '';
-        continue;
-      }
-    } else if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (ch === '$' || ch === '`') {
-      if (ch === '`') {
-        const close = trimmed.indexOf('`', i + 1);
-        i = close === -1 ? trimmed.length : close;
-        lastExpansionEnd = i + 1;
-        continue;
-      }
-      const next = trimmed[i + 1];
-      if (next === '{') {
-        let depth = 1;
-        let j = i + 2;
-        while (j < trimmed.length && depth > 0) {
-          if (trimmed[j] === '{') depth++;
-          else if (trimmed[j] === '}') depth--;
-          j++;
-        }
-        i = j - 1;
-        lastExpansionEnd = j;
-        continue;
-      }
-      if (next === '(') {
-        let depth = 1;
-        let j = i + 2;
-        while (j < trimmed.length && depth > 0) {
-          if (trimmed[j] === '(') depth++;
-          else if (trimmed[j] === ')') depth--;
-          j++;
-        }
-        i = j - 1;
-        lastExpansionEnd = j;
-        continue;
-      }
-      if (next !== undefined && /[A-Za-z_0-9@*#?$!-]/.test(next)) {
-        let j = i + 1;
-        if (/[A-Za-z_]/.test(next)) {
-          while (j < trimmed.length && /[A-Za-z0-9_]/.test(trimmed[j]!)) j++;
-        } else {
-          j++;
-        }
-        i = j - 1;
-        lastExpansionEnd = j;
-        continue;
-      }
-      // `$'…'` / `$"…"`: a quoted segment, not an expansion.
-    }
-  }
-  // The final character (or its closing quote) sits after every expansion;
-  // `lastExpansionEnd` is one past the last expansion's final character, so
-  // equality means the word ends inside an expansion.
-  return lastExpansionEnd < trimmed.length;
-}
-
 function endsWithBackgroundAmp(command: string): boolean {
   const text = command.trimEnd();
   if (!text.endsWith('&') || text.endsWith('&&')) return false;

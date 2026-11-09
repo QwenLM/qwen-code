@@ -4964,34 +4964,6 @@ describe('ShellTool', () => {
       expect(await build(command).getDefaultPermission()).toBe('ask');
     });
 
-    // Round 6 (#16540 review): a wrapper whose `-c` slot is nothing but an
-    // expansion has no provable script. The projected word may be only `$0`
-    // (`sh -c <script> <$0>`), and an UNQUOTED expansion is word-split, so
-    // anything can be injected into the slot. `sh -c $TERM 'ls -l'` projected to
-    // read-only `ls -l`, `hasShellSubstitution` does not flag a bare `$VAR`, and
-    // the command auto-executed with no prompt.
-    it.each([
-      ['asks when the -c slot is an unquoted expansion', `sh -c $TERM 'ls -l'`],
-      ['asks when the -c slot is only an expansion', `bash -c "$X" 'ls -l'`],
-    ])('%s', async (_title, command) => {
-      expect(await build(command).getDefaultPermission()).toBe('ask');
-    });
-
-    // R5-2 (#16540 review): a fully quoted payload prevents WORD SPLITTING,
-    // but the inner shell still RE-PARSES the expanded text — a `;` or
-    // newline inside `${X:=…}` becomes an operator (`bash -c "ls
-    // ${X:=;rm -rf /tmp/victim}"` ran the rm while the projection read as
-    // read-only). Every expansion-bearing `-c` word therefore asks. The
-    // monitor's strippable `tail -f $LOG &` shape is unaffected: that gate
-    // reads the operator markers, not the provability flag.
-    it.each([
-      [`bash -c "tail -f $LOG &"`],
-      [`bash -c "ls \${X:=;rm -rf /tmp/victim}"`],
-      [`bash -c -- "ls -l $X"`],
-    ])('asks for an expansion-bearing -c script: %s', async (command) => {
-      expect(await build(command).getDefaultPermission()).toBe('ask');
-    });
-
     it('asks for a read-only command only when its directory is outside the workspace', async () => {
       const local = build('ls -la', { directory: '/test/dir/subdir' });
       expect(await local.getDefaultPermission()).toBe('allow');

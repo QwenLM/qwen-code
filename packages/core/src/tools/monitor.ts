@@ -43,8 +43,6 @@ import {
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
-  hasUnprovableWrapperScript,
-  hasUnstrippablePayloadOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
 } from '../utils/shell-utils.js';
@@ -193,13 +191,6 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Like read_file outside the workspace: ask rather than reject at build
     // time, so an approval (or YOLO) can let it run.
     if (this.isDirectoryOutsideWorkspace()) return 'ask';
-    // Same contract as the shell tool: a wrapper whose `-c` script cannot be
-    // proved statically must not auto-allow on the projection. The outer
-    // shell expands a self-supplied `${X:=…}` before the inner bash re-parses
-    // it, so the read-only projection of `ls ${X:=;rm -rf /tmp/victim}` ran
-    // the rm with no prompt (#16540 review, R6-3). 'ask', not 'deny', per the
-    // #4093 fall-through contract.
-    if (hasUnprovableWrapperScript(this.params.command)) return 'ask';
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const command = normalized.safetyCommand;
     const cwd =
@@ -858,21 +849,6 @@ export class MonitorTool extends BaseDeclarativeTool<
     }
     if (hasUnsafeMonitorBackgroundOperator(params.command)) {
       return 'Monitor commands must not contain non-final top-level background operators. Remove "&" and let the monitor manage process lifetime.';
-    }
-    // A payload operator this scan cannot remove (an encoded `\x26`, or two
-    // operators where trimming one would leave a runnable command) stays in the
-    // spawn: the tracked shell forks the payload and exits 0 before it finishes,
-    // so the monitor would report success for a failure it never observed.
-    // Refuse instead — a payload whose operator WAS stripped is unaffected
-    // (#16540 review, R3-7).
-    if (hasUnstrippablePayloadOperator(params.command)) {
-      return (
-        'Monitor commands must not background the payload. The background ' +
-        'operator in this command cannot be removed without rewriting what you ' +
-        'typed, so the monitored shell would fork the payload and exit before ' +
-        'it ran, and the monitor would report success for a failure it never ' +
-        'observed. Rewrite the command without a trailing "&".'
-      );
     }
     // AJV enforces type: 'integer' from the schema. This method adds
     // range checks (min/max) that the schema does not express.

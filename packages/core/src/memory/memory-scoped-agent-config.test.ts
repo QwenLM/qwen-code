@@ -300,25 +300,6 @@ describe('createMemoryScopedAgentConfig', () => {
     await expect(shell(enabled, 'touch bad')).resolves.toBe('deny');
   });
 
-  it('denies an unprovable wrapper script even when its projection is read-only', async () => {
-    // R5-4 (#16540 review): the following-word projection turns an
-    // unresolvable `-c` slot into `ls -l`, which the AST reads as read-only —
-    // but bash runs the whole `"$X"` expansion as the script. The pre-AST
-    // refusal the interactive shell gate has must hold here too.
-    const enabled = scopedPm({ allowShell: true });
-    const shell = (command: string) =>
-      enabled.evaluate({ toolName: SHELL, command });
-    await expect(
-      shell(`X='rm -rf /tmp/important' sh -c "$X" 'ls -l'`),
-    ).resolves.toBe('deny');
-    await expect(shell(`sh -c $TERM 'ls -l'`)).resolves.toBe('deny');
-    await expect(shell(`bash -c "ls $(echo x; rm -rf /tmp/x)"`)).resolves.toBe(
-      'deny',
-    );
-    // The literal controls keep their decisions.
-    await expect(shell(`bash -c 'ls -l'`)).resolves.toBe('allow');
-  });
-
   it('lets base deny rules override scoped allows', async () => {
     const pm = scopedPm(undefined, basePm(false, 'base deny', 'deny'));
     await evalIs(pm, WRITE_FILE, projMem('project', 'a.md'), 'deny');

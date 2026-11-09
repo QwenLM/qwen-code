@@ -82,17 +82,6 @@ export interface ShellOperation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Index of the next character the shell actually lexes after `from`: a
- * `\`+newline continuation is removed outright, so `$` + continuation + `'`
- * still opens the ANSI-C word (#16075 review, R7-1).
- */
-function nextSignificantIndex(command: string, from: number): number {
-  let i = from;
-  while (command[i] === '\\' && command[i + 1] === '\n') i += 2;
-  return i;
-}
-
-/**
  * Tokenize a shell command string, respecting single/double quotes and
  * backslash escapes, splitting on unquoted whitespace.
  *
@@ -112,137 +101,33 @@ function tokenize(
   command: string,
   fdRedirects?: Set<number>,
   fdCloses?: Set<number>,
-  /**
-   * Optional parallel output: one bare-marking string per pushed token, valid
-   * while the token array is still unfiltered (extractRedirects consumes it
-   * before it removes anything).
-   */
-  bares?: string[],
-  /**
-   * Optional parallel output: true when the word's LEADING segment was
-   * quoted or decoded, including a zero-width one (`""~/x`). A quote later
-   * in the word (`~/"out"`) does not set it: bash expands a tilde prefix
-   * that was itself typed bare (#16540 review, R3-9 / R6-1).
-   */
-  wordQuotedFlags?: boolean[],
 ): string[] {
   const tokens: string[] = [];
   let current = '';
   // One char per char of `current`: '1' if typed unquoted and unescaped.
   let bare = '';
-  // Whether a quoted segment appeared inside the word's TILDE PREFIX —
-  // before its first bare `/`. bash suppresses expansion for `"~/x"`,
-  // `""~/x` and `~""/x` (witnessed: the last writes `./~/x`), but `~/"out"`
-  // still writes `$HOME/out`: a quote after the prefix's slash is data
-  // (#16540 review, R3-9 / R6-1).
-  let wordQuoted = false;
-  let tildePrefixOpen = true;
   let inSingle = false;
   let inDouble = false;
   // `$'…'` keeps its own quote state: `\'` does not close it and `\n` is a
-  // newline rather than layout, so decoding escapes here is what keeps
-  // `bash -c $'git commit --amend\ntrue'` from reading as one inert word.
+  // newline in the word rather than layout, so escapes decode here.
   let inAnsiC = false;
-  // Bytes accumulated for the ANSI-C word being read. bash builds BYTES from
-  // `$'…'`, so decoding one escape at a time turned each byte of a multi-byte
-  // UTF-8 sequence into U+FFFD (`\xc3\xa9` became `\uFFFD\uFFFD` while
-  // `decodeAnsiCWord` decoded the whole word correctly). The word is decoded
-  // once, when its quote closes, exactly like `decodeAnsiCWord`
-  // (#16540 review, R1-4 second round).
-  let ansiCBytes: number[] | null = null;
-  // A word can be empty and still be a word: `cd $''` and `cd ''` hand bash an
-  // empty argument, which fails the cd, and the merge base tokenized it that way.
-  // Dropping it made the target slot undefined, so the `?? process.env['HOME']`
-  // fallback resolved the cwd to $HOME with no `cwdUnknown` flag while bash never
-  // left the directory (#16540 review, R4-2).
-  let wordStarted = false;
-  // `pushToken` drops an empty token, so an empty word is pushed here directly:
-  // it carries no redirect syntax and no braces, only the fact that bash saw an
-  // argument (#16540 review, R4-2).
-  const endWord = () => {
-    flushPendingAnsiC();
-    if (current) {
-      pushToken(
-        tokens,
-        bares,
-        current,
-        bare,
-        fdRedirects,
-        fdCloses,
-        wordQuotedFlags,
-        wordQuoted,
-      );
-    } else {
-      tokens.push('');
-      bares?.push('');
-      wordQuotedFlags?.push(wordQuoted);
-    }
-    current = '';
-    bare = '';
-    wordQuoted = false;
-    tildePrefixOpen = true;
-    wordStarted = false;
-  };
-  const markSegment = (quoted: boolean) => {
-    if (quoted && tildePrefixOpen) wordQuoted = true;
-    wordStarted = true;
-  };
-  const pushAnsiCBytes = (bytes: Iterable<number>) => {
-    if (ansiCBytes === null) ansiCBytes = [];
-    for (const byte of bytes) ansiCBytes.push(byte);
-  };
-  const pushAnsiCLiteral = (index: number): number => {
-    // A literal non-BMP character arrives as a surrogate pair: encoding each
-    // UTF-16 unit on its own turns both halves into U+FFFD, so the analysed
-    // path stops being the path bash writes (#16540 review, R2-2).
-    const codePoint = command.codePointAt(index)!;
-    pushAnsiCBytes(Buffer.from(String.fromCodePoint(codePoint), 'utf8'));
-    return codePoint > 0xffff ? 1 : 0;
-  };
-  // Decode the pending ANSI-C bytes into the word: bash concatenates
-  // adjacent `$'…'` segments at the BYTE level, so a UTF-8 sequence split
-  // across them (`$'\xe4\xbd'$'\xa0'` → 你) decodes once for the whole run,
-  // not per segment (#16540 review, R2-7). Called at the word boundary and
-  // wherever a NON-ANSI-C segment appends — a plain quoted span breaks the
-  // run. A segment's own closing quote and NUL do NOT flush: the next
-  // `$'…'` segment of the same word keeps appending bytes, and NUL
-  // truncation stays per segment (the scan stops pushing bytes).
-  const flushPendingAnsiC = () => {
-    if (ansiCBytes === null) return;
-    const text = Buffer.from(ansiCBytes).toString('utf8');
-    current += text;
-    bare += '0'.repeat(text.length);
-    ansiCBytes = null;
-  };
-  // A NUL ends the word bash builds inside an ANSI-C quote: `$'a\0b'c` is the
-  // word `ac` — the rest of the quoted segment is dropped, but a following
-  // concatenation segment still appends (#16075 review, R11-2). Once set, the
-  // scan skips to the segment's closing quote without emitting anything.
+  // A NUL ends the word bash builds inside an ANSI-C quote: `$'a\0b'c` is
+  // the word `ac`. Once set, the scan skips to the segment's closing quote
+  // without emitting anything; a following concatenation still appends.
   let ansiCTruncated = false;
-  // Set by the `\c\` case: the next character of the ANSI-C word is literal.
-  let ansiCLiteralNext = false;
-  // The second `$` of `$$` (the PID) cannot open `$'…'` or `$"…"`: the quote
-  // after it is an ordinary quote. rule-parser.ts pins the same rule for
-  // segment boundaries, so the tokenizer must agree rather than add a second
-  // reading (#16540 review, R3-1).
-  let dollarPending = false;
   let escaped = false;
+  // The second `$` of `$$` (the PID) cannot open `$'…'` or `$"…"`: the
+  // quote after it is an ordinary quote.
+  let pendingDollar = false;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
-    const dollarIntroducer: boolean = dollarPending;
-    dollarPending = false;
+    const afterDollar = pendingDollar;
+    pendingDollar = false;
 
     if (inAnsiC) {
-      // The character after a `\c\` operand is literal text: it is neither a
-      // closing quote nor the start of a new escape (#16540 review, R1-5/R2-5).
-      if (ansiCLiteralNext) {
-        ansiCLiteralNext = false;
-        i += pushAnsiCLiteral(i);
-        continue;
-      }
       if (ansiCTruncated) {
-        // Skip an escaped character so `\'` does not read as the closing quote.
+        // Skip an escaped character so `\'` does not read as the close.
         if (ch === '\\') {
           i++;
           continue;
@@ -256,148 +141,97 @@ function tokenize(
       if (ch === '\\') {
         const escape = decodeAnsiCEscape(command, i);
         if (!escape) {
-          pushAnsiCBytes(Buffer.from('\\', 'utf8'));
+          current += '\\';
+          bare += '0';
           continue;
         }
         if (escape.text === '\0') {
-          // NUL ends THIS segment's contribution; the bytes stay pending so
-          // a following concatenation segment appends (`$'a\0b'c` → `ac`).
           ansiCTruncated = true;
           i += escape.length - 1;
           continue;
         }
-        pushAnsiCBytes(escape.bytes ?? Buffer.from(escape.text, 'utf8'));
-        // Inside `$'…'` a scanning backslash escapes only its operand, so the
-        // operand of `\c` does not swallow the backslash after it: in
-        // `$'a\c\''` that second backslash still escapes the quote and the word
-        // stays open. Consuming all three desynced the state and swallowed the
-        // rest of the line (#16540 review, R1-5). The character after that
-        // operand is then LITERAL text, not a new escape: bash reads
-        // `$'a\c\tb'` as 61 1c 74 62, while re-entering the decoder here turned
-        // the `t` into a tab and the two permission paths disagreed about the
-        // same word (#16540 review, R2-5).
-        if (escape.length === 3 && command[i + 2] === '\\') {
-          // The operand backslash is consumed, and when the character it
-          // escapes is ITSELF a backslash, that one is consumed too: bash
-          // writes 61 1c 74 62 for BOTH `$'a\c\tb'` and `$'a\c\\tb'`. Emitting
-          // the extra backslash made it a directory separator in the
-          // analysed path — a path bash never opens (#16540 review, R3-3).
-          ansiCLiteralNext = true;
-          i += 2;
-          if (command[i + 1] === '\\' && i + 2 < command.length) i++;
-        } else {
-          i += escape.length - 1;
-        }
+        current += escape.text;
+        // `bare` holds one entry per UTF-16 unit of `current`; an astral
+        // escape such as `\U0001F600` decodes to two units, and a single
+        // entry desynced the positional map so trailing syntax (`)`)
+        // stayed glued to the token.
+        bare += '0'.repeat(escape.text.length);
+        i += escape.length - 1;
         continue;
       }
       if (ch === "'") {
-        // Closing quote: the bytes stay pending — the next `$'…'` segment
-        // of the same word appends at the byte level (R2-7).
         inAnsiC = false;
         continue;
       }
-      i += pushAnsiCLiteral(i);
+      current += ch;
+      bare += '0';
       continue;
     }
 
     if (escaped) {
-      flushPendingAnsiC();
       current += ch;
       bare += '0';
       escaped = false;
-      markSegment(true);
       continue;
     }
     if (ch === '\\' && !inSingle) {
       // Bash removes a backslash-newline continuation outright, joining the
-      // word it interrupts — so `git commit \<newline>--amend` is the plain
-      // two-word invocation, not a token containing a newline.
+      // word it interrupts, so a continuation cannot hide the `$'…'` or
+      // `$"…"` opener that follows it.
       if (command[i + 1] === '\n') {
-        // bash removes the continuation before reading the next character, so a
-        // pending `$$` lookahead survives it: in `echo x $\<newline>$'a\' >
-        // /etc/passwd` the second `$` is the PID and the quote after it is an
-        // ordinary quote. Clearing the flag here let that `$` open an ANSI-C word
-        // which `\'` never closes, so the redirect was never flushed and the
-        // write vanished (#16540 review, R4-1). rule-parser.ts:1095-1099 restores
-        // the same flag across a segment boundary.
-        dollarPending = dollarIntroducer;
         i++;
         continue;
       }
       escaped = true;
       continue;
     }
-    // `$'…'`: skip only the `$`; the quote that follows opens the ANSI-C
-    // word, so the payload stays one token instead of splitting on spaces.
-    // A `\`+newline between the two is removed first (#16075 review, R7-1).
-    // `$"…"` is bash's locale-translation quoting: the shell removes the
-    // introducer and quotes just like a double-quoted word, so `git $"commit"`
-    // runs the `commit` subcommand (#16075 review, R8-11).
-    if (ch === '$' && !inSingle && !inDouble) {
-      const next = nextSignificantIndex(command, i + 1);
-      if (command[next] === "'" && !dollarIntroducer) {
+    // `$'…'` opens an ANSI-C word; `$"…"` is locale quoting, which quotes
+    // like a double-quoted word. Only the introducer is skipped; a
+    // backslash-newline between `$` and the quote is removed first.
+    if (ch === '$' && !inSingle && !inDouble && !afterDollar) {
+      let next = i + 1;
+      while (command[next] === '\\' && command[next + 1] === '\n') next += 2;
+      if (command[next] === "'") {
         inAnsiC = true;
-        markSegment(true);
-        // Keep any bytes pending from a PREVIOUS `$'…'` segment of this
-        // word: bash concatenates the segments at the byte level, so
-        // resetting here split a UTF-8 sequence across them into U+FFFD
-        // (#16540 review, R2-7).
-        if (ansiCBytes === null) ansiCBytes = [];
         i = next;
         continue;
       }
-      if (command[next] === '"' && !dollarIntroducer) {
+      if (command[next] === '"') {
         inDouble = true;
-        markSegment(true);
         i = next;
         continue;
       }
-      dollarPending = !dollarIntroducer;
+      pendingDollar = true;
     }
     if (ch === "'" && !inDouble) {
-      flushPendingAnsiC();
-      // Same opening-only rule as the double quote below (R3-9 / R6-1).
-      if (!inSingle) markSegment(true);
       inSingle = !inSingle;
       continue;
     }
     if (ch === '"' && !inSingle) {
-      flushPendingAnsiC();
-      // A zero-width quoted segment (`~""/x`) leaves no marking character,
-      // so only an OPENING quote can record the word's leading quoting; the
-      // closing quote of a later segment must not re-mark a word whose bare
-      // prefix (`~/`) already decided the tilde expands (R3-9 / R6-1).
-      if (!inDouble) markSegment(true);
       inDouble = !inDouble;
       continue;
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      if (current || wordStarted) {
-        endWord();
+      if (current) {
+        pushToken(tokens, current, bare, fdRedirects, fdCloses);
+        current = '';
+        bare = '';
       }
       continue;
     }
-    flushPendingAnsiC();
     current += ch;
     bare += inSingle || inDouble ? '0' : '1';
-    if (!inSingle && !inDouble) {
-      if (ch === '/') tildePrefixOpen = false;
-      markSegment(false);
-    }
   }
-  if (current || wordStarted) endWord();
+  if (current) pushToken(tokens, current, bare, fdRedirects, fdCloses);
   return tokens;
 }
 
 function pushToken(
   tokens: string[],
-  bares: string[] | undefined,
   token: string,
   bare: string,
   fdRedirects: Set<number> | undefined,
   fdCloses?: Set<number>,
-  wordQuotedFlags?: boolean[],
-  wordQuoted?: boolean,
 ): void {
   // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-`
   // as "close the descriptor" and starts a new word after it:
@@ -412,20 +246,16 @@ function pushToken(
     if (token === '{' || token === '}') return;
     const normalized = trimShellSyntax(token, bare);
     if (!normalized) return;
+    if (!fdRedirects) {
+      tokens.push(normalized);
+      return;
+    }
     // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
     const start = /^\(*/.exec(token)![0].length;
     const normBare = bare.slice(start, start + normalized.length);
-    if (!fdRedirects) {
-      tokens.push(normalized);
-      bares?.push(normBare);
-      wordQuotedFlags?.push(wordQuoted ?? false);
-      return;
-    }
     const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
     if (!op || normBare.slice(op.length - 2, op.length) !== '11') {
       tokens.push(normalized);
-      bares?.push(normBare);
-      wordQuotedFlags?.push(wordQuoted ?? false);
       return;
     }
     const close = op.length;
@@ -433,16 +263,12 @@ function pushToken(
     if (!closes || normalized.length === close + 1) {
       fdRedirects.add(tokens.length);
       tokens.push(normalized);
-      bares?.push(normBare);
-      wordQuotedFlags?.push(wordQuoted ?? false);
       return;
     }
     if (!chained) {
       fdRedirects.add(tokens.length);
       fdCloses?.add(tokens.length);
       tokens.push(normalized);
-      bares?.push(normBare);
-      wordQuotedFlags?.push(wordQuoted ?? false);
       chained = true;
     }
     token = normalized.slice(close + 1);
@@ -480,47 +306,12 @@ function trimShellSyntax(token: string, bare: string): string {
  * paths are consistent across platforms and compatible with picomatch / the
  * permission rule matching system.
  */
-function resolvePath(
-  p: string,
-  cwd: string,
-  bare?: string,
-  wordWasQuotedOverride?: boolean,
-): string {
-  // Operand sites reach the command handlers as plain string arrays; the
-  // dispatch in extractShellOperations installs the token→marking map for
-  // the duration of the handler so a decoded or quoted tilde in an OPERAND
-  // (`cat $'\x7e/x'`) stays literal just like at a redirect site
-  // (#16540 review, R3-9).
-  const operandMarking = operandMarkings?.get(p);
-  if (bare === undefined) {
-    bare =
-      operandMarking?.marking ??
-      // A flag VALUE sliced out of its token (`--target-directory=$'\x7e/d'`)
-      // is not itself a key in the map; the parent token's marking minus the
-      // flag prefix is the value's marking (#16540 review, R6-1).
-      markingForFlagValue(p);
-  }
-  // A zero-width quoted segment (`""~/x`, `~""/x`) leaves no marking
-  // character but still quotes the word, so bash keeps the tilde literal
-  // (#16540 review, R3-9).
-  const wordWasQuoted =
-    (operandMarking?.quoted ?? false) ||
-    wordWasQuotedOverride === true ||
-    (operandMarking === undefined && flagValueWasQuoted(p));
+function resolvePath(p: string, cwd: string): string {
   // Normalize inputs to forward slashes for consistent cross-platform handling
   const normP = p.replace(/\\/g, '/');
   const normCwd = cwd.replace(/\\/g, '/');
 
-  // Only a tilde the user typed unquoted expands: `$'\x7e/x'` decodes to `~/x`
-  // and bash opens `./~/x`, so expanding it invented a path under $HOME that no
-  // rule can match (#16540 review, R2-8). The first marking character must
-  // also BELONG to the tilde: a zero-width quoted segment before it
-  // (`""~/x`) leaves the marking starting at `~`'s successor, so a marking
-  // shorter than the word means the tilde came from a quoted segment
-  // (#16540 review, R3-9).
-  const tildeIsBare =
-    !wordWasQuoted && (bare === undefined || bare.startsWith('1'));
-  if (tildeIsBare && (normP === '~' || normP.startsWith('~/'))) {
+  if (normP === '~' || normP.startsWith('~/')) {
     const homeDir = os.homedir().replace(/\\/g, '/');
     const rest = normP.slice(1); // '' or '/some/path'
     // nodePath.posix.join handles the rest correctly:
@@ -535,53 +326,6 @@ function resolvePath(
 
 function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
-}
-
-/**
- * Token→bare-marking map installed by extractShellOperations around a
- * command-handler call. The handlers receive plain string arrays, so this
- * is how an operand's quoting reaches resolvePath without rewriting every
- * handler signature. A token spelled two ways in one command merges in the
- * safe direction: ANY bare occurrence expands the tilde, because that
- * occurrence really writes under $HOME and a deny rule must see it
- * (#16540 review, R6-1).
- */
-let operandMarkings:
-  | Map<string, { marking: string; quoted: boolean }>
-  | undefined;
-
-/**
- * The marking of a flag value sliced out of a larger token: find the map key
- * that ends with `=<value>` (or a short flag glued to it) and return the
- * marking's tail of the value's length. The prefix is bare flag syntax, so
- * only the value's own segment decides tilde expansion (#16540 R6-1).
- */
-function markingForFlagValue(value: string): string | undefined {
-  if (operandMarkings === undefined || value === '') return undefined;
-  for (const [token, marking] of operandMarkings) {
-    if (!token.startsWith('-') || !token.endsWith(value)) continue;
-    const prefixLength = token.length - value.length;
-    if (prefixLength <= 0) continue;
-    const prefix = token.slice(0, prefixLength);
-    // `--flag=value`, `--flag value` glued as `-ovalue`: the prefix must be
-    // flag syntax, not part of another path that happens to end alike.
-    if (!/^--[\w-]+=$/.test(prefix) && !/^-[A-Za-z]+=?$/.test(prefix)) {
-      continue;
-    }
-    return marking.marking.slice(prefixLength);
-  }
-  return undefined;
-}
-
-/**
- * Whether a sliced flag value came from a quoted or decoded segment: the
- * parent token's marking tail has no bare character for the value's first
- * position (`--target-directory=$'\x7e/d'` decodes to `~/d` with an all-zero
- * tail), so bash keeps the tilde literal (#16540 R6-1).
- */
-function flagValueWasQuoted(value: string): boolean {
-  const marking = markingForFlagValue(value);
-  return marking !== undefined && marking[0] !== '1';
 }
 
 function isEnvAssignmentToken(token: string): boolean {
@@ -664,8 +408,6 @@ function extractRedirects(
   cwd: string,
   fdRedirects: ReadonlySet<number>,
   fdCloses: ReadonlySet<number> = new Set(),
-  bares?: string[],
-  wordQuotedFlags?: boolean[],
 ): RedirectResult {
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
@@ -673,22 +415,6 @@ function extractRedirects(
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
-    // A quoted operator is data, not an operator. `$'\x3e'` decodes to `>` and
-    // the tokenizer marks every decoded character as quoted, so without reading
-    // that marking a decoded operator character looked real: `cat $'\x3e' > /tmp/t`
-    // reported a read of /tmp/t plus a phantom write to `>` while bash creates
-    // /tmp/t (#16540 review, R2-4).
-    const tokBare = bares?.[i];
-    // Scoped to a token whose characters were ALL quoted or decoded: a partly
-    // quoted word like `2">"&1` keeps the fail-safe reading this file already
-    // pinned (not an fd duplication, so a literal write to `&1`), while a word
-    // that is nothing but decoded quote content is data — `$'\x3e'` is a `>`
-    // argument, not a redirect (#16540 review, R2-4).
-    const isDecodedDataWord =
-      tokBare !== undefined &&
-      tokBare.length === tok.length &&
-      !tokBare.includes('1');
-    const targetBare = (index: number): string | undefined => bares?.[index];
 
     // ── `>&word`, `N>&word`, `<&word` with an unquoted `>&`/`<&` ─────────
     const fdOp = fdRedirects.has(i)
@@ -705,84 +431,49 @@ function extractRedirects(
         ? `&${tok.slice(fdOp.length)}`
         : fdRedirectFile(tok.slice(fdOp.length));
       if (file !== undefined) {
-        // The target's quoting survives inside the same token: `>&'~'/out`
-        // opens ./~/out, not $HOME/out (#16540 review, R3-9). The `&` prefix
-        // of a close-word is syntax this parser added, so that shape keeps
-        // the pre-existing whole-word reading.
-        (fdOp === '<&' ? readFiles : writeFiles).push(
-          resolvePath(
-            file,
-            cwd,
-            fdCloses.has(i) ? undefined : tokBare?.slice(fdOp.length),
-            wordQuotedFlags?.[i],
-          ),
-        );
+        (fdOp === '<&' ? readFiles : writeFiles).push(resolvePath(file, cwd));
       }
       continue;
     }
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if ((tok === '>' || tok === '1>') && !isDecodedDataWord) {
+    if (tok === '>' || tok === '1>') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(
-            resolvePath(
-              target,
-              cwd,
-              targetBare(i + 1),
-              wordQuotedFlags?.[i + 1],
-            ),
-          );
+          writeFiles.push(resolvePath(target, cwd));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
         i++;
       }
-    } else if ((tok === '>>' || tok === '1>>') && !isDecodedDataWord) {
+    } else if (tok === '>>' || tok === '1>>') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(
-            resolvePath(
-              target,
-              cwd,
-              targetBare(i + 1),
-              wordQuotedFlags?.[i + 1],
-            ),
-          );
+          writeFiles.push(resolvePath(target, cwd));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
         i++;
       }
-    } else if ((tok === '<<' || tok === '<<-') && !isDecodedDataWord) {
+    } else if (tok === '<<' || tok === '<<-') {
       toRemove.add(i);
       if (tokens[i + 1]) {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '<' && !isDecodedDataWord) {
+    } else if (tok === '<') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(
-            resolvePath(
-              target,
-              cwd,
-              targetBare(i + 1),
-              wordQuotedFlags?.[i + 1],
-            ),
-          );
+          readFiles.push(resolvePath(target, cwd));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
         i++;
       }
-    } else if (
-      (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') &&
-      !isDecodedDataWord
-    ) {
+    } else if (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
       if (target) {
@@ -791,14 +482,7 @@ function extractRedirects(
           looksLikePath(target) &&
           !isNetworkPseudoDevice(target)
         ) {
-          writeFiles.push(
-            resolvePath(
-              target,
-              cwd,
-              targetBare(i + 1),
-              wordQuotedFlags?.[i + 1],
-            ),
-          );
+          writeFiles.push(resolvePath(target, cwd));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -808,20 +492,9 @@ function extractRedirects(
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
       const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
-      if (m && !isDecodedDataWord) {
+      if (m) {
         const op = m[1]!;
         const target = m[2]!;
-        const targetMarking = tokBare?.slice(op.length);
-        // A zero-width quoted segment inside the target (`>~""/x`) leaves no
-        // marking character: the operator's own prefix is all bare, so a
-        // target marking with a missing character means a quote the marking
-        // cannot show, and bash keeps the tilde literal. A QUOTED operator
-        // prefix (`$'\x3e'~/x`) is decoded data, not this shape — its zeros
-        // belong to the operator, so only the bare-operator spelling counts
-        // (#16540 review, R3-9 / R6-1).
-        const targetQuoted =
-          wordQuotedFlags?.[i] ||
-          (tokBare !== undefined && tokBare.length < tok.length);
         if (op.startsWith('<<')) {
           toRemove.add(i);
           continue;
@@ -832,13 +505,9 @@ function extractRedirects(
           !isNetworkPseudoDevice(target)
         ) {
           if (op === '<') {
-            readFiles.push(
-              resolvePath(target, cwd, targetMarking, targetQuoted),
-            );
+            readFiles.push(resolvePath(target, cwd));
           } else {
-            writeFiles.push(
-              resolvePath(target, cwd, targetMarking, targetQuoted),
-            );
+            writeFiles.push(resolvePath(target, cwd));
           }
         }
         toRemove.add(i);
@@ -846,25 +515,10 @@ function extractRedirects(
     }
   }
 
-  // Remove redirect tokens from the array in-place, compacting the index-parallel
-  // marking with the SAME index set. Callers read a token's marking by position,
-  // so filtering one array without the other desyncs every later index
-  // (#16540 review, R3-2).
+  // Remove redirect tokens from the array in-place
   const filtered = tokens.filter((_, idx) => !toRemove.has(idx));
   tokens.length = 0;
   tokens.push(...filtered);
-  if (bares !== undefined) {
-    const filteredBares = bares.filter((_, idx) => !toRemove.has(idx));
-    bares.length = 0;
-    bares.push(...filteredBares);
-  }
-  if (wordQuotedFlags !== undefined) {
-    const filteredQuoted = wordQuotedFlags.filter(
-      (_, idx) => !toRemove.has(idx),
-    );
-    wordQuotedFlags.length = 0;
-    wordQuotedFlags.push(...filteredQuoted);
-  }
 
   return { readFiles, writeFiles };
 }
@@ -2470,52 +2124,18 @@ export function extractShellOperations(
 
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
-  const bares: string[] = [];
-  const quotedFlags: boolean[] = [];
-  const tokens = tokenize(
-    simpleCommand,
-    fdRedirects,
-    fdCloses,
-    bares,
-    quotedFlags,
-  );
+  const tokens = tokenize(simpleCommand, fdRedirects, fdCloses);
   if (tokens.length === 0) return [];
 
   // Extract I/O redirections before dispatching to the command handler.
   // This mutates `tokens` in-place by removing redirect tokens.
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd, fdRedirects, fdCloses, bares, quotedFlags);
+    extractRedirects(tokens, cwd, fdRedirects, fdCloses);
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
-    bares.shift();
-    quotedFlags.shift();
   }
 
-  return dispatchShellOperations(
-    tokens,
-    bares,
-    quotedFlags,
-    cwd,
-    redirectReads,
-    redirectWrites,
-  );
-}
-
-/**
- * Dispatch already-tokenized words whose redirect extraction has run. The
- * PREFIX_COMMANDS recursion enters here with the index-parallel markings
- * sliced by the same startIdx, so a prefix never re-tokenizes decoded text
- * and loses its quoting (#16540 review, R6-1).
- */
-function dispatchShellOperations(
-  tokens: string[],
-  bares: string[],
-  quotedFlags: boolean[],
-  cwd: string,
-  redirectReads: string[] = [],
-  redirectWrites: string[] = [],
-): ShellOperation[] {
   const cmdName = tokens[0];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
@@ -2564,60 +2184,16 @@ function dispatchShellOperations(
       startIdx++;
     }
     if (startIdx < tokens.length) {
-      // Recurse on the token slice with its index-parallel markings: joining
-      // the decoded tokens back into text and re-tokenizing lost the quoting
-      // (`sudo tee '~/y'` re-read the bare word `~/y` and invented a $HOME
-      // write bash never makes) (#16540 review, R6-1).
-      ops.push(
-        ...dispatchShellOperations(
-          tokens.slice(startIdx),
-          bares.slice(startIdx),
-          quotedFlags.slice(startIdx),
-          cwd,
-        ),
-      );
+      // Reconstruct the inner command and recurse
+      const innerCommand = tokens.slice(startIdx).join(' ');
+      ops.push(...extractShellOperations(innerCommand, cwd));
     }
   } else {
     // ── Dispatch to the known-command handler ─────────────────────────────
     const handler = COMMANDS[cmdName];
     if (handler) {
       const args = tokens.slice(1);
-      // Install the operand markings for the handler's resolvePath calls
-      // (R3-9). Duplicate spellings merge in the safe direction: a position
-      // is bare if ANY occurrence typed it bare, because that occurrence
-      // expands the tilde and really writes under $HOME — an out-of-workspace
-      // target a deny rule must see (#16540 review, R6-1).
-      const markings = new Map<string, { marking: string; quoted: boolean }>();
-      for (let t = 1; t < tokens.length; t++) {
-        const token = tokens[t]!;
-        const marking = bares[t] ?? '';
-        const quoted = quotedFlags[t] ?? false;
-        const prior = markings.get(token);
-        if (prior === undefined) {
-          markings.set(token, { marking, quoted });
-        } else {
-          let merged = '';
-          for (
-            let c = 0;
-            c < Math.max(prior.marking.length, marking.length);
-            c++
-          ) {
-            merged +=
-              prior.marking[c] === '1' || marking[c] === '1' ? '1' : '0';
-          }
-          markings.set(token, {
-            marking: merged,
-            quoted: prior.quoted && quoted,
-          });
-        }
-      }
-      const outerMarkings = operandMarkings;
-      operandMarkings = markings;
-      try {
-        ops.push(...handler(args, cwd));
-      } finally {
-        operandMarkings = outerMarkings;
-      }
+      ops.push(...handler(args, cwd));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
@@ -2678,13 +2254,8 @@ function resolveCdTargetCwd(
 ): CdResolution {
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
-  const bares: string[] = [];
-  const words = tokenize(command, fdRedirects, fdCloses, bares);
-  // extractRedirects compacts `words` and `bares` together, so the target and its
-  // marking are read from the filtered arrays: a redirect written BEFORE the
-  // directory (`cd 2>/dev/null /etc`) is gone by then, and reading a pre-filter
-  // snapshot made that redirect the cwd (#16540 review, R3-2 fix-induced).
-  const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
+  const words = tokenize(command, fdRedirects, fdCloses);
+  const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses);
 
   if (words[0] === 'popd') return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
@@ -2714,24 +2285,11 @@ function resolveCdTargetCwd(
   if (!target || target === '-' || isDynamicShellPath(target)) {
     return { kind: 'dynamic', redirects };
   }
-  const targetBare = bares[targetIndex];
-  // A target the shell had to decode (`cd $'\x7e'` is the literal directory
-  // `~`, never $HOME) may not exist at all — bash then fails the cd and the
-  // rest of the segment runs where it already was — so resolve it without
-  // tilde expansion and keep the fail-closed marking. An ABSOLUTE target does
-  // not depend on the cwd whichever way the cd goes, exactly like an unquoted
-  // absolute path, so quoting alone must not escalate every later write in the
-  // segment (#16540 review, R4-7).
-  const targetIsDecoded =
-    targetBare !== undefined &&
-    targetBare.length === target.length &&
-    !targetBare.includes('1') &&
-    !isShellAbsolutePath(target);
 
   return {
     kind: 'static',
-    cwd: resolvePath(target, cwd, targetBare),
-    cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
+    cwd: resolvePath(target, cwd),
+    cwdUnknown: cwdUnknown && !isShellAbsolutePath(target),
     redirects,
   };
 }

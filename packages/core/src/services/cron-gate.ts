@@ -156,29 +156,8 @@ export function gateCommandError(gate: unknown): string | null {
   // already runs in a shell; the wrapper adds nothing. The error names what
   // the rules would check, as the normalization also misreads a few plain
   // commands (`bash /opt/probe.sh -c x` reads as `x`).
-  const normalized = normalizeMonitorCommand(gate);
-  const checked = normalized.safetyCommand;
-  // A wrapper whose payload word carries an unresolvable expansion is handed
-  // back whole for the permission scan (#16075 review, R11-2), so an unchanged
-  // `checked` there does not mean "not a wrapper": the shell runs the glued
-  // script while the rules read the raw text. Refuse it like any wrapper.
-  if (normalized.wrapperPayloadUnresolved || checked !== gate.trim()) {
-    // The flag-only refusal has no checked/written difference to name: both
-    // strings are the gate itself, so the wrapper wording asserted a
-    // difference that does not exist and never mentioned the unresolvable
-    // payload — the real cause (#16540 review, R3-10).
-    // A command substitution keeps the wrapper wording (quoting hides it
-    // from a raw scan — that difference is real). Only the bare-expansion
-    // shape, where both strings are identical, gets the cannot-resolve
-    // message.
-    if (
-      normalized.wrapperPayloadUnresolved &&
-      checked === gate.trim() &&
-      !gate.includes('$(') &&
-      !gate.includes('`')
-    ) {
-      return 'must be a command whose payload can be resolved statically: this shell wrapper carries an expansion the permission rules cannot resolve, so they cannot check the command the shell would run';
-    }
+  const checked = normalizeMonitorCommand(gate).safetyCommand;
+  if (checked !== gate.trim()) {
     let shown = checked;
     if (checked.length > 80) {
       // Not between the halves of a surrogate pair.
