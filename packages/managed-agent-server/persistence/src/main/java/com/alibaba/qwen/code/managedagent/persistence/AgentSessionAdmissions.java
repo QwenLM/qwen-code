@@ -838,7 +838,7 @@ final class AgentSessionAdmissions {
                 registration == null
                         ? null
                         : CsiFilesRetirementProfile.request(
-                                        workspace, registration.mountRoot(), sessionId, CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE)
+                                        workspace, registration.mountRoot(), sessionId, CsiFilesRetirementProfile.ACTIVITY_PROFILE)
                                 .requestKey();
         String turnId = input.isEmpty() ? null : AgentStoreRows.publicId("turn");
         String promptId = input.isEmpty() ? null
@@ -868,7 +868,7 @@ final class AgentSessionAdmissions {
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
                 registration != null
-                        ? CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE
+                        ? CsiFilesRetirementProfile.ACTIVITY_PROFILE
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
                 runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",
