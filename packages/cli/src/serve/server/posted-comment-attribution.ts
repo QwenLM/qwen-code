@@ -500,17 +500,35 @@ function hasStdoutRedirect(probe: string): boolean {
 }
 
 /**
+ * Whether the command writes nothing to stdout, so it cannot be the source of
+ * the visible comment-shaped output. State-changing builtins (`cd`, `export`,
+ * `unset`, `set`, `shift`, `wait`, `read`, …) produce no stdout, and a bare
+ * shell closer such as `)` is not a command at all. Counting these as stdout
+ * writers would veto legitimate `cd … && create` chains. A leading `(`/`)` and
+ * whitespace are stripped first so a subshell's `(cd …` is recognised too.
+ */
+const NO_STDOUT_FIRST_WORD =
+  /^(?:cd|export|unset|set|shift|wait|read|return|exit|break|continue|true|false|:)(?:\s|$)/;
+function writesNoStdout(probe: string): boolean {
+  const trimmed = probe.replace(/^[()\s]+/, '');
+  if (trimmed === '') return true;
+  return NO_STDOUT_FIRST_WORD.test(trimmed);
+}
+
+/**
  * Whether the creation's output cannot be proven to be the result we see. The
  * visible stdout must be provably the creation's: attribute only when exactly
  * ONE independent command writes to stdout and that command leads with the
  * creation. Any other stdout-producing command — before OR after the creation,
  * API or not (`cat url.txt` prints a comment URL just as a read does) — makes
  * the origin unprovable. A command whose stdout is redirected (`> file`,
- * `>/dev/null`, `&>`) or a pure assignment contributes no visible output and
- * does not block: the heredoc that writes the body to a file still lets the
- * creation that follows it attribute. A stderr-only redirect (`2>`) does NOT
- * silence stdout. A pipe keeps a pipeline together (`create | tee` passes the
- * creation's output through). A shell conditional/loop is ambiguous (static
+ * `>/dev/null`, `&>`), a pure assignment, or a no-stdout builtin (`cd`,
+ * `export`, `unset`, `set`, `shift`, `wait`, …) / bare shell closer contributes
+ * no visible output and does not block: the heredoc that writes the body to a
+ * file still lets the creation that follows it attribute, and `cd … && create`
+ * is not vetoed. A stderr-only redirect (`2>`) does NOT silence stdout. A pipe
+ * keeps a pipeline together (`create | tee` passes the creation's output
+ * through). A shell conditional/loop is ambiguous (static
  * analysis cannot prove which branch executed). When the source cannot be
  * proven, attribute nothing (fail-open: the author may self-echo once, but a
  * mere reader is never credited with comments it only read).
@@ -540,6 +558,7 @@ function creationOutputIsAmbiguous(command: string): boolean {
     const probe = stripQuotedSpans(stripShellComment(independent)).trim();
     if (probe === '') continue;
     if (hasStdoutRedirect(probe)) continue;
+    if (writesNoStdout(probe)) continue;
     // A pure assignment produces no stdout; an env-prefixed creation does (and
     // is recognised as a creation, so it is not excluded here).
     if (

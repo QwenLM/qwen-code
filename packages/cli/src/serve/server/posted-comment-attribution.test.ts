@@ -471,6 +471,19 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('pins the escaped-space guard via a provable create-after-heredoc chain (F7)', () => {
+    // Unlike the tee fixture above (which the structural rule vetoes either
+    // way), this chain is provable: the heredoc writes the body to the escaped
+    // filename and the creation posts it. If the escaped-space guard regressed
+    // (the # treated as a comment), the heredoc would not be consumed and the
+    // creation would lose attribution — so this fixture reds without the guard.
+    const entry = shellResult(
+      "cat > review\\ #1.md <<'EOF'\nbody text\nEOF\ngh pr comment 42 --body-file review\\ #1.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('does not credit an unredirected read printed before the creation (structural source proof)', () => {
     // `cat url.txt` writes the comment URL to stdout before the creation runs;
     // the visible result is the read's, not the creation's, so attribute nothing.
@@ -486,6 +499,32 @@ describe('extractPostedCommentIds', () => {
     // visible output, so the creation that follows is the provable source.
     const entry = shellResult(
       "cat > note.md <<'EOF'\nbody text\nEOF\ngh pr comment 42 --body-file note.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('attributes a creation after a no-stdout builtin such as cd (F5)', () => {
+    // cd writes nothing to stdout, so it must not count as a stdout producer
+    // that vetoes the creation.
+    const entry = shellResult(
+      'cd /tmp\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('attributes cd && heredoc-to-file then create (F5, the corpus note shape)', () => {
+    const entry = shellResult(
+      "cd /tmp && cat > note.md <<'EOF'\nbody text\nEOF\ngh pr comment 42 --body-file note.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('attributes a creation after export (F5)', () => {
+    const entry = shellResult(
+      'export FOO=1\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
