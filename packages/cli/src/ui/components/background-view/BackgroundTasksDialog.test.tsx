@@ -285,6 +285,12 @@ describe('BackgroundTasksDialog', () => {
   });
 
   afterEach(() => {
+    // ink-testing-library does not auto-register cleanup, so every setup()
+    // leaks a render root. A leaked root that re-renders during a later test
+    // calls that test's useKeypress mock and pushes its own closure onto its
+    // handlers, so pressKey drives a foreign provider and the state under
+    // assertion never settles at any budget (#16609). Unmount before the
+    // mocks are restored, while the root can still render safely.
     cleanup();
     vi.restoreAllMocks();
   });

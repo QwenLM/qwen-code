@@ -2774,6 +2774,65 @@ class QwenHostedHarnessConnectorTest {
                 .doesNotContainKey("driveRuntimeRecovery");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"prepare", "prepared-archive", "inspect", "preview", "candidates", "snapshot", "archive"})
+    void selfServiceGenerationMismatchAdoptsWithoutRedispatchOrRuntimeReplacement(String method) {
+        HostedHarnessClient oldClient = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(oldClient.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef ref = mock(HarnessSessionRef.class);
+        when(ref.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(oldClient.loadSession(any(LoadHarnessSession.class))).thenReturn(ref);
+        QwenHostedHarnessConnector connector = connector(oldClient);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        clearInvocations(oldClient);
+        HostedHarnessGenerationException mismatch = mock(HostedHarnessGenerationException.class);
+        when(mismatch.getActualBootId()).thenReturn(NEW_BOOT_ID);
+        java.io.InputStream source = java.io.InputStream.nullInputStream();
+        Runnable operation;
+        switch (method) {
+            case "prepare" -> {
+                doThrow(mismatch).when(oldClient).prepareManagedPackage(any(), any());
+                operation = () -> connector.preparePackage(Map.of(), source);
+            }
+            case "prepared-archive" -> {
+                when(oldClient.prepareManagedPackage(any(), any())).thenReturn(Map.of("preparationId", SESSION_ID));
+                doThrow(mismatch).when(oldClient).managedPackageArchive(any(), any());
+                operation = () -> connector.preparePackage(Map.of(), source);
+            }
+            case "inspect" -> {
+                doThrow(mismatch).when(oldClient).inspectManagedPackage(any(), any());
+                operation = () -> connector.inspectPackage(Map.of(), source);
+            }
+            case "preview" -> {
+                doThrow(mismatch).when(oldClient).previewManagedPackage(any(), any());
+                operation = () -> connector.previewPackage(Map.of(), source);
+            }
+            case "candidates" -> {
+                doThrow(mismatch).when(oldClient).runtimeSkillCandidates(any());
+                operation = () -> connector.runtimeSkillCandidates("tenant-a", SESSION_ID);
+            }
+            case "snapshot" -> {
+                doThrow(mismatch).when(oldClient).runtimeSkillSnapshot(any(), any());
+                operation = () -> connector.runtimeSkillSnapshot("tenant-a", SESSION_ID, Map.of());
+            }
+            case "archive" -> {
+                doThrow(mismatch).when(oldClient).runtimeSkillArchive(any(), any(), any(), any(), any(), anyLong());
+                operation = () -> connector.runtimeSkillArchive("tenant-a", SESSION_ID,
+                        Map.of("operationId", SESSION_ID, "preparationId", SESSION_ID, "offset", 0L,
+                                "owner", Map.of("bindingId", "binding", "generation", "1")));
+            }
+            default -> throw new AssertionError(method);
+        }
+        assertThatThrownBy(operation::run).isSameAs(mismatch);
+        verify(oldClient).close();
+        assertThat(ReflectionTestUtils.getField(connector, "client")).isNull();
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).isEmpty();
+        verify(oldClient, never()).loadSession(any());
+        verify(oldClient, never()).createSession(any());
+    }
+
     // G3: a generation change adopts instead of pinning the Session. The
     // discovering call closes the pinned client and drops every cached
     // attachment, so the next call re-attaches on the rebuilt client.

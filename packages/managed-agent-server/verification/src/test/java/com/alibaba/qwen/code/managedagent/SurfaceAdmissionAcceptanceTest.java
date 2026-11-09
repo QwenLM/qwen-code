@@ -366,6 +366,10 @@ public class SurfaceAdmissionAcceptanceTest {
             belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
                     throws Exception {
         switch (entry.ruleClass()) {
+            case PERSONAL_MEMORY -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 503, "memory_disabled");
+            }
             case SESSION_WORKTREE -> {
                 expect(entry, null, 401, "actor_required");
                 if (entry.template().endsWith("/options")) {
@@ -1347,7 +1351,7 @@ public class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_MEMORY_QUERY, STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
@@ -1513,6 +1517,9 @@ public class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.SESSION_ACTIVITY)) {
+            query.add("kind=tools");
+        }
         if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
             query.add("workspaceId=workspace");
             query.add("cwdRelative=.");
@@ -1521,20 +1528,29 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
         }
         if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
-            String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
-                    ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
-                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
-                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            query.add("manifest=" + manifest);
-            if ("POST".equals(entry.method())) {
-                query.add("packageDigest=" + digest());
+            if (entry.template().contains("/imports")) {
+                String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                        ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest() + "\",\"compilerVersion\":1,"
+                                + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}")
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                query.add("metadata=" + metadata);
+            } else {
+                String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                        ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
+                                + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                query.add("manifest=" + manifest);
+                if ("POST".equals(entry.method())) {
+                    query.add("packageDigest=" + digest());
+                }
             }
             if (entry.surface() == Surface.WEBSHELL) {
                 query.add("workspaceId=ws");
             }
         } else if (entry.surface() == Surface.PUBLIC
                 && (entry.capabilities().contains(Capability.EXTENSION_GET)
-                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE))) {
+                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE)
+                || entry.capabilities().contains(Capability.EXTENSION_INSPECTION))) {
             query.add("packageDigest=" + digest());
         }
         if (path.startsWith("/internal/managed-tool-publications/")
@@ -1608,12 +1624,17 @@ public class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case MEMORY_STORE_CREATE, MEMORY_STORE_LIST -> "{}";
+            case STORE_MEMORY_QUERY -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"operation\":\"binding\"}";
             case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";
             case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
                     + "\"expectedCommittedSequence\":0}";
             case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
-            case EXTENSION_CONFIG_GET -> "{\"sessionId\":\"" + session + "\"}";
+            case EXTENSION_CONFIG_GET -> entry.template().endsWith("/operations/lookup")
+                    ? (publicSurface ? "{" : "{\"sessionId\":\"" + session + "\",")
+                            + "\"idempotencyKey\":\"extensions-probe\"}"
+                    : "{\"sessionId\":\"" + session + "\"}";
             case EXTENSION_CONFIG_APPLY -> {
                 if (entry == SurfaceRegistry.PUBLIC_SESSION_EXTENSIONS_APPLY) {
                     yield "{\"expectedConfigRevision\":0,\"extensions\":[]}";
@@ -1624,11 +1645,16 @@ public class SurfaceAdmissionAcceptanceTest {
                 yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
             }
             case EXTENSION_LIST -> "{\"workspaceId\":\"ws\"}";
-            case EXTENSION_GET -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
+            case EXTENSION_GET, EXTENSION_INSPECTION -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
+            case RUNTIME_SKILL_IMPORT -> publicSurface ? "{}" : "{\"sessionId\":\"" + session + "\""
+                    + (entry.template().endsWith("/imports") ? ",\"idempotencyKey\":\"skills-probe\"" : "") + "}";
             case EXTENSION_SETTINGS_GET -> "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\"}";
             case EXTENSION_SETTINGS_SET -> publicSurface ? "{\"expectedRevision\":0,\"values\":{}}"
                     : "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"idempotencyKey\":\"settings-probe\",\"expectedRevision\":0,\"values\":{}}";
-            case EXTENSION_OPERATION -> "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
+            case EXTENSION_OPERATION -> entry.template().endsWith("/lookup")
+                    ? (publicSurface ? "{" : "{\"workspaceId\":\"ws\",")
+                            + "\"kind\":\"publish\",\"idempotencyKey\":\"publish-probe\"}"
+                    : "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
             case SESSION_CREATE -> publicSurface
                     ? "{\"agent_id\":\"qwen-code\",\"input\":[],"
                             + "\"workspace\":{\"workspace_id\":\"ws\"}}"
@@ -1660,7 +1686,7 @@ public class SurfaceAdmissionAcceptanceTest {
             case SESSION_RECOVERY_RECHECK -> publicSurface
                     ? "{\"turnId\":\"turn_0000000000000000\"}"
                     : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
-            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST, SESSION_RESOURCES, SESSION_AGENT_TRACE -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";
@@ -1708,7 +1734,10 @@ public class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP,
+                    SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_ACTIVITY_STATS ->
+                    "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_ACTIVITY -> "{\"sessionId\":\"" + session + "\",\"kind\":\"tools\"}";
             case MCP_MANAGEMENT -> {
                 if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
                     yield "{\"sessionId\":\"" + session + "\"}";

@@ -6,14 +6,21 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Readable } from 'node:stream';
+import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { open, type Entry, type ZipFile } from 'yauzl';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import {
+  MAX_ARCHIVE_ENTRIES,
+  MAX_ARCHIVE_EXPANDED_BYTES,
+  MAX_ARCHIVE_PATH_BYTES,
+  type TarArchiveSafetyOptions,
+} from './archive-safety.js';
 
 const ZIP_FILE_TYPE_MASK = 0xf000;
 const ZIP_DIRECTORY_TYPE = 0x4000;
 const ZIP_SYMBOLIC_LINK_TYPE = 0xa000;
+const ZIP_REGULAR_FILE_TYPE = 0x8000;
 const ZIP_DOS_DIRECTORY_ATTRIBUTE = 16;
 const MAX_REPORTED_ZIP_PATH_LENGTH = 200;
 
@@ -157,6 +164,7 @@ async function extractEntry(
   entry: Entry,
   root: string,
   signal?: AbortSignal,
+  enforceResourceLimits = false,
 ): Promise<void> {
   signal?.throwIfAborted();
   if (entry.fileName.startsWith('__MACOSX/')) return;
@@ -168,6 +176,13 @@ async function extractEntry(
       `Zip archive contains unsupported symbolic link entry: ${reportedEntryName}`,
     );
   }
+  if (
+    enforceResourceLimits &&
+    ![0, ZIP_DIRECTORY_TYPE, ZIP_REGULAR_FILE_TYPE].includes(
+      mode & ZIP_FILE_TYPE_MASK,
+    )
+  )
+    throw new Error('Zip archive contains an unsupported resource type.');
 
   const destination = path.resolve(root, entry.fileName);
   if (!isWithinRoot(root, destination)) {
@@ -193,8 +208,17 @@ async function extractEntry(
   signal?.throwIfAborted();
   const readStream = await openEntryStream(zipFile, entry, signal);
   try {
+    let written = 0;
     await pipeline(
       readStream,
+      new Transform({
+        transform(chunk, _encoding, done) {
+          written += chunk.length;
+          if (enforceResourceLimits && written > entry.uncompressedSize)
+            done(new Error('Zip entry exceeds its declared size.'));
+          else done(null, chunk);
+        },
+      }),
       fs.createWriteStream(destination, { mode: permissions }),
       { signal },
     );
@@ -209,10 +233,15 @@ function extractEntries(
   zipFile: ZipFile,
   root: string,
   signal?: AbortSignal,
+  options: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     let settled = false;
+    let count = 0;
+    let expanded = 0;
+    let pathBytes = 0;
+    const paths = new Set<string>();
     const finish = (error?: unknown) => {
       if (settled) return;
       settled = true;
@@ -233,7 +262,31 @@ function extractEntries(
       finish();
     };
     const onEntry = (entry: Entry) => {
-      void extractEntry(zipFile, entry, root, signal).then(
+      if (options.enforceResourceLimits) {
+        count++;
+        expanded += entry.uncompressedSize;
+        pathBytes += Buffer.byteLength(entry.fileName);
+        const name = path.posix.normalize(entry.fileName).replace(/\/$/u, '');
+        if (
+          count > MAX_ARCHIVE_ENTRIES ||
+          !Number.isSafeInteger(entry.uncompressedSize) ||
+          entry.uncompressedSize < 0 ||
+          expanded > MAX_ARCHIVE_EXPANDED_BYTES ||
+          pathBytes > MAX_ARCHIVE_PATH_BYTES ||
+          paths.has(name)
+        ) {
+          fail(new Error('Zip archive resource limit or duplicate path.'));
+          return;
+        }
+        paths.add(name);
+      }
+      void extractEntry(
+        zipFile,
+        entry,
+        root,
+        signal,
+        options.enforceResourceLimits,
+      ).then(
         () => {
           if (!settled) zipFile.readEntry();
         },
@@ -254,6 +307,7 @@ export async function extractZipArchive(
   file: string,
   destination: string,
   signal?: AbortSignal,
+  options: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   signal?.throwIfAborted();
   if (!path.isAbsolute(destination)) {
@@ -264,7 +318,7 @@ export async function extractZipArchive(
   signal?.throwIfAborted();
   const zipFile = await openZipFile(file, signal);
   try {
-    await extractEntries(zipFile, root, signal);
+    await extractEntries(zipFile, root, signal, options);
   } catch (error) {
     signal?.throwIfAborted();
     throw error;

@@ -17,6 +17,7 @@ import {
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
+import { SESSION_MODEL_PERSIST_DEFAULT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
@@ -127,6 +128,7 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceGitIgnoredPaths,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
@@ -479,6 +481,7 @@ const CAPABILITY_PREFLIGHT_TTL_MS = 60_000;
 // Provider mutations persist before their bounded runtime sync. A default
 // client deadline could report failure while the daemon still completes it.
 const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
+const SUBSCRIPTION_ACTIVATION_TIMEOUT_MS = 65_000;
 const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
 const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
@@ -1480,7 +1483,10 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     let supported: boolean;
-    if (capability === 'session_source_metadata') {
+    if (
+      capability === 'session_source_metadata' ||
+      capability === 'session_last_user_prompt_sort'
+    ) {
       while (
         this.capabilitiesRequest ||
         !this.capabilityFeatures ||
@@ -3304,7 +3310,10 @@ export class DaemonClient {
   async listStandaloneSessionsPage(
     options: DaemonStandaloneSessionListOptions = {},
   ): Promise<DaemonStandaloneSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     const query = new URLSearchParams();
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options.cursor !== undefined) query.set('cursor', options.cursor);
     if (options.pageSize !== undefined) {
       query.set('size', String(options.pageSize));
@@ -3603,6 +3612,7 @@ export class DaemonClient {
   async listWorkspaceSessions(
     workspaceCwd: string,
     options?: {
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       pageSize?: number;
       archiveState?: DaemonSessionArchiveState;
       parentSessionId?: string;
@@ -3618,6 +3628,8 @@ export class DaemonClient {
     workspaceCwd: string,
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -3635,6 +3647,7 @@ export class DaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options?.cursor !== undefined) {
       query.set('cursor', options.cursor);
     }
@@ -3659,12 +3672,14 @@ export class DaemonClient {
     if (options?.liveOnly === true) {
       query.set('liveOnly', '1');
     }
-    // The ACP session/list mapping does not carry liveOnly; force native REST
-    // rather than silently serving persisted history.
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
-      options?.liveOnly === true ? { mode: 'rest' } : {},
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 
@@ -3678,6 +3693,8 @@ export class DaemonClient {
     request: DaemonSessionCatalogRequest,
     opts?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<DaemonSessionCatalogResult> {
+    if (request.options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     const { pageSize, ...options } = request.options ?? {};
     return await this.jsonRequest<DaemonSessionCatalogResult>(
       '/sessions/catalog',
@@ -4099,7 +4116,8 @@ export class DaemonClient {
   }
 
   /**
-   * Read the current in-memory runtime status for one live daemon session.
+   * Read one live session's runtime status and optional persisted
+   * summary metadata.
    */
   async sessionStatus(
     sessionId: string,
@@ -6807,13 +6825,19 @@ export class DaemonClient {
     sessionId: string,
     modelId: string,
     clientId?: string,
+    options?: { persistDefault: false },
   ): Promise<SetModelResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/model`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ modelId }),
+        body: JSON.stringify({
+          modelId,
+          ...(options?.persistDefault === false
+            ? { _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false } }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -7482,21 +7506,30 @@ export class DaemonClient {
   }
 
   async getSubscriptionDefaultModel(
-    opts: { signal?: AbortSignal } = {},
-  ): Promise<{ modelId: string }> {
+    opts: { signal?: AbortSignal; settingsScope?: 'provider' } = {},
+  ): Promise<{
+    modelId: string;
+    runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+  }> {
     const route = '/auth/subscription/model';
     return this.fetchWithTimeout(
       `${this.baseUrl}${route}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: '{}',
+        body: JSON.stringify({ settingsScope: opts.settingsScope }),
         signal: opts.signal,
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, `POST ${route}`);
-        return (await res.json()) as { modelId: string };
+        return (await res.json()) as {
+          modelId: string;
+          runtimeSync?: DaemonModelProviderRuntimeSyncResult;
+        };
       },
+      opts.settingsScope === 'provider' && !this.hasExplicitFetchTimeout
+        ? SUBSCRIPTION_ACTIVATION_TIMEOUT_MS
+        : undefined,
     );
   }
 
@@ -7694,6 +7727,22 @@ export class DaemonClient {
         };
       },
     );
+  }
+
+  async getWorkspaceOrder(): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'GET /workspace-order', {
+      mode: 'rest',
+    });
+  }
+
+  async setWorkspaceOrder(
+    cwds: readonly string[],
+  ): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'POST /workspace-order', {
+      method: 'POST',
+      body: { cwds },
+      mode: 'rest',
+    });
   }
 
   async updateWorkspace(
@@ -8498,6 +8547,27 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  /**
+   * Return confirmed Git-ignored paths for at most 256 inputs.
+   * Paths are relative to cwd, or the workspace root when cwd is omitted.
+   */
+  workspaceGitIgnoredPaths(
+    paths: readonly string[],
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonWorkspaceGitIgnoredPaths> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitIgnoredPaths>(
+      this.workspaceSelector,
+      `/git/check-ignore${query ? `?${query}` : ''}`,
+      'POST /workspaces/:workspace/git/check-ignore',
+      { method: 'POST', body: { paths }, mode: 'rest' },
+    );
+  }
+
   workspaceGitDiff(
     cwd?: string,
     sessionId?: string,
@@ -9077,6 +9147,8 @@ export class WorkspaceDaemonClient {
   async listWorkspaceSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.client.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.client.requireCapability('session_source_metadata');
     }
@@ -9094,6 +9166,7 @@ export class WorkspaceDaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options?.cursor !== undefined) query.set('cursor', options.cursor);
     if (options?.archiveState !== undefined) {
       query.set('archiveState', options.archiveState);
@@ -9112,13 +9185,15 @@ export class WorkspaceDaemonClient {
     if (options?.liveOnly === true) {
       query.set('liveOnly', '1');
     }
-    // The ACP session/list mapping does not carry liveOnly; force native REST
-    // rather than silently serving persisted history.
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
     return await this.client.workspaceJsonRequest<DaemonSessionListPage>(
       this.workspaceSelector,
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',
-      options?.liveOnly === true ? { mode: 'rest' } : {},
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 
@@ -9658,7 +9733,7 @@ export class WorkspaceDaemonClient {
   }
 
   activateSubscription(
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; settingsScope?: 'provider' | 'user' } = {},
   ): Promise<DaemonSubscriptionActivation> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -9666,10 +9741,10 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/auth/subscription',
       {
         method: 'POST',
-        body: {},
+        body: { settingsScope: opts.settingsScope },
         signal: opts.signal,
         mode: 'rest',
-        timeoutMs: 65000,
+        timeoutMs: SUBSCRIPTION_ACTIVATION_TIMEOUT_MS,
       },
     );
   }

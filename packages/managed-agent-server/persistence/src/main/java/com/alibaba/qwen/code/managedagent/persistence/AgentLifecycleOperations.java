@@ -129,14 +129,7 @@ final class AgentLifecycleOperations {
     // pre-V40 creator fallback) holding a current read grant. Unreadable is
     // invisible; a readable non-owner gets the sibling family's 403.
     void requireWorkspaceCreator(SessionRecord session, String actorId) {
-        if (!workspaces.canRead(session.tenantId(), actorId, session.workspace().getWorkspaceId())) {
-            throw new ManagedAgentException(
-                    404, "session_not_found", "The Session was not found.");
-        }
-        if (!workspaces.isSessionOwner(session.tenantId(), actorId, session.sessionId())) {
-            throw new ManagedAgentException(403, "session_operation_forbidden",
-                    "Only the Session owner may manage it.");
-        }
+        AgentSessionAccess.requireWorkspaceCreator(session, actorId, workspaces);
     }
 
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,

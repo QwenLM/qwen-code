@@ -90,6 +90,17 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                                                 + " service")));
             }
 
+            @Override
+            public CompletionStage<Capabilities> resolveCapabilities(String sessionId, RuntimeLifecycleAuthority authority) {
+                SessionRecord session = store.findSessionById(sessionId).orElse(null);
+                if (session != null && session.workspace() != null && workspaces != null) {
+                    var resolved = workspaces.resolve(sessionId, authority);
+                    return CompletableFuture.completedFuture(new Capabilities(resolved.scope(),
+                            new WorkspaceContext(resolved.binding().getCwdRelative(), Long.toString(resolved.binding().getContextRevision()))));
+                }
+                return HarnessSessionResolver.super.resolveCapabilities(sessionId, authority);
+            }
+
             private CompletionStage<RuntimeScope> resolveScope(
                     String sessionId, boolean admission,
                     RuntimeLifecycleAuthority authority) {
