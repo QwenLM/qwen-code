@@ -15,6 +15,12 @@ export type ManagedExtensionSnapshot =
 export type ManagedExtensionSelection =
   components['schemas']['ManagedExtensionApplySelection'];
 
+export type ManagedExtensionImportMetadata =
+  components['schemas']['ManagedExtensionImportMetadata'];
+export type ManagedExtensionInspection =
+  components['schemas']['ManagedExtensionPackageInspection'];
+export type ManagedExtensionSettingDeclaration =
+  ManagedExtensionInspection['settings'][number];
 export function isManagedExtensionPins(
   value: unknown,
 ): value is ManagedExtensionPin[] {

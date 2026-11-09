@@ -112,15 +112,7 @@ final class AgentSessionAdmissions {
     Admission insertSessionCommand(String tenantId, String actorId,
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest) {
-        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
-                requestDigest, agentId, requestedRevision, title, input, payloadDigest, null);
-    }
-
-    Admission insertSessionCommand(String tenantId, String actorId,
-            String operation, String idempotencyKey, String requestDigest,
-            String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
@@ -128,6 +120,7 @@ final class AgentSessionAdmissions {
         Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 null, actorId, pin);
+        ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), memoryStoreId);
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
@@ -251,6 +244,7 @@ final class AgentSessionAdmissions {
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 target, actorId, pin, null, planMode, modelId);
+        ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), command.memoryStoreId());
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
@@ -393,7 +387,7 @@ final class AgentSessionAdmissions {
             WorkspaceCsiRegistration registration, String sessionId) {
         requireCsiJournalIsolation();
         SessionRecord session = storeRows.requireSessionForUpdate(registration.tenantId(), sessionId);
-        if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
+        if (!CsiFilesRetirementProfile.isProfile(session.toolProfile())
                 || session.workspace() == null
                 || !"qwen-code".equals(session.agentId())
                 || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(
@@ -403,7 +397,7 @@ final class AgentSessionAdmissions {
         }
         RuntimeProvisionRequest request =
                 CsiFilesRetirementProfile.request(
-                        session.workspace(), registration.mountRoot(), session.sessionId());
+                        session.workspace(), registration.mountRoot(), session.sessionId(), session.toolProfile());
         String saved =
                 jdbc.queryForObject(
                         "SELECT runtime_request_key FROM ma_session"
@@ -463,7 +457,7 @@ final class AgentSessionAdmissions {
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -575,7 +569,7 @@ final class AgentSessionAdmissions {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key, approval_mode,"
+                        + " creator_actor_key, owner_actor_key, owner_only, approval_mode,"
                         + " parent_session_id, root_session_id,"
                         + " parent_child_run_id, child_depth)"
                         + " SELECT tenant_id, ?, agent_id,"
@@ -587,7 +581,7 @@ final class AgentSessionAdmissions {
                         + ", context_config_ref, context_revision,"
                         + " workspace_config_ref, workspace_policy_ref, "
                         + (toolProfile == null ? "tool_profile" : "?")
-                        + ", creator_actor_key, approval_mode,"
+                        + ", creator_actor_key, COALESCE(owner_actor_key, creator_actor_key), owner_only, approval_mode,"
                         + " ?, ?, ?, ?"
                         + " FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
@@ -699,7 +693,7 @@ final class AgentSessionAdmissions {
             String parentSessionId, String idempotencyKey,
             String requestDigest) {
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId, parentSessionId);
-        if (CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+        if (CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(
                     409,
                     "child_parent_unavailable",
@@ -838,7 +832,7 @@ final class AgentSessionAdmissions {
                 registration == null
                         ? null
                         : CsiFilesRetirementProfile.request(
-                                        workspace, registration.mountRoot(), sessionId)
+                                        workspace, registration.mountRoot(), sessionId, CsiFilesRetirementProfile.ACTIVITY_PROFILE)
                                 .requestKey();
         String turnId = input.isEmpty() ? null : AgentStoreRows.publicId("turn");
         String promptId = input.isEmpty() ? null
@@ -868,7 +862,7 @@ final class AgentSessionAdmissions {
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
                 registration != null
-                        ? CsiFilesRetirementProfile.PROFILE
+                        ? CsiFilesRetirementProfile.ACTIVITY_PROFILE
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
                 runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",

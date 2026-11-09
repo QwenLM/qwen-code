@@ -154,6 +154,7 @@ Publishing and managing Workspace extension packages, and which actors may do so
 | `allowed-actors` | `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` | list | *(empty)* | The actor IDs allowed to publish extension packages, save their settings, and select or apply them for Sessions, as a comma-separated list; `*` allows every actor. The actor also needs Workspace OPERATOR access. Empty allows nobody. |
 | `artifact-directory` | `QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` | string | *(empty)* | The directory that stores published extension package archives, in one private (`0700`) subdirectory per tenant and Workspace. Empty disables extension management. A symbolic link at the root or at a subdirectory makes archives unavailable. Replicas must share this directory. |
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED` | boolean | `false` | Whether extension packages can be published and managed for Workspaces through the public extensions API. Management also needs `qwen.managed-agent.extensions.artifact-directory`, an actor in `qwen.managed-agent.extensions.allowed-actors` and Workspace OPERATOR access. With `qwen.managed-agent.runtime-broker.enabled`, startup refuses `qwen.managed-agent.managed-extensions.enabled` without it; otherwise extension execution simply stays off. |
+| `self-service-enabled` | — | boolean | `false` | Whether Skill/extension archive uploads and authored MCP configurations can be prepared and imported without a daemon. Requires extension management, its configured artifact directory, an allowed actor with Workspace OPERATOR access, and the Hosted `managed-package-preparation/1` capability. Disabling this entry point preserves published content and existing package apply/recovery. |
 
 ## `qwen.managed-agent.harness`
 
@@ -217,6 +218,16 @@ Running the processes of selected extension packages inside Workspace Runtime wo
 | `cgroup-root` | `QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT` | string | *(empty)* | The absolute path of a writable, delegated cgroup v2 subtree under which Linux Runtime workers contain extension processes. Required for Linux workers when `qwen.managed-agent.managed-extensions.enabled` is true (a Runtime launch fails without it); must be empty in `developer-process-group` mode. |
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED` | boolean | `false` | Whether Workspace Runtimes run with the managed extension execution profile, which lets selected extension packages run their processes (such as Hooks and MCP servers) in Runtime workers. Requires `qwen.managed-agent.extensions.enabled` (startup refusal) and `qwen.managed-agent.managed-extensions.cache-directory`, plus `qwen.managed-agent.managed-extensions.cgroup-root` on Linux. |
 | `mode` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE` | string | `linux-cgroup` | The extension execution mode: `linux-cgroup` contains extension processes in a delegated cgroup v2 subtree, and `developer-process-group` is a weaker process-group mode for native macOS development. Linux workers always use `linux-cgroup`; a macOS worker is refused unless this is `developer-process-group`. |
+
+## `qwen.managed-agent.memory`
+
+Opt-in personal MemoryStores: server-side Mem0 access for explicitly bound, owner-only Sessions.
+
+| Property | Variable | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `api-key` | — | string | — | Service credential used by the control plane for Mem0 requests when memory is enabled. Required, nonblank and without CR or LF. Keep it in server-side secret configuration; it is not forwarded to the model, Hosted Harness, sandbox or MCP configuration. |
+| `enabled` | — | boolean | `false` | Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation. |
+| `endpoint` | — | string | — | Base URL of the dedicated Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane. |
 
 ## `qwen.managed-agent.runtime-broker`
 

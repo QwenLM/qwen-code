@@ -1260,6 +1260,7 @@ export default {
   Reqs: 'リクエスト',
   'Input Tokens': '入力トークン',
   'Output Tokens': '出力トークン',
+  'Output (incl. Reasoning)': '出力（推論を含む）',
   'Savings Highlight:': '節約ハイライト:',
   'of input tokens were served from the cache, reducing costs.':
     '入力トークンがキャッシュから提供され、コストを削減しました',

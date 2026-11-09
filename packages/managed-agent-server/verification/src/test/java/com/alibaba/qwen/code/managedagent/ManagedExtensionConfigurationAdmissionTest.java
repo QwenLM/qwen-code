@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedMcpSettings;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
@@ -46,6 +47,21 @@ class ManagedExtensionConfigurationAdmissionTest {
     void enableOnlyTheStoreAdmissionBranch() {
         Object target = AopTestUtils.getUltimateTargetObject(sessions);
         com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "workspaceFilesEnabled", true);
+    }
+
+    @Test
+    void canApplyMatchesTheDefaultAndReadProfilesButRejectsFilesV3() {
+        String workspace = registerWorkspace();
+        String id = UUID.randomUUID().toString();
+        publicJournal(id, workspace);
+        for (String profile : List.of(WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ)) {
+            jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, "tenant",
+                    id.getBytes(StandardCharsets.UTF_8));
+            assertThat(sessions.canApplyExtensions(sessions.findSessionById(id).orElseThrow())).isTrue();
+        }
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", WorkspaceToolProfiles.FILES_V3, "tenant",
+                id.getBytes(StandardCharsets.UTF_8));
+        assertThat(sessions.canApplyExtensions(sessions.findSessionById(id).orElseThrow())).isFalse();
     }
 
     @Test

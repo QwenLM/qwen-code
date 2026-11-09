@@ -368,6 +368,8 @@ public class ManagedSchemaBusinessStoreTest {
 
     @Test
     void schedulePagesUseCurrentRootPermissionsThroughoutTheChildWorkspaceChain() {
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                + " VALUES (?,?,'qwen-code',1,1)", tenant, session);
         byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "operator");
         String parent = null;
         for (String workspace : List.of("root", "child", "grandchild", "foreign")) {

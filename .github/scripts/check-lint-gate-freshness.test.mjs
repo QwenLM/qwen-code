@@ -6,8 +6,11 @@ import { fileURLToPath } from 'node:url';
 
 import {
   GATE_FILES,
+  TEXT_ACCEPT,
   findStaleGateFiles,
+  ignoreLines,
   renderReport,
+  splitGlobalIgnores,
 } from './check-lint-gate-freshness.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -193,4 +196,546 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     step < job.indexOf("- name: 'Install dependencies'"),
     'freshness step must precede Install dependencies',
   );
+});
+
+const GATE_SHA = 'a'.repeat(40);
+const HEAD_SHA = BASE_OPTS.headSha;
+const ESLINT_OPTS = { ...BASE_OPTS, gateFiles: ['eslint.config.js'] };
+
+function configWith(ignores, tail = '') {
+  return [
+    'export default tseslint.config(',
+    '  {',
+    '    // Global ignores',
+    '    ignores: [',
+    ...ignores.map((entry) => `      '${entry}',`),
+    '    ],',
+    '  },',
+    tail,
+    ');',
+    '',
+  ].join('\n');
+}
+
+function divergedJson() {
+  return fakeFetch([
+    ['/repos/QwenLM/qwen-code/commits?', commitsResponse(GATE_SHA)],
+    [`/repos/QwenLM/qwen-code/compare/${GATE_SHA}...`, { status: 'diverged' }],
+  ]);
+}
+
+function textFetch(baseText, headText, calls = [], file = 'eslint.config.js') {
+  return async (path) => {
+    calls.push(path);
+    // Pin the file too, not just the ref: fetching the wrong path would
+    // otherwise be served the same fixture and stay green.
+    const prefix = `/repos/QwenLM/qwen-code/contents/${file}?ref=`;
+    if (!path.startsWith(prefix)) throw new Error(`unexpected path: ${path}`);
+    if (path === `${prefix}${GATE_SHA}`) return baseText;
+    if (path === `${prefix}${HEAD_SHA}`) return headText;
+    throw new Error(`unexpected ref: ${path}`);
+  };
+}
+
+const PRETTIER_OPTS = { ...BASE_OPTS, gateFiles: ['.prettierignore'] };
+const ignoreFile = (lines) => `${lines.join('\n')}\n`;
+
+// Prettier's scope is .prettierignore AND .gitignore. Serve both, keyed by
+// file and ref, and pin the path so a wrong-file fetch cannot pass silently.
+function scopeFetch(byFile, calls = []) {
+  return async (path) => {
+    calls.push(path);
+    for (const [file, [baseText, headText]] of Object.entries(byFile)) {
+      const prefix = `/repos/QwenLM/qwen-code/contents/${file}?ref=`;
+      if (!path.startsWith(prefix)) continue;
+      if (path === `${prefix}${GATE_SHA}`) return baseText;
+      if (path === `${prefix}${HEAD_SHA}`) return headText;
+    }
+    throw new Error(`unexpected path: ${path}`);
+  };
+}
+
+const bothIgnoreFiles = (basePi, headPi, baseGi = [], headGi = []) => ({
+  '.prettierignore': [ignoreFile(basePi), ignoreFile(headPi)],
+  '.gitignore': [ignoreFile(baseGi), ignoreFile(headGi)],
+});
+
+test('a base-side global ignore addition does not stale the branch', async () => {
+  // Mutation witness: deleting the post-filter leaves this stale. This is the
+  // #16200 shape named by all 9 measured freshness reds.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(['node_modules/*', 'dist/**']),
+      configWith(['node_modules/*']),
+      calls,
+    ),
+  });
+  assert.deepEqual(stale, []);
+  // Only the two content fetches, and only on an already-stale verdict.
+  assert.equal(calls.length, 2);
+});
+
+test('a base-side global ignore REMOVAL still stales the branch', async () => {
+  // Mutation witness: inverting the subset to `base ⊆ head` passes this
+  // wrongly. The base now checks a file the branch never linted.
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(['node_modules/*']),
+      configWith(['node_modules/*', 'dist/**']),
+    ),
+  });
+  assert.equal(stale.length, 1);
+  assert.equal(stale[0].file, 'eslint.config.js');
+});
+
+test('a branch-only ignore stales even when the base also added one', async () => {
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(['node_modules/*', 'base-only/**']),
+      configWith(['node_modules/*', 'branch-only/**']),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('an ignore addition plus a rule change still stales the branch', async () => {
+  // Mutation witness: dropping the remainder-equality conjunct passes this.
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(
+        ['node_modules/*', 'dist/**'],
+        "  { rules: { 'no-var': 'error' } },",
+      ),
+      configWith(['node_modules/*'], "  { rules: { 'no-var': 'warn' } },"),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a config-scoped ignores addition still stales the branch', async () => {
+  // Mutation witness: the base scoped list is a SUPERSET of the head's, so
+  // consuming that block instead of the global one would satisfy the subset
+  // test and wrongly pass. Only keeping it in the byte-compare makes this stale.
+  const scoped = (globs) =>
+    [
+      '  {',
+      "    files: ['packages/core/src/**'],",
+      '    ignores: [',
+      ...globs.map((glob) => `      '${glob}',`),
+      '    ],',
+      '  },',
+    ].join('\n');
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(
+        ['node_modules/*'],
+        scoped([
+          'packages/core/src/generated/**',
+          'packages/core/src/other/**',
+        ]),
+      ),
+      configWith(
+        ['node_modules/*'],
+        scoped(['packages/core/src/generated/**']),
+      ),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a content fetch failure keeps every verdict instead of failing open', async () => {
+  // Mutation witness: letting the narrowing error propagate reaches main()'s
+  // fail-open and would drop the sibling lint.js verdict too.
+  const stale = await findStaleGateFiles({
+    ...BASE_OPTS,
+    gateFiles: ['scripts/lint.js', 'eslint.config.js'],
+    fetchJson: divergedJson(),
+    fetchText: async () => {
+      throw new Error('curl exit 28');
+    },
+  });
+  assert.deepEqual(stale.map((entry) => entry.file).sort(), [
+    'eslint.config.js',
+    'scripts/lint.js',
+  ]);
+});
+
+test('a missing ignores anchor keeps the verdict', async () => {
+  // Mutation witness: returning true on an extraction miss passes this. An
+  // empty-list fallback does NOT witness it — the differing remainders still
+  // reject — so the fail-closed return is what this case pins.
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(['node_modules/*', 'dist/**']),
+      'export default tseslint.config({});',
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('an unparseable entry line keeps the verdict', async () => {
+  // Mutation witness: skipping lines that fail the entry regex would silently
+  // shorten the head list into a subset.
+  const doubleQuoted = configWith(['node_modules/*']).replace(
+    "      'node_modules/*',",
+    '      "node_modules/*",',
+  );
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(['node_modules/*', 'dist/**']),
+      doubleQuoted,
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a negated entry on the base side blocks the narrowing', async () => {
+  // `!` RE-INCLUDES files, so entries are not purely subtractive. Measured on
+  // eslint 9.29.0 with lintFiles: this base lints keep.gen.ts, this head lints
+  // nothing, yet head is a subset of base. Mutation witness: dropping the
+  // negation guard passes this wrongly.
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(['**/*.gen.ts', '!**/keep.gen.ts']),
+      configWith(['**/*.gen.ts']),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('an escaped bang on the base side blocks the narrowing', async () => {
+  // The extractor sees source text; ESLint evaluates the decoded string, so
+  // '\x21foo' is a negation that startsWith('!') cannot see. Mutation witness:
+  // dropping the backslash arm of the guard passes this wrongly.
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(
+      configWith(['**/*.gen.ts', '\\x21**/keep.gen.ts']),
+      configWith(['**/*.gen.ts']),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a base-side prettierignore addition does not stale the branch', async () => {
+  // Same subtractive-scope argument, second gate file. Mutation witness:
+  // removing .prettierignore from the narrowing table leaves this stale.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(
+      bothIgnoreFiles(
+        ['node_modules', 'packages/live-host/'],
+        ['node_modules'],
+      ),
+      calls,
+    ),
+  });
+  assert.deepEqual(stale, []);
+  // Both scope files, both refs — and only on an already-stale verdict.
+  assert.equal(calls.length, 4);
+});
+
+test('a base-side prettierignore REMOVAL still stales the branch', async () => {
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(
+      bothIgnoreFiles(
+        ['node_modules'],
+        ['node_modules', 'packages/live-host/'],
+      ),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a negated prettierignore line blocks the narrowing', async () => {
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(bothIgnoreFiles(['*.md', '!keep.md'], ['*.md'])),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('prettierignore comments and blank lines are not patterns', () => {
+  assert.deepEqual(ignoreLines('# heading\n\nnode_modules\ndist  \n   \n'), [
+    'node_modules',
+    'dist',
+  ]);
+});
+
+test('prettierignore keeps leading whitespace, which is part of the pattern', () => {
+  // Measured against prettier: 'foo.js' and ' foo.js' ignore different files,
+  // and '  # foo' is a pattern, not a comment. Trimming both ends would merge
+  // distinct patterns and could certify a narrower branch scope as fresh.
+  assert.deepEqual(ignoreLines('foo.js\n foo.js\n  # foo\n'), [
+    'foo.js',
+    ' foo.js',
+    '  # foo',
+  ]);
+});
+
+test('a leading-space prettierignore pattern is not conflated with its trimmed form', async () => {
+  // base ignores ' foo.js', head ignores 'foo.js': different scopes, and the
+  // head excludes a file the base checks. Must stay stale.
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(bothIgnoreFiles([' foo.js'], ['foo.js'])),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('the raw media type is pinned', () => {
+  // Every narrowing case injects its own fetchText, so nothing else executes
+  // curlText. Flipping this to the JSON media type makes the contents API
+  // return an envelope the extractor cannot read, and the fail-closed catch
+  // hides it — the refinement would silently stop firing.
+  assert.equal(TEXT_ACCEPT, 'application/vnd.github.raw');
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  assert.match(source, /curlRaw\(path, token, TEXT_ACCEPT\)/);
+});
+
+for (const [name, sep] of [
+  ['U+2028', '\u2028'],
+  ['U+2029', '\u2029'],
+  ['a lone CR', '\r'],
+]) {
+  test(`a ${name} inside a comment cannot hide an ignore entry`, async () => {
+    // The engine ends a `//` comment at these terminators and reads the rest
+    // as a real entry; a \n-only split saw one comment line and skipped it,
+    // under-reporting the branch's own ignores and certifying it fresh.
+    const stale = await findStaleGateFiles({
+      ...ESLINT_OPTS,
+      fetchJson: divergedJson(),
+      fetchText: textFetch(
+        configWith(['node_modules/*']),
+        configWith(['node_modules/*']).replace(
+          "      'node_modules/*',",
+          `      'node_modules/*',\n      // x${sep} 'hidden/**',`,
+        ),
+      ),
+    });
+    assert.equal(stale.length, 1);
+  });
+}
+
+test('moving the base array into a files-scoped object stays stale', async () => {
+  // The extractor takes the first ignores block without proving it is global.
+  // The remainder byte-compare is what catches this: the `files:` property
+  // lands in `rest`. Pin it so a future loosening of that compare reddens here
+  // instead of silently certifying a narrower branch.
+  const scoped = [
+    'export default tseslint.config(',
+    '  {',
+    '  },',
+    '  {',
+    "    files: ['x'],",
+    '    ignores: [',
+    "      'node_modules/*',",
+    '    ],',
+    '  },',
+    ');',
+    '',
+  ].join('\n');
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(scoped, configWith(['node_modules/*'])),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a branch-only .gitignore entry blocks the prettier narrowing', async () => {
+  // Prettier 3 reads .gitignore too: measured on 3.6.1, adding apps/host/
+  // there drops the checked-file count from 2 to 1. Comparing .prettierignore
+  // alone would certify a branch whose prettier scope is smaller.
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(
+      bothIgnoreFiles(
+        ['node_modules', 'packages/live-host/'],
+        ['node_modules'],
+        [],
+        ['apps/host/'],
+      ),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('any .gitignore difference blocks the prettier narrowing', async () => {
+  // Even a base-side addition: .gitignore is compared by equality, not subset,
+  // because the real file carries `!` re-inclusions that would make a semantic
+  // comparison reject every input. Conservative, and it never reasons about
+  // gitignore semantics.
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(
+      bothIgnoreFiles(['node_modules'], ['node_modules'], ['apps/host/'], []),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('the real prettier scope files keep the narrowing usable', () => {
+  // Anchor-drift guard, matching the eslint one: a `!` or backslash line in
+  // either real file permanently disables the prettier narrowing, and every
+  // other prettier case injects fixtures so nothing else would notice.
+  // Only .prettierignore is parsed for semantics; .gitignore is compared by
+  // equality, so its real `!` lines are expected and must NOT be flagged here.
+  for (const file of ['.prettierignore']) {
+    const entries = ignoreLines(readFileSync(join(repoRoot, file), 'utf8'));
+    assert.ok(entries.length > 0, `${file} yielded no patterns`);
+    const reincluding = entries.filter(
+      (entry) => entry.startsWith('!') || entry.includes('\\'),
+    );
+    assert.deepEqual(
+      reincluding,
+      [],
+      `${file} gained a negated or escaped pattern; the narrowing is permanently disabled for it — teach the parser or drop the entry`,
+    );
+  }
+});
+
+test('the fail-closed catch leaves a diagnostic', () => {
+  // Without it the refinement can stop firing for every PR and leave no trace
+  // beyond a stale verdict nobody can explain. Source-read pin: the catch is
+  // exercised by the fetch-failure case, but that case asserts the verdict, not
+  // the log, so deleting the warning would otherwise stay green.
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  const at = source.indexOf(
+    '} catch (error) {',
+    source.indexOf('const narrow ='),
+  );
+  assert.ok(at > 0, 'fail-closed catch not found');
+  assert.match(
+    source.slice(at, source.indexOf('return verdict;', at)),
+    /::warning::lint gate freshness: could not narrow/,
+    'the fail-closed path must annotate why it kept the verdict',
+  );
+});
+
+test('the JSON media type is pinned alongside the raw one', () => {
+  // The two Accept values sit side by side and read as interchangeable; only
+  // the raw one had a pin. Swapping the JSON half would break every containment
+  // call, and no injected-fixture case would notice.
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  assert.match(
+    source,
+    /curlRaw\(path, token, 'application\/vnd\.github\+json'\)/,
+    'curlJson must keep the JSON media type',
+  );
+});
+
+test('main() wires fetchText into the verdict call', () => {
+  // Source-read pin, same style as the ci.yml wiring case above: deleting the
+  // wiring leaves fetchText undefined, the narrowing throws into the
+  // fail-closed catch, and every injected-fixture test still passes.
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  const main = source.slice(source.indexOf('async function main()'));
+  assert.match(
+    main,
+    /const fetchText = \(path\) => curlText\(path, GITHUB_TOKEN\);/,
+    'main() must build fetchText from curlText',
+  );
+  const call = main.slice(
+    main.indexOf('await findStaleGateFiles({'),
+    main.indexOf('});', main.indexOf('await findStaleGateFiles({')),
+  );
+  assert.match(
+    call,
+    /^\s*fetchText,$/m,
+    'fetchText must reach the verdict call',
+  );
+});
+
+test('a contained eslint verdict pays no content fetch', async () => {
+  // The narrowing is a post-filter on stale verdicts only. Running it on every
+  // verdict would leave the result identical while adding two API calls to
+  // every fresh PR, so only a call count pins this.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: fakeFetch([
+      ['/repos/QwenLM/qwen-code/commits?', commitsResponse(GATE_SHA)],
+      [`/repos/QwenLM/qwen-code/compare/${GATE_SHA}...`, { status: 'ahead' }],
+    ]),
+    fetchText: textFetch(configWith([]), configWith([]), calls),
+  });
+  assert.deepEqual(stale, []);
+  assert.deepEqual(calls, []);
+});
+
+test('other gate files never reach the content fetch', async () => {
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...BASE_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch('', '', calls),
+  });
+  assert.equal(stale.length, 1);
+  assert.equal(stale[0].file, 'scripts/lint.js');
+  assert.deepEqual(calls, []);
+});
+
+test('a trailing comment is not read as ignore entries', () => {
+  // Mutation witness: matching quoted literals anywhere in the line instead
+  // of anchoring at line start picks up 'generated' from the prose.
+  const split = splitGlobalIgnores(
+    configWith([]).replace(
+      '    ignores: [',
+      "    ignores: [\n      'dist/**', // don't lint 'generated' output",
+    ),
+  );
+  assert.deepEqual(split.entries, ['dist/**']);
+});
+
+test('the extractor finds the global block in the real eslint.config.js', () => {
+  // Anchor-drift guard: a reformat that defeats the line anchors must redden
+  // here rather than silently disable the narrowing in CI.
+  const split = splitGlobalIgnores(
+    readFileSync(join(repoRoot, 'eslint.config.js'), 'utf8'),
+  );
+  assert.ok(split, 'global ignores block not found');
+  assert.ok(split.entries.includes('node_modules/*'));
+  assert.ok(split.entries.includes('packages/**/dist/**'));
+  // Only the first block is consumed: the config-scoped arrays stay in rest.
+  assert.ok(!split.entries.includes('packages/core/src/config/config.ts'));
+  assert.ok(split.rest.includes('ignores: ['));
 });
