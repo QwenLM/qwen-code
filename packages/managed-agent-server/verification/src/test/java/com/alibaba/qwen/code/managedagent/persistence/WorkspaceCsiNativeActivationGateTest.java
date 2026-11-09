@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -65,7 +66,7 @@ class WorkspaceCsiNativeActivationGateTest {
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
     private JdbcToolExecutionRepository executions;
-    private ManagedSessionStore journal;
+    private JdbcManagedSessionStore journal;
     private RuntimeProvisionRequest request;
     private RuntimeBindingRecord binding;
     private WorkspaceCsiReservationStore reservations;
@@ -75,6 +76,7 @@ class WorkspaceCsiNativeActivationGateTest {
     private JsonNode nativeFixture;
     private String writerId;
     private String token;
+    private boolean activityDiagnostics;
     @TempDir
     Path directory;
 
@@ -99,14 +101,14 @@ class WorkspaceCsiNativeActivationGateTest {
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         sessionId = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, JSON, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
         var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
         if (method.contains("LegacyProfile")) {
             var legacy = CsiFilesRetirementProfile.request(new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
@@ -130,6 +132,7 @@ class WorkspaceCsiNativeActivationGateTest {
         binding = bindings.compareAndSet(binding, binding.withAttestation(lease,
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
+        activityDiagnostics = method.contains("ActivityDiagnostics");
         boolean extracted = method.startsWith("hostedTextConversation");
         generate(method.startsWith("textConversation") || extracted, extracted, method.contains("LegacyTerminal"), method.contains("Diagnostics"));
         writerId = nativeFixture.path("writerId").textValue();
@@ -329,7 +332,7 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(39);
+        assertThat(rows).hasSize(41);
         return rows;
     }
 
@@ -806,7 +809,7 @@ class WorkspaceCsiNativeActivationGateTest {
             assertThat(commit(index).replayed()).isFalse();
         }
         assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(3);
-        var diagnostics = new ManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
+        var diagnostics = new JdbcManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
         assertThat(diagnostics.statistics()).isNotNull();
         assertThat(diagnostics.statistics().at("/totals/requests/total").asInt()).isEqualTo(2);
         var before = allRows();
@@ -861,6 +864,28 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(reference.text("resource_id")).isEqualTo(projection.text("record_resource_id"));
         assertThat(reference.number("owner_revision")).isEqualTo(projection.number("revision"));
         assertThat(reference.number("journal_revision")).isNull();
+        assertThat(applicationInventory(intent).bytes()).isEqualTo(baseline.bytes());
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    @Test
+    void hostedTextConversationActivityDiagnosticsRetireWithVerifiedDerivedRows() throws Exception {
+        ready();
+        for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
+            commit(index);
+        }
+        var head = journal.restore("tenant", "workspace", sessionId, token);
+        assertThat(head.storageVersion()).isEqualTo(4);
+        var intent = retire();
+        var baseline = applicationInventory(intent);
+        assertThat(baseline.blockers()).isEmpty();
+        assertThat(baseline.table("ma_session_record").rows().stream().map(row -> row.text("domain")))
+                .contains("hosted_activity_statistics");
+        var edges = CsiActivityDiagnosticProjection.references(baseline.table("ma_session_journal_tx").rows(),
+                baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(),
+                baseline.table("ma_resource_ref").rows(), request, Long.MAX_VALUE);
+        assertThat(edges).hasSize(1);
+        var before = allRows();
         assertThat(applicationInventory(intent).bytes()).isEqualTo(baseline.bytes());
         assertThat(allRows()).isEqualTo(before);
     }
@@ -963,6 +988,7 @@ class WorkspaceCsiNativeActivationGateTest {
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
                 .put("capabilityDigest", request.getScope().getCapabilityDigest())
                 .put("toolProfile", CsiFilesRetirementProfile.profile(request.getScope())).put("diagnostics", diagnostics);
+        value.put("activityDiagnostics", activityDiagnostics);
         if (conversation) {
             value.put("conversation", true);
         }

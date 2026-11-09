@@ -1575,6 +1575,11 @@ export interface WebShellProps {
    * needs them. Plan must be explicitly included.
    */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /**
+   * The host renders its own add ("+") entry in
+   * `renderComposerToolbarStart`; hide the built-in composer AddMenu.
+   */
+  hostOwnsAddMenu?: boolean;
   /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Composer presentation shared by the main chat, split panes, and side tasks. */
@@ -1614,6 +1619,7 @@ export interface WebShellProps {
    * so its sessions stay distinguishable from CLI and browser ones.
    */
   sessionSourceType?: string;
+  subscriptionDraft?: { modelId: string };
   /** Built-in actions appended to the context-sensitive default toolbar. */
   composerToolbarAdditionalActions?: readonly ComposerToolbarAction[];
   /**
@@ -3654,6 +3660,7 @@ export function App({
   filterArtifact,
   shellRef,
   composerToolbarActions,
+  hostOwnsAddMenu = false,
   allowedApprovalModes: allowedApprovalModesProp,
   composerVariant = 'default',
   mainModelFilter,
@@ -3665,6 +3672,7 @@ export function App({
   onUserMessageEditRequest,
   cycleModeOnTab = false,
   sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
+  subscriptionDraft,
   composerToolbarAdditionalActions,
   composerPlaceholders,
   compactThinking = false,
@@ -4011,6 +4019,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      hostOwnsAddMenu,
       renderComposerHeader,
       renderComposerFooter,
       renderFooter,
@@ -4049,6 +4058,7 @@ export function App({
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
+      hostOwnsAddMenu,
       renderComposerHeader,
       renderComposerFooter,
       renderFooter,
@@ -12117,8 +12127,12 @@ export function App({
   );
   const [currentModel, setCurrentModel] = useState('');
   const currentModelRef = useRef(currentModel);
+  const subscriptionDraftModelRef = useRef<
+    { modelId: string; sourceVersion: number } | undefined
+  >(undefined);
   currentModelRef.current = currentModel;
   const setPendingModel = useCallback((modelId: string) => {
+    subscriptionDraftModelRef.current = undefined;
     currentModelRef.current = modelId;
     setCurrentModel(modelId);
   }, []);
@@ -12160,6 +12174,16 @@ export function App({
       setPendingModel(modelId);
     },
     [setPendingModel, setPendingReasoningIntent],
+  );
+  const selectSubscriptionDraftModel = useCallback(
+    (modelId: string) => {
+      selectWelcomeModel(modelId);
+      subscriptionDraftModelRef.current = {
+        modelId,
+        sourceVersion: composerSourceVersionRef.current,
+      };
+    },
+    [selectWelcomeModel],
   );
   /**
    * Whether a local action must be held back because a Goal owns the session.
@@ -12441,8 +12465,14 @@ export function App({
       const promise = (async () => {
         let allocatedSessionId: string | undefined;
         let detachedSessionResult: DaemonSessionClient | undefined;
-        const modelId =
-          currentModelRef.current || connectionRef.current.currentModel;
+        const draftSelection = subscriptionDraftModelRef.current;
+        const subscriptionDraftModel =
+          draftSelection?.sourceVersion === composerSourceVersionRef.current
+            ? draftSelection.modelId
+            : undefined;
+        const modelId = draftSelection
+          ? subscriptionDraftModel
+          : currentModelRef.current || connectionRef.current.currentModel;
         const reasoningIntent = pendingReasoningIntentRef.current;
         const reasoningPreview = connectionRef.current.models?.find(
           (model) => model.id === modelId,
@@ -12514,10 +12544,16 @@ export function App({
           draftProviders?.workspaceCwd === catalogWorkspaceCwd &&
           draftProviders?.current?.modelId === modelId;
         try {
+          const startupConfig =
+            subscriptionDraftModel &&
+            creationSessionContext?.kind !== 'standalone'
+              ? { modelServiceId: subscriptionDraftModel }
+              : undefined;
           await createAndAttachSessionForPrompt({
             sessionActions: sessionActions as typeof sessionActions &
               SessionActionsWithCreate,
-            modelId: useWorkspaceDefault ? undefined : modelId,
+            modelId: startupConfig || useWorkspaceDefault ? undefined : modelId,
+            startupConfig,
             reasoningEffort,
             modeId,
             planMode,
@@ -12628,6 +12664,9 @@ export function App({
             sourceVersion: composerSourceVersionRef.current,
             getCurrentSourceVersion: () => composerSourceVersionRef.current,
           }).then((result) => {
+            if (subscriptionDraftModelRef.current === draftSelection) {
+              subscriptionDraftModelRef.current = undefined;
+            }
             if (pendingManualTitleRef.current === pendingManualTitle) {
               pendingManualTitleRef.current = undefined;
             }
@@ -15884,8 +15923,25 @@ export function App({
     const wasLateHydration =
       prevConnectionModelRef.current === undefined && next !== undefined;
     prevConnectionModelRef.current = next;
+    const draft = subscriptionDraftModelRef.current;
+    if (
+      !connection.sessionId &&
+      draft?.sourceVersion === composerSourceVersionRef.current
+    )
+      return;
     setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
-  }, [connection.currentModel, logicalSessionKey]);
+  }, [connection.currentModel, connection.sessionId, logicalSessionKey]);
+
+  useLayoutEffect(() => {
+    if (connectionRef.current.sessionId) return;
+    if (subscriptionDraft) {
+      selectSubscriptionDraftModel(
+        `${subscriptionDraft.modelId}(qwen-subscription)`,
+      );
+    } else if (!isDesktopShell() && subscriptionDraftModelRef.current) {
+      setPendingModel(connectionRef.current.currentModel ?? '');
+    }
+  }, [subscriptionDraft, selectSubscriptionDraftModel, setPendingModel]);
 
   const prevModeSessionKeyRef = useRef(logicalSessionKey);
   useLayoutEffect(() => {
@@ -16798,6 +16854,14 @@ export function App({
         // is the primary selection on both sides.
         const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
         if (!sameTarget) pendingManualTitleRef.current = undefined;
+        const subscriptionDraft = subscriptionDraftModelRef.current;
+        if (
+          sameTarget &&
+          pendingSessionContextRef.current?.kind !== 'standalone' &&
+          subscriptionDraft?.sourceVersion === composerSourceVersionRef.current
+        ) {
+          subscriptionDraft.sourceVersion += 1;
+        }
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
@@ -21583,7 +21647,14 @@ export function App({
       if (!key || !isTarget()) {
         throw new DOMException('Subscription target changed.', 'AbortError');
       }
-      if (connectionRef.current.status === 'connected') {
+      if (isDesktopShell()) {
+        await workspace.client.setSessionModel(
+          sessionId,
+          modelId,
+          connectionRef.current.clientId,
+          { persistDefault: false },
+        );
+      } else if (connectionRef.current.status === 'connected') {
         await sessionActions.setModel(modelId);
       } else {
         // The daemon can switch a live session while its event stream reconnects.
@@ -23388,7 +23459,13 @@ export function App({
               standalone={isDesktopShell() && sessionIsStandalone}
               allowAdd={modelManagementPolicy.allowAdd}
               getWorkspaceCwd={getComposerWorkspaceCwd}
-              onModelActivated={selectWelcomeModel}
+              onModelActivated={
+                isDesktopShell() ? selectSubscriptionDraftModel : selectWelcomeModel
+              }
+              onChatProviderConfigured={() => {
+                if (subscriptionDraftModelRef.current)
+                  setPendingModel(connectionRef.current.currentModel ?? '');
+              }}
               activateSessionSubscriptionModel={activateSessionSubscriptionModel}
               onMessage={(text, type = 'status') => {
                 store.dispatch([

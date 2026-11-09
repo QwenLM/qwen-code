@@ -2208,3 +2208,32 @@ describe('migration profile eligibility', () => {
     ).rejects.toThrow('uninitialized migration member');
   });
 });
+
+it('restores committed execution diagnostic source resources', async () => {
+  const { enableManagedExecutionDiagnostics } = await import(
+    '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js'
+  );
+  const f = await hostedModelFixture(true, async (session) => {
+    await enableManagedExecutionDiagnostics(session);
+    await session.sink.write({
+      uuid: 'diag-assistant',
+      parentUuid: null,
+      sessionId: SESSION,
+      timestamp: '2026-11-07T00:00:00.000Z',
+      type: 'assistant',
+      cwd: '/original/cwd',
+      version: 'hosted-harness/1',
+      daemonPromptId: 'prompt',
+      message: { role: 'model', parts: [{ text: 'done' }] },
+    });
+  });
+  const source = {
+    ...f.source,
+    head: { ...f.source.head!, storageVersion: 4 },
+  };
+  await expect(verifyRecoverySession(source, f.io)).resolves.toBeDefined();
+  const diagnostics = [...f.resources.keys()].filter(
+    (id) => f.refs.get(id)?.kind === 'managed-execution-diagnostics',
+  );
+  expect(diagnostics).toHaveLength(1);
+});

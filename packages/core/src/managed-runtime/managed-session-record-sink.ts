@@ -25,6 +25,7 @@ import {
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import { getManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import type { ManagedInvocationObservation } from './managed-execution-diagnostics.js';
 
 /**
  * The record shapes the message projection can carry today.
@@ -146,7 +147,10 @@ export class ManagedSessionRecordSink {
    * would put content in the transcript that the authoritative log does not
    * account for, which is the divergence this layer exists to prevent.
    */
-  async write(record: ChatRecord): Promise<void> {
+  async write(
+    record: ChatRecord,
+    diagnostics?: readonly ManagedInvocationObservation[],
+  ): Promise<void> {
     if (!this.canCarry(record)) {
       throw new ManagedSessionUnmappedRecordError(record);
     }
@@ -185,7 +189,7 @@ export class ManagedSessionRecordSink {
         sessionKey: this.authority.sessionHeader.sessionKey,
         contentDigest: this.authority.sessionHeader.definitionRef.digest,
       },
-      { record },
+      { record, diagnostics },
       this.actor(),
     );
   }

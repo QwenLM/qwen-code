@@ -176,12 +176,12 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
         // Wired as in production, so the receipt commits below reach the capture guard.
-        var toolResults = new ManagedToolResultStore(jdbc, manager,
+        var toolResults = new JdbcManagedToolResultStore(jdbc, manager,
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON,
-                        java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
+                        java.time.Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties,
                         new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
-                new ManagedExtensionRecordStore(jdbc), null, null, null, null, toolResults, null,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null, null, null, toolResults, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
         var endpoint = new AtomicReference<URI>();
         var actualClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
@@ -441,8 +441,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isZero();
                 assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))
                         .isEqualTo(coldRecovery ? 3 : 1);
-                assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(3);
-                var diagnostics = new ManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
+                assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(4);
+                var diagnostics = new JdbcManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
                 assertThat(diagnostics.statistics()).isNotNull();
                 assertThat(diagnostics.statisticsSequence()).isPositive();
                 if (coldRecovery) {
@@ -480,7 +480,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(39);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(41);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");
@@ -588,7 +588,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             return Map.of("holderId", holderId);
         }
 
-        private ManagedSessionStoreModels.WriterGrant acquire(ManagedSessionStore journal, String token,
+        private ManagedSessionStoreModels.WriterGrant acquire(JdbcManagedSessionStore journal, String token,
                 String session, ManagedSessionStoreModels.AcquireWriterRequest request) {
             var transaction = new TransactionTemplate(manager);
             transaction.setTimeout(10);

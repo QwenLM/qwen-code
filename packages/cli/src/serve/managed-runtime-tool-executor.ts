@@ -780,6 +780,18 @@ export class ManagedToolExecutor {
     return this.trackStart(() => this.readWorkspaceContextAdmitted(sessionId));
   }
 
+  async admitsProjectSkillPath(
+    sessionId: string,
+    realPath: string,
+    directory: string,
+  ): Promise<boolean> {
+    return (
+      this.isAdmissionOpen &&
+      !this.closedSessions.has(sessionId) &&
+      !(await this.ownsAnotherSessionDir?.(sessionId, realPath, directory))
+    );
+  }
+
   private async readWorkspaceContextAdmitted(
     sessionId: string,
   ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
