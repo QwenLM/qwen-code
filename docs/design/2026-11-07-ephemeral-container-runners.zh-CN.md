@@ -148,7 +148,36 @@ HTTP 403/429 时 30 秒到 300 秒），重试次数不再对应固定时长。�
 保持当前路由。这样不把新镜像尚未验证的浏览器系统依赖一起迁入，也不改变
 现有分类 job 与其他 workflow 的路由镜像关系。
 
-池标签为 `ecs-qwen-ephemeral`，已部署的十个 runner 均为 ARM64。只注册
+2026-11-08 更新：无凭据的 Web-shell Visuals capture 任务迁入本池，
+**仅限非可信 fork PR**——同仓 PR 留在托管泳道（即本任务迁移前所在
+位置；上文「受信与同仓 PR 路由不变」的规则仍然有效）。主 CI 的
+`Test (ubuntu-latest, Node 22.x)` 聚合门禁曾迁到这里、又迁了回去
+（见下）。capture 任务与本池安全模型完全一致（不可信 PR 代码、只读 token、仅事件级
+`GITHUB_TOKEN`），因此上面「不迁浏览器依赖」的排除对这一个任务不再适用：
+它在 self-hosted 前置检查后复用镜像自带 Node，先过按本泳道标定的磁盘
+水位门禁（剩余 ≥8 GiB 且已用 <85%——共享的 2 GiB 默认值曾放行一个
+剩余 14.6 GB、已用 89% 的槽位，几分钟后 pnpm 即 ENOSPC），渲染钉住
+`--workers=2`（不钉的话会按宿主核数在 4 CPU 容器里起 Chromium，实测把
+runner 进程本身饿到失联），超时按路由取池上 90 分钟 / 托管 45 分钟
+（实测两次冷装 22 分 18 秒、36 分 48 秒时 Chromium 仍在下载），并在
+运行时尽力安装 DejaVu 字体基线和 ffmpeg——apt 出口与 Debian 归档仍是硬性前提
+（前面的 `playwright install --with-deps` 步骤依赖同一归档）；best-effort 仅
+覆盖这一步自身额外字体/ffmpeg 安装失败的情况，降级为回退字体和仅 .webm
+录制，而不是让预览失败；apt 调用带时限，安装后校验字体基线。首次完整
+池上渲染仍需验收字体度量与端到端耗时。同仓 PR 始终留在托管泳道，不存在回退；fork 触发的 run 收到的仓库
+变量为空（见上文 fork 一节），开关回退不到它们，fork 路径的真正逃生
+通道是改 `main` 上的 selector，而不是这个开关。E2E OpenTUI 泳道刻意留在托管：它注入长期模型
+secrets，本池边界禁止，需等独立受信池。
+
+2026-11-09 更新：聚合门禁不再使用本池。它是 `pull_request`/`push`/
+`merge_group` 的必需检查，钉在手工扩缩的池上曾以空 runner 排队 110 分钟
+（job 128729488158），而兄弟任务约 3 分钟即被接走——`timeout-minutes`
+不覆盖排队时间，舰队级 kill-switch 又够不到 fork run。它现在与兄弟聚合
+任务同形，直接跟随分类器的 `ubuntu_runner`：受信事件走持久舰队、不可信
+fork 走托管，kill-switch 经分类器在所有路径上生效。
+
+池标签为 `ecs-qwen-ephemeral`，首期部署注册了十个 ARM64 runner，
+2026-11-08 实时查询显示 hz4 上有 22 个在线槽位注册。只注册
 `self-hosted` 和这个专用标签，不注册通用 Linux、ARM64 标签，避免其他宽泛
 ARM64 选择器将无关任务送入本池。完整 PR CI 在新镜像上仍需验证。
 已记录的宿主机、网络和 runner 授权限制仍待解决，更换标签不会消除它们。
