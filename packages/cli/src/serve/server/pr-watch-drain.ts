@@ -170,7 +170,13 @@ export interface PrWatchDrainResult {
   deleted: number;
 }
 
-/** Default bound on the shutdown wait; the caller's own deadline governs. */
+/**
+ * Default bound on the shutdown wait. This is the only thing keeping `close()`
+ * finite: `closeOnce` gives app drains no deadline of their own, and its
+ * `DEFAULT_CLOSE_TIMEOUT_MS` bounds the listener close, which runs concurrently
+ * with the drains. Kept equal to that 5s so shutdown stays ~5s rather than
+ * becoming additive — raising it silently lengthens every daemon shutdown.
+ */
 export const PR_WATCH_SHUTDOWN_WAIT_MS = 5_000;
 
 export interface PrWatchShutdownOptions {

@@ -2,7 +2,7 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-Status: proposed (2026-11-09). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It lands the four items the drain increment deferred to enablement: the shared restore, the resume-drain hook, the lifecycle close reorder, and the daemon-level deps provisioning. **The off switch stays `false` and the `sessionPrWatch` setting is still not read** — configuration (§6), the channel alias and turning the switch on (§7) remain PR B. No build may ever run both pollers.
+Status: proposed (2026-11-09), partially landed (#16732). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It covers the four items the drain increment deferred to enablement: the shared restore (§1), the resume-drain hook (§2), the lifecycle close reorder (§3), and the daemon-level deps provisioning (§4). **Landed so far in #16732: §3 in full, plus the host enumerator from §4.** §1, §2, the rest of §4 and §5 are still ahead; each section below is marked accordingly. **The off switch stays `false` and the `sessionPrWatch` setting is still not read** — configuration (§6), the channel alias and turning the switch on (§7) remain PR B. No build may ever run both pollers.
 
 ## Problem
 
@@ -44,7 +44,7 @@ Two further gaps are load-bearing for correctness rather than reachability: the 
 
 ## Proposed changes
 
-### 1. Shared restore
+### 1. Shared restore (not yet landed)
 
 A new module `packages/cli/src/serve/server/session-restore.ts` exports the core as a function taking the runtime, the session id, the action, the validated options, and the closure state the route currently captures (`archiveCoordinator`, `requestedSessionIdAdmission`, the generation assertion, `materializeLiveConversationDirectory`, `daemonLog`). It returns the restored session plus a `release()` that detaches the minted client registration, and it **throws the existing typed errors** rather than writing a response.
 
@@ -56,13 +56,13 @@ Three boundaries are decided explicitly:
 - **`res.writable` has no in-process analogue.** The shared function takes an optional `isCancelled` predicate; the route passes `() => !res.writable`, the drain passes nothing. The cleanup it guards moves into the shared function so both callers get it.
 - **`resolveRuntimeForSessionRestore` is not extracted.** Its six `res` exits are routing decisions the drain does not make — the drain already knows the recipient's runtime and re-resolves it immediately before dispatch. Extracting it would mean inventing a typed-error variant for failures the in-process caller cannot hit.
 
-### 2. Resume-drain hook
+### 2. Resume-drain hook (not yet landed)
 
 The shared restore takes an optional `onRestored` callback, invoked after the session is live and the generation assertion passes, before the function returns. The route passes nothing (behaviour unchanged); the drain's `wakeSession` provisioning passes a hook that schedules a drain for that session's bound PRs.
 
 The hook **must not be awaited inside the restore**. `PathMutexRegistry.runExclusive` is not re-entrant, and the drain's own `restoreAndAdmit` re-acquires the same per-PR lock after its wake. Awaiting a drain from inside a restore that a drain dispatched would invert the await direction and can deadlock. The hook therefore fires the drain without waiting (`void`, with its own failure logging), exactly as the drain already fires restores. It also runs after the reservation and worktree-lock releases, so a drain that re-enters the same session's restore cannot collide with the pending reservation count.
 
-### 3. Lifecycle close reorder
+### 3. Lifecycle close reorder (landed in #16732)
 
 Register an app drain that, in order: stops the refresh timer; waits for the claim-holding refresh tick and the drain's in-flight restores and admissions to settle; then releases the owner record via `releaseOwnedPrWatchSync`. Registering it through `addAppDrain` places it in `closeOnce`'s drain set, which `close()` awaits alongside the listener close. The lifecycle imposes no ordering between them, so the stop → settle → release sequence has to hold inside the drain itself.
 
@@ -76,7 +76,7 @@ The arms must be **sequential, not parallel**. Sampling drain-idle alongside the
 
 "Does not own" is decided by the **claim's own identity rule**, in the same order: `isLocalIdentity` before `isSameProcess`. A matching PID number does not authorize deleting a record from another boot, machine or PID namespace sharing this home, and `isSameProcess` alone degrades to a PID-liveness check wherever no process token is readable (macOS/Windows) — which would delete a record the claim explicitly refuses.
 
-### 4. Deps provisioning
+### 4. Deps provisioning (host enumerator landed in #16732; the rest not yet)
 
 `run-qwen-serve.ts` populates both seams through late-bound getters beside `getArchiveCoordinator`:
 
@@ -87,7 +87,7 @@ The arms must be **sequential, not parallel**. Sampling drain-idle alongside the
 - **Self-push ledger**: `cloneWorktreesOf` from the candidate's clone (the bridge live summary's `worktree.path`, else the binding's `workspaceCwd`), then `vouchedScanRoots`, `autofixPrPaths`, `readState`, accepted only when `sameRepository` and the `sessionId` match. The untrusted primary uses the coordinate alone — no git runs in its checkout. Any refusal means no ledger and the transition delivers.
 - **Actions**: not provisioned. `sessionPrWatch.actions` is PR B; the drain's empty-map normalisation already treats an absent map as the generic prompt.
 
-### 5. Listing write, listedKeys and partial
+### 5. Listing write, listedKeys and partial (not yet landed)
 
 The refresh's slim listing already knows each listed PR's state. Under the same gate, and only when the daemon holds the owner record, write `state` and `observedAt` to that PR's watch file under its per-PR lock — the same atomic write the observation uses, initialising silently when no file exists. Collect the listed keys into `listedKeys` and pass them to the observation so a closed PR the listing returned leaves the view rotation (master §1).
 
@@ -107,6 +107,8 @@ Thread the bindings scan's `partial` flag into the observation options. The obse
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                 | no shape change; the new drain registers through the existing `addAppDrain`                                           |
 | `packages/cli/src/serve/server/session-pr-refresh.ts`           | listing→watch write, `listedKeys`, `partial` threading; `stopWatch` and the tick settle signal                        |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md` (+zh-CN) | this design                                                                                                           |
+
+Rows for `session-restore.ts`, `pr-watch-deps.ts` and `routes/session.ts` are not part of #16732 — they land with §1, §2 and the rest of §4. Two more rows are partial: `session-pr-refresh.ts` landed `stopWatch` and the tick settle signal but not the listing write, `listedKeys` or `partial` threading; `run-qwen-serve.ts` landed the shutdown drain registration but not the two seams.
 
 ## Key design decisions
 
@@ -131,7 +133,7 @@ Thread the bindings scan's `partial` flag into the observation options. The obse
 - Route parity: the existing load/resume, worktree-classification, prompt-terminal, multi-workspace and REST-contract suites pass unchanged — they are the byte-compatibility oracle.
 - Unit (wake mapping): each Gone code maps to `gone`, each temporary code to `unavailable`, success to `restored` with a release that detaches exactly once.
 - Unit (hook): a resume drains the session's bound PRs; a hanging drain does not lengthen the restore; the per-PR lock is never re-entered.
-- Unit (lifecycle): close stops the timer, waits for in-flight work, then releases the record; a hung restore times out rather than blocking; a non-owner releases nothing. Two ordering cases are load-bearing: shutdown mid-observation (drain-idle is already true), and shutdown mid-observation where the tick then dispatches a restore that outlives it — the record must survive until that restore settles. Identity: a record the claim refuses (foreign boot, or a foreign PID namespace whose process token still matches) is never deleted, on every platform.
+- Unit (lifecycle): close stops the timer, waits for in-flight work, then releases the record; a hung restore times out rather than blocking; a non-owner releases nothing. Two ordering cases are load-bearing: shutdown mid-observation (drain-idle is already true), and shutdown mid-observation where the tick then dispatches a restore that outlives it — the record must survive until that restore settles. Identity: a record the claim refuses (foreign boot, or a foreign PID namespace whose process token still matches) is never deleted, on every platform; a record held by another live PID with no process token is refused too. Wiring: a real daemon boot whose refresh timer is stubbed must reach `stopWatch` through `close()` — the sibling serve suite mocks the refresh chunk to throw, so this lives in its own file. The Windows `%AppData%` branch is exercised by stubbing the platform rather than gating on it, because the PR CI profile skips the Windows lane.
 - Unit (hosts): `github.com` with no channel; a `hosts.yml` entry; a hosted channel's enterprise web origin; an untrusted workspace's channel contributes nothing; a read failure degrades to the known-safe set with a log. Credential containment covers both diagnostic paths: a thrown parse error and a warning that would otherwise reach `process.emitWarning`, each asserted against the log and the emitted warning.
 - Unit (listing): a listed closed PR leaves the view rotation; the listing's `state` write initialises silently and takes the per-PR lock; `partial` reaches the drain.
 - Switch-off parity: with the switch off, none of the new seams is read and the refresh is unchanged.

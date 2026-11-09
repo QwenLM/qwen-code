@@ -2,7 +2,7 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-状态：proposed（2026-11-09）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，落地 drain 增量延后到启用的四项：共享 restore、resume 后 drain 钩子、lifecycle close 重排、daemon 级 deps 填充。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
+状态：proposed（2026-11-09），部分已落地（#16732）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**#16732 已落地：完整的 §3，外加 §4 中的 host 枚举器。**§1、§2、§4 的其余部分与 §5 仍在后面；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
 
 ## 问题
 
@@ -44,7 +44,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 ## 拟议改动
 
-### 1. 共享 restore
+### 1. 共享 restore（尚未落地）
 
 新模块 `packages/cli/src/serve/server/session-restore.ts` 把核心导出为一个函数，接收 runtime、session id、action、已校验的选项，以及路由当前捕获的闭包态（`archiveCoordinator`、`requestedSessionIdAdmission`、generation 断言、`materializeLiveConversationDirectory`、`daemonLog`）。它返回被恢复的会话加一个释放所铸造 client registration 的 `release()`，并**抛出既有的 typed error**而不是写响应。
 
@@ -56,13 +56,13 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - **`res.writable` 没有进程内对应物。** 共享函数接受可选的 `isCancelled` 谓词；路由传 `() => !res.writable`，drain 不传。它所守卫的清理移入共享函数，使两个调用方都获得它。
 - **`resolveRuntimeForSessionRestore` 不抽取。** 它的六个 `res` 出口是 drain 不做的路由决策——drain 已知接收者的 runtime，并在 dispatch 前立即重新解析。抽取它意味着为进程内调用者根本碰不到的失败发明 typed-error 变体。
 
-### 2. resume 后 drain 钩子
+### 2. resume 后 drain 钩子（尚未落地）
 
 共享 restore 接受可选的 `onRestored` 回调，在会话已 live 且 generation 断言通过之后、函数返回之前调用。路由不传（行为不变）；drain 的 `wakeSession` 填充传入一个为该会话所绑定 PR 调度 drain 的钩子。
 
 钩子**绝不能在 restore 内被 await**。`PathMutexRegistry.runExclusive` 不可重入，而 drain 自己的 `restoreAndAdmit` 在 wake 之后会重新取同一把 per-PR 锁。从「由 drain 派发的 restore」内部 await 一个 drain 会反转 await 方向并可能死锁。因此钩子不等待地触发 drain（`void`，自带失败日志），正如 drain 已经不等待地触发 restore。它还在 reservation 与 worktree 锁释放之后运行，因此重新进入同一会话 restore 的 drain 不会撞上 pending reservation 计数。
 
-### 3. lifecycle close 重排
+### 3. lifecycle close 重排（已落地于 #16732）
 
 注册一个 app drain，依次：停止 refresh timer；等待持有 claim 的 refresh tick 与 drain 的在途 restore 与准入落定；然后经 `releaseOwnedPrWatchSync` 释放 owner 记录。经 `addAppDrain` 注册使它进入 `closeOnce` 的 drain 集合，`close()` 会把它与 listener 关闭一并等待。lifecycle 不在两者之间施加任何顺序，因此「停止 → 落定 → 释放」的次序必须在 drain 内部自己成立。
 
@@ -76,7 +76,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 「不拥有」按 **claim 自己的身份规则**判定，且次序相同：先 `isLocalIdentity`，再 `isSameProcess`。PID 号相同并不授权删除来自共享同一 home 的另一次启动、另一台机器或另一个 PID namespace 的记录；而单靠 `isSameProcess` 在读不到 process token 的平台（macOS/Windows）会退化为 PID 存活检查——那就会删掉 claim 明确拒绝认领的记录。
 
-### 4. deps 填充
+### 4. deps 填充（host 枚举器已落地于 #16732，其余尚未）
 
 `run-qwen-serve.ts` 在 `getArchiveCoordinator` 旁经 late-bound getter 填充两个接缝：
 
@@ -87,7 +87,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - **自推账本**：从候选者的 clone（bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`）跑 `cloneWorktreesOf`，然后 `vouchedScanRoots`、`autofixPrPaths`、`readState`，仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 仅用坐标——其检出里不跑 git。任何拒绝意味着无账本、转换照常投递。
 - **actions**：不填充。`sessionPrWatch.actions` 属 PR B；drain 的空 map 归一化已把缺失的 map 当作通用 prompt。
 
-### 5. listing 写入、listedKeys 与 partial
+### 5. listing 写入、listedKeys 与 partial（尚未落地）
 
 refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下、且仅当 daemon 持有 owner 记录时，在该 PR 的 per-PR 锁内把 `state` 与 `observedAt` 写进其 watch 文件——与观测相同的原子写，无文件时静默初始化。把被列出的键收集为 `listedKeys` 传给观测，使 listing 已返回的 closed PR 离开 view 轮转（主 §1）。
 
@@ -107,6 +107,8 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                  | 形状不变；新 drain 经既有 `addAppDrain` 注册                                    |
 | `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入、`listedKeys`、`partial` 透传；`stopWatch` 与 tick 落定信号  |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN） | 本设计                                                                          |
+
+`session-restore.ts`、`pr-watch-deps.ts` 与 `routes/session.ts` 三行不属于 #16732——它们随 §1、§2 与 §4 的其余部分落地。另有两行是部分的：`session-pr-refresh.ts` 已落地 `stopWatch` 与 tick 落定信号，但 listing 写入、`listedKeys` 与 `partial` 透传尚未；`run-qwen-serve.ts` 已落地关停 drain 注册，但两个接缝尚未。
 
 ## 关键设计决策
 
@@ -131,7 +133,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 - 路由 parity：既有 load/resume、worktree 分类、prompt-terminal、multi-workspace 与 REST 契约套件原样通过——它们是字节兼容的判据。
 - 单元（wake 映射）：每个 Gone 码映射为 `gone`，每个临时码映射为 `unavailable`，成功映射为带「恰好 detach 一次」release 的 `restored`。
 - 单元（钩子）：resume 会 drain 该会话绑定的 PR；挂起的 drain 不拉长 restore；per-PR 锁绝不被重入。
-- 单元（lifecycle）：close 停 timer、等在途工作、然后释放记录；挂起的 restore 超时而非阻塞；非 owner 不释放。两个次序用例承重：关停落在 observation 中途（此时 drain 空闲已为真），以及关停落在 observation 中途、该 tick 随后派发一个比它活得更久的 restore——记录必须存活到那个 restore 落定。身份：claim 拒绝的记录（外部 boot，或 process token 仍匹配的外部 PID namespace）在任何平台都绝不删除。
+- 单元（lifecycle）：close 停 timer、等在途工作、然后释放记录；挂起的 restore 超时而非阻塞；非 owner 不释放。两个次序用例承重：关停落在 observation 中途（此时 drain 空闲已为真），以及关停落在 observation 中途、该 tick 随后派发一个比它活得更久的 restore——记录必须存活到那个 restore 落定。身份：claim 拒绝的记录（外部 boot，或 process token 仍匹配的外部 PID namespace）在任何平台都绝不删除；由另一个存活 PID 持有、且没有 process token 的记录同样拒绝。接线：一次真实 daemon 启动（refresh timer 打桩）必须经 `close()` 到达 `stopWatch`——兄弟 serve 套件把 refresh chunk mock 成抛错，所以这条放在自己的文件里。Windows 的 `%AppData%` 分支用平台打桩来执行，而不是按平台门控，因为 PR 的 CI profile 跳过 Windows 车道。
 - 单元（hosts）：无 channel 时只有 `github.com`；`hosts.yml` 条目；托管 channel 的企业 web origin；非受信 workspace 的 channel 不贡献；读取失败降级为已知安全集并记日志。凭据围堵覆盖两条诊断路径：被抛出的解析错误，以及否则会到达 `process.emitWarning` 的 warning；两者都同时对 log 与 emit 出的 warning 断言。
 - 单元（listing）：被列出的 closed PR 离开 view 轮转；listing 的 `state` 写入静默初始化并取得 per-PR 锁；`partial` 到达 drain。
 - 关闭态 parity：开关关闭时新接缝一个都不被读取，refresh 不变。

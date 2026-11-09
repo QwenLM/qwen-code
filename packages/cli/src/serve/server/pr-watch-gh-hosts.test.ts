@@ -73,14 +73,24 @@ describe('ghConfigDir', () => {
     );
   });
 
-  it.runIf(process.platform === 'win32')(
-    'uses %AppData%/GitHub CLI on Windows',
-    () => {
+  it('uses %AppData%/GitHub CLI on Windows', () => {
+    // Stubbed rather than gated on the host platform: the PR CI profile skips
+    // the Windows lane, so a runIf(win32) test would merge never having run.
+    const platform = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
       expect(ghConfigDir({ APPDATA: 'C:\\Users\\u\\AppData\\Roaming' })).toBe(
         path.join('C:\\Users\\u\\AppData\\Roaming', 'GitHub CLI'),
       );
-    },
-  );
+      // No APPDATA: the Windows branch falls through to HOME like the others.
+      expect(ghConfigDir({ HOME: '/home/u' })).toBe(
+        path.join('/home/u', '.config', 'gh'),
+      );
+    } finally {
+      platform.mockRestore();
+    }
+  });
 });
 
 describe('readGhConfiguredHosts', () => {

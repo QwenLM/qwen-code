@@ -4920,6 +4920,12 @@ async function runQwenServeImpl(
   // but the watch still has to stop in order (timer, in-flight work, owner
   // record). The disposed handle's closure stays valid, and disposing twice is
   // a no-op, so the drain can call it afterwards.
+  //
+  // A buildRuntime re-entry takes the other path — the monitor cleanup disposes
+  // the timer without an ordered stop, so the owner record is left behind. That
+  // is safe, not a hole in the ordering: the claim returns `retained` for a
+  // record whose pid is this process and whose process token verifies, so the
+  // restarted timer re-adopts it and no second process can overlap.
   let stopPrWatchOnShutdown: (() => Promise<void>) | undefined;
   serveAppLifecycle.addAppDrain(async () => {
     await stopPrWatchOnShutdown?.();

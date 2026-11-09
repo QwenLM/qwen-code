@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawn } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -402,6 +403,35 @@ describe('stopPrWatch', () => {
     expect(claimPrWatchOwnershipSync(dir, () => {}).kind).toBe('blocked');
     expect(releaseOwnedPrWatchSync(dir)).toBe(false);
     expect(existsSync(ownerPath)).toBe(true);
+  });
+
+  it('refuses a record held by another live process', async () => {
+    // The PID comparison is load-bearing on its own. With no process token
+    // recorded — the macOS/Windows shape — liveness alone accepts any live
+    // PID, so nothing else in the release path stops it.
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 10000)'],
+      { stdio: 'ignore' },
+    );
+    try {
+      const pid = child.pid;
+      expect(pid).toBeTypeOf('number');
+      expect(pid).not.toBe(process.pid);
+      const ownerPath = prWatchOwnerPath(dir);
+      writeFileSync(
+        ownerPath,
+        JSON.stringify({
+          pid,
+          procStart: null,
+          startedAt: new Date().toISOString(),
+        }),
+      );
+      expect(releaseOwnedPrWatchSync(dir)).toBe(false);
+      expect(existsSync(ownerPath)).toBe(true);
+    } finally {
+      child.kill('SIGKILL');
+    }
   });
 
   it('waits for a restore the tick dispatches after shutdown began', async () => {
