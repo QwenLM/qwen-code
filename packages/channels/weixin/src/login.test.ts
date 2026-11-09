@@ -80,6 +80,33 @@ describe('weixin login iLink request headers', () => {
     });
   });
 
+  it('bounds the QR mint so a hung upstream cannot hold a flow slot', async () => {
+    // The daemon holds a flow slot for the whole mint, so an unanswered mint
+    // would wedge the cap. A fetch that settles only on abort proves the
+    // signal is actually wired, not merely present.
+    let abortedAt: number | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      (_url: string, init: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            abortedAt = Date.now();
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const startedAt = Date.now();
+    // Shrink the bound so the pin costs milliseconds; the wiring is what is
+    // being proven, not the 30 s default.
+    await expect(startLogin(API_BASE, { timeoutMs: 50 })).rejects.toThrow();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(abortedAt).toBeDefined();
+    expect(abortedAt! - startedAt).toBeGreaterThanOrEqual(40);
+    expect(abortedAt! - startedAt).toBeLessThan(5_000);
+  });
+
   it('declares the iLink client version when polling the scan status', async () => {
     const fetchMock = stubFetch({
       status: 'confirmed',
@@ -180,9 +207,9 @@ describe('weixin login progress events', () => {
     vi.useFakeTimers();
     const fetchMock = stubFetchSequence([
       { status: 'expired' },
-      { qrcode: 'qrcode-2' },
+      { qrcode: 'qrcode-2', qrcode_img_content: 'https://scan.example/qr-2' },
       { status: 'expired' },
-      { qrcode: 'qrcode-3' },
+      { qrcode: 'qrcode-3', qrcode_img_content: 'https://scan.example/qr-3' },
       { status: 'expired' },
     ]);
 
@@ -200,6 +227,39 @@ describe('weixin login progress events', () => {
     });
     // Two refreshes, then the third expiry terminates: the budget is checked
     // before minting, so the loop never issues a fourth QR request.
+    const qrCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes('get_bot_qrcode'),
+    );
+    expect(qrCalls).toHaveLength(2);
+  });
+
+  it('does not publish a refresh that has no scannable URL', async () => {
+    // A URL-less replacement would overwrite the view with one that has
+    // nothing to scan and no link to open, and a live flow renders no retry
+    // action — the operator would be stuck. Keep the expired id instead and
+    // let the retry budget end the flow.
+    vi.useFakeTimers();
+    const fetchMock = stubFetchSequence([
+      { status: 'expired' },
+      { qrcode: 'qrcode-2' },
+      { status: 'expired' },
+      { qrcode: 'qrcode-3' },
+      { status: 'expired' },
+    ]);
+    const events: WeixinLoginEvent[] = [];
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      onEvent: (event) => events.push(event),
+    });
+    await vi.advanceTimersByTimeAsync(3100);
+    const result = await pending;
+
+    expect(result).toMatchObject({ connected: false, reason: 'expired' });
+    expect(events.filter((event) => event.type === 'qrcode')).toEqual([]);
+    expect(events.filter((event) => event.type === 'expired')).toHaveLength(2);
+    // Both refresh mints were still attempted; only their publication is held.
     const qrCalls = fetchMock.mock.calls.filter(([url]) =>
       String(url).includes('get_bot_qrcode'),
     );

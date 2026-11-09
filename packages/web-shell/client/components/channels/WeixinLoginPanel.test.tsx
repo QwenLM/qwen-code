@@ -50,23 +50,25 @@ async function renderPanel({
   status = vi.fn().mockResolvedValue(LOGGED_OUT),
   start = vi.fn().mockResolvedValue(WAITING),
   poll = vi.fn().mockResolvedValue(WAITING),
+  cancel = vi.fn().mockResolvedValue(undefined),
   revoke = vi.fn().mockResolvedValue(undefined),
   language = 'en',
 }: {
   status?: () => Promise<DaemonWeixinAccountStatus | undefined>;
   start?: () => Promise<DaemonWeixinLoginFlow | undefined>;
   poll?: (id: string) => Promise<DaemonWeixinLoginFlow | undefined>;
+  cancel?: (id: string) => Promise<void>;
   revoke?: () => Promise<void>;
   language?: 'en' | 'zh-CN';
 } = {}) {
   await act(async () => {
     root.render(
       <I18nProvider language={language}>
-        <WeixinLoginPanel api={{ status, start, poll, revoke }} />
+        <WeixinLoginPanel api={{ status, start, poll, cancel, revoke }} />
       </I18nProvider>,
     );
   });
-  return { status, start, poll, revoke };
+  return { status, start, poll, cancel, revoke };
 }
 
 beforeEach(() => {
@@ -292,6 +294,38 @@ describe('WeixinLoginPanel', () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(poll).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a live flow when the panel unmounts', async () => {
+    // The daemon keeps the flow and its upstream polling alive without a
+    // browser, so closing the editor must drop it — otherwise four abandoned
+    // attempts exhaust the flow cap and real logins are refused.
+    const { cancel } = await renderPanel();
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    act(() => root.unmount());
+    unmounted = true;
+
+    expect(cancel).toHaveBeenCalledWith('flow-1');
+  });
+
+  it('does not cancel a flow that already finished', async () => {
+    const { cancel } = await renderPanel({
+      poll: vi.fn().mockResolvedValue({ id: 'flow-1', status: 'ready' }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    act(() => root.unmount());
+    unmounted = true;
+
+    expect(cancel).not.toHaveBeenCalled();
   });
 
   it('keeps polling while the daemon reports the same status', async () => {

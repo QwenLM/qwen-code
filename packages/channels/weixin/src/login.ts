@@ -34,12 +34,26 @@ export type WeixinLoginEvent =
   | { type: 'scanned' }
   | { type: 'expired' };
 
+/**
+ * A mint that hangs must not outlive the caller's interest: the daemon holds a
+ * flow slot and an open request for its whole duration, so an unanswered mint
+ * would wedge the cap. The poll below already bounds each request; this is the
+ * same bound for the mint.
+ */
+const QR_MINT_TIMEOUT_MS = 30_000;
+
 /** Step 1: Get QR code from server. */
-export async function startLogin(apiBaseUrl: string): Promise<WeixinQrCode> {
+export async function startLogin(
+  apiBaseUrl: string,
+  options: { timeoutMs?: number } = {},
+): Promise<WeixinQrCode> {
   const resp = await fetch(
     `${apiBaseUrl}/ilink/bot/get_bot_qrcode?bot_type=3`,
     {
       headers: buildHeaders(),
+      // Symmetric with `waitForLogin`'s timeoutMs: the caller that owns the
+      // deadline decides, and the default bounds the daemon's slot holding.
+      signal: AbortSignal.timeout(options.timeoutMs ?? QR_MINT_TIMEOUT_MS),
     },
   );
   if (!resp.ok) {
@@ -132,8 +146,15 @@ export async function waitForLogin(params: {
           onEvent?.({ type: 'expired' });
           {
             const refreshed = await startLogin(apiBaseUrl);
-            currentQrcodeId = refreshed.qrcodeId;
-            onEvent?.({ type: 'qrcode', ...refreshed });
+            // A refresh that yields no scannable URL is not a replacement:
+            // publishing it would overwrite a view with one that has nothing
+            // to scan and no link to open. Keep the expired id instead, so the
+            // next poll spends another retry and the budget — not a dead view —
+            // decides when to stop.
+            if (refreshed.qrcodeUrl) {
+              currentQrcodeId = refreshed.qrcodeId;
+              onEvent?.({ type: 'qrcode', ...refreshed });
+            }
           }
           break;
         default:

@@ -21,6 +21,7 @@ export interface WeixinLoginApi {
   status: () => Promise<DaemonWeixinAccountStatus | undefined>;
   start: () => Promise<DaemonWeixinLoginFlow | undefined>;
   poll: (id: string) => Promise<DaemonWeixinLoginFlow | undefined>;
+  cancel: (id: string) => Promise<void>;
   revoke: () => Promise<void>;
 }
 
@@ -60,6 +61,20 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
   // restart the timer every time, so the poll could never fire.
   const apiRef = useRef(api);
   apiRef.current = api;
+  // The daemon keeps a flow alive on its own: it holds a slot and polls the
+  // upstream whether or not this panel is on screen. Closing the editor must
+  // therefore drop the flow explicitly, or four abandoned attempts exhaust the
+  // cap and real logins get 429 until those flows time out.
+  const liveFlowRef = useRef<string | undefined>(undefined);
+  liveFlowRef.current = flow && !isTerminal(flow.status) ? flow.id : undefined;
+  useEffect(
+    () => () => {
+      const id = liveFlowRef.current;
+      // Nobody is left to show a failure to; the flow expires on its own.
+      if (id) void apiRef.current.cancel(id).catch(() => undefined);
+    },
+    [],
+  );
 
   const reloadAccount = useCallback(async () => {
     try {

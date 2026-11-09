@@ -86,6 +86,7 @@ import { workspaceLabel } from '../../utils/workspace';
 import { ChannelEditorDialog } from './ChannelEditorDialog';
 import type { WeixinLoginApi } from './WeixinLoginPanel';
 import {
+  cancelWeixinLoginFlow,
   getWeixinAccountStatus,
   getWeixinLoginFlow,
   revokeWeixinLogin,
@@ -154,6 +155,7 @@ export function ChannelsManagerPage({
       status: () => getWeixinAccountStatus(target),
       start: () => startWeixinLogin(target),
       poll: (id) => getWeixinLoginFlow(target, id),
+      cancel: (id) => cancelWeixinLoginFlow(target, id),
       revoke: () => revokeWeixinLogin(target),
     };
   }, [workspace.baseUrl, workspace.token, workspace.client]);

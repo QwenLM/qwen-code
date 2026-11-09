@@ -4124,6 +4124,7 @@ describe('ChannelEditorDialog WeChat login', () => {
       status: vi.fn().mockResolvedValue({ enabled: true, configured: false }),
       start: vi.fn(),
       poll: vi.fn(),
+      cancel: vi.fn(),
       revoke: vi.fn(),
     };
   }

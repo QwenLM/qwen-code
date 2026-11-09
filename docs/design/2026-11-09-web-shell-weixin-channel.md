@@ -116,8 +116,9 @@ No user-visible change to `qwen channel configure-weixin`.
 ### 3. SDK: shared response types
 
 `packages/sdk-typescript/src/daemon/types.ts` gains two interfaces, exported from
-both `src/daemon/index.ts` and `src/index.ts` (the double registration the
-existing `Daemon*` types use):
+`src/daemon/index.ts` — the `@qwen-code/sdk/daemon` subpath every consumer in
+this change imports, following the sibling subscription types, which are not
+re-exported from the package root either:
 
 - `DaemonWeixinAccountStatus` — `{ enabled: boolean; configured: boolean; userId?: string; savedAt?: string }`
 - `DaemonWeixinLoginFlow` — `{ id: string; status: 'waiting' | 'scanned' | 'ready' | 'expired' | 'error'; qrText?: string; qrcodeUrl?: string; errorCode?: string }`
@@ -153,12 +154,19 @@ Flow lifecycle:
 - At most 4 concurrent flows; the fifth request gets `429` with
   `code: 'too_many_flows'`, matching the subscription route's cap pattern.
 - Starting a flow calls `startLogin`, renders `qrcodeUrl` to `qrText`, and stores
-  the view. `onEvent` updates the view in place: a `qrcode` event replaces
+  the view. A response that carries a QR id but no scannable URL is treated as a
+  failed mint (`502 qr_unavailable`, slot released) rather than a live flow: with
+  neither a QR nor a link, a live flow gives the operator nothing to act on and
+  renders no retry action. The mint also carries a 30 s timeout, because a hung
+  upstream would otherwise hold both a slot and the request open indefinitely.
+  `onEvent` updates the view in place: a `qrcode` event replaces
   `qrText`/`qrcodeUrl` (the QR refreshed after expiry), `scanned` moves the status
   to `scanned`.
 - On `LoginResult.connected`, the route calls `saveAccount` with the same fields
   the CLI writes, then sets status `ready`. The token is used for the save and
-  never placed in the view.
+  never placed in the view. A failed write is `error` with
+  `errorCode: 'credentials_error'`, kept distinct from an upstream failure
+  because the operator has to fix the daemon's home directory.
 - A terminal view is retained for 60 s so a polling client can observe it, then
   dropped by an `unref`'d timer, as the subscription route does.
 - `expired` (retry budget exhausted) and `error` are terminal views carrying a
@@ -196,7 +204,10 @@ subscription auth routes and calls the dispose function on shutdown.
   unmount, and retries after a transient request failure (clearing the error on
   the next success) so one network blip cannot strand a panel that renders no
   refresh button while the flow is non-terminal. The api object is held in a
-  ref so a host re-render cannot restart the timer.
+  ref so a host re-render cannot restart the timer. On unmount it cancels a flow
+  that is still live: the daemon keeps such a flow — and its upstream polling —
+  alive without a browser, so closing the editor would otherwise leak slots
+  until four abandoned attempts made every real login answer `429`.
 - `ChannelEditorDialog.tsx` — render the panel at the top of the credentials
   section when `descriptor.type === 'weixin'`. The login API arrives as an
   optional prop, matching how every other daemon call in this dialog is injected
@@ -262,7 +273,7 @@ pattern and keeps the contract-test surface unchanged.
 | `packages/channels/weixin/src/index.ts`                                          | Add `management` and `envResolvableConfigFields`.            |
 | `packages/cli/src/commands/channel/configure.ts`                                 | Print from events; preserve output.                          |
 | `packages/sdk-typescript/src/daemon/types.ts`                                    | Two new interfaces.                                          |
-| `packages/sdk-typescript/src/daemon/index.ts`, `src/index.ts`                    | Export them.                                                 |
+| `packages/sdk-typescript/src/daemon/index.ts`                                    | Export them.                                                 |
 | `packages/cli/src/serve/routes/weixin-auth.ts`                                   | New route module.                                            |
 | `packages/cli/src/serve/routes/weixin-auth.test.ts`                              | New route tests.                                             |
 | `packages/cli/src/serve/server.ts`                                               | Register and dispose.                                        |
@@ -341,3 +352,11 @@ directories.
   action they already have.
 - Should the expired-session (`errcode -14`) state eventually surface in the
   channel card? Tracked as a non-goal here; worth a follow-up issue.
+- The channel's `baseUrl` field overrides the runtime adapter's API root, but
+  QR login always mints against `DEFAULT_BASE_URL` — the login is process-global
+  and has no channel to read a root from, and `WeixinAdapter.connect` then
+  prefers the `baseUrl` stored by the login response anyway. Making the two
+  agree would mean teaching a global route to read one workspace's channel
+  configuration, so it stays as it is, but the field's description should not be
+  read as also moving the login endpoint. Worth revisiting if a private iLink
+  deployment ever needs the browser login path.

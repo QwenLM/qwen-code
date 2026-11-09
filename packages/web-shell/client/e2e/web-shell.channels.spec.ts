@@ -932,6 +932,7 @@ test('configures a WeChat channel with in-browser QR login', async ({
   let configured = false;
   let flowStatus: 'waiting' | 'scanned' | 'ready' = 'waiting';
   let revokes = 0;
+  let cancels = 0;
   await page.route('**/auth/weixin**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -957,6 +958,13 @@ test('configures a WeChat channel with in-browser QR login', async ({
           qrcodeUrl: 'https://scan.example/qr-1',
         },
       });
+      return;
+    }
+    if (path === '/auth/weixin/flows/flow-1' && method === 'DELETE') {
+      // The panel drops a live flow when the editor closes; the daemon would
+      // keep polling the upstream otherwise. Answer it like the real route.
+      cancels += 1;
+      await route.fulfill({ status: 204 });
       return;
     }
     if (path === '/auth/weixin/flows/flow-1' && method === 'GET') {
@@ -1041,4 +1049,7 @@ test('configures a WeChat channel with in-browser QR login', async ({
       }),
     }),
   );
+  // Closing the editor drops a *live* flow, never a finished one — cancelling
+  // here would delete the retained terminal view for no reason.
+  expect(cancels).toBe(0);
 });

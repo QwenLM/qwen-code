@@ -854,6 +854,7 @@ describe('channel registry', () => {
         .filter((entry) => entry.manageable)
         .map((entry) => entry.type),
     ).toEqual([
+      'weixin',
       'dingtalk',
       'dws',
       'email',

@@ -110,6 +110,39 @@ function mount(fake: FakeIlink) {
 
 const auth = (test: request.Test) => test.set('Authorization', 'Bearer secret');
 
+/**
+ * The flow view is `waiting` from the moment it is created, so waiting on that
+ * status says nothing about the upstream loop having started — the first poll
+ * lands a second later. Waiting on the upstream call itself is both the
+ * liveness control the stop assertions need and a deterministic one: asserting
+ * "at least one poll happened" right after a view read is a race that only
+ * passes when the suite happens to be slow.
+ */
+async function waitForUpstreamPoll(
+  fake: FakeIlink,
+  timeoutMs = 8000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (fake.statusCalls === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  expect(fake.statusCalls).toBeGreaterThan(0);
+}
+
+/**
+ * A live flow polls once a second, so two consecutive windows tell a stopped
+ * flow from a running one. The first window also lets a request that was
+ * already airborne when the flow was dropped land: comparing a single
+ * post-drop snapshot against a pre-drop one races that call and flakes under
+ * load, which is a defect in the test rather than in the route.
+ */
+async function expectPollingStopped(fake: FakeIlink): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const settled = fake.statusCalls;
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  expect(fake.statusCalls).toBe(settled);
+}
+
 async function waitForStatus(
   app: express.Express,
   id: string,
@@ -280,19 +313,17 @@ describe('weixin auth routes', () => {
       await auth(request(app).post('/auth/weixin/flows')).send({}),
     );
     const id = started.body['id'] as string;
-    // Liveness control: without this the "no further calls" assertion below
-    // would also pass on a flow that never polled at all.
+    // Liveness control: without at least one upstream poll before the drop,
+    // "polling stopped" would also be true of a flow that never polled at all.
     await waitForStatus(app, id, 'waiting');
-    expect(fake.statusCalls).toBeGreaterThan(0);
-    const before = fake.statusCalls;
+    await waitForUpstreamPoll(fake);
 
     const cancelled = await auth(
       request(app).delete(`/auth/weixin/flows/${id}`),
     );
     expect(cancelled.status).toBe(204);
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    expect(fake.statusCalls).toBe(before);
+    await expectPollingStopped(fake);
     const gone = await auth(request(app).get(`/auth/weixin/flows/${id}`));
     expect(gone.status).toBe(404);
   });
@@ -309,15 +340,13 @@ describe('weixin auth routes', () => {
     );
     const id = started.body['id'] as string;
     await waitForStatus(app, id, 'waiting');
-    expect(fake.statusCalls).toBeGreaterThan(0);
-    const before = fake.statusCalls;
+    await waitForUpstreamPoll(fake);
 
     const revoked = await auth(request(app).post('/auth/weixin/revoke'));
     expect(revoked.status).toBe(204);
     expect(existsSync(join(stateDir, 'account.json'))).toBe(false);
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    expect(fake.statusCalls).toBe(before);
+    await expectPollingStopped(fake);
     const status = await auth(request(app).get('/auth/weixin'));
     expect(status.body).toMatchObject({ configured: false });
   });
@@ -410,7 +439,32 @@ describe('weixin auth routes', () => {
     expect(response.status).toBe(502);
     expect(response.body).toEqual({ code: 'qr_unavailable' });
     // A failed mint must not occupy a slot: four more starts still succeed.
-    fake.qrResponses = [{ qrcode: 'qr-ok' }];
+    fake.qrResponses = [
+      { qrcode: 'qr-ok', qrcode_img_content: 'https://scan.example/ok' },
+    ];
+    for (let i = 0; i < 4; i += 1) {
+      const ok = await auth(request(app).post('/auth/weixin/flows')).send({});
+      expect(ok.status).toBe(201);
+    }
+  });
+
+  it('refuses a QR that carries no scannable URL', async () => {
+    // A qrcode id alone is not a login: the flow would be live with neither a
+    // QR to scan nor a link to open, and a live flow renders no retry action,
+    // so the operator would be stuck until the deadline. The real encoder
+    // failing is a different case and stays tolerated (next test).
+    fake.qrResponses = [{ qrcode: 'qr-no-url' }];
+
+    const response = record(
+      await auth(request(app).post('/auth/weixin/flows')).send({}),
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.body).toEqual({ code: 'qr_unavailable' });
+    // The slot must be released: four more starts still succeed.
+    fake.qrResponses = [
+      { qrcode: 'qr-ok', qrcode_img_content: 'https://scan.example/ok' },
+    ];
     for (let i = 0; i < 4; i += 1) {
       const ok = await auth(request(app).post('/auth/weixin/flows')).send({});
       expect(ok.status).toBe(201);
@@ -450,13 +504,11 @@ describe('weixin auth routes', () => {
     );
     const id = started.body['id'] as string;
     await waitForStatus(app, id, 'waiting');
-    expect(fake.statusCalls).toBeGreaterThan(0);
-    const before = fake.statusCalls;
+    await waitForUpstreamPoll(fake);
 
     fake.runDispose();
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    expect(fake.statusCalls).toBe(before);
+    await expectPollingStopped(fake);
     const start = await auth(request(app).post('/auth/weixin/flows')).send({});
     expect(start.status).toBe(404);
     expect(start.body).toEqual({ code: 'weixin_unavailable' });

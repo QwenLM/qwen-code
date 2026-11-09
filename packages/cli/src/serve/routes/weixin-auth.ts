@@ -129,6 +129,12 @@ export function registerWeixinAuthRoutes(
       let qrcodeId: string;
       try {
         const qr = await startLogin(apiBaseUrl);
+        // Without a scannable URL the flow has nothing to show: the operator
+        // could neither scan nor open a link, and a live flow renders no
+        // retry action, so it would sit dead until the deadline. Treat it like
+        // a failed mint. The encoder failing is different and stays tolerated
+        // below — qrcodeUrl is what makes the flow usable, not the rendering.
+        if (!qr.qrcodeUrl) throw new Error('QR code has no scannable URL');
         qrcodeId = qr.qrcodeId;
         flow.view = {
           id,

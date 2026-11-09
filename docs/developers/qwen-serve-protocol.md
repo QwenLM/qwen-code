@@ -1442,24 +1442,37 @@ It never calls the upstream platform.
 
 `POST /auth/weixin/flows` requires the strict mutation gate, mints a QR upstream,
 and returns `201` with `{ "id": string, "status": "waiting", "qrText"?: string,
-"qrcodeUrl"?: string }`. The scan loop then runs in the daemon; clients poll
+"qrcodeUrl": string }`. A mint that yields no scannable URL is reported as a
+failure rather than a live flow — the operator would have nothing to scan, and a
+live flow renders no retry action — so `502 { "code": "qr_unavailable" }` covers
+both an upstream error and a response carrying an id but no URL, and either way
+the slot is released. The scan loop then runs in the daemon; clients poll
 `GET /auth/weixin/flows/:id`, whose `status` advances through `waiting`,
-`scanned`, and the terminals `ready`, `expired`, or `error` (with a stable
-`errorCode`: `qr_expired` or `login_failed`). `qrText` is a best-effort
-block-glyph rendering and is absent when the encoder cannot render the URL;
-`qrcodeUrl` remains so the operator can open it directly. At most four flows run
-concurrently; a further start returns `429 too_many_flows`. A terminal view is
-retained for 60 seconds and then dropped, after which the poll returns
-`404 flow_not_found`. `DELETE /auth/weixin/flows/:id` aborts a flow and returns
-`204`. Daemon shutdown aborts every in-flight flow.
+`scanned`, and the terminals `ready`, `expired`, or `error`, each carrying a
+stable `errorCode`: `qr_expired` (the refresh budget ran out) or `login_failed`
+(the upstream poll failed). A credential that could not be written yields
+`error` with `errorCode: credentials_error`, because the operator has to fix the
+daemon's home directory and a generic `login_failed` would hide that. `qrText`
+is a best-effort block-glyph rendering and is absent when the encoder cannot
+render the URL; `qrcodeUrl` is always present while the flow is live, so the
+operator can open it directly. At most four flows run concurrently; a further
+start returns `429 too_many_flows`. A terminal view is retained for 60 seconds
+and then dropped, after which the poll returns `404 flow_not_found`.
+`DELETE /auth/weixin/flows/:id` aborts a flow and returns `204`; clients are
+expected to call it when they stop watching a live flow, because the daemon
+keeps polling the upstream whether or not anyone is. Daemon shutdown aborts
+every in-flight flow.
 
 On `ready` the daemon persists the credential itself. **No response on any of
 these routes carries the bot token**, and no request field can redirect the
 upstream API root.
 
 `POST /auth/weixin/revoke` requires the strict mutation gate, cancels every
-in-flight flow, removes the stored account, and returns `204`. Channels already
-running keep the account they read at connect time until they are restarted.
+in-flight flow, removes the stored account, and returns `204`. If the credential
+file cannot be removed it answers `502 { "code": "credentials_error" }` instead;
+the flows are cancelled either way, so a client must not read that failure as
+"still logged in". Channels already running keep the account they read at
+connect time until they are restarted.
 
 These routes are gated by the daemon's bearer authentication, not by workspace
 trust, because the credential they manage has no workspace scope. Clients that

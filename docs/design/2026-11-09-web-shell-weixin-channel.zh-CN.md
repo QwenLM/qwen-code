@@ -75,7 +75,7 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 
 ### 3. SDK：共享响应类型
 
-`packages/sdk-typescript/src/daemon/types.ts` 新增两个接口，并从 `src/daemon/index.ts` 与 `src/index.ts` 双处导出（现有 `Daemon*` 类型采用的双注册）：
+`packages/sdk-typescript/src/daemon/types.ts` 新增两个接口，从 `src/daemon/index.ts` 导出 —— 即本次改动中所有消费者 import 的 `@qwen-code/sdk/daemon` 子路径，沿用兄弟 subscription 类型的做法（它们同样没有再经包根 barrel 导出）：
 
 - `DaemonWeixinAccountStatus` —— `{ enabled: boolean; configured: boolean; userId?: string; savedAt?: string }`
 - `DaemonWeixinLoginFlow` —— `{ id: string; status: 'waiting' | 'scanned' | 'ready' | 'expired' | 'error'; qrText?: string; qrcodeUrl?: string; errorCode?: string }`
@@ -99,8 +99,8 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 流程生命周期：
 
 - 最多 4 个并发流程；第五个请求得到 `429` 与 `code: 'too_many_flows'`，与 subscription 路由的上限模式一致。
-- 发起流程时调用 `startLogin`，把 `qrcodeUrl` 渲染成 `qrText` 并存下视图。`onEvent` 就地更新视图：`qrcode` 事件替换 `qrText`/`qrcodeUrl`（过期后刷新的二维码），`scanned` 把状态推进到 `scanned`。
-- 当 `LoginResult.connected` 时，路由用与 CLI 相同的字段调用 `saveAccount`，然后把状态置为 `ready`。token 只用于这次保存，绝不放进视图。
+- 发起流程时调用 `startLogin`，把 `qrcodeUrl` 渲染成 `qrText` 并存下视图。若响应带回二维码 id 却没有可扫描 URL，按「生成失败」处理（`502 qr_unavailable`，释放 slot）而不是当作活动流程：既无二维码又无链接时，活动流程不给操作者任何可动作项，也不渲染重试按钮。该 mint 还带 30 秒超时，否则上游卡住会同时占住 slot 与请求。`onEvent` 就地更新视图：`qrcode` 事件替换 `qrText`/`qrcodeUrl`（过期后刷新的二维码），`scanned` 把状态推进到 `scanned`。
+- 当 `LoginResult.connected` 时，路由用与 CLI 相同的字段调用 `saveAccount`，然后把状态置为 `ready`。token 只用于这次保存，绝不放进视图。写入失败为 `error` 且 `errorCode: 'credentials_error'`，与上游失败区分开，因为这时要修的是 daemon 的 home 目录。
 - 终态视图保留 60 秒以便轮询客户端观察到，随后由一个 `unref` 的定时器丢弃，与 subscription 路由做法相同。
 - `expired`（重试预算耗尽）与 `error` 是携带稳定 `errorCode` 的终态视图；上游错误文本不逐字回显。
 - dispose 函数 abort 每一个 controller 并清掉每一个定时器。
@@ -113,7 +113,7 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 
 - `channel-platform.ts` —— 把 `weixin` 加进 `SUPPORTED_CHANNEL_TYPES` 与返回的类型联合；在 `PLATFORM_MARKS` 加 `weixin: 'WX'`。更新 `channel-platform.test.ts`，它目前断言的是相反结论。
 - 新增 `weixin-auth-api.ts` —— 基于 `createDaemonRestRequest(baseUrl, token, client)` 的薄 REST 助手，遵循 `components/local-control-api.ts`。这是浏览器调用进程全局路由的既有模式；它刻意不新增 `WorkspaceDaemonClient` 方法，因为该路由没有 workspace 段。
-- 新增 `WeixinLoginPanel.tsx` —— 展示组件加一个轮询 effect。显示账号状态；提供「扫码登录」动作，发起流程并把 `qrText` 渲染进 `<pre>`，样式沿用 `LocalControlQrButton`；为 waiting / scanned / ready / expired / error 各显示状态文案；提供发起新流程的刷新动作；以及退出登录动作。轮询循环自续期，且只以流程 id 为键、不以状态为键：在操作者扫码之前 daemon 会反复报告 `waiting`，只在状态变化时重新挂表的定时器会触发一次就冻住。它在终态与卸载时停止，并在瞬时请求失败后继续重试（下次成功时清除错误），这样一次网络抖动不会把面板卡死 —— 流程处于非终态时面板并不渲染刷新按钮。api 对象存放在 ref 中，宿主重渲染不会重启定时器。
+- 新增 `WeixinLoginPanel.tsx` —— 展示组件加一个轮询 effect。显示账号状态；提供「扫码登录」动作，发起流程并把 `qrText` 渲染进 `<pre>`，样式沿用 `LocalControlQrButton`；为 waiting / scanned / ready / expired / error 各显示状态文案；提供发起新流程的刷新动作；以及退出登录动作。轮询循环自续期，且只以流程 id 为键、不以状态为键：在操作者扫码之前 daemon 会反复报告 `waiting`，只在状态变化时重新挂表的定时器会触发一次就冻住。它在终态与卸载时停止，并在瞬时请求失败后继续重试（下次成功时清除错误），这样一次网络抖动不会把面板卡死 —— 流程处于非终态时面板并不渲染刷新按钮。api 对象存放在 ref 中，宿主重渲染不会重启定时器。卸载时它会取消仍在活动的流程：daemon 在没有浏览器的情况下也会让该流程及其上游轮询继续跑，否则关闭编辑器就会泄漏 slot，累积四次放弃的尝试后所有真正的登录都会被回 `429`。
 - `ChannelEditorDialog.tsx` —— 当 `descriptor.type === 'weixin'` 时在凭据分区顶部渲染该面板。登录 API 以可选 prop 注入，与该 dialog 里其它所有 daemon 调用一致（`listPairingRequests`、`approvePairingRequest`……）；由 `ChannelsManagerPage` 从 `useWorkspace()` 构造。这样 dialog 无需 workspace provider 即可测试。
 - `FIELD_LABEL_KEYS.weixin` 以及 `baseUrl`、`groupPolicy` 的 EN 与 ZH 词条，各带一条 `.description`。俄语目录是有意残缺的、会回落到 EN，因此无需新增词条。
 - 保存不以登录状态为前置条件。配置与凭据相互独立，操作者完全可能合理地预先配置一个 channel；面板会明确说明启动需要已登录的账号。
@@ -145,7 +145,7 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 | `packages/channels/weixin/src/index.ts`                                           | 新增 `management` 与 `envResolvableConfigFields`。      |
 | `packages/cli/src/commands/channel/configure.ts`                                  | 从事件打印；保留输出。                                  |
 | `packages/sdk-typescript/src/daemon/types.ts`                                     | 两个新接口。                                            |
-| `packages/sdk-typescript/src/daemon/index.ts`、`src/index.ts`                     | 导出它们。                                              |
+| `packages/sdk-typescript/src/daemon/index.ts`                                     | 导出它们。                                              |
 | `packages/cli/src/serve/routes/weixin-auth.ts`                                    | 新路由模块。                                            |
 | `packages/cli/src/serve/routes/weixin-auth.test.ts`                               | 新路由测试。                                            |
 | `packages/cli/src/serve/server.ts`                                                | 注册与 dispose。                                        |
@@ -195,3 +195,4 @@ qwen channel start my-weixin    # 还要先手工编辑 ~/.qwen/settings.json
 
 - 重新登录成功后是否应自动提议重启正在运行的 `weixin` channel？本设计只告知操作者；重启是他们已经拥有的 channel 动作。
 - 会话过期（`errcode -14`）状态最终是否应出现在 channel 卡片上？此处列为非目标；值得开一个后续 issue。
+- channel 的 `baseUrl` 字段覆盖的是运行时适配器的 API 根地址，而扫码登录始终对 `DEFAULT_BASE_URL` 生成二维码 —— 登录是进程全局的，没有某个 channel 可供读取根地址；而且 `WeixinAdapter.connect` 之后会优先采用登录响应里存下的 `baseUrl`。要让两者一致，就得让一条全局路由去读某个 workspace 的 channel 配置，因此维持现状；但该字段的说明不应被理解为同时改变登录端点。若将来私有 iLink 部署需要走浏览器登录，值得重新考虑。

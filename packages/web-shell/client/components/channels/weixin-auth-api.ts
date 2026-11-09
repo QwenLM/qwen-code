@@ -35,7 +35,7 @@ export class WeixinAuthError extends Error {
 
 async function send<T>(
   target: WeixinAuthTarget,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   path: string,
 ): Promise<T | undefined> {
   const response = await createDaemonRestRequest(
@@ -93,6 +93,23 @@ export async function getWeixinLoginFlow(
   return send<DaemonWeixinLoginFlow>(
     target,
     'GET',
+    `/auth/weixin/flows/${encodeURIComponent(id)}`,
+  );
+}
+
+/**
+ * Drop one flow. The daemon's flow lives in its own map and keeps polling the
+ * upstream whether or not a browser is watching, so a closing panel must say
+ * so explicitly; otherwise four abandoned attempts exhaust the flow cap and
+ * legitimate logins are refused until they time out.
+ */
+export async function cancelWeixinLoginFlow(
+  target: WeixinAuthTarget,
+  id: string,
+): Promise<void> {
+  await send<unknown>(
+    target,
+    'DELETE',
     `/auth/weixin/flows/${encodeURIComponent(id)}`,
   );
 }
