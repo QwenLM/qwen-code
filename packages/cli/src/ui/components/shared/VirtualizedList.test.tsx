@@ -1411,25 +1411,32 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
 });
 
 describe('<VirtualizedList /> zero-height host measurement', () => {
-  // The host derives the viewport height as
+  // The host derives the viewport as
   // `Math.max(0, terminalHeight - controlsHeight - tabBarHeight)`, so it can
-  // legitimately hand down 0 for a frame. The measured box height is the
-  // fallback that keeps the transcript visible until the next commit.
-  it('falls back to the measured height when the host passes 0', () => {
+  // legitimately hand down 0 for a frame. A host height of 0 must not be
+  // treated as a measured viewport: `rootHeight` would resolve to the content
+  // height, the render window would cover every row and the scroll math would
+  // collapse. The measured box height keeps the row window bounded instead.
+  it('keeps the row window bounded when the host passes 0', () => {
     const { lastFrame } = render(
       <Box height={12} flexDirection="column">
         <VirtualizedList<Item>
-          data={makeItems(3)}
+          data={makeItems(500)}
           renderItem={renderItem}
           estimatedItemHeight={estimatedItemHeight}
           keyExtractor={keyExtractor}
           containerHeight={0}
-          width={40}
           showScrollbar={false}
         />
       </Box>,
     );
 
-    expect(lastFrame() ?? '').toMatch(/item-0/);
+    const frame = lastFrame() ?? '';
+    expect(frame).toMatch(/item-0/);
+    // With a 12-row box and 1-row items only a bounded prefix can be drawn.
+    // Without the measured-height fallback the root box sizes to content and
+    // the whole 500-row list renders.
+    expect(frame).not.toMatch(/item-499/);
+    expect(frame.split('\n').length).toBeLessThanOrEqual(13);
   });
 });
