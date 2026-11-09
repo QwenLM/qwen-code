@@ -174,7 +174,9 @@ export function splitGlobalIgnores(text) {
 // subtractive and the subset argument does not hold. Measured on eslint 9.29.0
 // with lintFiles: base ['**/*.gen.ts', '!**/keep.gen.ts'] lints keep.gen.ts
 // while head ['**/*.gen.ts'] lints nothing, yet head is a subset of base.
-// (`isPathIgnored` is not a usable oracle — it reports both shapes as ignored.)
+// Cite lintFiles, not isPathIgnored: the latter answers true for both when no
+// config object matches the extension (or a parent directory is pruned), which
+// is an artifact of the probe, not of the ignore pattern.
 //
 // Any backslash is refused too, not just a leading bang: the extractor sees
 // source text while the consumer sees the decoded pattern, so '\x21foo'

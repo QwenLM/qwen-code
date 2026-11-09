@@ -55,7 +55,7 @@
 明确排除：
 
 - 其余七个门禁文件，包括 `ci.yml`。切 `ci.yml` lint 段的方案做过原型并被证据否决：在实测的两个分支上，base 到 head 的全部差值都落在 lint 段内（就是 `HELPER_TESTS` 那几行），因此切片结论仍为过期。它对观测到的 9 次红的修复率是 0。
-- 两个 config 作用域的 `ignores` 数组。它们留在逐字节比对的 remainder 中，因此对它们的任何改动仍判分支失败。
+- 五个 config 作用域的 `ignores` 构造。它们留在逐字节比对的 remainder 中，因此对它们的任何改动仍判分支失败。
 - `GATE_FILES` 不变；两个被收窄的文件都保留在清单中。
 - `main()` 的 fail-open 策略不变。
 
@@ -105,15 +105,15 @@ tree \ base_ignores  ⊆  tree \ branch_ignores
 
 `eslint.config.js` 今天没有任何负向条目，因此该守卫在当前流量上零成本。
 
-`ESLint#isPathIgnored` 在这里**不是**可用的 oracle：它把上面两种形状都报为 ignored。只有 `lintFiles` 能暴露差异，这也是守卫的理由引用该实测的原因。
+反例是 `lintFiles` 的实测，刻意不用 `isPathIgnored`。本设计的早期稿子曾声称 `isPathIgnored` 把两种形状都报为 ignored，那是错的，原因在探针而不在 API：配置里只有 `{ ignores: [...] }` 时没有任何 config 对象匹配 `.ts`，ESLint 因「缺少匹配配置」而视为 ignored。补上 `files: ['**/*.ts']` 后，`isPathIgnored` 能正确区分（负向 `false`、普通 `true`）。它对目录级剪枝的形状仍然失明，因此守卫引用的是 `lintFiles`。
 
 ### 为什么 remainder 必须逐字节一致
 
-子集判定只谈论全局 ignores 数组。`eslint.config.js` 的其余每一个字节——规则严重度、plugin 接线、两个 config 作用域的 `ignores` 数组、overrides——都按精确比对处理。因此一次既新增 ignore 又收紧规则的基线侧改动仍然过期。
+子集判定只谈论全局 ignores 数组。`eslint.config.js` 的其余每一个字节——规则严重度、plugin 接线、五个 config 作用域的 `ignores` 构造、overrides——都按精确比对处理。因此一次既新增 ignore 又收紧规则的基线侧改动仍然过期。
 
 ### 为什么只取第一个 `ignores` 块
 
-全局数组是文件中的第一个。取第一个块会把两个 config 作用域数组留在 remainder 里，按字节比对。这是刻意保守的：作用域 ignore 的改动不做分析，直接像今天一样判分支失败。一条 meta-test 通过断言抽出的块包含 `node_modules/*`，钉住它确实是全局块。
+全局数组是文件中的第一个。取第一个块会把五个 config 作用域构造留在 remainder 里，按字节比对。这是刻意保守的：作用域 ignore 的改动不做分析，直接像今天一样判分支失败。一条 meta-test 通过断言抽出的块包含 `node_modules/*`，钉住它确实是全局块。
 
 ### 用文本抽取，而非求值或 YAML/JS 解析
 
@@ -174,7 +174,7 @@ tree \ base_ignores  ⊆  tree \ branch_ignores
 
 - 唯一差距是基线侧新增全局 ignores 的分支，不再报告任何过期门禁文件。
 - 缺少基线侧**移除**全局 ignore 的分支，仍把 `eslint.config.js` 报为过期。
-- 基线侧对 `eslint.config.js` 任何其他部分的改动，包括两个 config 作用域 ignores 数组，仍报为过期。
+- 基线侧对 `eslint.config.js` 任何其他部分的改动，包括五个 config 作用域 ignores 构造，仍报为过期。
 - 任一侧存在负向（`!`）或反斜杠转义的条目时阻止收窄，即使 head 列表是 base 列表的子集。
 - `.prettierignore` 上同样三条结论成立：基线新增放行、基线移除仍过期、负向行阻止收窄。
 - raw media type 与 `main()` 的 `fetchText` 接线各自被钉住：改回 JSON media type 或删掉接线会让点名用例变红，而不是在 fail-closed 的 catch 后面静默失效。

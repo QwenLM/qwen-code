@@ -90,7 +90,7 @@ Explicitly out of scope:
   measured against, the entire base-to-head delta fell inside the lint slice (the
   `HELPER_TESTS` lines), so the slice verdict stayed stale. It would have fixed
   0 of the 9 observed reds.
-- The two config-scoped `ignores` arrays. They stay in the byte-compared
+- The five config-scoped `ignores` constructs. They stay in the byte-compared
   remainder, so any change to them still fails the branch.
 - `GATE_FILES` is unchanged; both narrowed files stay on the list.
 - The fail-open policy of `main()` is unchanged.
@@ -176,21 +176,26 @@ path too.
 No negated entry exists in `eslint.config.js` today, so the guard costs nothing on
 current traffic.
 
-`ESLint#isPathIgnored` is **not** a usable oracle here: it reports both shapes
-above as ignored. Only `lintFiles` exposes the difference, which is why the
-guard's rationale cites that measurement.
+The counterexample is a `lintFiles` measurement, deliberately not an
+`isPathIgnored` one. An earlier draft of this design claimed `isPathIgnored`
+reports both shapes as ignored; that was wrong, and the cause was the probe, not
+the API. With a config containing only `{ ignores: [...] }` no config object
+matches `.ts`, so ESLint treats the file as ignored for lack of a matching
+configuration. Adding `files: ['**/*.ts']` makes `isPathIgnored` distinguish the
+pair correctly (negated `false`, plain `true`). It remains blind to
+directory-pruned shapes, so `lintFiles` is the oracle the guard cites.
 
 ### Why the remainder must be byte-identical
 
 The subset test only speaks about the global ignores array. Every other byte of
-`eslint.config.js` — rule severities, plugin wiring, the two config-scoped
-`ignores` arrays, overrides — is compared exactly. A base-side change that both
+`eslint.config.js` — rule severities, plugin wiring, the five config-scoped
+`ignores` constructs, overrides — is compared exactly. A base-side change that both
 adds an ignore and tightens a rule therefore stays stale.
 
 ### Why only the first `ignores` block
 
 The global array is the first one in the file. Taking the first block leaves the
-two config-scoped arrays inside the remainder, where they are byte-compared.
+five config-scoped constructs inside the remainder, where they are byte-compared.
 That is deliberately conservative: a scoped ignore change is not analysed, it
 simply fails the branch as it does today. A meta-test pins that the extracted
 block is the global one by asserting it contains `node_modules/*`.
