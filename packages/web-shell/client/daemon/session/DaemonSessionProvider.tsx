@@ -3843,6 +3843,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           let sawEvent = false;
           let resyncRequested = false;
           const requestEpochResetReload = () => {
+            console.warn(
+              '[DaemonSessionProvider] event stream resync (sessionId=%s, reason=epoch_reset)',
+              activeSession.sessionId,
+            );
             invalidateGeneratedUi(activeSession, 'epoch', null);
             // An epoch reset means the daemon/EventBus timeline was rebuilt.
             // The current SSE cursor and any restored/local prompt activity may
@@ -4545,14 +4549,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   }
                   clearPendingTranscriptEvents();
                   resyncSnapshotPending = true;
-                  // Ring eviction means the SSE replay window has a real gap.
-                  // Resetting and continuing on the same stream can only replay
-                  // the surviving tail; reload the session snapshot instead so
-                  // compactedReplay/liveJournal rebuild the bounded replay
-                  // window.
+                  // The transport cannot guarantee incremental replay. Reload
+                  // the snapshot so compactedReplay/liveJournal rebuild the window.
                   console.warn(
-                    '[DaemonSessionProvider] ring eviction detected, reloading session (sessionId=%s)',
+                    '[DaemonSessionProvider] event stream resync (sessionId=%s, reason=%s)',
                     activeSession.sessionId,
+                    typeof reason === 'string' ? reason : 'unknown',
                   );
                   resyncRequested = true;
                   nextSseConnectReason = 'state_resync';
