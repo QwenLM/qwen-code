@@ -3,7 +3,10 @@ import {
   type DaemonApprovalMode,
   type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type { ReasoningSelection } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionClient,
+  ReasoningSelection,
+} from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
 const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
@@ -18,6 +21,10 @@ type PromptSessionActions = {
     sourceType?: string;
     worktree?: { slug?: string };
     branch?: { name: string };
+    keepOnNavigation?: boolean;
+    navigationOutcome?: { bound: boolean };
+    sourceVersion?: number;
+    getCurrentSourceVersion?: () => number;
   }) => Promise<{
     sessionId: string;
     worktree?: { slug: string; path: string; branch: string };
@@ -66,6 +73,8 @@ export async function createAndAttachSessionForPrompt({
   onSessionAllocated,
   getCurrentSessionId,
   getCurrentWorkspaceCwd,
+  sourceVersion,
+  getCurrentSourceVersion,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
@@ -83,14 +92,25 @@ export async function createAndAttachSessionForPrompt({
    * value so their sessions stay distinguishable from browser Web Shell ones.
    */
   sessionSourceType?: string;
-  onSessionCreated?: (sessionId: string) => Promise<void> | void;
+  /**
+   * `detachedSession` is set when the user navigated away during creation:
+   * the connection was never bound to the created session, so session-targeted
+   * actions (rename, attach, settings) must go through this client instead.
+   */
+  onSessionCreated?: (
+    sessionId: string,
+    detachedSession?: DaemonSessionClient,
+  ) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
   getCurrentWorkspaceCwd?: () => string | undefined;
+  sourceVersion?: number;
+  getCurrentSourceVersion?: () => number;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<{
   worktree?: { slug: string; path: string; branch: string };
   branch?: { name: string; baseBranch: string };
+  detachedSession?: DaemonSessionClient;
 }> {
   // Seed the approval mode in the create request itself so the daemon applies
   // it atomically at spawn (`POST /session` → `spawnOrAttach({ approvalMode })`),
@@ -102,17 +122,23 @@ export async function createAndAttachSessionForPrompt({
   // failed best-effort switch.
   const approvalMode =
     modeId && isDaemonApprovalMode(modeId) ? modeId : undefined;
-  const {
-    sessionId,
-    worktree: worktreeInfo,
-    branch: branchInfo,
-    modelApplied,
-  } = await sessionActions.createSession(
+  // A submitted prompt owns its session: when the user navigates away mid
+  // create, keep the created client (unbound) instead of aborting, so the
+  // prompt can still be dispatched. Only this first-prompt flow opts in.
+  const navigationOutcome = { bound: true };
+  const navigationOwnership =
+    sourceVersion !== undefined
+      ? { sourceVersion, getCurrentSourceVersion }
+      : {};
+  const created = await sessionActions.createSession(
     sessionContext?.kind === 'standalone'
       ? {
           sessionContext,
           ...(modelId ? { modelServiceId: modelId } : {}),
           ...(approvalMode ? { approvalMode } : {}),
+          keepOnNavigation: true,
+          navigationOutcome,
+          ...navigationOwnership,
         }
       : {
           workspaceCwd,
@@ -122,9 +148,23 @@ export async function createAndAttachSessionForPrompt({
           ...(approvalMode ? { approvalMode } : {}),
           ...(worktree ? { worktree } : {}),
           ...(branch ? { branch } : {}),
+          keepOnNavigation: true,
+          navigationOutcome,
+          ...navigationOwnership,
         },
   );
+  const {
+    sessionId,
+    worktree: worktreeInfo,
+    branch: branchInfo,
+    modelApplied,
+  } = created;
   onSessionAllocated?.(sessionId);
+  // The unbound keepOnNavigation path always returns the created session
+  // client; the declared create result type only names its data fields.
+  const detachedSession = navigationOutcome.bound
+    ? undefined
+    : (created as unknown as DaemonSessionClient);
   let preparationStep = 'prepare new session';
   try {
     if (onSessionCreated) {
@@ -132,7 +172,7 @@ export async function createAndAttachSessionForPrompt({
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          onSessionCreated(sessionId),
+          onSessionCreated(sessionId, detachedSession),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
               () => reject(new Error('onSessionCreated timed out')),
@@ -143,6 +183,64 @@ export async function createAndAttachSessionForPrompt({
       } finally {
         clearTimeout(timeout);
       }
+    }
+    if (detachedSession) {
+      // The connection belongs to the session the user opened. Skip attach
+      // and the identity checks, and apply the composer's choices through
+      // the created client; the caller dispatches the prompt admission-only.
+      if (
+        modelId &&
+        sessionContext?.kind === 'standalone' &&
+        modelApplied === false
+      ) {
+        if (reasoningEffort) {
+          preparationStep = 'confirm the requested model was applied';
+          throw new Error(
+            `The requested model ${modelId} was not applied to the standalone session; it is running on the agent default model.`,
+          );
+        }
+        warn(
+          `[WebShell] standalone session is running on the agent default model: failed to apply ${modelId} at spawn.`,
+        );
+      }
+      if (modelId && sessionContext?.kind !== 'standalone') {
+        preparationStep = 'set model for new session';
+        try {
+          await detachedSession.setModel(modelId);
+        } catch (error) {
+          if (reasoningEffort) throw error;
+          warn('[WebShell] failed to set model for new session:', error);
+        }
+      }
+      if (planMode) {
+        preparationStep = 'enable Plan for new session';
+        if (!approvalMode || approvalMode === 'plan') {
+          throw new Error(
+            'Plan requires an execution approval mode and session mode control.',
+          );
+        }
+        const result = await detachedSession.client.setSessionApprovalMode(
+          sessionId,
+          approvalMode,
+          { clientId: detachedSession.clientId, planMode: true },
+        );
+        if (result.mode !== 'plan') {
+          throw new Error('Daemon did not confirm Plan mode.');
+        }
+      }
+      if (reasoningEffort) {
+        preparationStep = 'set reasoning effort';
+        await detachedSession.setConfigOption(
+          'reasoning_effort',
+          reasoningEffort,
+          { persist: sessionContext?.kind !== 'standalone' },
+        );
+      }
+      return {
+        ...(worktreeInfo ? { worktree: worktreeInfo } : {}),
+        ...(branchInfo ? { branch: branchInfo } : {}),
+        detachedSession,
+      };
     }
     preparationStep = 'verify session identity';
     const sessionIdBeforeAttach = getCurrentSessionId();
@@ -240,6 +338,15 @@ export async function createAndAttachSessionForPrompt({
         '[WebShell] first-prompt preparation superseded; keeping session for later attach:',
         sessionId,
       );
+      throw error;
+    }
+    if (detachedSession) {
+      // releaseSession/clearSession target the provider's current session,
+      // which is the one the user navigated to; release through the created
+      // client instead and leave the connection alone.
+      await detachedSession.close().catch((releaseError: unknown) => {
+        warn('[WebShell] failed to release unattached session:', releaseError);
+      });
       throw error;
     }
     await sessionActions

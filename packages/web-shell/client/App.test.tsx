@@ -79,7 +79,10 @@ import type { WebShellSettingsOptions } from './settings';
 import type { WebShellModelManagementOptions } from './modelManagement';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
-import type { TurnOutputOpenRequest } from './components/artifacts/TurnOutputs';
+import type {
+  TurnOutputFileChange,
+  TurnOutputOpenRequest,
+} from './components/artifacts/TurnOutputs';
 import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
@@ -707,6 +710,7 @@ const {
     refreshModels: vi.fn().mockResolvedValue(undefined),
     setDaemonActivePrompt: vi.fn(),
     sendPrompt: vi.fn().mockResolvedValue(undefined),
+    sendDetachedPrompt: vi.fn().mockResolvedValue({ promptId: 'prompt-1' }),
     continueSession: vi.fn().mockResolvedValue(undefined),
     btwSessionStream: vi.fn(
       async function* (): AsyncGenerator<DaemonSessionBtwStreamEvent> {
@@ -946,8 +950,10 @@ const {
       backgroundDetails: undefined as
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
+      capturedHostOwnsArtifactPreview: undefined as boolean | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+        turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
         messages?: Array<{
           role?: string;
           content?: string;
@@ -991,6 +997,7 @@ const {
           workspaceCwd: string;
         }) => Promise<boolean | void> | boolean | void;
         manageLiveState?: boolean;
+        onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
       } | null,
       latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
@@ -1009,6 +1016,7 @@ const {
       latestAskUserQuestionOnError: null as
         | ((error: unknown, fallback: string) => void)
         | null,
+      latestAskUserQuestionOnAskDetails: null as (() => void) | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
       backgroundTasks: [] as DaemonSessionTaskStatus[],
       latestMonitorDetailsOnOpen: null as
@@ -1064,6 +1072,7 @@ const {
           actions: typeof mockPaneSessionActions,
         ) => void;
         onPendingPanesChange?: (ids: string[]) => void;
+        onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
         showSessionDetails?: boolean;
         includeOtherWorkspaces?: boolean;
         workspaceCwd?: string;
@@ -1593,6 +1602,7 @@ vi.mock('./components/TranscriptViewport', async () => {
   const { useInteractionBlocker } = await import('./interactionBlockContext');
   const { useSubagentDetails } = await import('./subagentDetailsContext');
   const { useOpenTurnCalls } = await import('./turnCallsContext');
+  const { useWebShellCustomization } = await import('./customization');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
     const releaseRef = React.useRef<(() => void) | null>(null);
@@ -1616,6 +1626,7 @@ vi.mock('./components/TranscriptViewport', async () => {
   return {
     TranscriptViewport: React.forwardRef(function TranscriptViewport(
       props: {
+        turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
         messages?: Array<{
           role?: string;
           content?: string;
@@ -1642,6 +1653,10 @@ vi.mock('./components/TranscriptViewport', async () => {
       testState.latestMessageListProps = props;
       testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
       testState.openTurnCalls = useOpenTurnCalls();
+      // The main transcript mounts inside mainChatCustomization, so this reads
+      // the hostOwnsArtifactPreview value App derives from onRightPanelOpen.
+      testState.capturedHostOwnsArtifactPreview =
+        useWebShellCustomization().hostOwnsArtifactPreview;
       React.useImperativeHandle(ref, () => ({
         scrollToBottom: notificationScrollToBottom,
       }));
@@ -2446,6 +2461,7 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
         workspaceCwd: string;
       }) => Promise<boolean | void> | boolean | void;
       manageLiveState?: boolean;
+      onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
     }) => {
       testState.latestSessionOverviewProps = props;
       return React.createElement('div', {
@@ -2476,6 +2492,7 @@ vi.doMock('./components/SplitView', async () => {
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
       onPendingPanesChange?: (ids: string[]) => void;
+      onPaneWorkspacesChange?: (cwds: readonly string[]) => void;
       includeOtherWorkspaces?: boolean;
       workspaceCwd?: string;
       sessionWorkflowEnabled?: boolean;
@@ -2952,11 +2969,13 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
     AskUserQuestion: (props: {
       keyboardActive?: boolean;
       onError: (error: unknown, fallback: string) => void;
+      onAskDetails?: () => void;
     }) => {
       testState.latestAskUserQuestionKeyboardActive =
         props.keyboardActive ?? null;
       testState.askUserKeyboardActiveHistory.push(props.keyboardActive ?? null);
       testState.latestAskUserQuestionOnError = props.onError;
+      testState.latestAskUserQuestionOnAskDetails = props.onAskDetails ?? null;
       return React.createElement('div', { 'data-web-shell-ask-panel': '' });
     },
   };
@@ -3040,11 +3059,13 @@ vi.doMock('./components/QueuedPromptDisplay', async () => {
   };
 });
 // Agents' live runs read the daemon over fetch + SSE; inert here so a test
-// that turns collaboration on opens no real connection.
+// that turns collaboration on opens no real connection. The mention spy
+// lets navigation tests pin release-after-dispatch ordering.
+const mentionApiSpy = vi.fn(() => Promise.resolve({ recordId: '', runs: [] }));
 vi.doMock('./components/workspace-agents/session-agents-api', () => ({
   createSessionAgentsHttpApi: () => ({
     listRuns: () => Promise.resolve({ frames: [] }),
-    mention: () => Promise.resolve({ recordId: '', runs: [] }),
+    mention: mentionApiSpy,
     cancelRun: () => Promise.resolve({}),
     stopAll: () => Promise.resolve({}),
     respondToPermission: () => Promise.resolve({}),
@@ -5736,6 +5757,281 @@ describe('task activity key', () => {
       container.querySelector('button[title="Daily report"]'),
     ).not.toBeNull();
   });
+
+  it.each([
+    'memory',
+    'missing-metadata',
+    'unknown-root',
+    'incomplete-memory',
+    'missing-persisted-edit',
+    'no-capability',
+  ])(
+    'restores file visibility reviews or reports missing snapshots (%s)',
+    async (mode) => {
+      testState.captureArtifactPanelOnly = true;
+      mockWorkspace.capabilities = {
+        features:
+          mode === 'no-capability' ? [] : ['workspace_git_check_ignore'],
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      const scoped = Object.assign(
+        mockWorkspace.client.workspaceByCwd('/tmp/project'),
+        {
+          workspaceGitIgnoredPaths: vi
+            .fn()
+            .mockResolvedValue({ v: 1, ignoredPaths: [] }),
+        },
+      );
+      mockWorkspace.client.workspaceByCwd.mockReturnValue(scoped);
+      const source =
+        mode === 'unknown-root' ? 'historical-session' : 'session-1';
+      if (mode === 'missing-metadata' || mode === 'unknown-root')
+        mockWorkspace.client.sessionStatus.mockRejectedValue(
+          new Error('offline'),
+        );
+      testState.messages =
+        mode === 'unknown-root'
+          ? []
+          : [
+              { id: 'old-turn', role: 'user', content: 'write' },
+              {
+                id: 'tools',
+                role: 'tool_group',
+                tools: [
+                  {
+                    callId: 'write-old',
+                    toolName: 'write_file',
+                    status: 'completed',
+                    args: {
+                      file_path: '/tmp/project/src/old.ts',
+                      content: 'source',
+                    },
+                  },
+                  ...(mode === 'no-capability'
+                    ? [
+                        {
+                          callId: 'write-outside',
+                          toolName: 'write_file',
+                          status: 'completed',
+                          args: {
+                            file_path: '/tmp/outside/notes.md',
+                            content: 'notes',
+                          },
+                        },
+                      ]
+                    : []),
+                ],
+              },
+            ];
+      mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: source,
+        events: [
+          'unknown-root',
+          'incomplete-memory',
+          'missing-persisted-edit',
+        ].includes(mode)
+          ? (mode === 'incomplete-memory' ? ['old', 'missing'] : ['old']).map(
+              (name) => ({
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'tool_call',
+                  toolCallId: `write-${name}`,
+                  title: 'Write',
+                  status: 'completed',
+                  rawInput: {
+                    file_path: `/tmp/project/src/${name}.ts`,
+                    content: 'source',
+                  },
+                  _meta: { toolName: 'write_file' },
+                },
+              }),
+            )
+          : [],
+        hasMore: false,
+        partial: mode === 'memory' || mode === 'missing-metadata',
+      });
+      window.localStorage.setItem(
+        'qwen-code-web-shell-right-panel-state',
+        JSON.stringify({
+          '/tmp/project\0session-1': {
+            open: true,
+            activeTabId: 'old-review',
+            tabs: [
+              {
+                id: 'old-review',
+                kind: 'review',
+                title: 'Old review',
+                sourceTurnId: 'old-turn',
+                sourceSessionId: source,
+                sourceToolCallIds: [
+                  'incomplete-memory',
+                  'missing-persisted-edit',
+                ].includes(mode)
+                  ? ['write-old', 'write-missing']
+                  : mode === 'no-capability'
+                    ? ['write-old', 'write-outside']
+                    : ['write-old'],
+              },
+            ],
+          },
+        }),
+      );
+      renderApp();
+      await flush();
+      await flush();
+      await vi.waitFor(async () => {
+        await flush();
+        const tab = testState.latestArtifactPanelProps?.tabs.find(
+          (tab) => tab.id === 'old-review',
+        );
+        if (mode === 'missing-persisted-edit') {
+          expect(tab?.kind).toBe('pending');
+          expect(tab?.kind === 'pending' && tab.loadError).toContain(
+            'Saved panel content is unavailable',
+          );
+          return;
+        }
+        expect(tab?.kind).toBe('review');
+        if (mode !== 'unknown-root')
+          expect(tab && 'workspaceCwd' in tab && tab.workspaceCwd).toBe(
+            '/tmp/project',
+          );
+        if (mode !== 'unknown-root')
+          expect(tab && 'workspaceId' in tab && tab.workspaceId).toBe(
+            'primary',
+          );
+        expect(
+          tab?.kind === 'review' && tab.changes?.map((change) => change.path),
+        ).toEqual(
+          mode === 'incomplete-memory'
+            ? ['/tmp/project/src/old.ts', '/tmp/project/src/missing.ts']
+            : ['/tmp/project/src/old.ts'],
+        );
+      });
+      if (
+        [
+          'unknown-root',
+          'incomplete-memory',
+          'missing-persisted-edit',
+        ].includes(mode)
+      )
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).toHaveBeenCalledTimes(1);
+      else
+        expect(
+          mockWorkspace.client.getSessionTranscriptPage,
+        ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['latest', false],
+    ['latest', true],
+    ['card', false],
+    ['card', true],
+  ] as const)(
+    'refreshes an open review after file visibility recovers (%s, widen=%s)',
+    async (entry, widen) => {
+      testState.captureArtifactPanelOnly = true;
+      mockWorkspace.capabilities = {
+        features: ['workspace_git_check_ignore'],
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      let failed = !widen;
+      let hidden = widen;
+      const ignored = vi.fn(async () => {
+        if (failed) throw new Error('offline');
+        return { v: 1, ignoredPaths: hidden ? ['ignored.log'] : [] };
+      });
+      const scoped = Object.assign(
+        mockWorkspace.client.workspaceByCwd('/tmp/project'),
+        { workspaceGitIgnoredPaths: ignored },
+      );
+      mockWorkspace.client.workspaceByCwd.mockReturnValue(scoped);
+      testState.messages = [
+        { id: 'write-turn', role: 'user', content: 'write' },
+        {
+          id: 'tools',
+          role: 'tool_group',
+          tools: ['src/app.ts', 'ignored.log'].map((path, index) => ({
+            callId: `write-${index}`,
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: `/tmp/project/${path}`, content: 'source' },
+          })),
+        },
+      ];
+      const view = renderApp();
+      await flush();
+      act(() =>
+        view.container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      await flush();
+      await vi.waitFor(async () => {
+        await flush();
+        expect(testState.latestArtifactPanelProps?.latestReviewAvailable).toBe(
+          true,
+        );
+      });
+      await act(async () => {
+        if (entry === 'latest')
+          testState.latestArtifactPanelProps?.onOpenLatestReview?.();
+        else
+          testState.latestMessageListProps?.onTurnOutputOpen?.({
+            id: 'review',
+            kind: 'review',
+            title: 'Review',
+            turnId: 'write-turn',
+            changes:
+              testState.latestMessageListProps?.turnFileChanges?.get(
+                'write-turn',
+              ) ?? [],
+            workspaceCwd: '/tmp/project',
+          });
+      });
+      const review = () =>
+        testState.latestArtifactPanelProps?.tabs.find(
+          (tab) => tab.kind === 'review',
+        );
+      expect(review()?.kind === 'review' && review()?.changes).toHaveLength(
+        widen ? 1 : 2,
+      );
+      expect(
+        review()?.kind === 'review' && review()?.sourceToolCallIds,
+      ).toEqual(['write-0', 'write-1']);
+      failed = false;
+      hidden = !widen;
+      mockConnection.status = 'disconnected';
+      act(() => view.rerender());
+      await flush();
+      mockConnection.status = 'connected';
+      act(() => view.rerender());
+      await vi.waitFor(async () => {
+        await flush();
+        const tab = review();
+        expect(
+          tab?.kind === 'review' && tab.changes?.map((change) => change.path),
+        ).toEqual(
+          widen
+            ? ['/tmp/project/src/app.ts', '/tmp/project/ignored.log']
+            : ['/tmp/project/src/app.ts'],
+        );
+      });
+    },
+  );
 
   it('keeps a current-session review tab while loading an older turn', async () => {
     window.localStorage.setItem(
@@ -12171,7 +12467,7 @@ function visibleRecapTexts(): string[] {
   );
 }
 
-async function triggerAutoRecap(): Promise<{
+async function triggerAutoRecap(supported = true): Promise<{
   recap: ReturnType<
     typeof deferred<{ sessionId: string; recap: string | null }>
   >;
@@ -12180,6 +12476,7 @@ async function triggerAutoRecap(): Promise<{
 }> {
   const recap = deferred<{ sessionId: string; recap: string | null }>();
   mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+  mockConnection.capabilities.features = supported ? ['session_recap'] : [];
   testState.blocks = [{}, {}, {}, {}];
   let hidden = true;
   Object.defineProperty(document, 'hidden', {
@@ -12195,7 +12492,9 @@ async function triggerAutoRecap(): Promise<{
   now += 3 * 60 * 1000;
   hidden = false;
   act(() => document.dispatchEvent(new Event('visibilitychange')));
-  expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  expect(mockSessionActions.recapSession).toHaveBeenCalledTimes(
+    supported ? 1 : 0,
+  );
   return { recap, container, rerender };
 }
 
@@ -12286,6 +12585,7 @@ beforeEach(() => {
   mockReleaseDetachedWebTerminal.mockReset();
   localStorage.removeItem('qwen-code-web-shell-environment-panel-open');
   localStorage.removeItem('qwen-code-web-shell-right-panel-state');
+  localStorage.removeItem('qwen-code-web-shell-details-children');
   Object.defineProperty(document, 'hidden', {
     configurable: true,
     get: () => false,
@@ -12408,6 +12708,10 @@ beforeEach(() => {
   });
   mockWorkspace.client.listWorkspaceSessions.mockReset();
   mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([]);
+  // Details tests opt into an active-side-task list via listWorkspaceSessionsPage;
+  // drop it so loadSessionCatalogOnce falls back to listWorkspaceSessions again.
+  delete (mockWorkspace.client as Record<string, unknown>)
+    .listWorkspaceSessionsPage;
   mockWorkspace.client.archiveSessionsData.mockReset();
   mockWorkspace.client.archiveSessionsData.mockResolvedValue({
     archived: [],
@@ -12535,6 +12839,7 @@ beforeEach(() => {
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
+  testState.capturedHostOwnsArtifactPreview = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
@@ -12548,6 +12853,7 @@ beforeEach(() => {
   testState.latestTodoPanelOnOpen = null;
   testState.latestTasksStatusProps = null;
   testState.latestAskUserQuestionOnError = null;
+  testState.latestAskUserQuestionOnAskDetails = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
@@ -14725,6 +15031,7 @@ describe('App composer footer renderer', () => {
 
 describe('App conversation indicator keep-alive (#9487)', () => {
   it('bridges a Live session through its resolved workspace owner', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockConnection.sessionContext = { kind: 'live' };
     mockConnection.workspaceCwd = undefined;
     mockWorkspace.capabilities = {
@@ -14753,9 +15060,18 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       '/tmp/live',
       'session-1',
     );
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: true,
+        pollIntervalMs: undefined,
+        workspaceCwds: ['/tmp/live'],
+        groupWorkspaceCwds: [],
+      },
+    );
   });
 
-  it('polls prompt authority only for trusted workspaces when the sidebar is disabled (#10989)', async () => {
+  it('polls only the connected workspace when the sidebar is disabled (#16355)', async () => {
     mockConnection.capabilities.features = ['workspace_session_live_state'];
     mockWorkspace.capabilities = {
       sessionLiveStatePollIntervalMs: 10_000,
@@ -14776,17 +15092,45 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       ],
     };
 
+    mockConnection.sessionId = undefined;
     const { rerender } = renderApp({ sidebar: false });
     await flush();
 
-    expect(mockUseWorkspaceSessionLiveState).toHaveBeenCalledWith(
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: false,
+        pollIntervalMs: 10_000,
+        workspaceCwds: [],
+        groupWorkspaceCwds: [],
+      },
+    );
+    // A cleared session keeps connection.workspaceCwd set; the activity
+    // bridge must not run against it, or it would arm an idle full-catalog
+    // fetch on the welcome view.
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      undefined,
+      undefined,
+    );
+
+    mockConnection.sessionId = 'session-1';
+    rerender({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
       mockWorkspace.client,
       {
         enabled: true,
         pollIntervalMs: 10_000,
-        workspaceCwds: ['/tmp/project', '/tmp/live'],
+        workspaceCwds: ['/tmp/project'],
         groupWorkspaceCwds: [],
       },
+    );
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      '/tmp/project',
+      'session-1',
     );
 
     mockWorkspace.capabilities = {
@@ -14810,6 +15154,208 @@ describe('App conversation indicator keep-alive (#9487)', () => {
         workspaceCwds: [],
         groupWorkspaceCwds: [],
       },
+    );
+  });
+
+  it('polls every trusted live workspace of a Live session when the sidebar is disabled (#16355)', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live-a',
+          cwd: '/tmp/live-a',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+        {
+          id: 'live-b',
+          cwd: '/tmp/live-b',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+        {
+          id: 'live-untrusted',
+          cwd: '/tmp/live-untrusted',
+          primary: false,
+          trusted: false,
+          kind: 'live',
+        },
+      ],
+    };
+
+    renderApp({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: true,
+        pollIntervalMs: undefined,
+        workspaceCwds: ['/tmp/live-a', '/tmp/live-b'],
+        groupWorkspaceCwds: [],
+      },
+    );
+    // Multi-live coverage is poller-only: the #9487 keep-alive bridge keeps
+    // its single-owner semantics (no unique owner → no bridge target).
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      undefined,
+      'session-1',
+    );
+  });
+
+  it('does not poll when a Live session has no trusted live workspace', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockConnection.sessionContext = { kind: 'live' };
+    mockConnection.workspaceCwd = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    };
+
+    renderApp({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      expect.objectContaining({ enabled: false, workspaceCwds: [] }),
+    );
+  });
+
+  it('does not poll a connected workspace whose cwd is relative', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockConnection.workspaceCwd = 'relative';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'relative', cwd: 'relative', primary: true, trusted: true },
+      ],
+    };
+
+    renderApp({ sidebar: false });
+    await flush();
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      expect.objectContaining({ enabled: false, workspaceCwds: [] }),
+    );
+  });
+
+  it('polls only the connected owner and trusted split pane workspaces without the sidebar', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'pane', cwd: '/tmp/pane', primary: false, trusted: true },
+        { id: 'idle', cwd: '/tmp/idle', primary: false, trusted: true },
+        {
+          id: 'untrusted',
+          cwd: '/tmp/untrusted',
+          primary: false,
+          trusted: false,
+        },
+        { id: 'relative', cwd: 'relative', primary: false, trusted: true },
+      ],
+    };
+    renderApp({ sidebar: false, splitSessionIds: ['s1', 's2'] });
+    await flush();
+
+    act(() => {
+      testState.latestSplitViewProps!.onPaneWorkspacesChange!([
+        '/tmp/project',
+        '/tmp/pane',
+        '/tmp/untrusted',
+        'relative',
+      ]);
+    });
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: true,
+        pollIntervalMs: undefined,
+        workspaceCwds: ['/tmp/project', '/tmp/pane'],
+        groupWorkspaceCwds: [],
+      },
+    );
+
+    act(() => {
+      testState.latestSplitViewProps!.onPaneWorkspacesChange!([]);
+    });
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      expect.objectContaining({ workspaceCwds: ['/tmp/project'] }),
+    );
+  });
+
+  it('adds the session overview displayed set to the sidebarless poll targets (#16355)', async () => {
+    mockConnection.capabilities.features = ['workspace_session_live_state'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'other', cwd: '/tmp/other', primary: false, trusted: true },
+        { id: 'idle', cwd: '/tmp/idle', primary: false, trusted: true },
+      ],
+    };
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(testState.latestSessionOverviewProps).not.toBeNull();
+    // The sidebar owns live state while it is enabled: no app-level polling.
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      expect.objectContaining({ enabled: false, workspaceCwds: [] }),
+    );
+
+    rerender({ sidebar: false });
+    await flush();
+    act(() => {
+      testState.latestSessionOverviewProps?.onLiveStateWorkspaceCwdsChange?.([
+        '/tmp/other',
+      ]);
+    });
+
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      {
+        enabled: true,
+        pollIntervalMs: undefined,
+        workspaceCwds: ['/tmp/project', '/tmp/other'],
+        groupWorkspaceCwds: [],
+      },
+    );
+
+    act(() => {
+      testState.latestSessionOverviewProps?.onLiveStateWorkspaceCwdsChange?.(
+        [],
+      );
+    });
+    expect(mockUseWorkspaceSessionLiveState).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      expect.objectContaining({ workspaceCwds: ['/tmp/project'] }),
     );
   });
 
@@ -26872,6 +27418,11 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('does not request an automatic recap without the advertised capability', async () => {
+    await triggerAutoRecap(false);
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
   it('shows an automatic recap when the session remains active', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {
@@ -27036,6 +27587,7 @@ describe('App session callbacks', () => {
   });
 
   it('keeps only the newest automatic recap across away cycles', async () => {
+    mockConnection.capabilities.features = ['session_recap'];
     const first = deferred<{ sessionId: string; recap: string | null }>();
     const second = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession
@@ -27132,6 +27684,7 @@ describe('App session callbacks', () => {
   });
 
   it('does not strand the manual recap placeholder when a newer request supersedes it', async () => {
+    mockConnection.capabilities.features = ['session_recap'];
     const manual = deferred<{ sessionId: string; recap: string | null }>();
     const auto = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession
@@ -27407,6 +27960,587 @@ describe('App session callbacks', () => {
       '/workspace',
       'session-1',
     );
+  });
+
+  it('dispatches the first prompt detached when the user switches sessions during creation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    mockSessionActions.sendDetachedPrompt.mockImplementationOnce(
+      async (
+        _session: unknown,
+        _text: string,
+        options?: { onAdmitted?: (admission: { promptId: string }) => void },
+      ) => {
+        options?.onAdmitted?.({ promptId: 'prompt-1' });
+        return { promptId: 'prompt-1' };
+      },
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('run while I am away');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+
+    // The user clicks another session while the create is still in flight.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await create.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+    });
+
+    const [detachedSessionArg, detachedPromptArg] = mockSessionActions
+      .sendDetachedPrompt.mock.calls[0] as [{ sessionId: string }, string];
+    expect(detachedSessionArg.sessionId).toBe('session-1');
+    expect(detachedPromptArg).toBe('run while I am away');
+    // The attached dispatch path never runs, and the navigation target is
+    // not replaced by the created session.
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
+    expect(mockConnection.sessionId).toBe('session-2');
+    expect(sessionCatalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/workspace',
+      'session-1',
+    );
+    // Naming goes through the created client, not the current-session action.
+    expect(detachedClient.updateMetadata).toHaveBeenCalledWith({
+      displayName: 'run while I am away',
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('releases the detached client when a goal is created after navigation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    mockWorkspaceActions.controlGoal.mockResolvedValueOnce({
+      snapshot: activeGoalSnapshot('first objective'),
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal first objective';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await create.promise;
+    });
+    // The goal still lands in its own session by id, and the unbound client
+    // is released so it cannot hold off the daemon's idle cleanup.
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith(
+        'session-1',
+        { action: 'create', objective: 'first objective' },
+      );
+    });
+    expect(detachedClient.detach).toHaveBeenCalledOnce();
+    // The daemon closes an idle session on last-client detach: the release
+    // must follow the dispatch, never precede it.
+    expect(detachedClient.detach.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mockWorkspaceActions.controlGoal.mock.invocationCallOrder[0],
+    );
+    expect(mockConnection.sessionId).toBe('session-2');
+  });
+
+  it('releases the detached client after a shell command dispatched post-navigation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      shellCommand: vi.fn(async () => ({ promptId: 'shell-1' })),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '!pwd';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await create.promise;
+    });
+    await vi.waitFor(() => {
+      expect(detachedClient.shellCommand).toHaveBeenCalledWith('pwd');
+    });
+    await vi.waitFor(() => {
+      expect(detachedClient.detach).toHaveBeenCalledOnce();
+    });
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockConnection.sessionId).toBe('session-2');
+  });
+
+  it('releases the detached client when the Goals dialog creates a session after navigation', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    mockWorkspaceActions.controlGoal.mockResolvedValueOnce({
+      snapshot: activeGoalSnapshot('goals dialog objective'),
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+
+    let pending!: Promise<unknown>;
+    await act(async () => {
+      pending = onCreateGoal('goals dialog objective');
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await pending;
+    });
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith('session-1', {
+      action: 'create',
+      objective: 'goals dialog objective',
+    });
+    expect(detachedClient.detach).toHaveBeenCalledOnce();
+    expect(detachedClient.detach.mock.invocationCallOrder[0]).toBeGreaterThan(
+      mockWorkspaceActions.controlGoal.mock.invocationCallOrder[0],
+    );
+    expect(mockConnection.sessionId).toBe('session-2');
+  });
+
+  it('releases the detached client when an agent mention creates the session after navigation', async () => {
+    mentionApiSpy.mockClear();
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['agent_collaboration_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes('/agent/agents')
+        ? {
+            agents: [
+              {
+                id: 'a1',
+                name: 'helper',
+                enabled: true,
+                status: 'idle',
+                waiting: 0,
+              },
+            ],
+          }
+        : url.includes('/agent/squads')
+          ? { squads: [] }
+          : {};
+      return { ok: true, json: async () => body } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const create = deferred<{ sessionId: string }>();
+      const detachedClient = {
+        sessionId: 'session-1',
+        updateMetadata: vi.fn(async () => ({})),
+        setModel: vi.fn(async () => ({})),
+        setConfigOption: vi.fn(async () => ({})),
+        close: vi.fn(async () => {}),
+        detach: vi.fn(async () => {}),
+        client: {
+          setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+        },
+      };
+      mockSessionActions.createSession.mockImplementationOnce(
+        async (options?: { navigationOutcome?: { bound: boolean } }) => {
+          const result = await create.promise;
+          if (options?.navigationOutcome) {
+            options.navigationOutcome.bound = false;
+          }
+          return { ...result, ...detachedClient };
+        },
+      );
+      const { rerender } = renderApp();
+      await flush();
+
+      act(() => {
+        testState.latestChatEditorProps?.onSubmit('@helper please review');
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+
+      act(() => {
+        mockConnection.sessionId = 'session-2';
+        testState.ownerVersion += 1;
+        rerender();
+      });
+      await flush();
+
+      await act(async () => {
+        create.resolve({ sessionId: 'session-1' });
+        await create.promise;
+      });
+      await vi.waitFor(() => {
+        expect(detachedClient.detach).toHaveBeenCalledOnce();
+      });
+      // Release follows the mention post: detaching earlier would let the
+      // daemon close the idle session before the post lands.
+      expect(mentionApiSpy).toHaveBeenCalledOnce();
+      expect(detachedClient.detach.mock.invocationCallOrder[0]).toBeGreaterThan(
+        mentionApiSpy.mock.invocationCallOrder[0],
+      );
+      expect(mockConnection.sessionId).toBe('session-2');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('dispatches a capacity-recovered draft detached when navigation interrupts the retry create', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    let draftCurrent = true;
+    const isCurrentDraft = vi.fn(() => draftCurrent);
+    mockSessionActions.createSession.mockRejectedValueOnce(
+      new DaemonHttpError(
+        503,
+        { code: 'acp_child_capacity_exhausted' },
+        'full',
+      ),
+    );
+    const retryCreate = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await retryCreate.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    mockRuntimeStopChoice();
+    const { rerender } = renderApp({ language: 'en' });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+        { isCurrentDraft },
+      );
+    });
+    await flush();
+    expect(
+      document.querySelector('[data-testid="capacity-recovery-dialog"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      (document.querySelector('[role="radio"]') as HTMLElement).click();
+    });
+    await act(async () => {
+      [...document.querySelectorAll('button')]
+        .find(
+          (node) => node.textContent === 'Stop these sessions and continue',
+        )!
+        .click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      draftCurrent = false;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      retryCreate.resolve({ sessionId: 'session-1' });
+      await retryCreate.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    // The retry's draft-unchanged preflight must not cancel a detached
+    // dispatch: the draft belongs to the view the user left.
+    expect(isCurrentDraft).not.toHaveBeenCalledWith({
+      allowSessionAssignment: true,
+    });
+    expect(mockConnection.sessionId).toBe('session-2');
+  });
+
+  it('gives a new draft its own session when another draft creation is in flight', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const createA = deferred<{ sessionId: string }>();
+    const detachedClientA = {
+      sessionId: 'session-a',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession
+      .mockImplementationOnce(
+        async (options?: { navigationOutcome?: { bound: boolean } }) => {
+          const result = await createA.promise;
+          if (options?.navigationOutcome) {
+            options.navigationOutcome.bound = false;
+          }
+          return { ...result, ...detachedClientA };
+        },
+      )
+      .mockImplementationOnce(async () => ({ sessionId: 'session-b' }));
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('prompt A');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    // The user opens an existing session, then starts a fresh draft and
+    // submits a different prompt while A's creation is still held.
+    act(() => {
+      mockConnection.sessionId = 'session-existing';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('prompt B');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      createA.resolve({ sessionId: 'session-a' });
+      await createA.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+    });
+    // A's prompt survives navigation into its own session; B's prompt goes
+    // to B's fresh session, never into A.
+    expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendDetachedPrompt.mock.calls[0][1]).toBe(
+      'prompt A',
+    );
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'prompt B',
+      expect.any(Object),
+    );
+  });
+
+  it('keeps a detached goal strip out of an unrelated new draft', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const createA = deferred<{ sessionId: string }>();
+    const detachedClientA = {
+      sessionId: 'session-a',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await createA.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClientA };
+      },
+    );
+    mockWorkspaceActions.controlGoal.mockResolvedValueOnce({
+      snapshot: activeGoalSnapshot('Objective A'),
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal Objective A';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-existing';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      rerender();
+    });
+    await flush();
+
+    await act(async () => {
+      createA.resolve({ sessionId: 'session-a' });
+      await createA.promise;
+    });
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith(
+        'session-a',
+        { action: 'create', objective: 'Objective A' },
+      );
+    });
+    await flush();
+    // The goal landed in A; the unrelated draft must not display its strip.
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).toBeNull();
   });
 
   it('discards an armed /clear carry when a shrink-fold lands on a split pane', async () => {
@@ -34744,6 +35878,1119 @@ describe('App session callbacks', () => {
     expect(container.querySelector('button[title="Side task"]')).toBeNull();
   });
 
+  it('opens a prefilled details side task from a pending ask-user question', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValueOnce({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(testState.latestAskUserQuestionOnAskDetails).not.toBeNull();
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    // The pending question stays pending: no answer, no main-session prompt.
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    const tab = testState.latestArtifactPanelProps?.tabs[0];
+    expect(tab).toEqual(
+      expect.objectContaining({
+        kind: 'side_task',
+        parentSessionId: 'session-1',
+        sessionId: 'details-side-task',
+      }),
+    );
+    const initialPrompt = tab?.kind === 'side_task' ? tab.initialPrompt : '';
+    expect(initialPrompt).toContain('Pick one');
+    expect(initialPrompt).toContain('ASD-STE100');
+    expect(initialPrompt).toContain('.qwen/tmp/');
+  });
+
+  it('does not offer the details action without the side-task capability', async () => {
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(testState.latestAskUserQuestionOnAskDetails).toBeNull();
+  });
+
+  // The read-site archive check asks the daemon for the parent's active side
+  // tasks; default to the details child being active so reuse paths attach it.
+  const mockDetailsChildActive = (childId = 'details-side-task') => {
+    mockWorkspace.client.listWorkspaceSessionsPage = vi.fn(async () => ({
+      sessions: [
+        {
+          sessionId: childId,
+          isArchived: false,
+          workspaceCwd: '/tmp/project',
+          displayName: 'Details side task',
+        },
+      ],
+    }));
+  };
+
+  it('focuses the existing details side task on repeat clicks', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    mockDetailsChildActive();
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    // A double click (or an impatient re-click) must not provision a second
+    // child session for the same pending question.
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    const sideTaskTabs = (
+      testState.latestArtifactPanelProps?.tabs ?? []
+    ).filter((tab) => tab.kind === 'side_task');
+    expect(sideTaskTabs).toHaveLength(1);
+  });
+
+  it('reopens the existing details child after its tab is closed', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    mockDetailsChildActive();
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    const panel = testState.latestArtifactPanelProps!;
+    const createdTab = panel.tabs.find((tab) => tab.kind === 'side_task')!;
+    expect(createdTab).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+    // The association is persisted, so it survives tab close and reloads.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task');
+
+    act(() => panel.onCloseTab(createdTab.id));
+    await flush();
+    // The panel unmounts when its last tab closes, so assert on the DOM
+    // rather than the captured (now stale) panel props.
+    expect(
+      container.querySelector('button[title="Details side task"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    // Closing the tab must not orphan the child: the second click reopens
+    // the same session instead of provisioning another one.
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    const reopened = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'side_task',
+    );
+    expect(reopened).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+    // The prompt rides along: creation resolves before the pane admits it,
+    // so a tab closed in that window leaves an empty child. The pane's
+    // empty-session guard sends it only if it was never admitted.
+    expect(
+      reopened?.kind === 'side_task' ? reopened.initialPrompt : undefined,
+    ).toContain('Pick one');
+  });
+
+  it('records the details association when creation resolves after the tab closed', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    let resolveCreation!: (value: {
+      sessionId: string;
+      clientId: string;
+      workspaceCwd: string;
+      displayName: string;
+    }) => void;
+    mockWorkspace.client.createSideTaskSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCreation = resolve;
+        }),
+    );
+    mockDetailsChildActive();
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    const panel = testState.latestArtifactPanelProps!;
+    const draftTab = panel.tabs.find((tab) => tab.kind === 'side_task')!;
+    // Close the loading tab BEFORE creation resolves; server-side creation
+    // is not cancelled, so the association must still be recorded.
+    act(() => panel.onCloseTab(draftTab.id));
+    await flush();
+    await act(async () => {
+      resolveCreation({
+        sessionId: 'details-side-task',
+        clientId: 'side-client',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Details side task',
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task');
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledTimes(1);
+    const reopened = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'side_task',
+    );
+    expect(reopened).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+    // The draft closed before creation resolved, so the display name never
+    // landed on the tab; it reopens under the generic side-task title.
+    expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
+  });
+
+  it('drops the details association when the child is archived', async () => {
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: vi.fn(),
+      getSessionTurnIndexPage: vi.fn(),
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        pullRequests: [],
+      }),
+      archiveSessionsData: vi.fn().mockResolvedValue({
+        archived: ['details-side-task'],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      }),
+    }));
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task');
+
+    // Archive the idle child while the question is still pending.
+    await act(async () => {
+      await testState.latestArtifactPanelProps?.onArchiveSideTasks?.([
+        {
+          sessionId: 'details-side-task',
+          title: 'Details side task',
+          workspaceCwd: '/tmp/project',
+          updatedAt: new Date().toISOString(),
+          archivable: true,
+        },
+      ]);
+      await Promise.resolve();
+    });
+    await flush();
+    // The archived child can no longer be attached (load 409s); the stored
+    // binding must be gone so the next click provisions a fresh child.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).not.toContain('details-side-task');
+
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task-2',
+      clientId: 'side-client-2',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task 2',
+    });
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledTimes(2);
+    const reopened = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'side_task',
+    );
+    expect(reopened).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task-2' }),
+    );
+  });
+
+  it('keeps the derived details clientId within the daemon budget with uuid ids', async () => {
+    // The daemon rejects client ids over 128 chars. With uuid-length parent
+    // and request ids, the derived side-task:<parent>:<tabId> must fit; the
+    // pre-fix double-uuid tab id measured 138 and 400s the pane's load.
+    mockConnection.sessionId = 'da424824-c6a7-4ce5-a5fd-9b12c9255bef';
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'ask_user_question',
+          requestId: '06a69fb6-7293-4f61-a279-e7b3963b1cd3',
+        }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    const tab = testState.latestArtifactPanelProps?.tabs.find(
+      (t) => t.kind === 'side_task',
+    );
+    expect(tab).toBeDefined();
+    const derivedClientId = `side-task:${mockConnection.sessionId}:${tab!.id}`;
+    expect(derivedClientId.length).toBeLessThanOrEqual(128);
+  });
+
+  it('focuses a catalog-reopened details child and supplies the unsent prompt', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    mockDetailsChildActive();
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    const panel = testState.latestArtifactPanelProps!;
+    const createdTab = panel.tabs.find((tab) => tab.kind === 'side_task')!;
+    act(() => panel.onCloseTab(createdTab.id));
+    await flush();
+
+    // Reopen the same child from the side-task catalog: its tab id is
+    // side-task:<sessionId>, not the details-request id.
+    act(() => {
+      testState.latestArtifactPanelProps?.onOpenSideTask?.({
+        sessionId: 'details-side-task',
+        title: 'Details side task',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+    await flush();
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    const sideTaskTabs = (
+      testState.latestArtifactPanelProps?.tabs ?? []
+    ).filter((tab) => tab.kind === 'side_task');
+    expect(sideTaskTabs).toHaveLength(1);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      sideTaskTabs[0]!.id,
+    );
+    // The catalog tab carries no prompt of its own. If the original tab was
+    // closed before the pane admitted the prompt, the child is still empty;
+    // the click must supply the pending explanation on the matched tab so
+    // the pane's empty-session guard can deliver it.
+    expect(sideTaskTabs[0]!.id).toBe('side-task:details-side-task');
+    expect(
+      sideTaskTabs[0]!.kind === 'side_task'
+        ? sideTaskTabs[0]!.initialPrompt
+        : undefined,
+    ).toContain('Pick one');
+  });
+
+  it('provisions a fresh child when the bound child was archived outside the panel', async () => {
+    // F5: archive can happen from the sidebar / overview / activity catalog /
+    // another tab, none of which prune the binding. The read-site check must
+    // notice the child is no longer active and provision a fresh one instead
+    // of attaching an archived child whose load 409s.
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession
+      .mockResolvedValueOnce({
+        sessionId: 'details-side-task',
+        clientId: 'side-client',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Details side task',
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'details-side-task-2',
+        clientId: 'side-client-2',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Details side task 2',
+      });
+    mockDetailsChildActive();
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task');
+
+    // The child is archived through a surface that does not touch the binding:
+    // it simply stops appearing in the active side-task list. The details tab
+    // is left OPEN: the fresh draft must replace the stale same-id tab (still
+    // bound to the archived child), not re-focus an unloadable pane.
+    mockWorkspace.client.listWorkspaceSessionsPage = vi.fn(async () => ({
+      sessions: [],
+    }));
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledTimes(2);
+    const sideTaskTabs = (
+      testState.latestArtifactPanelProps?.tabs ?? []
+    ).filter((t) => t.kind === 'side_task');
+    expect(sideTaskTabs).toHaveLength(1);
+    expect(sideTaskTabs[0]).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task-2' }),
+    );
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-details-children'),
+    ).toContain('details-side-task-2');
+  });
+
+  it('replaces a restored details tab bound to a different child than the binding', async () => {
+    // F2: a binding copied from another browser tab (or read on reload) can name
+    // an active child while the persisted same-id tab still shows a different,
+    // archived child. The openTab lookup matches by sessionId, so it misses the
+    // stale tab; the upsert must replace it rather than keep an unloadable pane.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, 'session-1': { 'req-1': 'details-new' } }),
+    );
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'side-task:details:req-1',
+          tabs: [
+            {
+              id: 'side-task:details:req-1',
+              kind: 'side_task',
+              title: 'Details side task',
+              sessionId: 'details-old',
+              parentSessionId: 'session-1',
+              workspaceCwd: '/tmp/project',
+            },
+          ],
+        },
+      }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockDetailsChildActive('details-new');
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    // The restored tab is bound to the archived details-old; confirm the seed.
+    const restored = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.id === 'side-task:details:req-1',
+    );
+    expect(restored).toEqual(
+      expect.objectContaining({ sessionId: 'details-old' }),
+    );
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    // The click reuses the active details-new: the stale same-id tab must be
+    // replaced, not kept bound to details-old, and no new child is provisioned.
+    const sideTaskTabs = (
+      testState.latestArtifactPanelProps?.tabs ?? []
+    ).filter((tab) => tab.kind === 'side_task');
+    expect(sideTaskTabs).toHaveLength(1);
+    expect(sideTaskTabs[0]).toEqual(
+      expect.objectContaining({
+        id: 'side-task:details:req-1',
+        sessionId: 'details-new',
+      }),
+    );
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+  });
+
+  it('does not open a details tab when the question resolves during the liveness check', async () => {
+    // F1: the read-site query is async; if the question is answered/ignored
+    // during the round-trip, the continuation must not add a details tab.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, 'session-1': { 'req-1': 'details-side-task' } }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    let releaseQuery!: (value: { sessions: unknown[] }) => void;
+    mockWorkspace.client.listWorkspaceSessionsPage = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          releaseQuery = resolve;
+        }),
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    // Start the click; it suspends on the in-flight catalog query.
+    let clickDone!: Promise<void>;
+    act(() => {
+      clickDone = testState.latestAskUserQuestionOnAskDetails!();
+    });
+    // Resolve the question while the query is still in flight.
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      releaseQuery({ sessions: [{ sessionId: 'details-side-task' }] });
+      await clickDone;
+    });
+    await flush();
+
+    const sideTaskTabs = (
+      testState.latestArtifactPanelProps?.tabs ?? []
+    ).filter((t) => t.kind === 'side_task');
+    expect(sideTaskTabs).toHaveLength(0);
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the persisted binding when the liveness query fails', async () => {
+    // R2-2: the catch fallback keeps Ask for details working when the catalog
+    // query fails — it attaches the bound child rather than provisioning fresh.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, 'session-1': { 'req-1': 'details-side-task' } }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.listWorkspaceSessionsPage = vi.fn(async () => {
+      throw new Error('daemon restarting');
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    const tab = testState.latestArtifactPanelProps?.tabs.find(
+      (t) => t.kind === 'side_task',
+    );
+    expect(tab).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+  });
+
+  it('forgets the binding when the active list holds other children but not the bound one', async () => {
+    // R2-11: the positive predicate matches by session id, not merely a
+    // non-empty page. A page of siblings without the bound child means it is gone.
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession
+      .mockResolvedValueOnce({
+        sessionId: 'details-side-task',
+        clientId: 'side-client',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Details side task',
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'details-side-task-2',
+        clientId: 'side-client-2',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Details side task 2',
+      });
+    mockDetailsChildActive();
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    // A non-empty active list that does not contain the bound child.
+    mockWorkspace.client.listWorkspaceSessionsPage = vi.fn(async () => ({
+      sessions: [{ sessionId: 'some-other-child', isArchived: false }],
+    }));
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledTimes(2);
+    const tab = testState.latestArtifactPanelProps?.tabs.find(
+      (t) => t.kind === 'side_task',
+    );
+    expect(tab).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task-2' }),
+    );
+  });
+
+  it('queries the parent active side-task list with the panel listing shape', async () => {
+    // R2-3: pin the read-site query's archiveState/sourceType/sourceId so a
+    // wrong query (e.g. archiveState 'archived') cannot keep the tests green.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, 'session-1': { 'req-1': 'details-side-task' } }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    const listPage = vi.fn(async () => ({
+      sessions: [{ sessionId: 'details-side-task', isArchived: false }],
+    }));
+    mockWorkspace.client.listWorkspaceSessionsPage = listPage;
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    const checkCall = listPage.mock.calls.find(
+      ([, options]) =>
+        (options as Record<string, unknown>)?.sourceId === 'session-1' &&
+        (options as Record<string, unknown>)?.archiveState === 'active',
+    );
+    expect(checkCall).toBeDefined();
+    expect(checkCall![1]).toEqual(
+      expect.objectContaining({
+        archiveState: 'active',
+        sourceType: 'side_task',
+        sourceId: 'session-1',
+      }),
+    );
+  });
+
+  it('ignores a persisted association written by a newer payload version', async () => {
+    // R2-9: readStoredDetailsChildren's version gate keeps a newer build's
+    // payload from being honoured verbatim; a v:2 payload provisions fresh.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 2, 'session-1': { 'req-1': 'details-side-task' } }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    // v:2 is ignored, so no bound child is reused — a fresh child is created.
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
+  });
+
+  it('binds a child per pending question, not per parent session', async () => {
+    // R2-5: a binding for one request must not be reused for a different
+    // pending question in the same parent — the invariant the feature rests on.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, 'session-1': { 'req-1': 'child-for-req-1' } }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'child-for-req-2',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    // A different pending question (req-2) in the same parent session.
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({
+          toolName: 'ask_user_question',
+          requestId: 'req-2',
+        }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    // req-2 has no binding, so a fresh child is provisioned (req-1's child is
+    // not reused).
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
+    const tab = testState.latestArtifactPanelProps?.tabs.find(
+      (t) => t.kind === 'side_task',
+    );
+    expect(tab).toEqual(
+      expect.objectContaining({ sessionId: 'child-for-req-2' }),
+    );
+  });
+
+  it('evicts the oldest parent when a new parent exceeds the association cap', async () => {
+    // R2-8: seed exactly the cap, then record a NEW parent so the writer's
+    // eviction loop actually runs and drops the oldest key.
+    const seeded: Record<string, Record<string, string>> = {};
+    for (let i = 0; i < 20; i++)
+      seeded[`parent-${i}`] = { 'old-req': `child-${i}` };
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, ...seeded }),
+    );
+    mockConnection.sessionId = 'parent-20';
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    const stored = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-details-children') ??
+        '{}',
+    ) as Record<string, unknown>;
+    const keys = Object.keys(stored).filter((k) => k !== 'v');
+    expect(keys).toHaveLength(20);
+    expect(keys).not.toContain('parent-0');
+    expect(keys[keys.length - 1]).toBe('parent-20');
+  });
+
+  it('forgets only the archived child across multiple parent bindings', async () => {
+    // R2-13: forgetDetailsChildren must filter by child id across all parents,
+    // not rebuild the store — another parent's binding survives.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({
+        v: 1,
+        'session-1': { 'req-1': 'details-side-task' },
+        'session-2': { 'req-9': 'other-child' },
+      }),
+    );
+    mockConnection.capabilities.features = [
+      'session_side_task',
+      'session_archive',
+      'session_archive_idle_guard',
+    ];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    mockDetailsChildActive();
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: vi.fn(),
+      getSessionTurnIndexPage: vi.fn(),
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
+        pullRequests: [],
+      }),
+      archiveSessionsData: vi.fn().mockResolvedValue({
+        archived: ['details-side-task'],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      }),
+    }));
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    // Open the panel (and bind session-1's child) so the archive path is wired.
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    await act(async () => {
+      await testState.latestArtifactPanelProps?.onArchiveSideTasks?.([
+        {
+          sessionId: 'details-side-task',
+          title: 'Details side task',
+          workspaceCwd: '/tmp/project',
+          updatedAt: new Date().toISOString(),
+          archivable: true,
+        },
+      ]);
+      await Promise.resolve();
+    });
+    await flush();
+
+    const stored = window.localStorage.getItem(
+      'qwen-code-web-shell-details-children',
+    );
+    expect(stored).not.toContain('details-side-task');
+    expect(stored).toContain('other-child');
+    expect(stored).toContain('session-2');
+  });
+
+  it('moves a re-recorded parent to the newest association slot', async () => {
+    // R1-4: the writer evicts the oldest key. Re-recording a parent must move
+    // it to the newest slot, or a live, frequently used parent is evicted first
+    // and its next details click provisions a duplicate child.
+    const seeded: Record<string, Record<string, string>> = {};
+    for (let i = 0; i < 20; i++)
+      seeded[`parent-${i}`] = { 'old-req': `child-${i}` };
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, ...seeded }),
+    );
+    mockConnection.sessionId = 'parent-0';
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    // A new pending request for parent-0 creates a child and re-records it.
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    const stored = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-details-children') ??
+        '{}',
+    ) as Record<string, unknown>;
+    const keys = Object.keys(stored).filter((k) => k !== 'v');
+    expect(keys).toHaveLength(20);
+    expect(keys[keys.length - 1]).toBe('parent-0');
+  });
+
+  it('reuses a persisted association seeded before render', async () => {
+    // R1-5: the reload contract — the association is read once at mount, so a
+    // binding persisted by a previous page load must reuse the child without
+    // provisioning a new one.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, 'session-1': { 'req-1': 'details-side-task' } }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockDetailsChildActive();
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    const tab = testState.latestArtifactPanelProps?.tabs.find(
+      (t) => t.kind === 'side_task',
+    );
+    expect(tab).toEqual(
+      expect.objectContaining({ sessionId: 'details-side-task' }),
+    );
+  });
+
+  it('refocuses the details tab when another tab is active', async () => {
+    // R1-7: repeat clicks must observably focus the details tab, not just avoid
+    // provisioning a duplicate. Move focus to another tab first.
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValue({
+      sessionId: 'details-side-task',
+      clientId: 'side-client',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Details side task',
+    });
+    mockDetailsChildActive();
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+    const detailsTabId = testState.latestArtifactPanelProps?.tabs.find(
+      (t) => t.kind === 'side_task',
+    )!.id;
+
+    // Activate a different session's side task so focus is elsewhere.
+    act(() => {
+      testState.latestArtifactPanelProps?.onOpenSideTask?.({
+        sessionId: 'other-session',
+        title: 'Other side task',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.activeTabId).not.toBe(
+      detailsTabId,
+    );
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(detailsTabId);
+    expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
+  });
+
   it('passes a directive to /fork as a regular background-agent directive', async () => {
     mockSessionActions.forkSession.mockResolvedValue({
       sessionId: 'session-1',
@@ -34913,6 +37160,47 @@ describe('App session callbacks', () => {
       expect(testState.dismissNotice).toHaveBeenCalledWith('stream');
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  it('shows the release banner after a session-limit create failure', async () => {
+    const previousSessionContext = mockConnection.sessionContext;
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
+    try {
+      testState.notices = [
+        {
+          id: 'limit',
+          severity: 'error',
+          category: 'user_action',
+          operation: 'create_session',
+          code: 'session_limit_exceeded',
+          message: 'Session limit reached (64)',
+          createdAt: 0,
+        },
+      ];
+      const { container } = renderApp();
+      await flush();
+
+      const banner = container.querySelector(
+        '[data-testid="session-limit-banner"]',
+      );
+      expect(banner).not.toBeNull();
+      expect(banner?.textContent).toContain('live-session limit');
+
+      const release = [...(banner?.querySelectorAll('button') ?? [])].find(
+        (button) => button.textContent === 'Release idle sessions',
+      );
+      expect(release).toBeDefined();
+      await act(async () => {
+        release?.click();
+      });
+      await flush();
+
+      expect(
+        container.querySelector('[data-dialog-title="Release Session"]'),
+      ).not.toBeNull();
+    } finally {
+      mockConnection.sessionContext = previousSessionContext;
     }
   });
 
@@ -41187,6 +43475,22 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each([
+    { withHost: true, expected: true },
+    { withHost: false, expected: false },
+  ])(
+    'derives host artifact-preview ownership from onRightPanelOpen (withHost=$withHost)',
+    async ({ withHost, expected }) => {
+      // Pins App's hostOwnsArtifactPreview = Boolean(onRightPanelOpen): the
+      // main-transcript customization carries the flag only when a host
+      // supplies the callback. The card's honoring of the flag is pinned by
+      // the TurnOutputs DOM tests.
+      renderApp(withHost ? { onRightPanelOpen: vi.fn(() => true) } : {});
+      await flush();
+      expect(testState.capturedHostOwnsArtifactPreview).toBe(expected);
+    },
+  );
+
   it('keeps same-name attachment tabs separate across split sessions', async () => {
     const { container } = renderApp();
     await flush();
@@ -45755,6 +48059,10 @@ describe('App session callbacks', () => {
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen',
       approvalMode: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
+      sourceVersion: expect.any(Number),
+      getCurrentSourceVersion: expect.any(Function),
     });
     expect(mockSessionActions.setModel).not.toHaveBeenCalled();
     await vi.waitFor(() => {
@@ -45808,6 +48116,10 @@ describe('App session callbacks', () => {
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen3-max',
       approvalMode: 'yolo',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
+      sourceVersion: expect.any(Number),
+      getCurrentSourceVersion: expect.any(Function),
     });
   });
 
@@ -45848,6 +48160,10 @@ describe('App session callbacks', () => {
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen-default',
       approvalMode: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
+      sourceVersion: expect.any(Number),
+      getCurrentSourceVersion: expect.any(Function),
     });
   });
 
@@ -47864,6 +50180,33 @@ describe('App prompt send failure retry', () => {
     expect(
       container.querySelector('[data-testid="streaming-status"]'),
     ).not.toBeNull();
+  });
+
+  it('anchors a local send before the authoritative user echo arrives', async () => {
+    testState.messages = [
+      {
+        id: 'old-user',
+        role: 'user',
+        content: 'old question',
+        timestamp: 1000,
+      },
+    ];
+    testState.streamingState = 'waiting';
+    Object.assign(mockConnection, {
+      localPrompt: { sessionId: mockConnection.sessionId, startedAt: 9000 },
+    });
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container
+          .querySelector('[data-testid="streaming-status"]')
+          ?.getAttribute('data-started-at'),
+      ).toBe('9000');
+      expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(9000);
+    } finally {
+      Reflect.deleteProperty(mockConnection, 'localPrompt');
+    }
   });
 
   it('shows processing only after retry admission and restarts its timer', async () => {
@@ -53689,4 +56032,94 @@ describe('Managed home integration', () => {
       expectSelectedTab('Extensions');
     },
   );
+});
+
+describe('upstream embedded transport reproduction', () => {
+  it('does not automatically recap when the transport omits session_recap', async () => {
+    mockConnection.capabilities = { qwenCodeVersion: 'test', features: [] };
+    mockSessionActions.recapSession.mockResolvedValue({
+      sessionId: 'session-1',
+      recap: null,
+    });
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+  });
+
+  it('starts the current local clock before the authoritative user echo', async () => {
+    const pending = deferred<void>();
+    const now = Date.now();
+    testState.messages = [
+      {
+        id: 'previous-user',
+        role: 'user',
+        content: 'previous question',
+        timestamp: now - 3_600_000,
+      },
+    ];
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      Object.assign(mockConnection, {
+        localPrompt: {
+          sessionId: mockConnection.sessionId,
+          startedAt: Date.now(),
+        },
+      });
+      return pending.promise;
+    });
+    const { rerender } = renderApp();
+    await flush();
+    try {
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('new question');
+        await Promise.resolve();
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+          'new question',
+          expect.anything(),
+        ),
+      );
+      act(() => {
+        testState.streamingState = 'waiting';
+        rerender();
+      });
+      expect(
+        testState.latestMessageListProps?.activeTurnStartedAt,
+      ).toBeGreaterThanOrEqual(now);
+    } finally {
+      await act(async () => {
+        pending.resolve();
+        await pending.promise;
+      });
+      Reflect.deleteProperty(mockConnection, 'localPrompt');
+    }
+  });
+
+  it('preserves the original remote turn anchor when no local send exists', async () => {
+    testState.messages = [
+      {
+        id: 'remote-user',
+        role: 'user',
+        content: 'remote question',
+        timestamp: 1000,
+      },
+    ];
+    testState.streamingState = 'waiting';
+    renderApp();
+    await flush();
+    expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(1000);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
 });

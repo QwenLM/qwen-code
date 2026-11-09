@@ -128,6 +128,7 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceGitIgnoredPaths,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
@@ -1482,7 +1483,10 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     let supported: boolean;
-    if (capability === 'session_source_metadata') {
+    if (
+      capability === 'session_source_metadata' ||
+      capability === 'session_last_user_prompt_sort'
+    ) {
       while (
         this.capabilitiesRequest ||
         !this.capabilityFeatures ||
@@ -3306,7 +3310,10 @@ export class DaemonClient {
   async listStandaloneSessionsPage(
     options: DaemonStandaloneSessionListOptions = {},
   ): Promise<DaemonStandaloneSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     const query = new URLSearchParams();
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options.cursor !== undefined) query.set('cursor', options.cursor);
     if (options.pageSize !== undefined) {
       query.set('size', String(options.pageSize));
@@ -3605,6 +3612,7 @@ export class DaemonClient {
   async listWorkspaceSessions(
     workspaceCwd: string,
     options?: {
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       pageSize?: number;
       archiveState?: DaemonSessionArchiveState;
       parentSessionId?: string;
@@ -3620,6 +3628,8 @@ export class DaemonClient {
     workspaceCwd: string,
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -3637,6 +3647,7 @@ export class DaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options?.cursor !== undefined) {
       query.set('cursor', options.cursor);
     }
@@ -3658,9 +3669,17 @@ export class DaemonClient {
     if (options?.sourceId !== undefined) {
       query.set('sourceId', options.sourceId);
     }
+    if (options?.liveOnly === true) {
+      query.set('liveOnly', '1');
+    }
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 
@@ -3674,6 +3693,8 @@ export class DaemonClient {
     request: DaemonSessionCatalogRequest,
     opts?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<DaemonSessionCatalogResult> {
+    if (request.options?.sortBy !== undefined)
+      await this.requireCapability('session_last_user_prompt_sort');
     const { pageSize, ...options } = request.options ?? {};
     return await this.jsonRequest<DaemonSessionCatalogResult>(
       '/sessions/catalog',
@@ -4095,7 +4116,8 @@ export class DaemonClient {
   }
 
   /**
-   * Read the current in-memory runtime status for one live daemon session.
+   * Read one live session's runtime status and optional persisted
+   * summary metadata.
    */
   async sessionStatus(
     sessionId: string,
@@ -4528,12 +4550,34 @@ export class DaemonClient {
    * different work, so floor the derived budget at the generic request deadline
    * these routes used before: a short restore budget must not shorten a create.
    * Restore keeps the unfloored budget, where pinning it low is deliberate.
+   *
+   * An explicit client deadline is returned verbatim, so the operator's own
+   * value reaches `fetchWithTimeout` unchanged — an explicit `0` asks for no
+   * deadline. (`resolveSessionOperationTimeoutMs` also maps an explicit value
+   * above `MAX_TIMER_DELAY_MS` onto `0`, so that over-ceiling case stays
+   * unbounded; it is pre-existing and out of scope here.) A *derived* `0`
+   * means something else:
+   * `resolveSessionOperationTimeoutMs` returns it when the advertised budget
+   * plus headroom overflowed `MAX_TIMER_DELAY_MS`, and `fetchWithTimeout` reads
+   * it as the same "no deadline", so the spawn would arm no timer and attach no
+   * AbortSignal, leaving a stalled daemon free to retain the create or worktree
+   * reset for the process lifetime. Clamp that overflow to `MAX_TIMER_DELAY_MS`
+   * — the largest delay a timer can express — so a derived deadline is bounded
+   * on these two routes. Restore is deliberately exempt: `resolveRestoreTimeoutMs`
+   * forwards the same derived `0` into `fetchWithTimeout`, so `loadSession` and
+   * `resumeSession` stay unbounded under an over-ceiling
+   * `--session-restore-timeout-ms`, which #14622 requires ("Restore must keep
+   * its `0` pass-through"). The bound below covers the spawn routes only.
    */
   private resolveSessionSpawnTimeoutMs(): number {
     const timeoutMs = this.resolveSessionOperationTimeoutMs();
-    return timeoutMs === 0 || this.hasExplicitFetchTimeout
-      ? timeoutMs
-      : Math.max(timeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
+    if (this.hasExplicitFetchTimeout) {
+      return timeoutMs;
+    }
+    if (timeoutMs === 0) {
+      return MAX_TIMER_DELAY_MS;
+    }
+    return Math.max(timeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
   }
 
   /**
@@ -7685,6 +7729,22 @@ export class DaemonClient {
     );
   }
 
+  async getWorkspaceOrder(): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'GET /workspace-order', {
+      mode: 'rest',
+    });
+  }
+
+  async setWorkspaceOrder(
+    cwds: readonly string[],
+  ): Promise<{ cwds: string[] }> {
+    return this.jsonRequest('/workspace-order', 'POST /workspace-order', {
+      method: 'POST',
+      body: { cwds },
+      mode: 'rest',
+    });
+  }
+
   async updateWorkspace(
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,
@@ -8487,6 +8547,27 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  /**
+   * Return confirmed Git-ignored paths for at most 256 inputs.
+   * Paths are relative to cwd, or the workspace root when cwd is omitted.
+   */
+  workspaceGitIgnoredPaths(
+    paths: readonly string[],
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonWorkspaceGitIgnoredPaths> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    return this.client.workspaceJsonRequest<DaemonWorkspaceGitIgnoredPaths>(
+      this.workspaceSelector,
+      `/git/check-ignore${query ? `?${query}` : ''}`,
+      'POST /workspaces/:workspace/git/check-ignore',
+      { method: 'POST', body: { paths }, mode: 'rest' },
+    );
+  }
+
   workspaceGitDiff(
     cwd?: string,
     sessionId?: string,
@@ -9066,6 +9147,8 @@ export class WorkspaceDaemonClient {
   async listWorkspaceSessionsPage(
     options?: DaemonSessionListPageOptions,
   ): Promise<DaemonSessionListPage> {
+    if (options?.sortBy !== undefined)
+      await this.client.requireCapability('session_last_user_prompt_sort');
     if (options?.sourceType !== undefined || options?.sourceId !== undefined) {
       await this.client.requireCapability('session_source_metadata');
     }
@@ -9083,6 +9166,7 @@ export class WorkspaceDaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.sortBy !== undefined) query.set('sortBy', options.sortBy);
     if (options?.cursor !== undefined) query.set('cursor', options.cursor);
     if (options?.archiveState !== undefined) {
       query.set('archiveState', options.archiveState);
@@ -9098,9 +9182,18 @@ export class WorkspaceDaemonClient {
     if (options?.sourceId !== undefined) {
       query.set('sourceId', options.sourceId);
     }
-    return await this.get(
+    if (options?.liveOnly === true) {
+      query.set('liveOnly', '1');
+    }
+    // The ACP session/list mapping carries neither liveOnly nor sortBy; force
+    // native REST rather than silently serving a different result.
+    return await this.client.workspaceJsonRequest<DaemonSessionListPage>(
+      this.workspaceSelector,
       `/sessions?${query.toString()}`,
       'GET /workspaces/:workspace/sessions',
+      options?.liveOnly === true || options?.sortBy !== undefined
+        ? { mode: 'rest' }
+        : {},
     );
   }
 

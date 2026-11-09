@@ -42,7 +42,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `message-relay.scan-delay` | — | 时长 | `2s` | Session 消息中继两次运行之间的间隔；每次运行推进 Session 之间待投递的消息（移交、回执、接受），并结算无法投递的消息。没有可用 Hosted Harness 的节点会跳过。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `model-catalog` | — | YAML 列表 | *（空）* | 为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。 |
 | `model-config-base-urls` | — | YAML 列表 | *（空）* | 允许完整 Session 模型配置使用的 HTTP(S) API 地址，按完整字符串精确匹配，以 YAML 列表设置。为空时禁止准入新配置。公共创建接口接受 `model_config`，WebShell 创建接口接受 `modelConfig`。要求启用 Session Store、Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的 Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。 |
-| `service-user` | `QWEN_MANAGED_AGENT_SERVICE_USER` | 字符串 | *（空）* | 服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。为空时按运行预检的账号检查访问权限。 |
+| `service-user` | `QWEN_MANAGED_AGENT_SERVICE_USER` | 字符串 | *（空）* | 服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。运行预检的账号看不到这类文件，或读不了检查要读取的文件时，该行为 FAIL，并提示以该账号运行检查。为空时按运行预检的账号检查访问权限。 |
 | `session-worktree.scan-delay` | — | 时长 | `1000` | Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。 |
 | `trusted-actor-header` | `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` | 字符串 | *（空）* | 一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。 |
 | `wake-recovery.scan-delay` | — | 时长 | `2s` | 唤醒恢复扫描两次运行之间的间隔；每次运行最多找出 8 个存有已提交输入但无写入者持有的 Session，并重新挂接以运行其唤醒。仅在开启 `qwen.managed-agent.session-store.enabled` 且 Hosted Harness 可用时运行。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
@@ -154,6 +154,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `allowed-actors` | `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` | 列表 | *（空）* | 允许发布扩展包、保存其设置以及为 Session 选择或应用扩展包的 actor ID，以逗号分隔；`*` 表示允许所有 actor。该 actor 还需具备 Workspace OPERATOR 权限。为空时不允许任何人。 |
 | `artifact-directory` | `QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` | 字符串 | *（空）* | 存放已发布扩展包归档的目录，每个租户与 Workspace 各占一个私有（`0700`）子目录。为空时禁用扩展管理。根目录或子目录为符号链接时归档不可用。多个副本必须共享该目录。 |
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED` | 布尔 | `false` | 是否允许通过公开扩展 API 为 Workspace 发布和管理扩展包。管理操作还需要设置 `qwen.managed-agent.extensions.artifact-directory`、actor 位于 `qwen.managed-agent.extensions.allowed-actors` 中，并具备 Workspace OPERATOR 权限。开启 `qwen.managed-agent.runtime-broker.enabled` 时，开启 `qwen.managed-agent.managed-extensions.enabled` 而未开启本项会在启动时拒绝；否则扩展执行只是保持关闭。 |
+| `self-service-enabled` | — | 布尔 | `false` | 是否允许在没有 daemon 时准备和导入上传的 Skill/扩展归档及用户编写的 MCP 配置。需要启用扩展管理、配置归档目录、actor 位于 allowlist 且具备 Workspace OPERATOR 权限，并要求 Hosted 支持 `managed-package-preparation/1`。关闭此入口保留已发布内容及现有包应用/恢复能力。 |
 
 ## `qwen.managed-agent.harness`
 

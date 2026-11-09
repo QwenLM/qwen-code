@@ -1025,6 +1025,10 @@ export class BridgeClient implements Client {
     /** Invoked after the child reports that it started a Goal turn. */
     private readonly onGoalTurnStart?: (sessionId: string) => void,
     private readonly onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler,
+    private readonly onLastUserPromptRecorded?: (
+      entry: BridgeClientSessionEntry,
+      timestamp: string | undefined,
+    ) => Promise<void>,
   ) {}
 
   async requestPermission(
@@ -2823,6 +2827,27 @@ export class BridgeClient implements Client {
     }
     if (method === 'qwen/notify/session/mode-update') {
       this.handleInSessionModeUpdate(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/last-user-prompt') {
+      const sessionId = params['sessionId'];
+      const timestamp = params['timestamp'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        (timestamp !== null &&
+          (typeof timestamp !== 'string' ||
+            !Number.isFinite(Date.parse(timestamp)) ||
+            new Date(timestamp).toISOString() !== timestamp))
+      )
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      try {
+        await this.onLastUserPromptRecorded?.(entry, timestamp ?? undefined);
+      } finally {
+        this.onSessionCatalogChanged?.();
+      }
       return;
     }
     if (method === 'qwen/notify/session/title-update') {

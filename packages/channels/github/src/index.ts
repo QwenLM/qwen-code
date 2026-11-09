@@ -6,6 +6,10 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
   validateBoundSessionConfig,
+  DEFAULT_PR_WATCH_LIMIT,
+  MAX_PR_WATCH_LIMIT,
+  DEFAULT_PR_WATCH_BUDGET_RESERVE,
+  MAX_PR_WATCH_BUDGET_RESERVE,
   validateRepoFilterConfig,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
@@ -168,6 +172,14 @@ export const plugin: ChannelPlugin = {
         default: 'false',
       },
       {
+        key: 'prCommentWatch',
+        label: 'PR Comment Watch',
+        kind: 'boolean',
+        description:
+          'Poll conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (including comments by the same GitHub account used by another session/agent). Requires Deliver To PR-Bound Sessions. Enabled by default; set false to disable.',
+        default: 'true',
+      },
+      {
         key: 'prWatchEvents',
         label: 'PR Watch Events',
         kind: 'string-list',
@@ -176,6 +188,26 @@ export const plugin: ChannelPlugin = {
         // Built from the adapter's exported vocabulary so the UI options can
         // never drift from the validator/emit path (R2-18).
         options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
+      },
+      {
+        key: 'prWatchLimit',
+        label: 'PR Watch Limit',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_PR_WATCH_LIMIT,
+        default: String(DEFAULT_PR_WATCH_LIMIT),
+        description:
+          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
+      },
+      {
+        key: 'prWatchBudgetReserve',
+        label: 'PR Watch Budget Reserve',
+        kind: 'number',
+        exclusiveMinimum: -1,
+        maximum: MAX_PR_WATCH_BUDGET_RESERVE,
+        default: String(DEFAULT_PR_WATCH_BUDGET_RESERVE),
+        description:
+          'REST requests held back for the interactive notification lane (requires Deliver To PR-Bound Sessions and PR Watch Events). When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour PAT budget. Set 0 to disable the gate. Leave empty for the default.',
       },
       {
         key: 'boundSessionActions',
