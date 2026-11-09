@@ -52,6 +52,7 @@ export function registerWorkspaceSubscriptionRoutes(
   app: Application,
   deps: {
     workspaceRegistry: WorkspaceRegistry;
+    qwenCodeVersion?: string;
     mutate: (opts?: { strict?: boolean }) => RequestHandler;
     persistSettings?: (
       workspace: string,
@@ -136,7 +137,10 @@ export function registerWorkspaceSubscriptionRoutes(
           res.status(403).json({ code: 'subscription_required' });
           return;
         }
-        const { models } = await session.getModels(controller.signal);
+        const { models } = await session.getModels(
+          controller.signal,
+          deps.qwenCodeVersion,
+        );
         assertActive();
         const modelId = selectSubscriptionModel(models);
         if (shouldPersist && persistSettings) {

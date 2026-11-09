@@ -207,12 +207,20 @@ it('does not hide a repeated unauthorized response behind the cached catalog', a
   modelFetch.mockResolvedValue(modelResponse(['served']));
   await session.getModels();
   modelFetch.mockReset().mockResolvedValue(modelResponse([], 401));
-  await expect(session.getModels()).rejects.toMatchObject({
+  await expect(
+    session.getModels(undefined, '0.0.0-test'),
+  ).rejects.toMatchObject({
     code: 'invalid_token',
     status: 401,
   });
   expect(client.refreshToken).toHaveBeenCalledOnce();
-  expect(modelFetch).toHaveBeenCalledTimes(2);
+  expect(modelFetch.mock.calls.map(([, options]) => options.headers)).toEqual(
+    [tokens.access_token, rotated.access_token].map((token) => ({
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+      'User-Agent': `QwenCode/0.0.0-test (${process.platform}; ${process.arch})`,
+    })),
+  );
   expect(readCachedSubscriptionModels()).toEqual(['served']);
 });
 

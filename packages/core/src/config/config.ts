@@ -6152,7 +6152,10 @@ export class Config {
     const session = new QwenSubscriptionSession();
     const identity = session.getIdentity();
     this.subscriptionModelIdentity = undefined;
-    const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    const result = await this.modelsConfig.refreshSubscriptionModels(
+      signal,
+      this.getCliVersion(),
+    );
     if (identity && session.getIdentity() === identity) {
       this.subscriptionModelIdentity = identity;
     }

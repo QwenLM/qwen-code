@@ -117,7 +117,7 @@ it.each([
   expect(mocks.apply).not.toHaveBeenCalled();
 });
 
-it('selects the first served model when Max is unavailable', async () => {
+it('selects the first served model for an unfamiliar catalog', async () => {
   const runtime = config();
   vi.mocked(runtime.refreshSubscriptionModels).mockResolvedValue({
     models: ['future-model', 'other-model'],
@@ -129,8 +129,8 @@ it('selects the first served model when Max is unavailable', async () => {
   );
 });
 
-it.each(['qwen3.8-flash', 'removed-model'])(
-  'selects Max on explicit sign-in instead of the saved model %s',
+it.each(['qwen3.8-max', 'removed-model'])(
+  'selects the first served model on explicit sign-in instead of the saved model %s',
   async (savedModel) => {
     const runtime = config();
     vi.mocked(runtime.refreshSubscriptionModels).mockResolvedValue({
@@ -146,7 +146,7 @@ it.each(['qwen3.8-flash', 'removed-model'])(
     } as unknown as LoadedSettings;
     await activateSubscription(existing, runtime, new AbortController().signal);
     expect(mocks.apply.mock.calls[0][0].modelSelection.modelId).toBe(
-      'qwen3.8-max',
+      'qwen3.8-flash',
     );
   },
 );

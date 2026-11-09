@@ -1205,6 +1205,7 @@ describe('Server Config (config.ts)', () => {
 
     const subscriptionConfig = async () => {
       const config = makeConfig({
+        cliVersion: '0.0.0-test',
         model: 'qwen3.8-max',
         generationConfig: { reasoning: { effort: 'high' } },
         modelProvidersConfig: { openai: [{ id: 'other-model' }] },
@@ -1259,6 +1260,10 @@ describe('Server Config (config.ts)', () => {
 
       expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
         1,
+      );
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledWith(
+        undefined,
+        '0.0.0-test',
       );
       expect(createContentGenerator).toHaveBeenCalledTimes(4);
       expect(config.getContentGeneratorConfig()).toMatchObject({

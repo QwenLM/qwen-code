@@ -301,8 +301,12 @@ export class ModelsConfig {
 
   async refreshSubscriptionModels(
     signal?: AbortSignal,
+    cliVersion?: string,
   ): Promise<{ models: string[]; cached: boolean }> {
-    const result = await new QwenSubscriptionSession().getModels(signal);
+    const result = await new QwenSubscriptionSession().getModels(
+      signal,
+      cliVersion,
+    );
     this.modelRegistry.setSubscriptionModels(result.models);
     return result;
   }

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
-import { getQwenOAuthConfig, QWEN_SUBSCRIPTION_MODEL } from './oauth-config.js';
+import { getQwenOAuthConfig } from './oauth-config.js';
 
 export const subscriptionModelIdsSchema = z
   .array(
@@ -53,9 +53,7 @@ export function selectSubscriptionModel(
     return selected;
   }
   if (!models.length) throw new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
-  return models.includes(QWEN_SUBSCRIPTION_MODEL)
-    ? QWEN_SUBSCRIPTION_MODEL
-    : models[0]!;
+  return models[0]!;
 }
 
 export function readCachedSubscriptionModels(): string[] {

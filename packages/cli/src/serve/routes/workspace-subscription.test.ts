@@ -66,6 +66,7 @@ function setup(trusted = true) {
   const app = express();
   app.use(express.json());
   registerWorkspaceSubscriptionRoutes(app, {
+    qwenCodeVersion: '0.0.0-test',
     workspaceRegistry: createWorkspaceRegistry([
       {
         ...runtime,
@@ -183,6 +184,10 @@ it.each([
         apiKey: 'ignored',
       });
     expect(response.status).toBe(200);
+    expect(mocks.models).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+      '0.0.0-test',
+    );
     expect(persistSettings).toHaveBeenCalledWith(
       settingsScope === 'provider' ? '/primary' : '/secondary',
       [
@@ -524,8 +529,8 @@ it.each(['failed', 'deferred'])(
   },
 );
 
-it.each(['qwen3.8-flash', 'removed-model'])(
-  'activates Max on explicit sign-in instead of the saved model %s',
+it.each(['qwen3.8-max', 'removed-model'])(
+  'activates the first served model on explicit sign-in instead of the saved model %s',
   async (savedModel) => {
     const { app, persistSettings } = setup();
     mocks.models.mockResolvedValue({
@@ -547,14 +552,14 @@ it.each(['qwen3.8-flash', 'removed-model'])(
       '/workspaces/secondary/auth/subscription',
     );
     expect(response.status).toBe(200);
-    expect(response.body.modelId).toBe('qwen3.8-max');
+    expect(response.body.modelId).toBe('qwen3.8-flash');
     expect(persistSettings).toHaveBeenCalledWith(
       '/secondary',
       expect.arrayContaining([
         {
           scope: SettingScope.Workspace,
           key: 'model.name',
-          value: 'qwen3.8-max',
+          value: 'qwen3.8-flash',
         },
       ]),
       expect.any(Function),

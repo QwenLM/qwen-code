@@ -409,6 +409,7 @@ export class QwenSubscriptionSession {
 
   async getModels(
     signal?: AbortSignal,
+    cliVersion?: string,
   ): Promise<{ models: string[]; cached: boolean }> {
     const snapshot = await this.locked(async (assertCanCommit) => {
       const credentials = await this.read();
@@ -442,6 +443,7 @@ export class QwenSubscriptionSession {
           headers: {
             Accept: 'application/json',
             Authorization: `Bearer ${token}`,
+            'User-Agent': `QwenCode/${cliVersion || 'unknown'} (${process.platform}; ${process.arch})`,
           },
           signal,
         });
