@@ -110,7 +110,7 @@ Thread the bindings scan's `partial` flag into the observation options. The obse
 2. **Typed errors, not a result union, at the restore boundary.** The classes already exist and `sendBridgeError` already maps them. The drain's adapter classifies by class, so the Gone/temporary split lives in one place and cannot drift from the route's wire mapping.
 3. **The hook is fire-and-forget and runs after the locks release.** This is the deadlock avoidance, not an optimisation: the per-PR lock is not re-entrant and the drain's restore path re-acquires it.
 4. **Release the owner record last, and wait on both arms.** Stopping the timer is not enough; the claim-holding observation tick and the in-flight restores and admissions must all settle first, or a successor overlaps them. Drain-idle alone misses the observation, which never enters a drain tick.
-5. **Host discovery fails open to a known-safe set, never to empty.** An empty allowed-host set would silently disable every view while looking healthy.
+5. **The composed allowed-host set fails open, never to empty.** The enumerator itself returns an empty set on every failure path and never throws; the fail-open guarantee lives in the composition, which always includes `github.com`. An empty allowed-host set would silently disable every view while looking healthy, so the guarantee is stated where it is actually enforced.
 6. **Still off.** Every new path is behind the existing switch and the unpopulated-until-PR-B setting, so this increment changes no production behaviour.
 
 ## Constraints and risks

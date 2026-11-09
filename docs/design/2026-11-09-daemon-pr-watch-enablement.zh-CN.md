@@ -110,7 +110,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 2. **restore 边界用 typed error，而非结果联合。** 类已存在，`sendBridgeError` 已映射它们。drain 的适配器按类分拣，因此 Gone/临时划分只存在于一处，不会与路由的 wire 映射漂移。
 3. **钩子不等待，且在锁释放之后运行。** 这是死锁避免而非优化：per-PR 锁不可重入，而 drain 的 restore 路径会重新取它。
 4. **owner 记录最后释放，且两条臂都要等。** 停 timer 不够；持有 claim 的 observation tick 与在途 restore 与准入都必须先落定，否则后继者与它们重叠。只等 drain 空闲会漏掉 observation——它从不进入 drain tick。
-5. **host 发现向已知安全集失败开放，绝不向空集。** 空的 allowed-host 集会静默禁用所有 view，却看起来健康。
+5. **组装后的 allowed-host 集失败开放，绝不向空集。** 枚举器本身在每条失败路径都返回空集且绝不抛错；失败开放的保证在组装那一层——它总是包含 `github.com`。空的 allowed-host 集会静默禁用所有 view，却看起来健康，所以这条保证要写在真正施加它的地方。
 6. **仍然关闭。** 每条新路径都在既有开关与「PR B 前不填充」的设置之后，因此本增量不改变任何生产行为。
 
 ## 约束与风险
