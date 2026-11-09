@@ -331,6 +331,11 @@ export type DaemonGitOperation =
   | 'revert'
   | 'bisect';
 
+export interface DaemonWorkspaceGitIgnoredPaths {
+  v: 1;
+  ignoredPaths: string[];
+}
+
 /**
  * Current Git metadata returned from a workspace Git status route.
  *
@@ -1616,7 +1621,14 @@ export interface DaemonRestoredSession extends DaemonSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at least once for this session
+   * Publish-time summary/unverified-seed boundary captured with a full load
+   * snapshot in eventEpoch. A suffix starting after it excludes those sources,
+   * not other partial/truncated/degraded content. Zero precedes the first event;
+   * absence is not zero. Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed for this session
    * (load only): `compactedReplay`/`liveJournal` may lag behind live
    * events. Clients should prefer the full transcript (see
    * `fullTranscriptAvailable`) over the degraded snapshot.
@@ -1736,6 +1748,9 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1931,6 +1946,8 @@ export type DaemonSessionGroupFilter =
   | (string & {});
 
 export interface DaemonSessionListPageOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -1948,6 +1965,14 @@ export interface DaemonSessionListPageOptions {
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * List the sessions currently live in the workspace bridge instead of
+   * persisted history, so closed rows cannot crowd live sessions out of the
+   * first page. Served over native REST; the ACP transport does not carry it.
+   * Cannot be combined with `view`, archived `archiveState`,
+   * `parentSessionId`, `sourceType`, or `sourceId`.
+   */
+  liveOnly?: boolean;
 }
 
 export interface DaemonSessionListPage {
@@ -1967,8 +1992,8 @@ export interface DaemonSessionCatalogWorkspace {
 export interface DaemonSessionCatalogRequest {
   /** 1–20 entries; `all` excludes internal workspaces. */
   workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-  /** Shared filters; pageSize is 1–100, default 20. */
-  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  /** Shared filters; pageSize is 1–100, default 20. `liveOnly` is not shared. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor' | 'liveOnly'>;
   includeGroups?: boolean;
 }
 

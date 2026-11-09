@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonClient, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { RecentSessions } from './RecentSessions';
+import { RecentSessions, sortRecentSessions } from './RecentSessions';
 
 vi.mock('../../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -305,4 +305,30 @@ describe('recent sessions', () => {
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
     expect(buttons()[0].title).toBe('newest · sidebar.noWorkspace');
   });
+});
+
+it('merges global recent candidates by question time without activity fallback', () => {
+  const entries = [
+    {
+      workspaceCwd: '/a',
+      session: session('a', '2026-10-20T10:10:00Z', {
+        lastUserPromptAt: '2026-10-20T10:00:00Z',
+      }),
+    },
+    {
+      workspaceCwd: '/b',
+      session: session('b', '2026-10-20T10:05:00Z', {
+        lastUserPromptAt: '2026-10-20T10:05:00Z',
+      }),
+    },
+    { session: session('unknown', '2026-10-20T12:00:00Z') },
+  ];
+  expect(
+    sortRecentSessions(entries, 'lastUserPromptAt').map(
+      (entry) => entry.session.sessionId,
+    ),
+  ).toEqual(['b', 'a', 'unknown']);
+  expect(
+    sortRecentSessions(entries).map((entry) => entry.session.sessionId),
+  ).toEqual(['unknown', 'a', 'b']);
 });

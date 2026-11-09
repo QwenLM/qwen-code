@@ -86,7 +86,9 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  getShellDisplayName,
   hasShellSubstitution,
+  hasUnprovableWrapperScript,
   SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
   type ShellType,
@@ -2278,7 +2280,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // `echo ok`, which the AST classifies as read-only. Without this
     // gate the command auto-executes silently with no confirmation
     // dialog and no warning. See PR #4386 R6 (cid 3298521039).
-    if (hasShellSubstitution(this.params.command)) {
+    if (
+      hasShellSubstitution(this.params.command) ||
+      // A wrapper whose `-c` slot is nothing but an expansion has no provable
+      // script: the projected word may be only `$0`, and an unquoted expansion
+      // is word-split, so anything can be injected into the slot. Projecting it
+      // is right for op extraction, but `sh -c $TERM 'ls -l'` read as read-only
+      // `ls -l` and auto-executed with no prompt (#16540 review, round 6).
+      hasUnprovableWrapperScript(this.params.command)
+    ) {
       return 'ask';
     }
 
@@ -5786,30 +5796,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 }
 
-function getExecutableBasename(executable: string): string {
-  return path.basename(path.win32.basename(executable));
-}
-
-function getShellDisplayName({
-  executable,
-  shell,
-}: ShellConfiguration): string {
-  switch (shell) {
-    case 'cmd':
-      return 'cmd.exe';
-    case 'powershell': {
-      const basename = getExecutableBasename(executable).toLowerCase();
-      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
-    }
-    case 'bash':
-      return 'bash';
-    default: {
-      const _exhaustive: never = shell;
-      return _exhaustive;
-    }
-  }
-}
-
 function getShellExecutionWrapper(
   shellConfiguration = getShellConfiguration(),
 ): string {
@@ -5874,9 +5860,10 @@ function getShellCommandSequencingGuidance({
   - Use '&' only when you need to run commands sequentially but don't care if earlier commands fail.
   - DO NOT use ';' or newlines to separate commands in cmd.exe.`;
     case 'powershell': {
-      const executableBasename =
-        getExecutableBasename(executable).toLowerCase();
-      if (executableBasename === 'pwsh.exe') {
+      if (
+        getShellDisplayName({ executable, argsPrefix: [], shell }) ===
+        'pwsh.exe'
+      ) {
         return `- When issuing multiple commands:
   ${independentGuidance}
   - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).

@@ -613,6 +613,45 @@ describe('extractShellOperations', () => {
 });
 
 // Shared compound shell analysis for permission rules and AUTO review.
+// R1-5 (#16540 review): `\c\` before a quote leaves the backslash free to
+// escape that quote, so the ANSI-C word stays open and the following
+// redirection is still part of the command.
+// R1-4 second round (#16540 review): the op extraction runs through the same
+// byte-exact ANSI-C decoding, so a multi-byte UTF-8 path is not U+FFFD.
+describe('ANSI-C byte decoding in op extraction', () => {
+  it.each([
+    ["(cat > $'\\xc3\\xa9')", '/repo/é'],
+    ["(cat > $'\\303\\251')", '/repo/é'],
+    ["(cat > $'\\u00e9')", '/repo/é'],
+  ])('extracts the multi-byte path for %s', (command, filePath) => {
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      { virtualTool: 'write_file', filePath },
+    ]);
+  });
+
+  // R1-11 (#16540 review): the backslash-newline before the ANSI-C opener does
+  // not stop the following write from being extracted.
+  it('keeps the redirect after a continuation before the ANSI-C opener', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "sh -c $\\\n'--' 'cat > /etc/motd'",
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/etc/motd' }]);
+  });
+});
+
+describe('ANSI-C word boundaries with \\c\\ before a quote', () => {
+  it('keeps the redirect after a \\c\\ word', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "echo $'a\\c\\'' > /etc/motd",
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/etc/motd' }]);
+  });
+});
+
 describe('extractShellOperationsAcrossCommand', () => {
   it.each<Row>([
     [
@@ -1135,6 +1174,101 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
   });
 });
 
+// R2-1/R2-2/R2-4/R2-5/R2-8 (#16540 review): a word that is nothing but decoded
+// ANSI-C content is data. Its operator characters are not operators, its tilde
+// does not expand, its astral characters stay whole, and both permission paths
+// read `\c\` the same way.
+describe('round-3 lexing regressions', () => {
+  it('reads $$ as the PID, so the quote after it is an ordinary quote', () => {
+    // `$$` is the PID: bash closes the word at the second `'` and the `>` is a
+    // real redirect (witnessed with bash 5.3.20 — `echo x $$'a\' > motd1`
+    // exits 0 and the file holds `x <pid>a\`). Lexing `$$'…'` as an ANSI-C
+    // word kept it open through the rest of the line, so the write vanished
+    // (#16540 review, R3-1). Whether the word decodes is not observable here:
+    // `$$` keeps it dynamic either way.
+    expect(across(`echo x $$'a\\' > /etc/motd`)).toEqual([write('/etc/motd')]);
+    expect(across(`cat $$'\\x41' > /tmp/out`)).toEqual([write('/tmp/out')]);
+    // A single `$` still opens the ANSI-C word, and an unterminated one still
+    // swallows the line: bash reports an unexpected EOF and creates nothing.
+    expect(across(`cat $'\\x41' > /tmp/out`)).toEqual([
+      read('/repo/A'),
+      write('/tmp/out'),
+    ]);
+    expect(across(`echo x $'a\\' > /etc/motd`)).toEqual([]);
+  });
+
+  it('resolves a decoded cd target without tilde expansion, and stays uncertain', () => {
+    // bash does not expand a tilde it had to decode: `cd $'\x7e'` fails with
+    // "cd: ~: No such file or directory" and the next command writes into the
+    // ORIGINAL cwd; when a literal ./~ does exist, the write lands inside it
+    // (both witnessed). Reading $HOME into the path was wrong in both cases and
+    // dropped the fail-closed marking the merge base kept (#16540 review, R3-2).
+    expect(across(`cd $'\\x7e' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+    expect(across(`cd '~' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+    // A plain absolute target is still certain.
+    expect(across('cd /tmp ; cat > settings.json')).toEqual([
+      write('/tmp/settings.json'),
+    ]);
+  });
+});
+
+describe('decoded ANSI-C words stay data', () => {
+  it('does not read a decoded operator as a redirect', () => {
+    // bash creates /tmp/t and cat opens a file literally named `>`, so the write
+    // is the real redirect and the read is the literal argument; before this the
+    // decoded `>` was the operator, /tmp/t came out as a READ and a phantom
+    // write to `>` was invented.
+    expect(
+      extractShellOperationsAcrossCommand("cat $'\\x3e' > /tmp/t", '/repo'),
+    ).toEqual([read('/repo/>'), write('/tmp/t')]);
+  });
+
+  it('does not expand a tilde that was quoted', () => {
+    expect(
+      extractShellOperationsAcrossCommand("cat > $'\\x7e/x'", '/repo'),
+    ).toEqual([write('/repo/~/x')]);
+  });
+
+  it('still expands an unquoted tilde', () => {
+    const target = ops('cat > ~/x')[0]?.filePath ?? '';
+    expect(target.startsWith('/')).toBe(true);
+    expect(target).not.toBe(`${CWD}/~/x`);
+  });
+
+  it('keeps a literal astral character whole', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\u{1F600}')", '/repo'),
+    ).toEqual([write('/repo/\u{1F600}')]);
+  });
+
+  it('reads the \\c\\ word the way decodeAnsiCWord does', () => {
+    // bash builds 61 1c 74 62 for `a\c\tb`; the tokenizer used to re-decode the
+    // operand backslash and report a tab instead of the literal `t`.
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cat $'a\\c\\tb' /etc/passwd",
+        '/repo',
+      ),
+    ).toEqual([read('/repo/a\u001ctb'), read('/etc/passwd')]);
+  });
+
+  it('reports the write inside a locale or continuation-split payload', () => {
+    expect(
+      extractShellOperationsAcrossCommand('sh -c $"cat > /etc/motd"', '/repo'),
+    ).toEqual([write('/etc/motd')]);
+    expect(
+      extractShellOperationsAcrossCommand(
+        "bash -c $\\\n'cat > /etc/motd'",
+        '/repo',
+      ),
+    ).toEqual([write('/etc/motd')]);
+  });
+});
+
 // R13-1 (#16075): a fully quoted -c payload that carries an expansion is still
 // unwrapped for op extraction, so a write inside it is reported (the monitor /
 // cron consumers keep the unresolved signal separately).
@@ -1372,5 +1506,59 @@ describe('amend guard fail-closed witnesses (#16075 R17-1)', () => {
         CWD,
       ).kind,
     ).toBe('untrackable');
+  });
+});
+
+describe('round-4 lexing regressions', () => {
+  // R4-1 (#16540 review): bash removes a `\`+newline before reading the next
+  // character, so the `$$` PID lookahead survives it. Clearing the pending flag
+  // on the continuation made the second `$` open an ANSI-C word that `\'` never
+  // closes, and the redirect was never flushed (witnessed with bash 5.3.20: both
+  // spellings exit 0 and write identical bytes).
+  it('keeps the $$ lookahead across a continuation', () => {
+    expect(across("echo x $\\\n$'a\\' > /etc/motd")).toEqual(
+      across("echo x $$'a\\' > /etc/motd"),
+    );
+    expect(across("echo x $\\\n$'a\\' > /etc/motd")).toEqual([
+      write('/etc/motd'),
+    ]);
+  });
+
+  // R4-2: `cd $''` and `cd ''` hand bash an empty argument, the cd fails ("null
+  // directory") and the write lands in the original cwd. Dropping the empty word
+  // left the target slot undefined, so the `$HOME` fallback invented a phantom
+  // path and flagged nothing. A bare `cd` really does go to $HOME and is
+  // untouched here.
+  it.each(["cd $''; echo x > settings.json", "cd ''; echo x > settings.json"])(
+    'fails closed on an empty cd target: %s',
+    (command) => {
+      expect(across(command)).toEqual([uncertainWrite('/repo/settings.json')]);
+    },
+  );
+
+  // R3-2 (fix-induced): a redirect written BEFORE the directory is filtered out
+  // of the token list, so the target and its marking must be read from the
+  // filtered arrays. A pre-filter snapshot made the redirect itself the cwd.
+  it('reads the cd target after redirects are filtered out', () => {
+    expect(across('cd 2>/dev/null /etc && echo x > passwd')).toEqual([
+      write('/etc/passwd'),
+    ]);
+    expect(across('cd >/dev/null /tmp ; cat > f')).toEqual([write('/tmp/f')]);
+    // The marking array must stay index-parallel with the tokens: a quoted
+    // target standing behind a redirect is still a literal directory, and an
+    // off-by-N marking would read it as typed and expand `~` to $HOME.
+    expect(across("cd 2>/dev/null '~'; echo x > settings.json")).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  // R4-7: quoting alone does not make a statically known absolute target
+  // uncertain, while `cd '~'` stays uncertain because `~` is then a literal
+  // directory that may not exist at all.
+  it('does not escalate a quoted absolute cd target', () => {
+    expect(across('cd "/tmp" ; cat > f')).toEqual([write('/tmp/f')]);
+    expect(across("cd '~'; echo x > settings.json")).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
   });
 });

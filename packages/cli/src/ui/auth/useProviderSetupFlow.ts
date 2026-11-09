@@ -627,6 +627,7 @@ export function useProviderSetupFlow(
     changeModelIds,
     clearModelIdsError,
     submitModelIds,
+    advancedOptionCount,
     moveAdvancedFocusUp,
     moveAdvancedFocusDown,
     toggleFocusedAdvancedOption,

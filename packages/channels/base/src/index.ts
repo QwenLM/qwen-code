@@ -79,6 +79,7 @@ export {
   BOUND_ACTION_VARIABLE_MAX_CODE_POINTS,
   BOUND_EVENT_PLATFORMS,
   BOUND_PROMPT_BODY_MAX_CODE_POINTS,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
   boundActionTemplateEntries,
   buildBoundEventPrompt,
   isBoundActionKey,
