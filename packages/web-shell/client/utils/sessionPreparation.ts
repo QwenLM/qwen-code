@@ -79,7 +79,11 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
-  setSessionModel?: (sessionId: string, modelId: string) => Promise<unknown>;
+  setSessionModel?: (
+    sessionId: string,
+    modelId: string,
+    detachedSession?: DaemonSessionClient,
+  ) => Promise<unknown>;
   reasoningEffort?: ReasoningSelection;
   modeId?: string;
   planMode?: boolean;
@@ -206,7 +210,8 @@ export async function createAndAttachSessionForPrompt({
       if (modelId && sessionContext?.kind !== 'standalone') {
         preparationStep = 'set model for new session';
         try {
-          await detachedSession.setModel(modelId);
+          await (setSessionModel?.(sessionId, modelId, detachedSession) ??
+            detachedSession.setModel(modelId));
         } catch (error) {
           if (reasoningEffort) throw error;
           warn('[WebShell] failed to set model for new session:', error);

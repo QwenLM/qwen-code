@@ -789,6 +789,26 @@ describe('createAndAttachSessionForPrompt', () => {
       expect(actions.clearSession).not.toHaveBeenCalled();
     });
 
+    it('uses the session-only model setter when the created session is detached', async () => {
+      const client = createDetachedClient();
+      const setSessionModel = vi.fn().mockResolvedValue({});
+      const modelId = 'qwen3.8-max(qwen-subscription)';
+
+      await prepareSession({
+        sessionActions: createUnboundActions(client),
+        modelId,
+        setSessionModel,
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(setSessionModel).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        modelId,
+        client,
+      );
+      expect(client.setModel).not.toHaveBeenCalled();
+    });
+
     it('applies Plan and reasoning through the created client', async () => {
       const client = createDetachedClient();
       const setApprovalMode = vi.fn(async () => ({ mode: 'plan' }));

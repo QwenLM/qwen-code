@@ -261,6 +261,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
+import { getSubscriptionStartupFallbackModel } from '../config/modelProvidersScope.js';
 import {
   getOperatorTrustSettings,
   loadSettings,
@@ -6004,7 +6005,16 @@ class QwenAgent implements Agent {
             initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
-                this.ensureAuthenticated(config, settings),
+                this.ensureAuthenticated(
+                  config,
+                  settings,
+                  executionEngine !== 'managed' &&
+                    sessionSource?.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+                    sessionSource?.sourceType !==
+                      AGENT_HOST_SESSION_SOURCE_TYPE &&
+                    this.argv.model === undefined &&
+                    this.argv.authType === undefined,
+                ),
               );
               initializationDeadline?.signal.throwIfAborted();
               profiler.timeSync('file_system_setup', () =>
@@ -17082,8 +17092,17 @@ class QwenAgent implements Agent {
     authType: AuthType,
     isInitialAuth?: boolean,
     sessionSelection?: ReasoningSelection,
+    subscriptionFallbackModel?: string,
   ): Promise<void> {
-    await config.refreshAuth(authType, isInitialAuth);
+    if (subscriptionFallbackModel === undefined) {
+      await config.refreshAuth(authType, isInitialAuth);
+    } else {
+      await config.refreshAuth(
+        authType,
+        isInitialAuth,
+        subscriptionFallbackModel,
+      );
+    }
     const selection =
       sessionSelection ??
       parseReasoningSelection(settings.merged.model?.reasoningEffort);
@@ -17183,6 +17202,7 @@ class QwenAgent implements Agent {
   private async ensureAuthenticated(
     config: Config,
     settings: LoadedSettings,
+    allowSubscriptionStartupFallback = false,
   ): Promise<void> {
     const selectedType = config.getModelsConfig().getCurrentAuthType();
     if (!selectedType) {
@@ -17198,6 +17218,10 @@ class QwenAgent implements Agent {
         settings,
         selectedType,
         true,
+        undefined,
+        allowSubscriptionStartupFallback
+          ? getSubscriptionStartupFallbackModel(settings, selectedType, config)
+          : undefined,
       );
     } catch (e) {
       debugLogger.error(`Authentication failed: ${e}`);

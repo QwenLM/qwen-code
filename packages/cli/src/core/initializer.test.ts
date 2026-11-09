@@ -150,8 +150,15 @@ describe('initializeApp', () => {
     { label: 'model-only override', expected: 'user-model' },
     { label: 'explicit CLI selection', allow: false },
     {
-      label: 'workspace endpoint',
+      label: 'empty workspace endpoint',
       workspace: { model: { name: 'saved-model', baseUrl: '' } },
+      expected: 'user-model',
+    },
+    {
+      label: 'workspace endpoint',
+      workspace: {
+        model: { name: 'saved-model', baseUrl: 'https://example.test/v1' },
+      },
     },
     {
       label: 'workspace authentication',

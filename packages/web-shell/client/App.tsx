@@ -12531,11 +12531,15 @@ export function App({
             modelId: useWorkspaceDefault ? undefined : modelId,
             ...(subscriptionDraftModel && subscriptionDraftModel === modelId
               ? {
-                  setSessionModel: (sessionId, modelId) =>
-                    workspace.client.setSessionModel(
+                  setSessionModel: (sessionId, modelId, detachedSession) =>
+                    (
+                      detachedSession?.client ?? workspace.client
+                    ).setSessionModel(
                       sessionId,
                       modelId,
-                      connectionRef.current.clientId,
+                      detachedSession
+                        ? detachedSession.clientId
+                        : connectionRef.current.clientId,
                       { persistDefault: false },
                     ),
                 }

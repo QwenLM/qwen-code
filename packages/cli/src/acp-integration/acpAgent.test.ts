@@ -30430,6 +30430,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   let capturedAgentFactory:
     | ((conn: { closed: Promise<void> }) => {
         initialize: (args: Record<string, unknown>) => Promise<unknown>;
+        newSession: (args: Record<string, unknown>) => Promise<unknown>;
         loadSession: (args: Record<string, unknown>) => Promise<unknown>;
         unstable_resumeSession: (
           args: Record<string, unknown>,
@@ -31128,6 +31129,45 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       }
     },
   );
+
+  it('passes the saved subscription fallback when authenticating a new workspace session', async () => {
+    const config = bindRestoreMocks({ sessionExists: false });
+    config
+      .getModelsConfig()
+      .getCurrentAuthType.mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+    config.getModel.mockReturnValue('legacy-api-model');
+    const setValue = vi.fn();
+    vi.mocked(loadSettings).mockReturnValue({
+      ...makeRestoreSettings(),
+      isTrusted: true,
+      workspaceSettingsActive: true,
+      user: {
+        settings: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+          model: { name: 'qwen3.8-max' },
+        },
+      },
+      workspace: {
+        settings: { model: { name: 'legacy-api-model', baseUrl: '' } },
+      },
+      system: { settings: {} },
+      setValue,
+    } as unknown as LoadedSettings);
+    const { agent, agentPromise } = await spawnAgent();
+
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      expect(config.refreshAuth).toHaveBeenCalledExactlyOnceWith(
+        AuthType.QWEN_SUBSCRIPTION,
+        true,
+        'qwen3.8-max',
+      );
+      expect(setValue).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('loadSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });

@@ -12,6 +12,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings } from '../config/settings.js';
+import { getSubscriptionStartupFallbackModel } from '../config/modelProvidersScope.js';
 import { performInitialAuth } from './auth.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { subscriptionModelUnavailable } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
@@ -72,30 +73,9 @@ export async function initializeApp(
   // Use authType from modelsConfig which respects CLI --auth-type argument
   // over settings.security.auth.selectedType
   const authType = config.getModelsConfig().getCurrentAuthType();
-  let subscriptionFallbackModel: string | undefined;
-  if (
-    options.allowSubscriptionStartupFallback &&
-    authType === AuthType.QWEN_SUBSCRIPTION &&
-    settings.isTrusted &&
-    settings.workspaceSettingsActive
-  ) {
-    const { user, workspace, system } = settings;
-    const enforcedType = settings.merged.security?.auth?.enforcedType;
-    const projectModel = workspace.settings.model?.name;
-    if (
-      projectModel &&
-      projectModel === config.getModel() &&
-      user.settings.security?.auth?.selectedType === authType &&
-      (!enforcedType || enforcedType === authType) &&
-      workspace.settings.security?.auth?.selectedType === undefined &&
-      workspace.settings.model?.baseUrl === undefined &&
-      workspace.settings.modelProviders === undefined &&
-      system.settings.security?.auth?.selectedType === undefined &&
-      system.settings.model?.name === undefined
-    ) {
-      subscriptionFallbackModel = user.settings.model?.name;
-    }
-  }
+  const subscriptionFallbackModel = options.allowSubscriptionStartupFallback
+    ? getSubscriptionStartupFallbackModel(settings, authType, config)
+    : undefined;
   const authError = await performInitialAuth(
     config,
     authType,
