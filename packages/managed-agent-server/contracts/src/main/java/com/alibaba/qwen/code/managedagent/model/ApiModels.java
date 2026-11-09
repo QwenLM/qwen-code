@@ -190,6 +190,11 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
+        @JsonProperty("diagnostics")
+        public boolean diagnostics() {
+            return tasks;
+        }
+
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
                 boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
                 boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
@@ -411,6 +416,9 @@ public final class ApiModels {
 
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
+
+    public record WebShellActivityQueryRequest(@NotBlank String sessionId, @NotBlank String kind,
+            String cursor, Integer limit) { }
 
     public record ManagedMcpServerPin(@NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
             @Min(1) @Max(9_007_199_254_740_991L) long serverRevision,
@@ -1064,6 +1072,14 @@ public final class ApiModels {
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {
+    }
+
+    public record WebShellDiagnosticTraceRequest(@NotBlank String sessionId,
+            @Size(max = 256) String cursor, @Min(1) @Max(100) Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown diagnostic trace request field: " + name);
+        }
     }
 
     public record WebShellTaskGetRequest(@NotBlank String sessionId,

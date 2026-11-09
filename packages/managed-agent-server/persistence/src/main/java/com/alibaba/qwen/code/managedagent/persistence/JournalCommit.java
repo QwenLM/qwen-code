@@ -84,16 +84,9 @@ final class JournalCommit {
         Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
-        boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
-                || validated.resources().stream().anyMatch(resource -> {
-                    if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
-                        return false;
-                    }
-                    JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
-                    return body != null && (body.path("v").asInt() == 3 || body.path("v").asInt() == 4);
-                });
-        if (promotes) {
-            readerVersion.requireReadable(2);
+        int storageFloor = ManagedModelDiagnosticProjection.storageFloor(validated.recordBytes(), request.resources(), validated.resources());
+        if (storageFloor > 1) {
+            readerVersion.requireReadable(storageFloor);
         }
         var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
@@ -101,6 +94,10 @@ final class JournalCommit {
             csiOriginal.requireContinuation();
         }
         JournalStoreRows.HeadRow csiHead = csiOriginal == null ? null : fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
+        if (csiOriginal != null && !com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.supportsStorage(
+                csiOriginal.request().getScope(), Math.max(csiHead.storageVersion(), storageFloor))) {
+            throw JournalStoreRows.invalid("This CSI profile does not admit the requested storage format.");
+        }
         JournalFencing.requireCsiWriter(csiOriginal, csiHead);
         if (csiOriginal != null
                 && ("commitFileHistory".equals(request.operation())
@@ -160,6 +157,12 @@ final class JournalCommit {
         JournalStoreRows.HeadRow head = csiHead == null
                 ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (head.storageVersion() >= 4) {
+            JsonNode activity = extensionRecords.findActivityStatistics(tenantId, sessionId);
+            if (activity == null || !"ready".equals(activity.path("readiness").asText())) {
+                throw JournalStoreRows.conflict("managed_activity_rebuilding", "Session diagnostics are being restored before writer admission.");
+            }
+        }
         if (authority == null) {
             fencing.requireNoLifecycleClaim(tenantId, sessionId);
         }
@@ -234,13 +237,27 @@ final class JournalCommit {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+                ManagedModelDiagnosticProjection.validateResource(closureReader.apply(resource.resourceId()));
+            }
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.kind())) {
+                StoredResource evidence = closureReader.apply(resource.resourceId());
+                ManagedExtensionRecordStore.require(evidence.schemaVersion() == 1 && evidence.byteLength() <= 65_536,
+                        "Invalid execution diagnostic resource.");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.requireEvidence(
+                        ManagedExtensionRecordStore.readBody(evidence));
+            }
         }
+        List<JsonNode> diagnosticEvents = new ArrayList<>();
         boolean wakeInput = false;
         for (String line :
                 new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
+                if (event.isObject() && event.has("kind")) {
+                    diagnosticEvents.add(event);
+                }
                 wakeInput |= WakeRecoveryStore.isWakeInput(event);
                 ManagedHostedRecoveryRecords.validateEvent(
                         event.path("kind").asText(),
@@ -258,6 +275,10 @@ final class JournalCommit {
         }
         lifecycleAuthorization.authorizeNewLifecycleDispatch(tenantId, sessionId, authority,
                 validated.recordBytes(), reader);
+        if (diagnosticEvents.stream().anyMatch(event -> event.path("payload").has("diagnosticsRef"))) {
+            ManagedExtensionRecordStore.require(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics
+                    .carrierDigest(diagnosticEvents).equals(request.contentDigest()), "Execution diagnostic commit digest conflicts.");
+        }
         if (authority == null && fencing.lifecycleProtocolFenced(tenantId, sessionId)) {
             extensionRecords.requireLifecycleSettlement(tenantId, sessionId, validated.recordBytes(),
                     reader);
@@ -340,7 +361,7 @@ final class JournalCommit {
                 request.latestCheckpointResourceId(),
                 validated.recordBytes(), validated.recordBytes().length,
                 validated.recordDigest(), now.getTime());
-        ActivationChange activation = activationChange(
+        var activation = JournalStoreRows.activationChange(
                 applied.lastActivation());
         if (placement != null && "QUIESCING".equals(placement.state()) && activation != null
                 && "active".equals(activation.phase())
@@ -383,7 +404,7 @@ final class JournalCommit {
                         : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
                         : activation.expiresAt(),
-                activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -850,27 +871,6 @@ final class JournalCommit {
                 existing.operation(), existing.firstSequence(),
                 existing.lastSequence(), existing.lastSequence(),
                 existing.commitDigest(), true);
-    }
-
-    /**
-     * Converts the last activation.changed payload of a committed transaction, so the head row can
-     * answer authorization reads without rescanning the journal. The payload was already parsed by
-     * the extension record pass of this commit.
-     */
-    static ActivationChange activationChange(JsonNode payload) {
-        if (payload == null) {
-            return null;
-        }
-        return new ActivationChange(
-                ToolPublicationContract.text(payload, "activationId"),
-                ToolPublicationContract.text(payload, "phase"),
-                payload.path("epoch").asLong(),
-                ManagedExtensionRecords.millisLenient(
-                        payload.path("expiresAt")));
-    }
-
-    record ActivationChange(String id, String phase, long epoch,
-            Long expiresAt) {
     }
 
     record ValidatedCommit(byte[] recordBytes, String recordDigest,

@@ -70,6 +70,7 @@ describe('Hosted Harness private contract', () => {
         'workspace-shell-mcp/1',
         'session-mcp-management/1',
         'session-extension-packages/1',
+        'managed-package-preparation/1',
         'recovery-cleanup/1',
         'targeted-cancel/1',
         'event-keepalive/1',

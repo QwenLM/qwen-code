@@ -200,6 +200,12 @@ class HostedAutomationFaultGatesIT {
         JsonNode created = request("POST", "/v1/agent-automations", definition, "create-reply", 202);
         String id = created.path("id").asText();
         assertThat(created.path("definition_revision").asLong()).isEqualTo(1);
+        // The verb's create of the never-attached Session also bound the
+        // Harness boot id at Session level, so the next cold verb loads
+        // instead of collecting the create's 409 (#14548).
+        assertThat(jdbc.queryForObject(
+                "SELECT harness_boot_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session)).isNotNull();
         assertOperations(id, "define_schedule", 2, 1);
         assertThat(sameOperationId(id, "define_schedule")).isTrue();
         assertThat(commands(session, "defineSchedule")).hasSize(1);
@@ -1177,7 +1183,7 @@ class HostedAutomationFaultGatesIT {
                         "FG11E_TAIL"))), "fg11e-stream-tail", 202);
         waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForList(
                 "SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?", String.class, tenant,
-                session)).containsExactly("COMPLETED", "COMPLETED"));
+                session)).containsExactly("COMPLETED"));
         SessionStream resumed = new SessionStream(session, sessionCut);
         resumed.awaitThrough(settledSessionLedger(session).size());
         resumed.abort();
@@ -2472,13 +2478,9 @@ class HostedAutomationFaultGatesIT {
         waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForObject(
                 "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?", String.class, tenant,
                 session)).isEqualTo("ACTIVE"));
-        // The automation verbs load the Session on the Harness, never create it, so it runs
-        // one Turn first.
-        request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message",
-                "input", List.of(Map.of("type", "input_text", "text", "FG11_WARM " + name))), "warm-" + name, 202);
-        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForList(
-                "SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session))
-                .containsExactly("COMPLETED"));
+        // #14548: no warm-up Turn. The automation verbs must create a
+        // never-attached Session on the Harness the way its first Turn
+        // would; every case below pins that by defining on this Session.
         return session;
     }
 
@@ -2665,6 +2667,15 @@ class HostedAutomationFaultGatesIT {
         Path log = temporary.resolve("harness.log");
         if (Files.exists(log)) {
             Files.copy(log, cases.resolve("harness.log"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        if ("fg11f".equals(letter) && jdbc != null) {
+            Files.writeString(cases.resolve("publication-state.json"), json.writeValueAsString(Map.of(
+                    "resources", jdbc.queryForList("SELECT session_id, resource_id, kind, byte_length, sha256, storage_kind, state, capture_state, OCTET_LENGTH(inline_bytes) AS inline_byte_length"
+                            + " FROM ma_resource WHERE tenant_id = ? AND kind = 'managed-tool-outcome' ORDER BY resource_id LIMIT 16", tenant),
+                    "publications", jdbc.queryForList("SELECT session_id, publication_id, producer_phase, is_quarantined, admission_resource_id"
+                            + " FROM ma_output_capture WHERE tenant_id = ? ORDER BY publication_id LIMIT 16", tenant),
+                    "heads", jdbc.queryForList("SELECT session_id, storage_version, journal_revision, committed_sequence, recovery_status, recovery_detail_code"
+                            + " FROM ma_session_head WHERE tenant_id = ? AND head_kind = 'MANAGED_SESSION' ORDER BY session_id LIMIT 16", tenant))));
         }
     }
 

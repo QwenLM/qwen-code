@@ -6,6 +6,8 @@ import type {
   ManagedExtensionSettings,
   ManagedExtensionSnapshot,
   ManagedExtensionSelection,
+  ManagedExtensionImportMetadata,
+  ManagedExtensionInspection,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
@@ -486,6 +488,60 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getDiagnosticContextUsage(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticContextUsage']>(
+      '/session-context-usage/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getDiagnosticStatistics(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticStats']>(
+      '/session-stats/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getActivityStatistics(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticActivityStats']>(
+      '/session-activity-stats/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  listActivity(
+    request: Schemas['WebShellActivityQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['ManagedDiagnosticActivityPage']>(
+      '/session-activity/query',
+      request,
+      signal,
+    );
+  }
+
+  getDiagnosticResources(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticResources']>(
+      '/session-resources/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  listDiagnosticAgentTrace(
+    request: Schemas['WebShellDiagnosticTraceRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['ManagedDiagnosticAgentTrace']>(
+      '/session-agent-trace/query',
+      request,
+      signal,
+    );
+  }
+
   getSessionMcp(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['PublicMcpCatalog']>(
       '/session-mcp/query',
@@ -552,6 +608,103 @@ export class JavaManagedAgentClient {
     return this.post<ManagedExtensionSettings>(
       '/workspace-extensions/settings/query',
       { workspaceId, extensionId },
+      signal,
+    );
+  }
+
+  async importExtensionPackage(
+    workspaceId: string,
+    extensionId: string | undefined,
+    metadata: ManagedExtensionImportMetadata,
+    source: Blob,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<ManagedExtensionPackageOperation> {
+    if (source.size > 100 * 1024 * 1024)
+      throw new Error('Managed package exceeds 100 MiB');
+    const query = new URLSearchParams({
+      workspaceId,
+      metadata: JSON.stringify(metadata),
+    });
+    if (extensionId) query.set('extensionId', extensionId);
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('Content-Type', 'application/octet-stream');
+    headers.set('Idempotency-Key', idempotencyKey);
+    const response = await this.fetchImpl(
+      `${this.baseUrl}${API_PREFIX}/workspace-extensions/imports?${query}`,
+      {
+        method: 'POST',
+        headers,
+        body: source,
+        credentials: this.credentials,
+        signal,
+      },
+    );
+    if (!response.ok) throw await toHttpError(response);
+    return response.json();
+  }
+
+  inspectExtensionPackage(
+    workspaceId: string,
+    pin: ManagedExtensionPin,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionInspection>(
+      '/workspace-extensions/inspection/query',
+      { workspaceId, pin },
+      signal,
+    );
+  }
+
+  async previewExtensionPackage(
+    workspaceId: string,
+    metadata: ManagedExtensionImportMetadata,
+    source: Blob,
+    signal?: AbortSignal,
+  ): Promise<ManagedExtensionInspection> {
+    if (source.size > 100 * 1024 * 1024)
+      throw new Error('Managed package exceeds 100 MiB');
+    const query = new URLSearchParams({
+      workspaceId,
+      metadata: JSON.stringify(metadata),
+    });
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('Content-Type', 'application/octet-stream');
+    const response = await this.fetchImpl(
+      `${this.baseUrl}${API_PREFIX}/workspace-extensions/imports/preview?${query}`,
+      {
+        method: 'POST',
+        headers,
+        body: source,
+        credentials: this.credentials,
+        signal,
+      },
+    );
+    if (!response.ok) throw await toHttpError(response);
+    return response.json();
+  }
+
+  lookupExtensionPackageOperation(
+    workspaceId: string,
+    kind: 'publish' | 'settings',
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionPackageOperation>(
+      '/workspace-extensions/operations/lookup',
+      { workspaceId, kind, idempotencyKey },
+      signal,
+    );
+  }
+
+  lookupExtensionApplyOperation(
+    sessionId: string,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      '/session-extensions/operations/lookup',
+      { sessionId, idempotencyKey },
       signal,
     );
   }

@@ -1,6 +1,7 @@
+import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
 import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -25,6 +26,7 @@ import {
   getArtifactsByTurn,
   getFileChangesByTurn,
 } from './turnOutputSelectors';
+import { fileChangeOwnerSessionId } from './workspace-file-changes';
 import styles from './SubagentDetail.module.css';
 
 interface SubagentResolution {
@@ -149,14 +151,16 @@ function SubagentDetailContent({
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
     [artifacts, connection.workspaceCwd, messages],
   );
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        messages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [artifactsByTurn, connection.workspaceCwd, messages],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    messages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId
+      ? fileChangeOwnerSessionId(connection.sessionId)
+      : undefined,
+    connection.workspaceCwd ? undefined : null,
   );
   const description = getAgentDescription(rootTool);
   const metrics = useMemo(
@@ -177,14 +181,34 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
+  const reviewSourceRef = useRef({ messages, artifactsByTurn });
+  reviewSourceRef.current = { messages, artifactsByTurn };
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
+      const source = reviewSourceRef.current;
       onRightPanelOpen?.({
         ...request,
+        ...(request.kind === 'review'
+          ? {
+              unfilteredChanges:
+                getFileChangesByTurn(
+                  source.messages,
+                  source.artifactsByTurn,
+                  connection.workspaceCwd ||
+                    connection.standaloneSession?.projectlessOutputDirectory ||
+                    '',
+                ).get(request.turnId) ?? request.changes,
+            }
+          : {}),
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      onRightPanelOpen,
+    ],
   );
 
   useEffect(() => {
