@@ -3,7 +3,7 @@
 //
 // The address agent is handed check NAMES only (qwen-autofix.yml's "Failed
 // checks" / "Still-red checks" sections) and holds no GitHub credentials, so
-// "Linux unit tests (shard 3/8)" cannot tell it which step or assertion went
+// "Linux unit tests (shard 3/4)" cannot tell it which step or assertion went
 // red. This prints the failed step names plus a short log excerpt per failing
 // job, reusing the CI Failure Patrol's redaction and line selection so both
 // automations scrub secrets identically.

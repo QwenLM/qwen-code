@@ -18,7 +18,7 @@ failed.
 For a locally reproducible lane this is survivable: the agent maps the check
 name to the repository's own command and reruns it. Three classes are not:
 
-- A sharded lane (`Linux unit tests (shard 3/8)`) does not say which test file
+- A sharded lane (`Linux unit tests (shard 3/4)`) does not say which test file
   failed, so the agent runs the whole package and bisects.
 - A check named `Test` can fail on a non-test step (schema, format, lint,
   freshness). The skill already warns about this because it recurs.

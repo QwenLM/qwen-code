@@ -58,9 +58,9 @@ inputs, and a single required aggregate check. Each is a follow-up.
 flowchart LR
     C[Classify PR] --> B[test_build<br/>restore base build, build once<br/>+ bundle closure / core subpath checks]
     C --> L[Lint & Static]
-    B --> U[unit shards 1..8]
+    B --> U[unit shards 1..4]
     B --> I[no-AK integration shards 1..3]
-    B --> W[web-shell smoke shards 1..4]
+    B --> W[web-shell smoke shards 1..2]
     U --> T{{Test ubuntu}}
     I --> R{{Integration Tests no-AK, No Sandbox}}
     W --> WR{{web-shell E2E Smoke}}

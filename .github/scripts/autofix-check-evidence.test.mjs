@@ -40,7 +40,7 @@ afterEach(() => {
 const jobUrl = (id) => `https://github.com/o/r/actions/runs/123/job/${id}`;
 const failedCheck = (overrides = {}) => ({
   __typename: 'CheckRun',
-  name: 'Linux unit tests (shard 3/8)',
+  name: 'Linux unit tests (shard 3/4)',
   workflowName: 'Qwen Code CI',
   conclusion: 'FAILURE',
   detailsUrl: jobUrl(111),

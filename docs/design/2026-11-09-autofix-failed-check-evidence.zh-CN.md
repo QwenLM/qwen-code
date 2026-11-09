@@ -15,7 +15,7 @@ credentials”）。它读不到 job 日志、annotation，甚至连失败步骤
 对本地可复现的车道这还能撑住：agent 把检查名映射到仓库自己的命令再跑一遍。有三类
 撑不住：
 
-- 分片车道（`Linux unit tests (shard 3/8)`）不说明哪个测试文件红了，agent 只能跑
+- 分片车道（`Linux unit tests (shard 3/4)`）不说明哪个测试文件红了，agent 只能跑
   整包再二分。
 - 名为 `Test` 的检查可能红在非测试步（schema、format、lint、freshness）。skill
   专门警告过这一类，因为它反复出现。

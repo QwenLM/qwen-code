@@ -315,12 +315,12 @@ it('gives the shared Linux test lane one ceiling on both pools', () => {
     expect(timeoutMinutesOn('test', runner)).toBe(60);
   }
   expect(ci.jobs.test.strategy['fail-fast']).toBe(false);
-  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
 });
 
 it('skips every build-consuming shard step when test_build failed', () => {
   // `!cancelled()` is true when a needed job fails, so without this term a
-  // failed build still starts all eight shards: each pays a full install and
+  // failed build still starts all four shards: each pays a full install and
   // then dies at the missing artifact, and every shard reports artifact
   // plumbing as its failing step instead of the build that broke. The steps
   // are gated, not the job or the matrix: `test_ubuntu` compares
@@ -425,13 +425,13 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   expect(archive).not.toContain('git ls-files');
 
   // Four coupled literals tie the producer to the consumers. Renaming any one
-  // fails all eight shards at unpack after a full build, on the required
+  // fails all four shards at unpack after a full build, on the required
   // check, so the name has to be pinned in one place.
   const name = built.get('Upload the built tree').with.name;
   expect(name).toBeTruthy();
   expect(shard.get('Download the built tree').with.name).toBe(name);
   expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
-  // Both attempts have to outlast the slow tail, not the median: eight shards
+  // Both attempts have to outlast the slow tail, not the median: four shards
   // fetch this same artifact at once, the slowest completed one on main took
   // just under five minutes, and one exceeded the old five-minute cap on two
   // runs in a row, skipping the unpack entirely.
@@ -553,14 +553,12 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
-  // Each of the four shards runs a quarter of the smoke at the hosted
+  // Each of the two shards runs half of the smoke at the hosted
   // worker count; the transcript gate runs once, on the first shard.
   expect(smoke.run).toMatch(
-    / -- --shard=\$\{\{ matrix\.shard \}\}\/4 --workers=2$/,
+    / -- --shard=\$\{\{ matrix\.shard \}\}\/2 --workers=2$/,
   );
-  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([
-    1, 2, 3, 4,
-  ]);
+  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([1, 2]);
   expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
   const result = ci.jobs.web_shell_e2e_smoke_result;
   expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');

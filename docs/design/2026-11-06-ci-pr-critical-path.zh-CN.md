@@ -38,9 +38,9 @@
 flowchart LR
     C[Classify PR] --> B[test_build<br/>恢复 base 构建，只构建一次<br/>+ bundle closure / core subpath 检查]
     C --> L[Lint & Static]
-    B --> U[单测分片 1..8]
+    B --> U[单测分片 1..4]
     B --> I[no-AK 集成分片 1..3]
-    B --> W[web-shell smoke 分片 1..4]
+    B --> W[web-shell smoke 分片 1..2]
     U --> T{{Test ubuntu}}
     I --> R{{Integration Tests no-AK, No Sandbox}}
     W --> WR{{web-shell E2E Smoke}}
