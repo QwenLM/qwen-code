@@ -507,12 +507,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     if (!this.cliConfig) {
       return;
     }
-    // Every deliberate teardown -- operator Disconnect, Clear OAuth,
-    // `disableMcpServer`, session shutdown -- also writes
+    // Every deliberate teardown that goes through `McpClient.disconnect()` --
+    // operator Disconnect, Clear OAuth, `disableMcpServer` -- also writes
     // `CONNECTED -> DISCONNECTED` to the same process-wide registry, so the
     // transition alone cannot tell abort damage apart. The owner records its
     // intent before closing the transport; read that instead of a status
     // field, which the tool's client (the raw SDK `Client`) does not have.
+    // A pooled session's shutdown is not in that set: it only releases the
+    // connection and detaches the session, so it records no intent.
     let wasConnected =
       getMCPServerStatus(this.serverName) === MCPServerStatus.CONNECTED;
     const detach = () => {
