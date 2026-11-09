@@ -13,6 +13,7 @@ import {
   assertManagedSessionEventActor,
   assertManagedSessionTransaction,
   isManagedSessionLifecycleTransitionAllowed,
+  managedSessionDurableRefsEqual,
   managedSessionEventsDigest,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -1375,5 +1376,26 @@ describe('Hosted recovery envelopes', () => {
         }),
       ),
     ).toThrow();
+  });
+});
+
+describe('managedSessionDurableRefsEqual', () => {
+  it('compares every field of a reference', () => {
+    const ref: ManagedSessionDurableRef = {
+      resourceId: 'resource-a',
+      kind: 'managed-message',
+      schemaVersion: 1,
+      byteLength: 6,
+      digest: 'a'.repeat(64),
+    };
+    expect(managedSessionDurableRefsEqual(ref, { ...ref })).toBe(true);
+    for (const other of [
+      { ...ref, resourceId: 'resource-b' },
+      { ...ref, kind: 'managed-checkpoint' },
+      { ...ref, schemaVersion: 2 },
+      { ...ref, byteLength: 7 },
+      { ...ref, digest: 'b'.repeat(64) },
+    ])
+      expect(managedSessionDurableRefsEqual(ref, other)).toBe(false);
   });
 });

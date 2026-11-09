@@ -72,15 +72,23 @@ export class HostedHarnessInstance {
     return this.operations;
   }
 
+  beginOperation = (): (() => void) => {
+    this.operations += 1;
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      this.operations -= 1;
+    };
+  };
+
   track: RequestHandler = (req, res, next) => {
     if (req.path.endsWith('/events') || req.path.endsWith('/ownership:release'))
       return next();
-    this.operations += 1;
+    const finish = this.beginOperation();
     // A disconnected response cannot prove its asynchronous operation ended.
     // Keep the owner non-releasable; the bounded shutdown takes the crash path.
-    res.once('finish', () => {
-      this.operations -= 1;
-    });
+    res.once('finish', finish);
     next();
   };
 
