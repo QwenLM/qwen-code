@@ -290,16 +290,17 @@ silently discarding configuration the operator may still want.
 
 | Group                                    | Result                         |
 | ---------------------------------------- | ------------------------------ |
-| 1 — vitest (whole `channels/` directory) | 451 passed                     |
+| 1 — vitest (whole `channels/` directory) | 453 passed                     |
 | 1 — Email adapter package                | 82 passed                      |
 | 1 — CLI catalog consumers                | 8 passed                       |
 | 2 — Playwright browser E2E               | **Blocked**, see below         |
 | 3 — real-daemon round trip               | 9/9 passed on the local bundle |
 | 4 — build / typecheck / lint / prettier  | passed                         |
 
-The web-shell count moved 385 → 449 → 451: 385 before the code review below, 449
-after the review's added cases, and 451 once the branch incorporated `main`,
-which brought two upstream `prCommentWatch` cases into the same parity file.
+The web-shell count moved 385 → 449 → 451 → 453: 385 before the code review
+below, 449 after the review's added cases, 451 once the branch incorporated
+`main` (two upstream `prCommentWatch` cases), and 453 after the test-efficacy
+round added the no-group-descriptor variant and the per-locale pins.
 A full `packages/web-shell` run during review reported 15598 passed, and
 `packages/cli` timed out on unrelated files whose failure set drifted between
 runs — no verdict for that suite, not attributed to this change.

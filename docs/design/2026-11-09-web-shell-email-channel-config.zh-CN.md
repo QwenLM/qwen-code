@@ -254,16 +254,17 @@ devDependency，与既有的 `@qwen-code/channel-github` 条目对称，使 pari
 
 | 组                                       | 结果                    |
 | ---------------------------------------- | ----------------------- |
-| 1 —— vitest（整个 `channels/` 目录）     | 451 通过                |
+| 1 —— vitest（整个 `channels/` 目录）     | 453 通过                |
 | 1 —— Email 适配器包                      | 82 通过                 |
 | 1 —— CLI catalog 消费者                  | 8 通过                  |
 | 2 —— Playwright 浏览器 E2E               | **受阻**，见下文        |
 | 3 —— 真实 daemon 往返                    | 本地 bundle 上 9/9 通过 |
 | 4 —— build / typecheck / lint / prettier | 通过                    |
 
-web-shell 计数的变化是 385 → 449 → 451：下文代码评审之前是 385，评审新增用例后
-是 449，分支纳入 `main` 后是 451——后者把上游两条 `prCommentWatch` 用例带进了同一
-个 parity 文件。评审期间一次完整的 `packages/web-shell` 运行报告 15598 通过；
+web-shell 计数的变化是 385 → 449 → 451 → 453：下文代码评审之前是 385，评审新增
+用例后是 449，分支纳入 `main` 后是 451（上游两条 `prCommentWatch` 用例），测试
+效力轮新增"descriptor 缺 group 字段"变体与逐语钉子后是 453。评审期间一次完整的
+`packages/web-shell` 运行报告 15598 通过；
 `packages/cli` 在无关文件上超时，且失败集合在两次运行之间漂移——该套件本轮无判决，
 不归因于本次改动。
 
