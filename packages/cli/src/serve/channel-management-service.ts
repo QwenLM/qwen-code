@@ -21,6 +21,10 @@ import type {
   ChannelSettingsUpsertOptions,
   WorkspaceChannelSettingsStore,
 } from './channel-settings-store.js';
+import {
+  ChannelQrLoginRegistry,
+  type ChannelQrLoginView,
+} from './channel-qr-login.js';
 import { isAllChannelSelectionName } from './channel-selection.js';
 import type { ChannelRestoreFailures } from './channel-restore-failures.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
@@ -122,6 +126,15 @@ export interface ChannelManagementService {
     name: string,
     subject: ChannelPairingApprovalSubject,
   ): Promise<ChannelPairingRevocationResult>;
+  startQrLogin(
+    name: string,
+    initiatorClientId?: string,
+  ): Promise<{ view: ChannelQrLoginView; attached: boolean }>;
+  qrLoginState(
+    loginId: string,
+    callerClientId?: string,
+  ): ChannelQrLoginView | undefined;
+  cancelQrLogin(loginId: string, callerClientId?: string): boolean;
 }
 
 interface ChannelManagementSettingsStore {
@@ -728,6 +741,51 @@ export function createChannelManagementService(
       };
     },
   };
+  const qrLogins = new ChannelQrLoginRegistry({
+    renderQrCode: async (url) => {
+      const { default: QRCode } = await import('qrcode');
+      return QRCode.toDataURL(url, { margin: 1, width: 320 });
+    },
+    persist: async (channelName, values) => {
+      const current = opts.store.snapshot();
+      const existing = current.channels[channelName];
+      if (!existing) {
+        throw Object.assign(
+          new Error(
+            `Channel ${JSON.stringify(channelName)} must be saved before it can be bound.`,
+          ),
+          { code: 'channel_qr_login_channel_missing' },
+        );
+      }
+      const type = String(existing['type']);
+      const plugin = await getPlugin(type);
+      const fields = plugin?.management?.fields ?? [];
+      const config: Record<string, unknown> & { type: string } = {
+        ...existing,
+        type,
+      };
+      const secrets: Record<string, ChannelSecretUpdate> = {};
+      for (const [key, value] of Object.entries(values)) {
+        // Secret-kind values go through the managed secret path so they are
+        // stored and redacted exactly like a hand-entered credential.
+        if (
+          fields.some((field) => field.key === key && field.kind === 'secret')
+        ) {
+          secrets[key] = { operation: 'replace', value };
+        } else {
+          config[key] = value;
+        }
+      }
+      await inMutationLane(() =>
+        opts.store.upsert(channelName, {
+          expectedRevision: current.revision,
+          config,
+          secrets,
+        }),
+      );
+    },
+  });
+
   return {
     list: () => service.list(),
     upsert: (name, request) =>
@@ -745,5 +803,37 @@ export function createChannelManagementService(
     pairingApprovals: (name) => service.pairingApprovals(name),
     revokePairingApproval: (name, subject) =>
       inMutationLane(() => service.revokePairingApproval(name, subject)),
+    startQrLogin: async (name, initiatorClientId) => {
+      assertManageableInstanceName(name);
+      const existing = opts.store.snapshot().channels[name];
+      if (!existing) {
+        throw Object.assign(
+          new Error(
+            `Channel ${JSON.stringify(name)} must be saved before it can be bound.`,
+          ),
+          { code: 'channel_qr_login_channel_missing' },
+        );
+      }
+      const channelType = String(existing['type']);
+      const qrLogin = (await getPlugin(channelType))?.management?.qrLogin;
+      if (!qrLogin) {
+        throw Object.assign(
+          new Error(
+            `Channel type ${JSON.stringify(channelType)} does not support QR login.`,
+          ),
+          { code: 'channel_qr_login_unsupported' },
+        );
+      }
+      return qrLogins.start({
+        channelType,
+        channelName: name,
+        qrLogin,
+        ...(initiatorClientId !== undefined ? { initiatorClientId } : {}),
+      });
+    },
+    qrLoginState: (loginId, callerClientId) =>
+      qrLogins.get(loginId, callerClientId),
+    cancelQrLogin: (loginId, callerClientId) =>
+      qrLogins.cancel(loginId, callerClientId),
   };
 }
