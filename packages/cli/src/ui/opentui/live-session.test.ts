@@ -4367,6 +4367,47 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     ]);
   });
 
+  it('pairs sidecar tool uses before yielding cancelled cards', async () => {
+    const send = vi.fn(function* () {
+      yield call('t1');
+      yield call('t2');
+      yield { type: 'loop_detected' };
+    });
+    const order: string[] = [];
+    const dualOutput = {
+      emitUserMessage: vi.fn(),
+      startAssistantMessage: vi.fn(),
+      processEvent: vi.fn(),
+      finalizeAssistantMessage: () => order.push('assistant'),
+      emitToolResult: vi.fn<DualOutputBridge['emitToolResult']>((request) => {
+        order.push(`result:${request.callId}`);
+      }),
+    };
+    for await (const event of livePromptEvents(
+      shared(createFakeConfig(send)),
+      'start',
+      undefined,
+      { dualOutput: dualOutput as unknown as DualOutputBridge },
+    )) {
+      if (event.type === 'tool-end') {
+        order.push(`card:${event.id}`);
+        break;
+      }
+    }
+    expect(order).toEqual(['assistant', 'result:t1', 'result:t2', 'card:t1']);
+    expect(
+      dualOutput.emitToolResult.mock.calls.map(([request, response]) => [
+        request.callId,
+        response.callId,
+        response.executionStatus,
+      ]),
+    ).toEqual([
+      ['t1', 't1', 'not_started'],
+      ['t2', 't2', 'not_started'],
+    ]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it("closes the round's stream when the turn is no longer current", async () => {
     let current = true;
     let closed = false;

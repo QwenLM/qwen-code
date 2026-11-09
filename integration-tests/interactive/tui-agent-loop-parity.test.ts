@@ -57,9 +57,9 @@ interface Scenario {
   /** Presses Ctrl+Y this many times after the prompt, each after a turn. */
   retries?: number;
   /**
-   * The session starts turns of its own after the prompts, a Goal's
-   * continuations, a background task's notification or a cron fire: waits
-   * until it has sent all `requests`.
+   * Wait for turns started by the session after the prompts, such as Goal
+   * continuations, background notifications, cron fires and teammate reports.
+   * These scenarios run only on Ink and wait until all `requests` are sent.
    */
   laterTurns?: boolean;
   /** Environment for the TUI, over the suite's. */
