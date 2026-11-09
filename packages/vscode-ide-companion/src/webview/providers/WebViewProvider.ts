@@ -1947,6 +1947,7 @@ export class WebViewProvider {
             .workspaceByCwd(owner.workspaceCwd)
             .activateSubscription({
               signal,
+              settingsScope: 'user',
             });
           assertOwner();
           if (result.runtimeSync.status === 'failed')
@@ -1956,6 +1957,8 @@ export class WebViewProvider {
             await owner.client.setSessionModel(
               owner.sessionId,
               `${result.modelId}(qwen-subscription)`,
+              undefined,
+              { persistDefault: false },
             );
             assertOwner();
           } else {

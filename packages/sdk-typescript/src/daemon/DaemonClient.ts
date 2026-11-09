@@ -17,6 +17,7 @@ import {
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
+import { SESSION_MODEL_PERSIST_DEFAULT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { isDaemonSessionPrInfo } from './session-pr.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
@@ -6779,13 +6780,19 @@ export class DaemonClient {
     sessionId: string,
     modelId: string,
     clientId?: string,
+    options?: { persistDefault: false },
   ): Promise<SetModelResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/model`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ modelId }),
+        body: JSON.stringify({
+          modelId,
+          ...(options?.persistDefault === false
+            ? { _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false } }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {
@@ -7454,7 +7461,7 @@ export class DaemonClient {
   }
 
   async getSubscriptionDefaultModel(
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; settingsScope?: 'provider' } = {},
   ): Promise<{ modelId: string }> {
     const route = '/auth/subscription/model';
     return this.fetchWithTimeout(
@@ -7462,7 +7469,7 @@ export class DaemonClient {
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: '{}',
+        body: JSON.stringify({ settingsScope: opts.settingsScope }),
         signal: opts.signal,
       },
       async (res) => {
@@ -9623,7 +9630,7 @@ export class WorkspaceDaemonClient {
   }
 
   activateSubscription(
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; settingsScope?: 'provider' | 'user' } = {},
   ): Promise<DaemonSubscriptionActivation> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -9631,7 +9638,7 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/auth/subscription',
       {
         method: 'POST',
-        body: {},
+        body: { settingsScope: opts.settingsScope },
         signal: opts.signal,
         mode: 'rest',
         timeoutMs: 65000,

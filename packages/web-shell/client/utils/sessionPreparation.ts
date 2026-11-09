@@ -53,6 +53,7 @@ function isSupersededSessionLoad(error: unknown): boolean {
 export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
+  setSessionModel,
   reasoningEffort,
   modeId,
   planMode = false,
@@ -69,6 +70,7 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
+  setSessionModel?: (sessionId: string, modelId: string) => Promise<unknown>;
   reasoningEffort?: ReasoningSelection;
   modeId?: string;
   planMode?: boolean;
@@ -192,7 +194,8 @@ export async function createAndAttachSessionForPrompt({
     if (modelId && sessionContext?.kind !== 'standalone') {
       preparationStep = 'set model for new session';
       try {
-        await sessionActions.setModel(modelId);
+        await (setSessionModel?.(sessionId, modelId) ??
+          sessionActions.setModel(modelId));
       } catch (error) {
         if (reasoningEffort) throw error;
         warn('[WebShell] failed to set model for new session:', error);

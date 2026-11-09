@@ -5,8 +5,19 @@
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  LoadedSettings,
+  type Settings,
+  type SettingsFile,
+} from '../../config/settings.js';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { activateSubscription } from './activate-subscription.js';
@@ -53,7 +64,7 @@ beforeEach(() => {
   mocks.createAdapter.mockReset().mockReturnValue(mocks.adapter);
 });
 afterEach(() => vi.unstubAllEnvs());
-it('installs the subscription in the current project settings', async () => {
+it('installs the subscription and switches the current model', async () => {
   const runtime = config();
   const signal = new AbortController().signal;
   await activateSubscription(settings, runtime, signal);
@@ -67,10 +78,6 @@ it('installs the subscription in the current project settings', async () => {
     },
   });
   expect(callbacks.settings).toBe(mocks.adapter);
-  expect(mocks.createAdapter).toHaveBeenCalledWith(
-    settings,
-    SettingScope.Workspace,
-  );
   expect(settings.setValues).not.toHaveBeenCalled();
   callbacks.syncAuthState(
     plan.authType,
@@ -176,16 +183,87 @@ it('rejects an untrusted workspace without falling back to user settings', async
   expect(mocks.apply).not.toHaveBeenCalled();
 });
 
-it('saves to user settings when the CLI starts in the home directory', async () => {
-  const userOnly = {
-    ...settings,
-    workspaceSettingsActive: false,
-  } as LoadedSettings;
-  const runtime = config();
-  await activateSubscription(userOnly, runtime, new AbortController().signal);
-  expect(mocks.createAdapter).toHaveBeenCalledWith(userOnly, SettingScope.User);
-  expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');
-});
+it.each<{ project: Settings; saveToProject: boolean }>([
+  { project: {}, saveToProject: false },
+  {
+    project: {
+      model: { name: 'project-api-model' },
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+    },
+    saveToProject: false,
+  },
+  { project: { modelProviders: {} }, saveToProject: true },
+  {
+    project: {
+      security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+    },
+    saveToProject: true,
+  },
+])(
+  'uses the API Key settings scope for project $project',
+  async ({ project, saveToProject }) => {
+    const { createLoadedSettingsAdapter } = await vi.importActual<
+      typeof import('../../config/loadedSettingsAdapter.js')
+    >('../../config/loadedSettingsAdapter.js');
+    const { applyProviderInstallPlan } = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/providers/install.js')
+    >('@qwen-code/qwen-code-core/providers/install.js');
+    mocks.createAdapter.mockImplementation(createLoadedSettingsAdapter);
+    mocks.apply.mockImplementation(applyProviderInstallPlan);
+    const directory = mkdtempSync(path.join(tmpdir(), 'subscription-scope-'));
+    try {
+      const layer = (name: string, data: Settings = {}): SettingsFile => ({
+        path: path.join(directory, name, '.qwen', 'settings.json'),
+        settings: structuredClone(data),
+        originalSettings: structuredClone(data),
+      });
+      const user = layer('user', {
+        modelProviders: {},
+        model: { name: 'user-api-model' },
+        security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        env: { OPENAI_API_KEY: 'fixture-key' },
+      });
+      const workspace = layer('project', project);
+      const other = saveToProject ? user : workspace;
+      const otherBefore = JSON.stringify(other.originalSettings);
+      for (const file of [user, workspace]) {
+        if (Object.keys(file.settings).length > 0) {
+          mkdirSync(path.dirname(file.path), { recursive: true });
+          writeFileSync(file.path, JSON.stringify(file.settings));
+        }
+      }
+      const loaded = new LoadedSettings(
+        layer('system'),
+        layer('system-defaults'),
+        user,
+        workspace,
+        true,
+        new Set(),
+      );
+      const runtime = config();
+      await activateSubscription(loaded, runtime, new AbortController().signal);
+      const target = saveToProject ? workspace : user;
+      expect(JSON.parse(readFileSync(target.path, 'utf8'))).toMatchObject({
+        security: { auth: { selectedType: 'qwen-subscription' } },
+        model: {
+          name: 'qwen3.8-max',
+          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+        },
+      });
+      if (otherBefore !== '{}') {
+        expect(readFileSync(other.path, 'utf8')).toBe(otherBefore);
+      } else {
+        expect(() => readFileSync(other.path, 'utf8')).toThrow(/ENOENT/);
+      }
+      expect(JSON.parse(readFileSync(user.path, 'utf8'))).toMatchObject({
+        env: { OPENAI_API_KEY: 'fixture-key' },
+      });
+      expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 it('keeps committed disk settings and runtime consistent when the dialog closes during refresh', async () => {
   const { applyProviderInstallPlan } = await vi.importActual<

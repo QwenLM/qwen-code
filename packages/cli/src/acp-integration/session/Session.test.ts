@@ -14322,15 +14322,14 @@ describe('Session', () => {
     );
 
     it.each([
-      [AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
-      [AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+      ['standalone', AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
+      ['standalone', AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+      [undefined, AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
     ] as const)(
-      'switches standalone %s using only the session config',
-      async (authType, modelId, refresh) => {
+      'switches %s session to %s using only the session config',
+      async (sourceType, authType, modelId, refresh) => {
         session.dispose();
-        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
-          'standalone',
-        );
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(sourceType);
         const refreshSubscriptionModels = vi.fn().mockResolvedValue({
           models: [modelId],
           cached: false,
@@ -14348,7 +14347,7 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             modelId: `${modelId}(${authType})`,
           },
-          { persistDefault: true },
+          { persistDefault: sourceType === 'standalone' },
         );
 
         expect(mockConfig.switchModel).toHaveBeenCalledWith(

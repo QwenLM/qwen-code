@@ -1364,10 +1364,15 @@ export function AuthMessage({
               );
           };
           assertTarget();
+          const desktop = isDesktopShell();
           if (standalone) {
             const { modelId } =
-              await workspaceActions.getSubscriptionDefaultModel({ signal });
+              await workspaceActions.getSubscriptionDefaultModel({
+                signal,
+                ...(desktop ? { settingsScope: 'provider' } : {}),
+              });
             assertTarget();
+            if (desktop) onSettingsSaved();
             const selector = `${modelId}(qwen-subscription)`;
             if (sessionId) {
               await activateSessionSubscriptionModel(
@@ -1386,6 +1391,7 @@ export function AuthMessage({
           const result = await workspaceActions.activateSubscription({
             workspaceCwd,
             signal,
+            ...(desktop ? { settingsScope: 'provider' } : {}),
           });
           assertTarget();
           onSettingsSaved();

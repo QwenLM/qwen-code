@@ -2448,11 +2448,14 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         );
         expect(attached.calls.activate).toHaveBeenCalledWith({
           signal: expect.any(AbortSignal),
+          settingsScope: 'user',
         });
         if (sessionId) {
           expect(attached.calls.setModel).toHaveBeenCalledExactlyOnceWith(
             sessionId,
             'qwen3.8-max(qwen-subscription)',
+            undefined,
+            { persistDefault: false },
           );
           expect(attached.calls.providers).not.toHaveBeenCalled();
         } else {

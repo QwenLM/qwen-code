@@ -1079,7 +1079,11 @@ describe('subscription development entry', () => {
         ).toBeNull();
         expect(document.querySelector('[role="alert"]')).toBeNull();
         expect(actions.startSubscriptionLogin).toHaveBeenCalledOnce();
-        expect(actions.activateSubscription).toHaveBeenCalledOnce();
+        expect(actions.activateSubscription).toHaveBeenCalledExactlyOnceWith({
+          workspaceCwd: '/workspace',
+          signal: expect.any(AbortSignal),
+          settingsScope: 'provider',
+        });
       } finally {
         delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
       }
@@ -1244,9 +1248,14 @@ describe('subscription development entry', () => {
     );
   });
 
-  it.each(['draft', 'connected', 'connecting'] as const)(
-    'activates a no-workspace %s without writing workspace settings',
-    async (target) => {
+  it.each([
+    ['draft', false],
+    ['connected', false],
+    ['connecting', false],
+    ['draft', true],
+  ] as const)(
+    'activates a no-workspace %s with the right settings scope (Desktop: %s)',
+    async (target, desktop) => {
       sessionState.workspaceCwd =
         target === 'draft' ? undefined : '/private/standalone';
       sessionState.sessionId = target === 'draft' ? undefined : 'standalone';
@@ -1270,11 +1279,21 @@ describe('subscription development entry', () => {
       const entry = container!.querySelector<HTMLButtonElement>(
         'button[aria-label="Qwen Account with Subscription"]',
       )!;
-      await act(async () => entry.click());
+      if (desktop)
+        Object.assign(window, { __TAURI__: { core: { invoke: vi.fn() } } });
+      try {
+        await act(async () => entry.click());
+      } finally {
+        if (desktop)
+          delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
+      }
 
       expect(
         actions.getSubscriptionDefaultModel,
-      ).toHaveBeenCalledExactlyOnceWith({ signal: expect.any(AbortSignal) });
+      ).toHaveBeenCalledExactlyOnceWith({
+        signal: expect.any(AbortSignal),
+        ...(desktop ? { settingsScope: 'provider' } : {}),
+      });
       expect(actions.activateSubscription).not.toHaveBeenCalled();
       if (target === 'draft') {
         expect(completion.onModelActivated).toHaveBeenCalledExactlyOnceWith(

@@ -11607,8 +11607,10 @@ export function App({
   );
   const [currentModel, setCurrentModel] = useState('');
   const currentModelRef = useRef(currentModel);
+  const subscriptionDraftModelRef = useRef<string | undefined>(undefined);
   currentModelRef.current = currentModel;
   const setPendingModel = useCallback((modelId: string) => {
+    subscriptionDraftModelRef.current = undefined;
     currentModelRef.current = modelId;
     setCurrentModel(modelId);
   }, []);
@@ -11994,10 +11996,22 @@ export function App({
           draftProviders?.workspaceCwd === catalogWorkspaceCwd &&
           draftProviders?.current?.modelId === modelId;
         try {
+          const subscriptionDraftModel = subscriptionDraftModelRef.current;
           await createAndAttachSessionForPrompt({
             sessionActions: sessionActions as typeof sessionActions &
               SessionActionsWithCreate,
             modelId: useWorkspaceDefault ? undefined : modelId,
+            ...(subscriptionDraftModel && subscriptionDraftModel === modelId
+              ? {
+                  setSessionModel: (sessionId, modelId) =>
+                    workspace.client.setSessionModel(
+                      sessionId,
+                      modelId,
+                      connectionRef.current.clientId,
+                      { persistDefault: false },
+                    ),
+                }
+              : {}),
             reasoningEffort,
             modeId,
             planMode,
@@ -12100,6 +12114,9 @@ export function App({
             getCurrentSessionId: () => connectionRef.current.sessionId,
             getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
           }).then((result) => {
+            if (subscriptionDraftModelRef.current === subscriptionDraftModel) {
+              subscriptionDraftModelRef.current = undefined;
+            }
             if (pendingManualTitleRef.current === pendingManualTitle) {
               pendingManualTitleRef.current = undefined;
             }
@@ -12151,6 +12168,7 @@ export function App({
       sessionCatalogController,
       setPendingSessionContext,
       setPendingReasoningIntent,
+      workspace.client,
     ],
   );
   const onSubmitBeforeRef = useRef(onSubmitBefore);
@@ -20791,7 +20809,14 @@ export function App({
       if (!key || !isTarget()) {
         throw new DOMException('Subscription target changed.', 'AbortError');
       }
-      if (connectionRef.current.status === 'connected') {
+      if (isDesktopShell()) {
+        await workspace.client.setSessionModel(
+          sessionId,
+          modelId,
+          connectionRef.current.clientId,
+          { persistDefault: false },
+        );
+      } else if (connectionRef.current.status === 'connected') {
         await sessionActions.setModel(modelId);
       } else {
         // The daemon can switch a live session while its event stream reconnects.
@@ -22582,7 +22607,10 @@ export function App({
               standalone={isDesktopShell() && sessionIsStandalone}
               allowAdd={modelManagementPolicy.allowAdd}
               getWorkspaceCwd={getComposerWorkspaceCwd}
-              onModelActivated={selectWelcomeModel}
+              onModelActivated={(modelId) => {
+                selectWelcomeModel(modelId);
+                if (isDesktopShell()) subscriptionDraftModelRef.current = modelId;
+              }}
               activateSessionSubscriptionModel={activateSessionSubscriptionModel}
               onMessage={(text, type = 'status') => {
                 store.dispatch([

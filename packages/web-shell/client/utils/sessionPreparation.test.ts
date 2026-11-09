@@ -66,6 +66,21 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
   });
 
+  it('applies the authenticated draft model with the session-only setter', async () => {
+    const actions = createActions();
+    const setSessionModel = vi.fn().mockResolvedValue({});
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max(qwen-subscription)',
+      setSessionModel,
+    });
+    expect(setSessionModel).toHaveBeenCalledExactlyOnceWith(
+      sessionResult.sessionId,
+      'qwen3.8-max(qwen-subscription)',
+    );
+    expect(actions.setModel).not.toHaveBeenCalled();
+  });
+
   it('enables Plan with the selected execution permission after attach', async () => {
     const order: string[] = [];
     const actions = createActions({

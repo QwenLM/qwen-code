@@ -533,6 +533,7 @@ export interface DaemonWorkspaceActions
   activateSubscription(options?: {
     workspaceCwd?: string;
     signal?: AbortSignal;
+    settingsScope?: 'provider' | 'user';
   }): Promise<DaemonSubscriptionActivation>;
   setUiLanguage(
     language: string,

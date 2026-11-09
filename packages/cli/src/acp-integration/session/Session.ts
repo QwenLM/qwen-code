@@ -15128,7 +15128,8 @@ export class Session implements SessionContext {
     }
 
     if (
-      this.requiresManagedConversationBinding &&
+      (this.requiresManagedConversationBinding ||
+        options.persistDefault === false) &&
       selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
       !resolvedRoute
     ) {
