@@ -552,10 +552,11 @@ jobs:
                 break
               fi
               # A failed push may still have landed remotely (GitHub can time out deciding
-              # whether workflow files may be created), so reconcile before retrying.
-              if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" > /dev/null; then
-                git fetch origin "${BRANCH_NAME}"
-                if [[ "$(git rev-parse FETCH_HEAD)" == "$(git rev-parse HEAD)" ]]; then
+              # whether workflow files may be created), so reconcile before retrying; the
+              # || true keeps a transient ls-remote failure on the retry path (bash -e).
+              remote_sha="$(git ls-remote --heads origin "${BRANCH_NAME}" | cut -f1 || true)"
+              if [[ -n "${remote_sha}" ]]; then
+                if [[ "${remote_sha}" == "$(git rev-parse HEAD)" ]]; then
                   echo "::notice::Push of ${BRANCH_NAME} landed remotely despite the reported failure; continuing."
                   break
                 fi
