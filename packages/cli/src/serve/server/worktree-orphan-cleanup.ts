@@ -55,6 +55,8 @@ function canonicalPath(candidate: string): string {
   }
 }
 
+export const canonicalPathForTesting = canonicalPath;
+
 function logWarning(message: string): void {
   writeStderrLine(`qwen serve: ${message}`);
 }

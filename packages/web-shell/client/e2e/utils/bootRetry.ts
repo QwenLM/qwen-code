@@ -1,7 +1,23 @@
 import type { Page, Request } from '@playwright/test';
 
+/**
+ * Delay before each successive reload of a failing boot.
+ *
+ * The aborts arrive in storms, not one at a time: every in-flight request dies
+ * together, and the notifier can keep firing for several seconds. Retrying
+ * immediately spends the whole budget inside the storm that caused the first
+ * failure — run 42546153793 stranded a boot whose three attempts started at
+ * 01:55:24.631, :25.536 and :27.599 while the aborts covered :24–:27. Spacing
+ * the attempts is what lands one after the storm has passed.
+ *
+ * The ladder waits 5.5 s in total, which has to fit inside the 20 s `expect`
+ * budget the rest of the suite asserts visibility with.
+ */
+export const BOOT_RELOAD_BACKOFF_MS = [500, 1_500, 3_500] as const;
+
 /** Reloads allowed for one tab whose boot keeps failing. */
-const MAX_BOOT_RELOADS = 2;
+export const MAX_BOOT_RELOADS = BOOT_RELOAD_BACKOFF_MS.length;
+
 const installedPages = new WeakSet<Page>();
 
 /**
@@ -36,6 +52,7 @@ export async function installBootRetry(page: Page): Promise<void> {
   let failedBoot = -1;
   const bootOf = new WeakMap<Request, number>();
   let reloads = 0;
+  let pendingReload: ReturnType<typeof setTimeout> | null = null;
 
   page.on('request', (request) => {
     bootOf.set(request, boot);
@@ -48,6 +65,13 @@ export async function installBootRetry(page: Page): Promise<void> {
     const request = response.request();
     if (mainFrame(request) && request.resourceType() === 'document') {
       boot += 1;
+      // The backoff opens a window the immediate reload did not have: a
+      // navigation the test drives while a reload is waiting supersedes it,
+      // and the stale timer would otherwise reload the new destination.
+      if (pendingReload !== null) {
+        clearTimeout(pendingReload);
+        pendingReload = null;
+      }
     }
   });
   page.on('requestfailed', (request) => {
@@ -62,12 +86,15 @@ export async function installBootRetry(page: Page): Promise<void> {
       return;
     }
     // An abort of a non-essential script still costs one reload; the budget
-    // caps that at two, and the healthy second load returns it.
+    // caps that, and the next healthy load returns it.
     if (reloads >= MAX_BOOT_RELOADS) return;
+    const delay = BOOT_RELOAD_BACKOFF_MS[reloads];
     reloads += 1;
-    // Reload after the load the test awaited, so its navigation has settled.
-    setTimeout(() => {
+    // Reload after the load the test awaited, so its navigation has settled,
+    // then wait out the rest of the storm before spending the next attempt.
+    pendingReload = setTimeout(() => {
+      pendingReload = null;
       void page.reload().catch(() => {});
-    }, 0);
+    }, delay);
   });
 }

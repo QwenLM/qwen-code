@@ -105,6 +105,7 @@ public interface ManagedAgentSettings {
     }
     public interface Extensions {
         public boolean isEnabled();
+        public default boolean isSelfServiceEnabled() { return false; }
         public String getArtifactDirectory();
         public List<String> getAllowedActors();
     }
