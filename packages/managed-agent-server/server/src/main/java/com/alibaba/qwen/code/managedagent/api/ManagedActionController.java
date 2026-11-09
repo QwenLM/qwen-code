@@ -59,7 +59,7 @@ public class ManagedActionController {
         var admission =
                 actions.respond(
                         tenant.tenantId(),
-                        tenant.principal(),
+                        tenant.actorId(),
                         sessionId,
                         actionId,
                         idempotencyKey,
@@ -102,7 +102,7 @@ public class ManagedActionController {
         var admission =
                 actions.respond(
                         tenant.tenantId(),
-                        tenant.principal(),
+                        tenant.actorId(),
                         request.sessionId(),
                         request.actionId(),
                         request.idempotencyKey(),

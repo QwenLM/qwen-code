@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -46,11 +45,9 @@ class SessionRecoveryServiceTest {
     private final HarnessConnector harness = mock(HarnessConnector.class);
     private final SessionRecord session = new SessionRecord("tenant", "session",
             "qwen-code", "title", "ACTIVE", "boot", "epoch", 1, 1, 1, 1, null, 1);
-    // The service resolves the String actor to a principal before calling the
-    // store; SessionPrincipal is a record, so these value-equal constants match
-    // the principal the service builds from ("tenant", "actor").
-    private static final SessionPrincipal ACTOR = SessionPrincipal.ofUser("tenant", "actor");
-    private static final SessionPrincipal FOREIGN = SessionPrincipal.ofUser("foreign", "actor");
+    // The raw-actor request path passes the filter-admitted actor verbatim
+    // (R7-1); only a trusted principal overload carries a SessionPrincipal.
+    private static final String ACTOR = "actor";
     private JdbcTemplate jdbc;
     private SessionRecoveryService service;
 
@@ -268,10 +265,10 @@ class SessionRecoveryServiceTest {
         // A null-principal read only answers inside an explicit tenant; the
         // principal-derived overload would resolve tenant null and 404.
         when(sessions.requireReadableSession(eq("tenant"),
-                isNull(SessionPrincipal.class), eq("session")))
+                isNull(String.class), eq("session")))
                 .thenReturn(session);
         when(sessions.requireReadableSession(
-                isNull(String.class), isNull(SessionPrincipal.class),
+                isNull(String.class), isNull(String.class),
                 eq("session")))
                 .thenThrow(new ManagedAgentException(404, "session_not_found",
                         "The Session was not found."));
@@ -283,10 +280,10 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.state()).isEqualTo("ready");
         verify(sessions, org.mockito.Mockito.atLeastOnce())
                 .requireReadableSession(eq("tenant"),
-                        isNull(SessionPrincipal.class), eq("session"));
+                        isNull(String.class), eq("session"));
         verify(sessions, never()).requireReadableSession(
                 argThat(tenant -> tenant == null),
-                isNull(SessionPrincipal.class), eq("session"));
+                isNull(String.class), eq("session"));
     }
 
     @Test
@@ -425,7 +422,7 @@ class SessionRecoveryServiceTest {
 
     @Test
     void foreignOrInvisibleSessionsNeverReachTheirEvidence() {
-        when(sessions.requireReadableSession("foreign", FOREIGN, "session"))
+        when(sessions.requireReadableSession("foreign", "actor", "session"))
                 .thenThrow(new ManagedAgentException(404,
                         "session_not_found", "Not found"));
         assertThatThrownBy(() -> service.query("foreign", "actor", "session"))

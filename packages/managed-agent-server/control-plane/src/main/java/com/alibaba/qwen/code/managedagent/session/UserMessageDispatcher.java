@@ -24,7 +24,7 @@ public class UserMessageDispatcher {
         for (var session : messages.readySessions()) {
             try {
                 messages.startNext(session.get("tenant"), session.get("session"),
-                        sessions::submitTurn);
+                        sessions::submitQueuedTurn);
             } catch (ManagedAgentException unavailable) {
                 LOG.debug("User message dispatch deferred for Session {}", session.get("session"), unavailable);
             } catch (RuntimeException failure) {

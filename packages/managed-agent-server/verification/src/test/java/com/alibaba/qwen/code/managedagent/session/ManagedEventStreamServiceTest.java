@@ -43,7 +43,7 @@ class ManagedEventStreamServiceTest {
     void actorlessStreamRequestsResolveVisibilityBeforeStreaming() {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
         when(agentService.requireReadableSession("tenant",
-                (com.alibaba.qwen.code.managedagent.model.SessionPrincipal) null, "session"))
+                (String) null, "session"))
                 .thenThrow(new ManagedAgentException(404, "session_not_found",
                         "The Session was not found."));
         ManagedEventStreamService service = new ManagedEventStreamService(
@@ -60,10 +60,10 @@ class ManagedEventStreamServiceTest {
                         assertThat(error.getCode()).isEqualTo("session_not_found");
                     });
         }
-        // Visibility ran with the caller's own tenant and a null principal;
+        // Visibility ran with the caller's own tenant and a null raw actor;
         // its refusal precedes any emitter or streaming task.
         verify(agentService, times(4)).requireReadableSession("tenant",
-                (com.alibaba.qwen.code.managedagent.model.SessionPrincipal) null, "session");
+                (String) null, "session");
     }
 
     @Test
@@ -663,8 +663,7 @@ class ManagedEventStreamServiceTest {
     void pushesCommittedEventsWithoutWaitingForReconciliation()
             throws Exception {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
-        when(agentService.requireReadableSession("tenant",
-                new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "actor", null), "session"))
+        when(agentService.requireReadableSession("tenant", "actor", "session"))
                 .thenReturn(SESSION);
         CountDownLatch initialRead = new CountDownLatch(1);
         when(agentService.streamEvents(SESSION, 0))
@@ -706,8 +705,7 @@ class ManagedEventStreamServiceTest {
     @Test
     void treatsClientDisconnectAsACompletedStream() throws Exception {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
-        when(agentService.requireReadableSession("tenant",
-                new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "actor", null), "session"))
+        when(agentService.requireReadableSession("tenant", "actor", "session"))
                 .thenReturn(SESSION);
         when(agentService.streamEvents(SESSION, 0))
                 .thenReturn(List.of());

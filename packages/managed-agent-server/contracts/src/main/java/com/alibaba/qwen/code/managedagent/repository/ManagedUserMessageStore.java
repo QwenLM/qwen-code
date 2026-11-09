@@ -44,7 +44,29 @@ public interface ManagedUserMessageStore {
                 List<com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock> input);
     }
 
-    public void startNext(String tenant, String session, QueuedTurnSubmitter submitter);
+    /**
+     * The dispatch entry: a bound Session's queued actor was admitted under
+     * the filter's code-point bound, so the dispatcher passes it raw with a
+     * null principal (R7-1); an unbound dispatch carries the exact durable
+     * principal, whose user id equals the raw actor.
+     */
+    @FunctionalInterface
+    public interface QueuedDispatchSubmitter {
+        public com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission submit(String tenantId,
+                SessionPrincipal principal, String actorId,
+                String idempotencyKey, String sessionId,
+                List<com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock> input);
+    }
+
+    public default void startNext(String tenant, String session, QueuedTurnSubmitter submitter) {
+        startNext(tenant, session, (QueuedDispatchSubmitter) (actorTenant, principal, actorId, key, sessionId, input) ->
+                submitter.submit(principal != null ? principal
+                        : actorId == null ? null
+                                : SessionPrincipal.ofUser(actorTenant, actorId),
+                        key, sessionId, input));
+    }
+
+    public void startNext(String tenant, String session, QueuedDispatchSubmitter submitter);
 
     public void retireClosed();
 }

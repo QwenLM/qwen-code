@@ -3024,6 +3024,68 @@ class ManagedWorkspaceAdmissionTest {
                 .sessionId();
     }
 
+    @Test
+    void boundSessionReadsServeAnActorThePrincipalByteBoundWouldReject() throws Exception {
+        // R7-1: 512 CJK code points (1536 UTF-8 bytes). The tenant filter
+        // admits it, SessionPrincipal.ofUser rejects it; every raw-actor
+        // entry must defer construction to the unbound ownership arms so
+        // this Workspace actor keeps reading its bound Session. Restoring
+        // the eager principalOf at any String overload turns these red
+        // with 400 invalid_actor.
+        String longActor = "界".repeat(512);
+        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", longActor))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("invalid_actor"));
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-long", "storage-long",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-long", longActor, true);
+        String session = new TransactionTemplate(transactionManager).execute(status ->
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId(longActor)
+                        .idempotencyKey("create-long")
+                        .requestDigest("sha256:" + "b".repeat(64))
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("ws-long", "."))
+                        .build())
+                        .sessionId());
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(session));
+        mvc.perform(get("/v1/agents/sessions/{sessionId}", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(session));
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].sessionId").value(session));
+        mvc.perform(get("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(session));
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/actions", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk());
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/user-messages", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+    }
+
     private ManagedAgentService boundService(boolean workspaceFiles) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);

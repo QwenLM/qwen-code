@@ -71,36 +71,34 @@ final class AgentSessionCommands {
     // Input admission records the supplied caller on the command
     // receipt, so the receipt's replay answers the actor who recorded it —
     // an OPERATOR's own retry of his own key — and not only the creator.
+    // The raw-actor entries defer principal construction to the unbound
+    // arm (R7-1); principal entries pass their verified owner through.
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
-        return insertTurnCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, input, payloadDigest,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId));
+        return insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, null, actorId);
     }
 
-    /**
-     * The principal-carrying Turn admission. An unbound Session requires
-     * the exact immutable ownership row and stamps the receipt with the
-     * complete principal; a bound Session keeps Workspace actor identity.
-     */
+    // Principal-carrying Turn admission: unbound requires the exact row.
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             SessionPrincipal principal) {
-        String actorId = principal == null ? null : principal.userId();
-        // A per-turn admission takes no tenant guard. The Session row orders it
-        // against lifecycle begin, requireOpen's locking reads of this storage's
-        // alias (fence) and directory rows order it against migration fence
-        // installation and physical fencing, and nothing later in this
-        // transaction takes the guard. The Session lock comes first, so this
-        // transaction's snapshot is taken after it.
+        return insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, principal, principal == null ? null : principal.userId());
+    }
+
+    private Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionPrincipal principal, String actorId) {
+        // No tenant guard: the Session lock comes first (ordering against
+        // lifecycle begin and migration fencing), so this transaction's
+        // snapshot follows it and nothing later takes the guard.
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         if (session.workspace() == null) {
-            principal = resolveWritePrincipal(tenantId, sessionId, principal);
+            principal = resolveWritePrincipal(tenantId, sessionId, principal, actorId);
             actorId = principal == null ? null : principal.userId();
         }
         // A bound Session's later Turn needs the same deployment opt-in as
@@ -198,19 +196,21 @@ final class AgentSessionCommands {
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
-        return insertCancelCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, turnId,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId));
+        return insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId, null, actorId);
     }
 
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, SessionPrincipal principal) {
-        String actorId = principal == null ? null : principal.userId();
+        return insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId, principal, principal == null ? null : principal.userId());
+    }
+
+    private Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, SessionPrincipal principal, String actorId) {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
-            principal = resolveWritePrincipal(tenantId, sessionId, principal);
+            principal = resolveWritePrincipal(tenantId, sessionId, principal, actorId);
             actorId = principal == null ? null : principal.userId();
         }
         if (session.workspace() != null && !workspaceFilesEnabled) {
@@ -268,10 +268,7 @@ final class AgentSessionCommands {
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
-        return beginSessionRename(tenantId, key, digest, sessionId, title,
-                actorId,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId));
+        return beginSessionRename(tenantId, key, digest, sessionId, title, actorId, null);
     }
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
@@ -281,8 +278,8 @@ final class AgentSessionCommands {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
-            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
-                    principal);
+            principal = unboundPrincipal(tenantId, principal, actorId);
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, principal);
         }
         // The Session lock serializes this Session's admissions without gap-locking missing index
         // entries. A different Session reusing the tenant-scoped key loses on the receipt's unique
@@ -494,10 +491,7 @@ final class AgentSessionCommands {
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
-        return beginSessionMutation(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, kind, actorId,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId));
+        return beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind, actorId, null);
     }
 
     SessionMutationCommand beginSessionMutation(String tenantId,
@@ -511,8 +505,8 @@ final class AgentSessionCommands {
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
-            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
-                    principal);
+            principal = unboundPrincipal(tenantId, principal, actorId);
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId, principal);
         }
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
@@ -583,13 +577,19 @@ final class AgentSessionCommands {
         return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 
-    // Background execution continues already-admitted work through its
-    // operation and lease APIs. New commands on an unbound Session must
-    // carry the exact durable owner; a missing principal cannot borrow it.
-    // The legacy tenant-header arm (null principal) may still write a Session
-    // that has no ownership row, but never one that has a durable owner.
+    // New commands on an unbound Session must carry the exact durable owner;
+    // the legacy null-principal arm may write only a row-less Session. The
+    // raw-actor path (R7-1) defers construction to this unbound arm: a bound
+    // Session's Workspace identity is the filter-admitted actor verbatim.
+    private static SessionPrincipal unboundPrincipal(String tenantId,
+            SessionPrincipal principal, String actorId) {
+        return principal != null || actorId == null ? principal
+                : SessionPrincipal.ofUser(tenantId, actorId);
+    }
+
     private SessionPrincipal resolveWritePrincipal(String tenantId,
-            String sessionId, SessionPrincipal principal) {
+            String sessionId, SessionPrincipal principal, String actorId) {
+        principal = unboundPrincipal(tenantId, principal, actorId);
         if (principal == null) {
             if (ManagedSessionPrincipal.find(jdbc, tenantId, sessionId) != null) {
                 throw new ManagedAgentException(404, "session_not_found",

@@ -50,15 +50,16 @@ final class SessionRenameDeliveries {
     // live-Session refusal.
     void requireRenameReplayOwner(SessionRecord session,
             CommandRecord previous, String actorId) {
-        requireRenameReplayOwner(session, previous, actorId,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(session.tenantId(), actorId));
+        requireRenameReplayOwner(session, previous, actorId, null);
     }
 
     void requireRenameReplayOwner(SessionRecord session,
             CommandRecord previous, String actorId,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
+            if (principal == null && actorId != null) {
+                principal = SessionPrincipal.ofUser(session.tenantId(), actorId);
+            }
             ManagedSessionPrincipal.requireAuthority(jdbc, session.tenantId(),
                     session.sessionId(), principal);
             return;

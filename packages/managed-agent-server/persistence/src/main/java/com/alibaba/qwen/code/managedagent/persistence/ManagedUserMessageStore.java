@@ -45,14 +45,20 @@ public class ManagedUserMessageStore
 
     @Transactional
     public Snapshot queryMessages(String tenant, String actor, String session) {
-        return queryMessages(actor == null ? null
-                : SessionPrincipal.ofUser(tenant, actor), session);
+        // The raw-actor queue path keeps the filter-admitted actor verbatim
+        // (R7-1): the Workspace gates compare the raw actor, and a
+        // principal is built only where an ownership row must be matched.
+        agents.authorizeUserMessages(tenant, actor, session);
+        return queueSnapshot(tenant, session);
     }
 
     @Transactional
     public Snapshot queryMessages(SessionPrincipal principal, String session) {
         agents.authorizeUserMessages(principal, session);
-        String tenant = principal.tenantId();
+        return queueSnapshot(principal.tenantId(), session);
+    }
+
+    private Snapshot queueSnapshot(String tenant, String session) {
         if (!agents.supportsUserMessageQueue()) {
             throw conflict("unsupported_feature");
         }
@@ -64,16 +70,26 @@ public class ManagedUserMessageStore
     @Transactional
     public Snapshot command(String tenant, String actor, String session,
             String key, Command command) {
-        return command(actor == null ? null
-                : SessionPrincipal.ofUser(tenant, actor), session, key, command);
+        agents.authorizeUserMessageActor(tenant, actor, session);
+        // A String actor never carries a business-actor subject, so the
+        // pre-ownership receipt key is the exact compatible identity.
+        return commandInternal(tenant, actor, session,
+                DigestUtils.sha256Hex(actor + "\n" + key), key, command,
+                () -> agents.authorizeUserMessages(tenant, actor, session));
     }
 
     @Transactional
     public Snapshot command(SessionPrincipal principal, String session,
             String key, Command command) {
         agents.authorizeUserMessageActor(principal, session);
-        String tenant = principal.tenantId();
-        String actor = principal.userId();
+        return commandInternal(principal.tenantId(), principal.userId(),
+                session, commandKey(principal, key), key, command,
+                () -> agents.authorizeUserMessages(principal, session));
+    }
+
+    private Snapshot commandInternal(String tenant, String actor,
+            String session, String commandKey, String key, Command command,
+            Runnable authorizeMessages) {
         if (key == null || key.isBlank() || key.length() > 128) {
             throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
         }
@@ -81,7 +97,6 @@ public class ManagedUserMessageStore
         if (command == null || command.action() == null) {
             throw refusal("invalid_request", "A queue action is required.");
         }
-        String commandKey = commandKey(principal, key);
         String digest = digests.digest(command);
         var replay = jdbc.query("SELECT request_digest, result_json FROM ma_user_message_command"
                         + " WHERE tenant_id = ? AND session_id = ? AND command_key = ?",
@@ -92,7 +107,7 @@ public class ManagedUserMessageStore
             }
             return decode(replay.getFirst().getValue(), Snapshot.class);
         }
-        agents.authorizeUserMessages(principal, session);
+        authorizeMessages.run();
         lock(tenant, session);
         if (!agents.supportsUserMessageQueue()) {
             throw conflict("unsupported_feature");
@@ -207,7 +222,7 @@ public class ManagedUserMessageStore
     }
 
     @Transactional
-    public void startNext(String tenant, String session, QueuedTurnSubmitter submitter) {
+    public void startNext(String tenant, String session, QueuedDispatchSubmitter submitter) {
         if (!agents.supportsUserMessageQueue()) {
             return;
         }
@@ -235,7 +250,7 @@ public class ManagedUserMessageStore
             return;
         }
         Message first = snapshot.messages().getFirst();
-        SessionPrincipal principal = queuedPrincipal(tenant, session, first.id());
+        QueuedIdentity identity = queuedIdentity(tenant, session, first.id());
         List<InputBlock> input = first.input().stream().map(block -> {
             if ("text".equals(block.get("type"))) {
                 return new InputBlock("input_text", (String) block.get("text"));
@@ -245,8 +260,8 @@ public class ManagedUserMessageStore
             return new InputBlock("input_file", (String) resource.get("text"), (String) resource.get("mimeType"), null, name);
         }).toList();
         jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ? AND message_id = ? AND state = 'queued'", tenant, session, first.id());
-        var admission = submitter.submit(principal,
-                "user-queue:" + first.id(), session, input);
+        var admission = submitter.submit(tenant, identity.principal(),
+                identity.actorId(), "user-queue:" + first.id(), session, input);
         String prompt = jdbc.queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
                 String.class, tenant, session, admission.turnId());
         jdbc.update("UPDATE ma_user_message SET state = 'claimed', turn_id = ?, prompt_id = ? WHERE tenant_id = ?"
@@ -291,7 +306,13 @@ public class ManagedUserMessageStore
                 + "\0" + key);
     }
 
-    private SessionPrincipal queuedPrincipal(String tenant, String session,
+    // A bound Session's queued actor dispatches raw: rebuilding a principal
+    // from the filter-admitted actor would 400 a byte-long non-ASCII actor
+    // whose queue this dispatcher drained before (R7-1). An unbound
+    // dispatch keeps the exact durable principal.
+    private record QueuedIdentity(String actorId, SessionPrincipal principal) { }
+
+    private QueuedIdentity queuedIdentity(String tenant, String session,
             String messageId) {
         record QueuedActor(String actorId, boolean unbound) { }
         QueuedActor owner = jdbc.queryForObject(
@@ -309,7 +330,7 @@ public class ManagedUserMessageStore
                     "The Session was not found.");
         }
         if (!owner.unbound()) {
-            return SessionPrincipal.ofUser(tenant, owner.actorId());
+            return new QueuedIdentity(owner.actorId(), null);
         }
         ManagedSessionPrincipal.Row row = ManagedSessionPrincipal.find(jdbc,
                 tenant, session);
@@ -322,16 +343,17 @@ public class ManagedUserMessageStore
                     owner.actorId());
             ManagedSessionPrincipal.requireAuthority(jdbc, tenant, session,
                     queued);
-            return queued;
+            return new QueuedIdentity(owner.actorId(), queued);
         }
         if (!owner.actorId().equals(row.userId())) {
             throw new ManagedAgentException(404, "session_not_found",
                     "The Session was not found.");
         }
-        return row.actorPresent()
+        SessionPrincipal durable = row.actorPresent()
                 ? SessionPrincipal.of(tenant, row.userId(),
                         row.actorSubjectId())
                 : SessionPrincipal.ofUser(tenant, row.userId());
+        return new QueuedIdentity(row.userId(), durable);
     }
 
     private void lock(String tenant, String session) {

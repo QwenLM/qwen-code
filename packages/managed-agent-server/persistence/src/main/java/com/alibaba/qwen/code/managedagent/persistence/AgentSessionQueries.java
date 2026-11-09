@@ -218,10 +218,15 @@ final class AgentSessionQueries {
 
     SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
-        return listSessions(tenantId, actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId),
+        // The raw-actor page keeps the filter's code-point-bounded actor
+        // verbatim: a principal's byte bound would 400 a long non-ASCII
+        // actor whose Workspace Sessions this page listed before (R7-1).
+        // A String actor never carries a business-actor subject, so the
+        // ownership clause matches the absent-subject row exactly as a
+        // subjectless principal would.
+        return listSessionPage(tenantId, actorId, false, null,
                 beforeCreatedAt, beforeSessionId, limit, archiveState,
-                titleQuery);
+                titleQuery, false);
     }
 
     /**
@@ -236,30 +241,42 @@ final class AgentSessionQueries {
             SessionPrincipal principal, Long beforeCreatedAt,
             String beforeSessionId, int limit, String archiveState,
             String titleQuery) {
-        return listSessionPage(tenantId, principal, beforeCreatedAt,
-                beforeSessionId, limit, archiveState, titleQuery, false);
+        if (principal != null) {
+            ManagedSessionPrincipal.requireTenant(tenantId, principal);
+        }
+        return listSessionPage(tenantId,
+                principal == null ? null : principal.userId(),
+                principal != null && principal.actorPresent(),
+                principal == null ? null : principal.actorSubjectId(),
+                beforeCreatedAt, beforeSessionId, limit, archiveState,
+                titleQuery, false);
     }
 
     SessionPage listOwnedSessions(String tenantId,
             SessionPrincipal principal, Long beforeCreatedAt,
             String beforeSessionId, int limit, String archiveState,
             String titleQuery) {
-        return listSessionPage(tenantId, principal, beforeCreatedAt,
-                beforeSessionId, limit, archiveState, titleQuery, true);
-    }
-
-    private SessionPage listSessionPage(String tenantId,
-            SessionPrincipal principal, Long beforeCreatedAt,
-            String beforeSessionId, int limit, String archiveState,
-            String titleQuery, boolean ownerOnly) {
         if (principal != null) {
             ManagedSessionPrincipal.requireTenant(tenantId, principal);
         }
+        return listSessionPage(tenantId,
+                principal == null ? null : principal.userId(),
+                principal != null && principal.actorPresent(),
+                principal == null ? null : principal.actorSubjectId(),
+                beforeCreatedAt, beforeSessionId, limit, archiveState,
+                titleQuery, true);
+    }
+
+    private SessionPage listSessionPage(String tenantId,
+            String actorId, boolean actorPresent, String actorSubjectId,
+            Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery, boolean ownerOnly) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        arguments.add(principal == null ? null
+        arguments.add(actorId == null ? null
                 : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
-                        tenantId, principal.userId()));
+                        tenantId, actorId));
         // A legacy unbound Session — one that never wrote an ownership row —
         // lists tenant-wide. The CREATE_SESSION receipt is an exclusion mark,
         // not a required one: a principal-created Session stamps the non-empty
@@ -280,7 +297,7 @@ final class AgentSessionQueries {
                 + " r.actor_id IS NOT NULL AND LENGTH(r.actor_id) > 0 AND"
                 + " r.actor_id <> ma_session.creator_actor_key))";
         String ownershipClause;
-        if (principal != null) {
+        if (actorId != null) {
             // A present ownership row is the sole authority over an unbound
             // Session; the legacy arm below adds the tenant-wide no-row rows.
             ownershipClause = " OR EXISTS (SELECT 1 FROM"
@@ -293,10 +310,10 @@ final class AgentSessionQueries {
                     + " (sp.actor_subject_id = ? OR"
                     + " (sp.actor_subject_id IS NULL AND ? IS NULL)))"
                     + " OR" + legacyUnbound;
-            arguments.add(principal.userId());
-            arguments.add(principal.actorPresent());
-            arguments.add(principal.actorSubjectId());
-            arguments.add(principal.actorSubjectId());
+            arguments.add(actorId);
+            arguments.add(actorPresent);
+            arguments.add(actorSubjectId);
+            arguments.add(actorSubjectId);
         } else {
             // The anonymous arm sees only the tenant-wide legacy rows; a
             // row-present Session is its owner's alone.
@@ -307,10 +324,10 @@ final class AgentSessionQueries {
             ownerClause = " AND (ma_session.workspace_id IS NULL OR"
                     + " (? = FALSE AND COALESCE(ma_session.owner_actor_key,"
                     + " ma_session.creator_actor_key) = ?))";
-            arguments.add(principal == null || principal.actorPresent());
-            arguments.add(principal == null ? null
+            arguments.add(actorId == null || actorPresent);
+            arguments.add(actorId == null ? null
                     : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
-                            tenantId, principal.userId()));
+                            tenantId, actorId));
         }
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";

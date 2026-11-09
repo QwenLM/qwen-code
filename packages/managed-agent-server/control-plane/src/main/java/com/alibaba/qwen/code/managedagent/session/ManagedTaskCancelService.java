@@ -146,13 +146,19 @@ public class ManagedTaskCancelService {
         } else if (principal == null) {
             // An anonymous caller admitted to a legacy no-row Session has no
             // principal identity; the cancel is scoped to the tenant-wide
-            // anonymous actor. A bound Session never reaches here anonymously.
-            actorDigest = digests.digest(Map.of("anonymous", "legacy"));
+            // anonymous actor — the SAME empty digest the pre-ownership code
+            // stored, so rows recorded before a rolling deploy still replay
+            // (R7-4). A bound Session never reaches here anonymously.
+            actorDigest = "";
+        } else if (!principal.actorPresent()) {
+            // No business actor: keep the pre-ownership {actorId} digest so
+            // idempotency rows written before this deploy still replay. The
+            // tenant is already part of the operation's UNIQUE key (R7-4).
+            actorDigest = digests.digest(Map.of("actorId", principal.userId()));
         } else {
             actorDigest = digests.digest(Map.of("userId", principal.userId(),
                     "actorPresent", principal.actorPresent(),
-                    "actorSubjectId", principal.actorSubjectId() == null
-                            ? "" : principal.actorSubjectId()));
+                    "actorSubjectId", principal.actorSubjectId()));
         }
         OperationAdmission admission = store.beginTaskCancelOperation(
                 tenantId, sessionId, taskId, actorDigest, idempotencyKey,

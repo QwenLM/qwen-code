@@ -73,7 +73,7 @@ public class SessionLifecycleService {
             String actorId, String idempotencyKey, String sessionId,
             OperationKind kind) {
         OperationAdmission admission = admit(tenantId,
-                principal(tenantId, actorId),
+                null, actorId,
                 idempotencyKey, sessionId, kind);
         return publicOperation(admission.operation(), admission.replayed());
     }
@@ -82,7 +82,7 @@ public class SessionLifecycleService {
             String actorId, String idempotencyKey, String sessionId,
             OperationKind kind) {
         OperationAdmission admission = admit(tenantId,
-                principal(tenantId, actorId),
+                null, actorId,
                 idempotencyKey, sessionId, kind);
         return webShellOperation(admission.operation(),
                 admission.replayed());
@@ -92,6 +92,7 @@ public class SessionLifecycleService {
             String idempotencyKey, String sessionId, OperationKind kind) {
         OperationAdmission admission = admit(
                 principal == null ? null : principal.tenantId(), principal,
+                principal == null ? null : principal.userId(),
                 idempotencyKey, sessionId, kind);
         return publicOperation(admission.operation(), admission.replayed());
     }
@@ -101,6 +102,7 @@ public class SessionLifecycleService {
             String sessionId, OperationKind kind) {
         OperationAdmission admission = admit(
                 principal == null ? null : principal.tenantId(), principal,
+                principal == null ? null : principal.userId(),
                 idempotencyKey, sessionId, kind);
         return webShellOperation(admission.operation(),
                 admission.replayed());
@@ -110,21 +112,22 @@ public class SessionLifecycleService {
     // own contract, every other kind with the command operation.
     public Object getPublicOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        return getPublicOperation(tenantId, principal(tenantId, actorId),
+        return getPublicOperation(tenantId, null, actorId,
                 sessionId, operationId);
     }
 
     public Object getPublicOperation(SessionPrincipal principal,
             String sessionId, String operationId) {
         return getPublicOperation(principal == null ? null : principal.tenantId(),
-                principal, sessionId, operationId);
+                principal, principal == null ? null : principal.userId(),
+                sessionId, operationId);
     }
 
     // The tenant stays explicit so an anonymous caller still reads inside its
     // own tenant; the read grant admits a legacy no-row Session tenant-wide.
     private Object getPublicOperation(String tenantId, SessionPrincipal principal,
-            String sessionId, String operationId) {
-        OperationRecord operation = operation(tenantId, principal,
+            String rawActorId, String sessionId, String operationId) {
+        OperationRecord operation = operation(tenantId, principal, rawActorId,
                 sessionId, operationId);
         if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
             return compressions.publicOperation(operation, false);
@@ -136,19 +139,20 @@ public class SessionLifecycleService {
 
     public Object getWebShellOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        return getWebShellOperation(tenantId, principal(tenantId, actorId),
+        return getWebShellOperation(tenantId, null, actorId,
                 sessionId, operationId);
     }
 
     public Object getWebShellOperation(SessionPrincipal principal,
             String sessionId, String operationId) {
         return getWebShellOperation(principal == null ? null : principal.tenantId(),
-                principal, sessionId, operationId);
+                principal, principal == null ? null : principal.userId(),
+                sessionId, operationId);
     }
 
     private Object getWebShellOperation(String tenantId, SessionPrincipal principal,
-            String sessionId, String operationId) {
-        OperationRecord operation = operation(tenantId, principal,
+            String rawActorId, String sessionId, String operationId) {
+        OperationRecord operation = operation(tenantId, principal, rawActorId,
                 sessionId, operationId);
         if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
             return compressions.webOperation(operation, false);
@@ -202,23 +206,32 @@ public class SessionLifecycleService {
 
     private OperationAdmission admit(String tenantId,
             SessionPrincipal principal,
+            String rawActorId,
             String idempotencyKey, String sessionId, OperationKind kind) {
-        String actorId = principal == null ? null : principal.userId();
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         SessionRecord session = store.requireSession(tenantId, sessionId);
-        sessions.requireReadGrant(session, principal);
+        if (principal == null) {
+            sessions.requireReadGrant(session, rawActorId);
+        } else {
+            sessions.requireReadGrant(session, principal);
+        }
         String digest = sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind));
         OperationAdmission admission;
         if (session.workspace() != null) {
             boolean activeLifecycle = usesLifecycleProtocol(session, kind);
-            admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
+            admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, rawActorId, actorDigest(rawActorId),
                     idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle(session)
                             : kind == OperationKind.CLOSE && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace()),
                     activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0);
         } else {
-            sessions.requireLegacyWorkspace(tenantId, principal, sessionId);
+            // Only the unbound ownership arm needs a byte-bounded
+            // principal; the bound arm above kept the raw actor (R7-1).
+            SessionPrincipal owner = principal != null ? principal
+                    : rawActorId == null ? null
+                            : SessionPrincipal.ofUser(tenantId, rawActorId);
+            sessions.requireLegacyWorkspace(tenantId, owner, sessionId);
             admission = store.beginOperation(tenantId, sessionId, kind,
-                    principalDigest(principal), idempotencyKey, digest);
+                    principalDigest(owner), idempotencyKey, digest);
         }
         OperationRecord operation = admission.operation();
         if (!"COMPLETED".equals(operation.state())) {
@@ -232,13 +245,18 @@ public class SessionLifecycleService {
     // tombstones as the Session reads do.
     private OperationRecord operation(String tenantId,
             SessionPrincipal principal,
+            String rawActorId,
             String sessionId, String operationId) {
         if (operationId.length() > 64) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The operation id is invalid.");
         }
         SessionRecord session = store.requireSession(tenantId, sessionId);
-        sessions.requireReadGrant(session, principal);
+        if (principal == null) {
+            sessions.requireReadGrant(session, rawActorId);
+        } else {
+            sessions.requireReadGrant(session, principal);
+        }
         return store.findOperation(tenantId, sessionId, operationId)
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "operation_not_found",
@@ -251,27 +269,28 @@ public class SessionLifecycleService {
                 : digests.digest(Map.of("actorId", actorId));
     }
 
-    private static SessionPrincipal principal(String tenantId,
-            String actorId) {
-        return actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId);
-    }
-
     private String principalDigest(SessionPrincipal principal) {
         if (principal == null) {
             // An anonymous caller admitted to a legacy no-row Session has no
             // principal identity; the operation is scoped to the tenant-wide
-            // anonymous actor rather than refused. A row-present Session never
+            // anonymous actor rather than refused — the SAME empty digest the
+            // pre-ownership code stored, so a rolling deploy still replays
+            // rows recorded before it (R7-4). A row-present Session never
             // reaches here anonymously — its authority gate answers 404 first.
-            return digests.digest(Map.of("anonymous", "legacy"));
+            return "";
+        }
+        if (!principal.actorPresent()) {
+            // No business actor: keep the pre-ownership {actorId} digest so
+            // idempotency rows written before this deploy still replay. The
+            // tenant is already a column of the UNIQUE key, so folding it
+            // into the digest adds nothing and only breaks the replay (R7-4).
+            return actorDigest(principal.userId());
         }
         Map<String, Object> identity = new java.util.LinkedHashMap<>();
         identity.put("tenantId", principal.tenantId());
         identity.put("userId", principal.userId());
         identity.put("actorPresent", principal.actorPresent());
-        if (principal.actorPresent()) {
-            identity.put("actorSubjectId", principal.actorSubjectId());
-        }
+        identity.put("actorSubjectId", principal.actorSubjectId());
         return digests.digest(identity);
     }
 

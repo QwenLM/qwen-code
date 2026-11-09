@@ -39,19 +39,28 @@ public class ManagedMcpManagementService {
     }
 
     public JsonNode get(String tenantId, String actorId, String sessionId) {
-        return get(principalOf(tenantId, actorId), sessionId);
+        // MCP management serves only Workspace Sessions: the raw
+        // filter-admitted actor never needs a byte-bounded principal (R7-1).
+        return get(tenantId, actorId, null, sessionId);
     }
 
     public JsonNode get(SessionPrincipal principal, String sessionId) {
-        SessionRecord readable = sessions.requireReadableSession(principal,
+        return get(principal.tenantId(), principal.userId(), principal,
                 sessionId);
+    }
+
+    private JsonNode get(String tenantId, String actorId,
+            SessionPrincipal principal, String sessionId) {
+        SessionRecord readable = principal == null
+                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
+                : sessions.requireReadableSession(principal, sessionId);
         if (readable.workspace() == null) {
             return unsupported(sessionId);
         }
         SessionRecord session;
         try {
-            session = store.requireMcpManagement(principal.tenantId(),
-                    principal.userId(), sessionId, null);
+            session = store.requireMcpManagement(tenantId,
+                    actorId, sessionId, null);
         } catch (ManagedAgentException unsupported) {
             if (!"unsupported_feature".equals(unsupported.getCode())) {
                 throw unsupported;
@@ -61,20 +70,28 @@ public class ManagedMcpManagementService {
         if (!harness.supportsMcpManagement() || !harness.supportsLifecycle(session.toolProfile())) {
             return unsupported(sessionId);
         }
-        return invoke(() -> harness.mcpManagement(principal.tenantId(),
+        return invoke(() -> harness.mcpManagement(tenantId,
                 sessionId));
     }
 
     public JsonNode submit(String tenantId, String actorId, String sessionId, String idempotencyKey,
             ManagedMcpManagementCommand command) {
-        return submit(principalOf(tenantId, actorId), sessionId, idempotencyKey,
+        return submit(tenantId, actorId, null, sessionId, idempotencyKey,
                 command);
     }
 
     public JsonNode submit(SessionPrincipal principal, String sessionId,
             String idempotencyKey, ManagedMcpManagementCommand command) {
-        SessionRecord readable = sessions.requireReadableSession(principal,
-                sessionId);
+        return submit(principal.tenantId(), principal.userId(), principal,
+                sessionId, idempotencyKey, command);
+    }
+
+    private JsonNode submit(String tenantId, String actorId,
+            SessionPrincipal principal, String sessionId,
+            String idempotencyKey, ManagedMcpManagementCommand command) {
+        SessionRecord readable = principal == null
+                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
+                : sessions.requireReadableSession(principal, sessionId);
         if (readable.workspace() == null) {
             throw unsupportedOperation();
         }
@@ -92,8 +109,8 @@ public class ManagedMcpManagementService {
             // identity so recorded keys still replay; only an actual subject
             // joins the identity (the commandKey rule).
             java.util.List<String> identity = new java.util.ArrayList<>(java.util.List.of(
-                    "managed-mcp-command", principal.tenantId(), principal.userId()));
-            if (principal.actorPresent()) {
+                    "managed-mcp-command", tenantId, actorId));
+            if (principal != null && principal.actorPresent()) {
                 identity.add(principal.actorSubjectId());
             }
             identity.add(sessionId);
@@ -103,12 +120,12 @@ public class ManagedMcpManagementService {
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }
-        SessionRecord session = store.requireMcpManagement(principal.tenantId(),
-                principal.userId(), sessionId, (String) request.get("operationId"));
+        SessionRecord session = store.requireMcpManagement(tenantId,
+                actorId, sessionId, (String) request.get("operationId"));
         if (!harness.supportsMcpManagement() || !harness.supportsLifecycle(session.toolProfile())) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }
-        request.put("actorKey", DigestUtils.sha256Hex(principal.userId()));
+        request.put("actorKey", DigestUtils.sha256Hex(actorId));
         request.put("action", command.action());
         request.put("serverId", command.serverId());
         request.put("expectedRevision", command.expectedRevision());
@@ -116,30 +133,37 @@ public class ManagedMcpManagementService {
             request.put("server", Map.of("serverId", command.server().serverId(),
                     "serverRevision", command.server().serverRevision(), "definitionDigest", command.server().definitionDigest()));
         }
-        return invoke(() -> harness.manageMcp(principal.tenantId(), sessionId,
+        return invoke(() -> harness.manageMcp(tenantId, sessionId,
                 request));
     }
 
     public JsonNode operation(String tenantId, String actorId, String sessionId, String operationId) {
-        return operation(principalOf(tenantId, actorId), sessionId, operationId);
+        return operation(tenantId, actorId, null, sessionId, operationId);
     }
 
     public JsonNode operation(SessionPrincipal principal, String sessionId,
             String operationId) {
-        SessionRecord readable = sessions.requireReadableSession(principal,
-                sessionId);
+        return operation(principal.tenantId(), principal.userId(), principal,
+                sessionId, operationId);
+    }
+
+    private JsonNode operation(String tenantId, String actorId,
+            SessionPrincipal principal, String sessionId, String operationId) {
+        SessionRecord readable = principal == null
+                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
+                : sessions.requireReadableSession(principal, sessionId);
         if (readable.workspace() == null) {
             throw unsupportedOperation();
         }
         if (operationId == null || !operationId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
             throw new ManagedAgentException(400, "invalid_request", "Invalid MCP operation identity.");
         }
-        SessionRecord session = store.requireMcpManagement(principal.tenantId(),
-                principal.userId(), sessionId, null);
+        SessionRecord session = store.requireMcpManagement(tenantId,
+                actorId, sessionId, null);
         if (!harness.supportsMcpManagement() || !harness.supportsLifecycle(session.toolProfile())) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }
-        return invoke(() -> harness.mcpManagementOperation(principal.tenantId(),
+        return invoke(() -> harness.mcpManagementOperation(tenantId,
                 sessionId, operationId));
     }
 
@@ -214,11 +238,5 @@ public class ManagedMcpManagementService {
     private static boolean counter(JsonNode value, long minimum) {
         return value.isIntegralNumber() && value.canConvertToLong()
                 && value.longValue() >= minimum && value.longValue() <= 9_007_199_254_740_991L;
-    }
-
-    private static SessionPrincipal principalOf(String tenantId,
-            String actorId) {
-        return actorId == null || actorId.isBlank()
-                ? null : SessionPrincipal.ofUser(tenantId, actorId);
     }
 }

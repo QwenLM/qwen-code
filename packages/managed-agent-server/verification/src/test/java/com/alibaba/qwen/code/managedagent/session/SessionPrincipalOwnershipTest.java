@@ -403,6 +403,53 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void preOwnershipDigestRowsStillReplayAfterTheDeploy() {
+        // R7-4: a rolling deploy must not retire idempotency rows written
+        // by the pre-ownership code. A subjectless caller keeps the
+        // {actorId} digest, an anonymous caller the empty digest — the
+        // exact values the old code stored. Only a genuine legacy Session
+        // (no ownership row) admits these callers at all.
+        var f = new Fixture();
+        var digests = new RequestDigests();
+        var lifecycle = new SessionLifecycleService(f.store, f.service, digests,
+                mock(SessionLifecycleCoordinator.class));
+        f.tx.executeWithoutResult(status -> {
+            String subjectless = f.store.insertSessionCommand("tenant", (String) null,
+                    "CREATE_SESSION", "legacy-create", "digest", "qwen-code",
+                    null, "legacy", List.of(), "payload")
+                    .sessionId();
+            var preOwnership = lifecycle.admitPublic("tenant", "legacy-user",
+                    "legacy-delete", subjectless,
+                    com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.DELETE);
+            String stored = f.jdbc.queryForObject(
+                    "SELECT actor_digest FROM ma_operation WHERE operation_id = ?",
+                    String.class, preOwnership.id());
+            assertThat(stored).isEqualTo(digests.digest(Map.of("actorId", "legacy-user")));
+            var replay = lifecycle.admitPublic("tenant", "legacy-user",
+                    "legacy-delete", subjectless,
+                    com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.DELETE);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.id()).isEqualTo(preOwnership.id());
+            // The anonymous arm keeps the empty digest the old code stored.
+            String anonymousSession = f.store.insertSessionCommand("tenant", (String) null,
+                    "CREATE_SESSION", "anonymous-create", "digest", "qwen-code",
+                    null, "anonymous", List.of(), "payload")
+                    .sessionId();
+            var anonymous = lifecycle.admitPublic("tenant", null,
+                    "anonymous-delete", anonymousSession,
+                    com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.DELETE);
+            assertThat(f.jdbc.queryForObject(
+                    "SELECT actor_digest FROM ma_operation WHERE operation_id = ?",
+                    String.class, anonymous.id())).isEmpty();
+            var anonymousReplay = lifecycle.admitPublic("tenant", null,
+                    "anonymous-delete", anonymousSession,
+                    com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.DELETE);
+            assertThat(anonymousReplay.replayed()).isTrue();
+            assertThat(anonymousReplay.id()).isEqualTo(anonymous.id());
+        });
+    }
+
+    @Test
     void actorStreamDeliversStoredEventsAndRechecksTheSamePrincipal() throws Exception {
         var f = new Fixture();
         String id = f.tx.execute(status -> f.create(OWNER, "create"));

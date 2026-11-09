@@ -58,8 +58,20 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
-        requireSubmitterRole(session,
-                principalOf(session.tenantId(), actorId));
+        // Same split as the read grant: the bound arm compares the raw
+        // actor (code-point bounded by the filter); only the unbound
+        // ownership arm needs a byte-bounded principal.
+        if (session.workspace() == null) {
+            store.requireSessionAuthority(session.tenantId(),
+                    session.sessionId(),
+                    principalOf(session.tenantId(), actorId));
+            return;
+        }
+        if (!workspaces.accessOf(session.tenantId(), actorId,
+                session.workspace().getWorkspaceId())
+                .atLeast(WorkspaceAccess.OPERATOR)) {
+            requireLegacyWorkspace(session, actorId);
+        }
     }
 
     void requireSubmitterRole(SessionRecord session,
@@ -80,8 +92,18 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     void requireSubmitterFacts(SessionRecord session,
             String actorId) {
-        requireSubmitterFacts(session,
-                principalOf(session.tenantId(), actorId));
+        if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
+            throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions accept only their delegated input");
+        }
+        if (session.workspace() == null) {
+            store.requireSessionAuthority(session.tenantId(),
+                    session.sessionId(),
+                    principalOf(session.tenantId(), actorId));
+            return;
+        }
+        if (!maySubmitWorkspaceTurn(session, actorId)) {
+            requireLegacyWorkspace(session, actorId);
+        }
     }
 
     void requireSubmitterFacts(SessionRecord session,
@@ -161,8 +183,8 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     void requireLegacyWorkspace(String tenantId, String actorId,
             String sessionId) {
-        requireLegacyWorkspace(tenantId, actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId);
+        requireLegacyWorkspace(store.requireSession(tenantId, sessionId),
+                actorId);
     }
 
     void requireLegacyWorkspace(String tenantId, SessionPrincipal principal,
@@ -177,8 +199,13 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // shape gates or the creator-keyed facts the family's domain 409.
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
-        requireLegacyWorkspace(session,
-                principalOf(session.tenantId(), actorId));
+        if (session.workspace() == null) {
+            store.requireSessionAuthority(session.tenantId(),
+                    session.sessionId(),
+                    principalOf(session.tenantId(), actorId));
+            return;
+        }
+        requireBoundLegacyWorkspace(session, actorId);
     }
 
     void requireLegacyWorkspace(SessionRecord session,
@@ -188,7 +215,12 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
                     session.sessionId(), principal);
             return;
         }
-        if (session.workspace() != null) {
+        requireBoundLegacyWorkspace(session,
+                principal == null ? null : principal.userId());
+    }
+
+    private void requireBoundLegacyWorkspace(SessionRecord session,
+            String actorId) {
             // A tombstone is invisible to every actor shape, as the reads
             // answer: the fence stands above the role split, whose 403/409
             // codes are live-Session answers. An unbound tombstone needs no
@@ -201,8 +233,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
             }
             String workspaceId = session.workspace().getWorkspaceId();
             WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
-                    principal == null ? null : principal.userId(),
-                    workspaceId);
+                    actorId, workspaceId);
             if (!access.canRead()) {
                 throw new ManagedAgentException(404,
                         "session_not_found", "The Session was not found.");
@@ -215,7 +246,6 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
             throw new ManagedAgentException(403,
                     "session_operation_forbidden",
                     "Only a Workspace operator may use the Session.");
-        }
     }
 
     SessionRecord requireVisibleSession(String tenantId,
@@ -238,8 +268,9 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
         if (actorId == null || actorId.isBlank()) {
             throw new ManagedAgentException(401, "actor_required", "An authenticated actor is required.");
         }
-        return authorizeUserMessageActor(
-                SessionPrincipal.ofUser(tenantId, actorId), sessionId);
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        requireSubmitterRole(session, actorId);
+        return session;
     }
 
     public SessionRecord authorizeUserMessageActor(
@@ -256,8 +287,12 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
         SessionRecord session = authorizeUserMessageActor(tenantId, actorId, sessionId);
-        return authorizeUserMessages(
-                SessionPrincipal.ofUser(tenantId, actorId), session);
+        requireVisibleSession(session);
+        requireSubmitterFacts(session, actorId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(409, "session_not_active", "The Session does not accept messages.");
+        }
+        return session;
     }
 
     public SessionRecord authorizeUserMessages(

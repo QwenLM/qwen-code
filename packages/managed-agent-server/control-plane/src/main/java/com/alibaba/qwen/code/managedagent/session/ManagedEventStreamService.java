@@ -52,24 +52,25 @@ public class ManagedEventStreamService {
 
     public SseEmitter publicStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
-        return publicStream(tenantId,
-                actorId == null || actorId.isBlank() ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId),
+        return publicStream(tenantId, null,
+                actorId == null || actorId.isBlank() ? null : actorId,
                 sessionId, afterSequence);
     }
 
     public SseEmitter publicStream(SessionPrincipal principal,
             String sessionId, long afterSequence) {
         return publicStream(principal == null ? null : principal.tenantId(),
-                principal, sessionId, afterSequence);
+                principal, principal == null ? null : principal.userId(),
+                sessionId, afterSequence);
     }
 
     private SseEmitter publicStream(String tenantId, SessionPrincipal principal,
-            String sessionId, long afterSequence) {
-        SessionRecord session = agentService.requireReadableSession(
-                tenantId, principal, sessionId);
+            String rawActorId, String sessionId, long afterSequence) {
+        SessionRecord session = principal == null
+                ? agentService.requireReadableSession(tenantId, rawActorId, sessionId)
+                : agentService.requireReadableSession(tenantId, principal, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> stream(emitter, principal, session,
+        executor.execute(() -> stream(emitter, principal, rawActorId, session,
                 afterSequence,
                 agentService::publicEvent, window -> new SessionResyncRequired(
                         RESYNC, session.sessionId(), window.floorSequence(),
@@ -79,24 +80,25 @@ public class ManagedEventStreamService {
 
     public SseEmitter webShellStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
-        return webShellStream(tenantId,
-                actorId == null || actorId.isBlank() ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId),
+        return webShellStream(tenantId, null,
+                actorId == null || actorId.isBlank() ? null : actorId,
                 sessionId, afterSequence);
     }
 
     public SseEmitter webShellStream(SessionPrincipal principal,
             String sessionId, long afterSequence) {
         return webShellStream(principal == null ? null : principal.tenantId(),
-                principal, sessionId, afterSequence);
+                principal, principal == null ? null : principal.userId(),
+                sessionId, afterSequence);
     }
 
     private SseEmitter webShellStream(String tenantId, SessionPrincipal principal,
-            String sessionId, long afterSequence) {
-        SessionRecord session = agentService.requireReadableSession(
-                tenantId, principal, sessionId);
+            String rawActorId, String sessionId, long afterSequence) {
+        SessionRecord session = principal == null
+                ? agentService.requireReadableSession(tenantId, rawActorId, sessionId)
+                : agentService.requireReadableSession(tenantId, principal, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> stream(emitter, principal, session,
+        executor.execute(() -> stream(emitter, principal, rawActorId, session,
                 afterSequence,
                 agentService::webShellEvent, window -> new WebShellResyncRequired(
                         RESYNC, session.sessionId(), window.floorSequence(),
@@ -109,13 +111,13 @@ public class ManagedEventStreamService {
     }
 
     private void stream(SseEmitter emitter, SessionPrincipal principal,
-            SessionRecord session, long initialSequence,
+            String rawActorId, SessionRecord session, long initialSequence,
             Function<EventRecord, ?> eventPayload,
             Function<ReplayWindow, ?> resyncPayload) {
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         AtomicBoolean closed = callbacks(emitter);
-        ReadGrant grant = new ReadGrant(emitter, closed, principal, session);
+        ReadGrant grant = new ReadGrant(emitter, closed, principal, rawActorId, session);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
                 + heartbeatInterval.toNanos();
@@ -237,16 +239,19 @@ public class ManagedEventStreamService {
         private final SseEmitter emitter;
         private final AtomicBoolean closed;
         private final SessionPrincipal principal;
+        private final String rawActorId;
         private final SessionRecord session;
         // MIN_VALUE, not 0: nanoTime may be negative, and a first check must
         // always run.
         private long recheckAt = Long.MIN_VALUE;
 
         private ReadGrant(SseEmitter emitter, AtomicBoolean closed,
-                SessionPrincipal principal, SessionRecord session) {
+                SessionPrincipal principal, String rawActorId,
+                SessionRecord session) {
             this.emitter = emitter;
             this.closed = closed;
             this.principal = principal;
+            this.rawActorId = rawActorId;
             this.session = session;
         }
 
@@ -256,7 +261,7 @@ public class ManagedEventStreamService {
                 return true;
             }
             if (ManagedEventStreamService.this.stillReadable(emitter, closed,
-                    principal, session)) {
+                    principal, rawActorId, session)) {
                 recheckAt = now + readGrantRecheckInterval.toNanos();
                 return true;
             }
@@ -265,9 +270,13 @@ public class ManagedEventStreamService {
     }
 
     private boolean stillReadable(SseEmitter emitter, AtomicBoolean closed,
-            SessionPrincipal principal, SessionRecord session) {
+            SessionPrincipal principal, String rawActorId, SessionRecord session) {
         try {
-            agentService.requireReadGrant(session, principal);
+            if (principal == null) {
+                agentService.requireReadGrant(session, rawActorId);
+            } else {
+                agentService.requireReadGrant(session, principal);
+            }
             return true;
         } catch (ManagedAgentException error) {
             if (error.getStatus() != 404) {
