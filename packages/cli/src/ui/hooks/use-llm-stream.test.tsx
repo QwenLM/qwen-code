@@ -531,6 +531,7 @@ describe('useLlmStream', () => {
     modelSwitchedFromQuotaError = false,
     onPromptReturned?: Parameters<typeof useLlmStream>[25],
     midTurnDrainRef?: Parameters<typeof useLlmStream>[19],
+    isCommandCancellationBlocked?: Parameters<typeof useLlmStream>[26],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -614,6 +615,7 @@ describe('useLlmStream', () => {
           undefined, // midTurnRestoreRef
           goalQueueRef,
           onPromptReturned,
+          isCommandCancellationBlocked,
         );
       },
       {
@@ -1697,6 +1699,61 @@ describe('useLlmStream', () => {
       releaseCommand();
       await request;
     });
+  });
+
+  it('keeps the submission lease while a slash command finishes its state change', async () => {
+    let finishCommand!: () => void;
+    const command = new Promise<void>((resolve) => {
+      finishCommand = resolve;
+    });
+    const isCommandCancellationBlocked = () => true;
+    const submissionInFlightRef = { current: false };
+    const { result } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        current: {
+          peekNextUserBatchKey: () => undefined,
+          submissionInFlightRef,
+        },
+      },
+      false,
+      undefined,
+      undefined,
+      isCommandCancellationBlocked,
+    );
+    mockHandleSlashCommand.mockImplementation(async () => {
+      await command;
+      return { type: 'handled' };
+    });
+    let request!: Promise<void>;
+    await act(async () => {
+      request = result.current.submitQuery('/branch');
+    });
+    try {
+      await waitFor(() =>
+        expect(mockHandleSlashCommand).toHaveBeenCalledOnce(),
+      );
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      act(() => {
+        expect(result.current.cancelOngoingRequest()).toBe(false);
+      });
+      expect(submissionInFlightRef.current).toBe(true);
+      await act(async () => {
+        await result.current.submitQuery('follow-up');
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => {
+        finishCommand();
+        await request;
+      });
+    }
+    expect(submissionInFlightRef.current).toBe(false);
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
   });
 
   it('rejects slash rewind admission while a model response is held', async () => {

@@ -936,6 +936,17 @@ export class OpenTuiSlashDispatcher {
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
+            beginCommit: () => {
+              if (
+                this.activeCommand !== activeCommand ||
+                abortController.signal.aborted ||
+                !fullCommandContext.ui.isIdleRef.current
+              ) {
+                return false;
+              }
+              activeCommand.canCancel = false;
+              return true;
+            },
           };
 
           // Parity: a "Proceed" confirmation temporarily augments the session
@@ -1039,7 +1050,9 @@ export class OpenTuiSlashDispatcher {
                   }
                 }
                 if (result.dialog === 'branch') {
-                  await this.host.handleBranch(result.name);
+                  if (fullCommandContext.beginCommit?.() !== false) {
+                    await this.host.handleBranch(result.name);
+                  }
                   return { kind: 'handled' };
                 }
                 return {

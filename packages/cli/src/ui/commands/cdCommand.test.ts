@@ -156,6 +156,18 @@ describe('cdCommand', () => {
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
   });
 
+  it('leaves the working directory unchanged when cancelled during path lookup', async () => {
+    const controller = new AbortController();
+    const action = cdCommand.action!(
+      { ...context, abortSignal: controller.signal },
+      nextDir,
+    );
+    controller.abort();
+
+    await expect(action).resolves.toBeUndefined();
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
   it('rejects restrictive sandbox sessions', async () => {
     context = createMockCommandContext({
       services: {

@@ -1608,7 +1608,7 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
   });
 
-  it('/branch awaits handleBranch', async () => {
+  it('/branch stays processing after Esc until handleBranch settles', async () => {
     // Gate is held closed. If dispatch properly awaits handleBranch, its promise
     // stays pending. If dispatch uses void, it resolves immediately.
     let resolveHandleBranch!: () => void;
@@ -1617,10 +1617,11 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
     const branchNames: Array<string | undefined> = [];
     const host = createFakeHost();
-    host.handleBranch = async (name) => {
+    const handleBranch = vi.fn(async (name?: string) => {
       await handleBranchGate;
       branchNames.push(name);
-    };
+    });
+    host.handleBranch = handleBranch;
 
     const commands = [
       stub({
@@ -1632,23 +1633,16 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
 
     const handlePromise = dispatcher.handle('/branch');
 
-    // Race: if dispatch did NOT await handleBranch, it already resolved and wins.
-    // If dispatch IS awaiting, the race times out (undefined sentinel wins).
-    const sentinel = Symbol('pending');
-    const raceResult = await Promise.race([
-      handlePromise.then(() => 'resolved'),
-      Promise.resolve()
-        .then(() => Promise.resolve())
-        .then(() => sentinel),
-    ]);
-
-    // dispatch must still be pending (blocked on the gate) — not yet resolved.
-    expect(raceResult).toBe(sentinel);
-
-    // Now unblock and let everything complete.
-    resolveHandleBranch();
+    try {
+      await vi.waitFor(() => expect(handleBranch).toHaveBeenCalledOnce());
+      dispatcher.cancel();
+      expect(host.processingFlags).toEqual([true]);
+    } finally {
+      resolveHandleBranch();
+    }
     const outcome = await handlePromise;
     expect(outcome).toEqual({ kind: 'handled' });
+    expect(host.processingFlags).toEqual([true, false]);
     expect(branchNames).toEqual(['wip']);
   });
 

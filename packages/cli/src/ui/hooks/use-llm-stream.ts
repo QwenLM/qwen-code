@@ -861,6 +861,7 @@ export const useLlmStream = (
     text: string,
     pasteExpansions?: ReadonlyMap<string, string>,
   ) => void,
+  isCommandCancellationBlocked?: () => boolean,
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
@@ -1752,6 +1753,8 @@ export const useLlmStream = (
     // notice, the loop stop or the composer restore.
     const quiet = quietCancelRef.current;
     quietCancelRef.current = false;
+    // Keep the submission lease until the command's state change settles.
+    if (isCommandCancellationBlocked?.()) return false;
     setWorkflowKeywordActive(false);
     if (turnCancelledRef.current) {
       for (const controller of detachedToolContinuationAbortControllersRef.current) {
@@ -1910,6 +1913,7 @@ export const useLlmStream = (
     return true;
   }, [
     streamingState,
+    isCommandCancellationBlocked,
     addItem,
     commitItemInOrder,
     commitPendingThought,

@@ -122,6 +122,10 @@ export const cdCommand: SlashCommand = {
       fs.realpath(targetPath).catch(() => targetPath),
     ]);
 
+    if (context.abortSignal?.aborted || !context.ui.isIdleRef.current) {
+      return;
+    }
+
     if (realTargetPath === realOldDir) {
       return {
         type: 'message' as const,
@@ -162,6 +166,10 @@ export const cdCommand: SlashCommand = {
           };
         }
       }
+    }
+
+    if (context.beginCommit?.() === false) {
+      return;
     }
 
     const warnings: string[] = [];

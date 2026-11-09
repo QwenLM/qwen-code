@@ -2339,6 +2339,7 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
+    isCommandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -2664,6 +2665,7 @@ export const AppContainer = (props: AppContainerProps) => {
     midTurnRestoreRef,
     goalQueueRef,
     returnPrompt,
+    isCommandCancellationBlocked,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -5036,6 +5038,15 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
+      if (
+        isCommandCancellationBlocked() &&
+        (keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
+          keyMatchers[Command.ESCAPE](key))
+      ) {
+        return;
+      }
+
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -5265,6 +5276,7 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       ideContextState,
       handleExit,
+      isCommandCancellationBlocked,
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,

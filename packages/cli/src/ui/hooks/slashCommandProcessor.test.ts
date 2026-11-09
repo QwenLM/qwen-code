@@ -240,6 +240,9 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenOutputStyleDialog = vi.fn();
   const mockOpenHelpDialog = vi.fn();
   const mockOpenRewindSelector = vi.fn();
+  const mockHandleBranch = vi
+    .fn<SlashCommandProcessorActions['handleBranch']>()
+    .mockResolvedValue(undefined);
   const mockSetQuittingMessages = vi.fn();
   const mockClearPendingState = vi.fn();
 
@@ -266,7 +269,7 @@ describe('useSlashCommandProcessor', () => {
     openHelpDialog: mockOpenHelpDialog,
     openResumeDialog: vi.fn(),
     handleResume: vi.fn(),
-    handleBranch: vi.fn().mockResolvedValue(undefined),
+    handleBranch: mockHandleBranch,
     openDeleteDialog: vi.fn(),
     openDiffDialog: vi.fn(),
     quit: mockSetQuittingMessages,
@@ -1373,6 +1376,68 @@ describe('useSlashCommandProcessor', () => {
       // After the promise resolves, it should be called with false
       expect(mockSetIsProcessing).toHaveBeenNthCalledWith(2, false);
       expect(mockSetIsProcessing).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps /branch processing after Esc until the session switch settles', async () => {
+      let finishSwap!: () => void;
+      mockHandleBranch.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          finishSwap = resolve;
+        }),
+      );
+      const processing = vi.fn();
+      const branch = createTestCommand({
+        name: 'branch',
+        action: () => ({ type: 'dialog', dialog: 'branch', name: 'wip' }),
+      });
+      const mcpAction = vi.fn();
+      const mcp = createTestCommand({ name: 'mcp', action: mcpAction });
+      const result = setupProcessorHook(
+        [branch, mcp],
+        [],
+        [],
+        processing,
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+      let dispatch:
+        | ReturnType<typeof result.current.handleSlashCommand>
+        | undefined;
+      try {
+        act(() => {
+          dispatch = result.current.handleSlashCommand(
+            '/branch',
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            () => true,
+          );
+        });
+        await waitFor(() =>
+          expect(mockHandleBranch).toHaveBeenCalledExactlyOnceWith('wip'),
+        );
+        await act(async () => {
+          await result.current.handleSlashCommand('/mcp desc');
+        });
+        expect(mcpAction).not.toHaveBeenCalled();
+        act(() => result.current.cancelSlashCommand());
+        expect(processing).not.toHaveBeenCalledWith(false);
+        expect(result.current.isCommandCancellationBlocked()).toBe(true);
+      } finally {
+        await act(async () => {
+          finishSwap();
+          await dispatch;
+        });
+      }
+      expect(processing).toHaveBeenLastCalledWith(false);
+      expect(result.current.isCommandCancellationBlocked()).toBe(false);
+      await act(async () => {
+        await result.current.handleSlashCommand('/mcp desc');
+      });
+      expect(mcpAction).toHaveBeenCalledOnce();
     });
 
     it.each(['/clear', '/reset', '/new'])(

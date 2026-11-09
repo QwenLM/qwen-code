@@ -434,6 +434,11 @@ export const useSlashCommandProcessor = (
     canCancel: boolean;
   } | null>(null);
 
+  const isCommandCancellationBlocked = useCallback(
+    () => activeCommandRef.current?.canCancel === false,
+    [],
+  );
+
   const cancelSlashCommand = useCallback(() => {
     cancelBtw();
     if (!activeCommandRef.current?.canCancel) {
@@ -912,6 +917,11 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
+      // Shortcuts can dispatch directly while the composer is disabled.
+      if (isCommandCancellationBlocked()) {
+        return { type: 'handled' };
+      }
+
       let {
         commandToExecute,
         args,
@@ -1160,6 +1170,17 @@ export const useSlashCommandProcessor = (
               },
               overwriteConfirmed,
               abortSignal: abortController.signal,
+              beginCommit() {
+                if (
+                  activeCommandRef.current !== activeCommand ||
+                  abortController.signal.aborted ||
+                  !fullCommandContext.ui.isIdleRef.current
+                ) {
+                  return false;
+                }
+                activeCommand.canCancel = false;
+                return true;
+              },
             };
 
             // If a one-time list is provided for a "Proceed" action, temporarily
@@ -1374,6 +1395,9 @@ export const useSlashCommandProcessor = (
                       }
                       return { type: 'handled' };
                     case 'branch':
+                      if (fullCommandContext.beginCommit?.() === false) {
+                        return { type: 'handled' };
+                      }
                       // Must be awaited: `/branch` swaps core + UI session
                       // state asynchronously, and a non-awaited call lets
                       // this dispatcher return `handled` while the swap is
@@ -1700,6 +1724,7 @@ export const useSlashCommandProcessor = (
       setIsProcessing,
       setConfirmationRequest,
       updateItem,
+      isCommandCancellationBlocked,
     ],
   );
 
@@ -1712,6 +1737,7 @@ export const useSlashCommandProcessor = (
     setBtwItem,
     cancelBtw,
     cancelSlashCommand,
+    isCommandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
