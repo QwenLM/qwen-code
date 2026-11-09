@@ -341,6 +341,7 @@ describe('btw view', () => {
     expect(view.current()).toMatchObject({
       question: 'first?',
       isPending: false,
+      ownRequestPending: true,
     });
     expect(handleBtwViewKey(key({ name: 'return', sequence: '\r' }))).toBe(
       false,
@@ -349,6 +350,7 @@ describe('btw view', () => {
 
     pending[1].resolve({ text: 'second answer' });
     await second.done;
+    expect(view.current()?.ownRequestPending).toBeUndefined();
     expect(handleBtwViewKey(key({ name: 'return', sequence: '\r' }))).toBe(
       true,
     );

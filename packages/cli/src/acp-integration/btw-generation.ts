@@ -45,7 +45,9 @@ export async function executeBtwGeneration(
         ? formatBtwToolCallNotice(result.toolName)
         : result.kind === 'empty'
           ? t('No response received.')
-          : null;
+          : result.kind === 'unavailable'
+            ? t('No conversation context available for /btw')
+            : null;
     if (notice !== null) {
       await emit({ type: 'delta', seq: seq++, text: notice });
     }

@@ -224,9 +224,12 @@ function render(view: BtwView): void {
 
 function project(view: BtwView): BtwProps | null {
   const exchanges = browsableExchanges(view);
+  const ownRequestPending =
+    view.session.getRequest(view.requestId)?.outcome === null;
   const common = {
     historyCount: exchanges.length,
     ...(view.shortcuts ? { browsing: true } : {}),
+    ...(ownRequestPending ? { ownRequestPending: true } : {}),
     ...(view.notice ? { notice: view.notice } : {}),
   };
 
@@ -265,7 +268,10 @@ function project(view: BtwView): BtwProps | null {
 
 function projectRequest(
   request: BtwRequest,
-  common: Pick<BtwProps, 'historyCount' | 'browsing' | 'notice'>,
+  common: Pick<
+    BtwProps,
+    'historyCount' | 'browsing' | 'ownRequestPending' | 'notice'
+  >,
 ): BtwProps | null {
   const base = { ...common, question: request.question };
   const outcome = request.outcome;

@@ -118,6 +118,24 @@ describe('BtwMessage', () => {
     expect(output).not.toContain('c copy');
   });
 
+  it('advertises cancel instead of dismiss while the own request runs', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'older question',
+          answer: 'older answer',
+          isPending: false,
+          ownRequestPending: true,
+        }}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Ctrl+C');
+    expect(output).toContain('Ctrl+D');
+    expect(output).not.toContain('dismiss');
+  });
+
   it('caps a long answer at maxAnswerRows and scrolls the rest into view', async () => {
     const ui = (
       <KeypressProvider kittyProtocolEnabled={false}>

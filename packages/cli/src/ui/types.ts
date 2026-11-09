@@ -671,6 +671,9 @@ export interface BtwProps {
   browsePosition?: number;
   /** True while ←/→ browse mode is active, which enables `c` and `x`. */
   browsing?: boolean;
+  /** The view's own request is still running, even while an earlier answer
+   *  is shown, so Space/Enter do not dismiss it. */
+  ownRequestPending?: boolean;
   /** Short-lived status line, e.g. after copying the answer. */
   notice?: { text: string; isError?: boolean };
 }

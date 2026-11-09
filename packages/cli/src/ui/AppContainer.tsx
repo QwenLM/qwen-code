@@ -4997,7 +4997,11 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // 3. Cancel in-flight btw side-question
-      if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+      if (
+        btwItem &&
+        (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+        !dialogsVisibleRef.current
+      ) {
         cancelBtw();
         return; // Btw cancelled, end processing
       }
@@ -5066,7 +5070,11 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       } else if (keyMatchers[Command.EXIT](key)) {
         // Cancel in-flight btw even when buffer has text (Ctrl+D)
-        if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+        if (
+          btwItem &&
+          (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+          !dialogsVisibleRef.current
+        ) {
           cancelBtw();
           return;
         }

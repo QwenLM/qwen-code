@@ -208,7 +208,7 @@ describe('executeBtwGeneration', () => {
     });
   });
 
-  it('completes with no answer when no conversation context exists', async () => {
+  it('streams the no-context notice when no conversation context exists', async () => {
     runner.mockResolvedValue(null);
     const emit = vi.fn().mockResolvedValue(undefined);
 
@@ -220,7 +220,14 @@ describe('executeBtwGeneration', () => {
         emit,
       ),
     ).toEqual({ model: 'main', modelSource: 'main' });
-    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit.mock.calls.map(([event]) => event)).toEqual([
+      { type: 'started', model: 'main', modelSource: 'main' },
+      {
+        type: 'delta',
+        seq: 0,
+        text: 'No conversation context available for /btw',
+      },
+    ]);
   });
 
   it('rethrows a model failure', async () => {

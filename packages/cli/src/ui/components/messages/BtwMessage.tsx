@@ -53,7 +53,11 @@ function footerHint(btw: BtwProps): string {
   if (btw.historyCount) hints.push(t('←/→ browse earlier answers'));
   if (btw.browsing && !btw.isError) hints.push(t('c copy'));
   if (btw.browsing && btw.historyCount) hints.push(t('x clear history'));
-  hints.push(t('Press Space, Enter, or Escape to dismiss'));
+  hints.push(
+    btw.ownRequestPending
+      ? t('Press Escape, Ctrl+C, or Ctrl+D to cancel')
+      : t('Press Space, Enter, or Escape to dismiss'),
+  );
   return hints.join(' · ');
 }
 
