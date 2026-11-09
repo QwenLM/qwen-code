@@ -504,8 +504,8 @@ final class AgentExecutionOperations {
                         + " context_revision = ?, gmt_modified = ?, version ="
                         + " version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ?",
-                operation.targetCwdRelative(), result, now, tenantId,
-                sessionId);
+                operation.targetCwdRelative(), result, now, tenantId, sessionId);
+        ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         jdbc.update(
                 "UPDATE ma_operation SET phase = 'COMPLETED', state = 'COMPLETED', delivery_state ="
                     + " 'CONFIRMED', receipt_id = ?, result_context_revision = ?, claim_owner ="

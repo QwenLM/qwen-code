@@ -408,8 +408,8 @@ public class ManagedNativeJournalSnapshots {
             case "input.accepted" -> List.of("contentRef", "admissionRef");
             case "activation.changed" -> List.of("installRef", "boundaryRef");
             case "model.attempt" -> List.of("routeRef", "inputCheckpointRef", "usageRef", "recoveryRef");
-            case "message.committed" -> List.of("contentRef");
-            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef");
+            case "message.committed" -> List.of("contentRef", "diagnosticsRef");
+            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef", "diagnosticsRef");
             case "hosted.batch.planned" -> List.of("planRef");
             case "hosted.cleanup" -> List.of("descriptorRef");
             case "action.changed" -> List.of("optionsRef", "decisionRef");
@@ -458,6 +458,11 @@ public class ManagedNativeJournalSnapshots {
                     && resource.schemaVersion() == next.path("schemaVersion").asInt(-1)
                     && resource.byteLength() == next.path("byteLength").asLong(-1)
                     && resource.digest().equals(next.path("digest").asText()), "managed_session_snapshot_corrupt");
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+                require(resource.schemaVersion() == 1, "managed_session_snapshot_corrupt");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(
+                        resource.kind(), decode(resource.bytes(), JsonNode.class));
+            }
             if (seen.add(id) && structured(resource.kind())) {
                 JsonNode body = decode(resource.bytes(), JsonNode.class);
                 if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {

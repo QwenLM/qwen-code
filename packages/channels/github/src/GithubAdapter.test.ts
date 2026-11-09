@@ -81,6 +81,24 @@ vi.mock('@octokit/rest', () => {
       },
     },
     paginate: vi.fn(),
+    // connect() registers a request hook to record the success-path budget.
+    // Store the wrapper on a stable property (not the mock call log, which
+    // initChannel's clearAllMocks wipes) so a test can feed it a response
+    // with rate-limit headers. The real-paginator test uses a real Octokit.
+    hook: {
+      wrap: vi.fn((_name: string, wrapper: unknown) => {
+        (
+          mockOctokit as {
+            __requestWrapper?: unknown;
+            __requestHookName?: string;
+          }
+        ).__requestWrapper = wrapper;
+        (mockOctokit as { __requestHookName?: string }).__requestHookName =
+          _name;
+      }),
+    },
+    __requestWrapper: undefined as unknown,
+    __requestHookName: undefined as unknown,
   };
   return {
     Octokit: vi.fn(() => mockOctokit),
@@ -133,6 +151,9 @@ const mockOctokit = octokitModule.__mockOctokit as {
     };
   };
   paginate: ReturnType<typeof vi.fn>;
+  hook: { wrap: ReturnType<typeof vi.fn> };
+  __requestWrapper: unknown;
+  __requestHookName: unknown;
 };
 
 function makeConfig(
@@ -17599,13 +17620,78 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockOctokit.rest.pulls.get.mockResolvedValue({ data: makePrMeta(meta) });
     }
 
+    /** A paginate map function, as @octokit/plugin-paginate-rest calls it. */
+    type ChecksMapFn = (
+      response: { data: unknown[]; headers?: { link?: string } },
+      done: () => void,
+    ) => unknown[];
+
     // The watch pass runs before the notification loop, so paginate is
     // routed by API params instead of a shared once-queue: checks fetches
     // must not consume the notifications slot.
+    //
+    // The checks route honours a map function: the adapter accumulates its
+    // observation inside one, so a routing stub that dropped the callback
+    // would leave every CI aggregate reading as 'none'. One page is served
+    // here; mockCheckPages drives the multi-page contract.
     function installWatchPaginateRouting(): void {
       mockOctokit.paginate.mockImplementation(
-        async (_fn: unknown, params: Record<string, unknown> = {}) => {
-          if ('ref' in params) return mockOctokit.rest.checks.listForRef();
+        async (
+          _fn: unknown,
+          params: Record<string, unknown> = {},
+          mapFn?: ChecksMapFn,
+        ) => {
+          if ('ref' in params) {
+            const runs = (await mockOctokit.rest.checks.listForRef()) ?? [];
+            if (mapFn) {
+              mapFn({ data: runs }, () => {});
+              return [];
+            }
+            return runs;
+          }
+          if ('issue_number' in params)
+            return mockOctokit.rest.issues.listComments();
+          return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+        },
+      );
+    }
+
+    /**
+     * Serve check runs as real pages: one listForRef request per page, and
+     * `done()` stops before the next one. The single-page routing cannot
+     * observe an early exit, so request-count assertions need this.
+     */
+    function mockCheckPages(
+      pages: Array<
+        Array<{ status: string; conclusion: string | null; name?: string }>
+      >,
+    ): void {
+      mockOctokit.paginate.mockImplementation(
+        async (
+          _fn: unknown,
+          params: Record<string, unknown> = {},
+          mapFn?: ChecksMapFn,
+        ) => {
+          if ('ref' in params) {
+            for (const [index, page] of pages.entries()) {
+              // Called for its request count only: the page body comes from
+              // the fixture, so assertions count pages actually read.
+              await mockOctokit.rest.checks.listForRef();
+              let stopped = false;
+              // The real iterator follows this header, so every page but the
+              // last carries it — that is how the adapter tells "stopped with
+              // pages left" from "read everything".
+              const headers =
+                index < pages.length - 1
+                  ? { link: '<https://api.github.com/next>; rel="next"' }
+                  : {};
+              mapFn?.({ data: page, headers }, () => {
+                stopped = true;
+              });
+              if (stopped) break;
+            }
+            return [];
+          }
           if ('issue_number' in params)
             return mockOctokit.rest.issues.listComments();
           return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
@@ -18053,6 +18139,1023 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
         'Failed checks: slow-job, manual-gate',
       );
+    });
+
+    // A busy head carries hundreds of check runs, so one CI observation used
+    // to cost one request per page plus a combined-status request. A failure
+    // decides the aggregate on its own: neither a later page nor a commit
+    // status can overturn it.
+    describe('CI aggregate request cost', () => {
+      /** Advance updated_at so the next poll re-observes a settled head. */
+      async function baselineThenRecheck(): Promise<void> {
+        await initChannel(watchConfig, { boundSessions });
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+      }
+
+      /**
+       * Every other case stubs `paginate`, so none can show that the real
+       * plugin issues fewer requests. This drives the production reducer
+       * through a REAL Octokit and the REAL pagination plugin, replacing
+       * only the HTTP transport, and counts what actually goes on the wire.
+       */
+      async function observeWithRealPaginator(
+        pages: Array<Array<{ name: string; conclusion: string }>>,
+      ) {
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        const urls: string[] = [];
+        const client = new Octokit({
+          auth: 'test-token',
+          request: {
+            fetch: async (url: string) => {
+              urls.push(String(url));
+              const parsed = new URL(String(url));
+              const json = (body: unknown, headers: Record<string, string>) =>
+                new Response(JSON.stringify(body), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json', ...headers },
+                });
+              if (parsed.pathname.endsWith('/status')) {
+                return json({ state: 'pending', total_count: 0 }, {});
+              }
+              const page = Number(parsed.searchParams.get('page') ?? '1');
+              const link: Record<string, string> = {};
+              if (page < pages.length) {
+                const next = new URL(parsed);
+                next.searchParams.set('page', String(page + 1));
+                link['link'] = `<${next}>; rel="next"`;
+              }
+              return json(
+                {
+                  total_count: pages.length,
+                  check_runs: pages[page - 1]!.map((run) => ({
+                    ...run,
+                    status: 'completed',
+                  })),
+                },
+                link,
+              );
+            },
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        (channel as unknown as { octokit: unknown }).octokit = client;
+        const observation = await (
+          channel as unknown as {
+            fetchCiAggregate: (
+              owner: string,
+              repo: string,
+              sha: string,
+            ) => Promise<{
+              aggregate: string;
+              failedChecks: string[];
+              namesIncomplete: boolean;
+            }>;
+          }
+        ).fetchCiAggregate('owner', 'repo', 'sha-1');
+        return { observation, urls };
+      }
+
+      it('issues one real request for a red multi-page head', async () => {
+        const { observation, urls } = await observeWithRealPaginator([
+          [{ name: 'lint', conclusion: 'failure' }],
+          [{ name: 'build', conclusion: 'failure' }],
+          [{ name: 'test', conclusion: 'success' }],
+        ]);
+
+        // Before the short-circuit this same fixture cost 3 check-list pages
+        // plus 1 combined status. Counted on the transport, not on a stub.
+        expect(urls).toHaveLength(1);
+        expect(urls[0]).toContain('/check-runs');
+        expect(observation.aggregate).toBe('failure');
+        expect(observation.failedChecks).toEqual(['lint']);
+        expect(observation.namesIncomplete).toBe(true);
+      });
+
+      it('reads every real page and the status while nothing has failed', async () => {
+        const { observation, urls } = await observeWithRealPaginator([
+          [{ name: 'lint', conclusion: 'success' }],
+          [{ name: 'build', conclusion: 'success' }],
+        ]);
+
+        expect(urls).toHaveLength(3);
+        expect(urls.filter((url) => url.includes('/check-runs'))).toHaveLength(
+          2,
+        );
+        expect(urls.filter((url) => url.endsWith('/status'))).toHaveLength(1);
+        expect(observation.aggregate).toBe('success');
+        expect(observation.namesIncomplete).toBe(false);
+      });
+
+      it('stops paging check runs once a page reports a failure', async () => {
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'failure', name: 'build' }],
+          [{ status: 'completed', conclusion: 'failure', name: 'later-page' }],
+          [{ status: 'completed', conclusion: 'success' }],
+        ]);
+        await pollOnce();
+
+        // One page for the baseline, one for the failing head: pages 2 and 3
+        // must never be requested.
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Failed checks: build');
+        expect(prompt).not.toContain('later-page');
+        // Pages went unread, so the list must not read as complete: this
+        // fires once per head, so the marker is the only notice that later
+        // pages went unread.
+        expect(prompt).toContain('list may be incomplete');
+      });
+
+      it('does not mark the list incomplete when the failing page is the last', async () => {
+        // Stopping on the last page read everything, so a marker here would
+        // falsely claim that pages went unread.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'success' }],
+          [{ status: 'completed', conclusion: 'failure', name: 'last-page' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(3);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Failed checks: last-page');
+        expect(prompt).not.toContain('list may be incomplete');
+      });
+
+      it('keeps paging until it finds a failure on a later page', async () => {
+        // The passing control for the early exit, and the risk it carries: a
+        // head whose first pages are clean must still be read to the page
+        // that fails, or the red head is certified green.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'success' }],
+          [{ status: 'queued', conclusion: null }],
+          [{ status: 'completed', conclusion: 'failure', name: 'late-job' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(4);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Failed checks: late-job',
+        );
+      });
+
+      it('reports every failure name on the page that decided the aggregate', async () => {
+        // The exit is between pages, not inside one: breaking out of the
+        // per-run loop would drop the second name from the same page.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+            { status: 'completed', conclusion: 'timed_out', name: 'slow-job' },
+          ],
+          [{ status: 'completed', conclusion: 'failure', name: 'later-page' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Failed checks: build, slow-job',
+        );
+      });
+
+      it('skips the combined status once a check run has failed', async () => {
+        await baselineThenRecheck();
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await pollOnce();
+
+        // Only the baseline poll consulted it; a decided 'failure' cannot be
+        // changed by a commit status.
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(1);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+      });
+
+      it('still fires ci_failure when the skipped statuses endpoint would fail', async () => {
+        // The behavioural half of the skip, which a resolving mock cannot
+        // show: 403 is fail-fast for the watch, so without the guard the
+        // whole observation aborts, ciResult stays undefined, the baseline
+        // 'success' stands and the red head is silent until the next
+        // re-check interval.
+        await baselineThenRecheck();
+        mockOctokit.rest.repos.getCombinedStatusForRef.mockRejectedValue(
+          Object.assign(new Error('Resource not accessible by integration'), {
+            status: 403,
+          }),
+        );
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'CI failed on head sha-1',
+        );
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        // Baseline only: the failing poll never reached the endpoint, so the
+        // 403 could not be retried either.
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('still reads the combined status when no check run failed', async () => {
+        // The control for the skip: legacy commit statuses are the only CI
+        // signal on a status-only head, so an undecided aggregate must ask.
+        await baselineThenRecheck();
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not carry an aborted attempt into the retried observation', async () => {
+        // githubApi retries the whole pagination. A page that dies after an
+        // earlier page read 'pending' must not leave that reading behind to
+        // decide the retry, which observes a fully settled success.
+        await initChannel(watchConfig, { boundSessions });
+        (
+          channel as unknown as {
+            abortableSleep: (ms: number) => Promise<void>;
+          }
+        ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        // The throw must land INSIDE the first pagination, after a page was
+        // already mapped: a rejection on a later paginate call would be a
+        // fresh observation, not a retry of a half-read one.
+        let attempt = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (
+            _fn: unknown,
+            params: Record<string, unknown> = {},
+            mapFn?: ChecksMapFn,
+          ) => {
+            if ('ref' in params) {
+              attempt += 1;
+              await mockOctokit.rest.checks.listForRef();
+              if (attempt === 1) {
+                mapFn?.(
+                  { data: [{ status: 'queued', conclusion: null }] },
+                  () => {},
+                );
+                throw Object.assign(new Error('Server Error'), { status: 500 });
+              }
+              mapFn?.(
+                { data: [{ status: 'completed', conclusion: 'success' }] },
+                () => {},
+              );
+              return [];
+            }
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // Without a second attempt the assertion below would be vacuous.
+        expect(attempt).toBe(2);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'success',
+        );
+      });
+    });
+
+    // The watch runs before the notification lane and is best-effort. When
+    // the last known REST budget is at or below the reserve, the pass yields
+    // so a human mention keeps the budget. The budget is recorded from a
+    // successful response's headers by the request hook connect() registers.
+    describe('watch budget awareness', () => {
+      function degradedRows(reason?: string): Array<Record<string, unknown>> {
+        return readChannelEvents().filter(
+          (event) =>
+            event['type'] === 'poll' &&
+            event['outcome'] === 'degraded' &&
+            (reason === undefined || event['reason'] === reason),
+        );
+      }
+
+      /**
+       * Feed the request hook a successful response carrying rate-limit
+       * headers, exactly as a real GitHub response would. connect() (run by
+       * initChannel) stored the wrapper on __requestWrapper, which survives
+       * initChannel's clearAllMocks.
+       */
+      async function feedBudget(
+        remaining: number | string | undefined,
+        resetEpochSeconds?: number,
+      ): Promise<void> {
+        const wrap = mockOctokit.__requestWrapper as
+          | ((
+              request: (opts: unknown) => Promise<unknown>,
+              opts: unknown,
+            ) => Promise<unknown>)
+          | undefined;
+        if (!wrap) throw new Error('request hook was not registered');
+        const headers: Record<string, string> = {};
+        if (remaining !== undefined) {
+          headers['x-ratelimit-remaining'] = String(remaining);
+        }
+        if (resetEpochSeconds !== undefined) {
+          headers['x-ratelimit-reset'] = String(resetEpochSeconds);
+        }
+        await wrap(async () => ({ headers }), {});
+      }
+
+      /** A watched PR whose CI would fire if the pass ran. */
+      async function armRedHead(): Promise<void> {
+        await initChannel(watchConfig, { boundSessions });
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+      }
+
+      it('records the remaining budget from a successful response', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // The hook must be registered on the 'request' name: a typo would
+        // build a registry nothing dispatches to, silently disabling the gate.
+        expect(mockOctokit.__requestHookName).toBe('request');
+        await feedBudget(4321, Math.floor(Date.now() / 1000) + 3600);
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(4321);
+      });
+
+      it('skips the watch when remaining equals the reserve (boundary)', async () => {
+        // `<=` not `<`: a real GitHub count steps down by one, so landing
+        // exactly on the reserve is common and must still yield.
+        await armRedHead();
+        await feedBudget(200, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('skips the watch pass when budget is at or below the reserve', async () => {
+        await armRedHead();
+        // Below the default reserve of 200, window not yet reset.
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const checksBefore =
+          mockOctokit.rest.checks.listForRef.mock.calls.length;
+        await pollOnce();
+
+        // The red head would fire if the pass ran; it must not.
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(mockOctokit.rest.checks.listForRef.mock.calls.length).toBe(
+          checksBefore,
+        );
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'success',
+        );
+        const low = degradedRows('watch_budget_low');
+        expect(low).toHaveLength(1);
+        expect(low[0]!['detail']).toEqual({ remaining: 150, reserve: 200 });
+      });
+
+      it('runs the watch pass when budget is above the reserve', async () => {
+        // The passing control: a healthy budget must not skip detection.
+        await armRedHead();
+        await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+        // A healthy round must not journal a recovery edge.
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(0);
+      });
+
+      it('does not gate before any budget reading exists', async () => {
+        // No response has carried the header yet: the watch runs normally.
+        await armRedHead();
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+      });
+
+      it('does not gate on a stale reading whose window has reset', async () => {
+        // A low count from a window that already reset must not starve the
+        // watch: the reset time has passed, so the reading is stale.
+        await armRedHead();
+        await feedBudget(50, Math.floor(Date.now() / 1000) - 60);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+      });
+
+      it('journals the low-budget edge once, not every poll', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          // Each poll consumes its notification queue; keep the lane fed so
+          // the repeat polls exercise the budget edge, not an empty queue.
+          mockNotificationsOnce([]);
+          await pollOnce();
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        // Three low-budget polls, one edge row.
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('journals recovery when the budget climbs back above the reserve', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+
+        // Budget recovers: the next poll runs the watch and journals recovery.
+        mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+        await pollOnce();
+
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+
+        // A second low episode must journal again: this pins the flag reset
+        // on recovery (without it, every later starvation stays invisible).
+        mockNotificationsOnce([]);
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr2 = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr2.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(2);
+      });
+
+      it('honours a configured reserve of 0 as disabling the gate', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 0 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // An exhausted budget (remaining 0) must still not skip when the
+        // reserve is 0: `0 <= 0` would otherwise gate the opted-out watch.
+        await feedBudget(0, Math.floor(Date.now() / 1000) + 3600);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+      });
+
+      it('closes the low-budget episode when the watch loses eligibility', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          // Binding refresh starts failing, so the watch block is skipped
+          // wholesale; the budget recovers during that window.
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+      });
+
+      it('journals a fresh skip after an ineligible window, not a suppressed repeat', async () => {
+        // The latch must not survive the watch losing eligibility: otherwise
+        // the second genuine starvation is silently unjournalled and the
+        // timeline's last budget word stays on an episode that already ended.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode 1: skipped for low budget
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          // Still low while ineligible: no false recovery claim.
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+          expect(degradedRows('watch_budget_recovered')).toHaveLength(0);
+
+          // Watch returns, budget still low: a NEW skip must be journalled.
+          boundSessions.listPrBindings.mockResolvedValue({
+            bindings: [makeBinding()],
+            partial: false,
+          });
+          mockPull({ updated_at: '2026-07-02T12:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // episode 2
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(2);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('uses a configured reserve other than the default', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 1000 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // 500 is above the default 200 but below the configured 1000.
+        await feedBudget(500, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const low = degradedRows('watch_budget_low');
+        expect(low).toHaveLength(1);
+        expect(low[0]!['detail']).toEqual({ remaining: 500, reserve: 1000 });
+      });
+
+      it('keeps the last known budget when a response omits the header', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        // A proxy stripped the header: the real reading must survive.
+        await feedBudget(undefined);
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(150);
+      });
+
+      it('the adapter-registered hook records a real response budget', async () => {
+        // The other cases feed the captured wrapper a hand-built response.
+        // This drives the SAME wrapper connect() registered with a real
+        // Octokit request, so the header parsing is exercised against a real
+        // Response (lowercased header keys, string values) rather than a
+        // fixture shaped to match the parser.
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        const client = new Octokit({
+          auth: 'test-token',
+          request: {
+            fetch: async () =>
+              new Response(JSON.stringify({ total_count: 0, check_runs: [] }), {
+                status: 200,
+                headers: {
+                  'content-type': 'application/json',
+                  'x-ratelimit-remaining': '321',
+                  'x-ratelimit-reset': String(
+                    Math.floor(Date.now() / 1000) + 3600,
+                  ),
+                },
+              }),
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        // The wrapper the adapter installed in connect(), applied to a real
+        // request function. This is the adapter's own code path, not a
+        // re-implementation.
+        const wrap = mockOctokit.__requestWrapper as (
+          request: (
+            opts: unknown,
+          ) => Promise<{ headers: unknown; data: unknown }>,
+          opts: unknown,
+        ) => Promise<{ headers: unknown; data: unknown }>;
+        const res = await wrap(
+          (opts) =>
+            client.request(opts as Parameters<typeof client.request>[0]),
+          { method: 'GET', url: '/repos/o/r/commits/s/check-runs' },
+        );
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(321);
+        // The hook must return the response unchanged: dropping it would
+        // resolve every REST call to undefined and break connect().
+        expect(res.data).toEqual({ total_count: 0, check_runs: [] });
+      });
+
+      it('clears a stale reset when a response omits the reset header', async () => {
+        // A proxy strips only x-ratelimit-reset. The old (expired) reset must
+        // not survive to make the gate treat a fresh low count as stale.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) - 60);
+        await feedBudget(150); // remaining kept, reset header absent
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('clamps an over-ceiling reserve to the hard maximum', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 100000 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // Clamped to 5000: remaining 5000 is at the reserve (skip), 5001 above.
+        await feedBudget(5000, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')[0]!['detail']).toEqual({
+          remaining: 5000,
+          reserve: 5000,
+        });
+      });
+
+      it('rounds a fractional reserve up so it is never smaller than requested', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 200.5 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // Ceil(200.5) = 201, so remaining 201 is at the reserve and skips.
+        await feedBudget(201, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')[0]!['detail']).toEqual({
+          remaining: 201,
+          reserve: 201,
+        });
+      });
+
+      it('falls back to the default reserve for an invalid configured value', async () => {
+        // validateBoundSessionConfig now rejects a non-numeric reserve at the
+        // boundary, so the getter's fallback is only reachable from a settings
+        // file written before that rule (or hand-edited). Inject it after
+        // connect to exercise that legacy path rather than the rejected one.
+        await initChannel(watchConfig, { boundSessions });
+        (channel as unknown as { config: Record<string, unknown> }).config[
+          'prWatchBudgetReserve'
+        ] = 'abc';
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // Invalid -> default 200: remaining 150 skips.
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')[0]!['detail']).toEqual({
+          remaining: 150,
+          reserve: 200,
+        });
+      });
+
+      it('still delivers a mention in the very poll whose watch was skipped', async () => {
+        // The feature's whole promise. Every other case queues an EMPTY
+        // notification list, so turning the skip into an early `return`
+        // would starve mentions while they all stayed green.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        // armRedHead leaves an EMPTY notification queued for its next poll;
+        // drop it, or the mention queues behind it and is never consumed.
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockReset();
+        mockNotificationsOnce([
+          makeNotification({
+            reason: 'mention',
+            subject: {
+              title: 'Some issue',
+              url: 'https://api.github.com/repos/owner/repo/issues/99',
+              type: 'Issue',
+            },
+          }),
+        ]);
+        mockOctokit.rest.issues.listComments.mockResolvedValueOnce([]);
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: {
+            title: 'Some issue',
+            body: '@test-bot please look',
+            state: 'open',
+            user: { login: 'alice' },
+          },
+        });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // Watch skipped...
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+        // ...but the notification lane still ran, claimed the mention as a
+        // task and started it — in this same poll.
+        const mentionTasks = readChannelEvents().filter(
+          (event) => event['type'] === 'task' && event['thread'] === 'issue:99',
+        );
+        expect(
+          mentionTasks.some((event) => event['outcome'] === 'accepted'),
+        ).toBe(true);
+        expect(
+          mentionTasks.some((event) => event['outcome'] === 'running'),
+        ).toBe(true);
+      });
+
+      it('yields mid-pass once the budget reaches the reserve', async () => {
+        // R1-5: the poll-boundary gate alone lets a pass entered just above
+        // the reserve spend it all before the notification lane runs.
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        // Enter one above the reserve; the first PR's own request drops the
+        // reading to the reserve, so the second must not be fetched.
+        await feedBudget(201, Math.floor(Date.now() / 1000) + 3600);
+        mockOctokit.rest.pulls.get.mockImplementation(async () => {
+          await feedBudget(200, Math.floor(Date.now() / 1000) + 3600);
+          return { data: makePrMeta() };
+        });
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('journals recovery when the budget recovers while the watch stays ineligible', async () => {
+        // R1-6: the skip latch is released during the ineligible window, so
+        // gating recovery on that latch alone loses the episode's closing row.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode opens
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // still low, ineligible: latch released silently
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // budget recovers, watch STILL ineligible
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+      });
+
+      it('closes the episode when the window resets, with no payload on the recovery row', async () => {
+        // R1-4: the realistic exhaustion end is the window rolling over, not
+        // a climbing count; and the protocol says the recovery row carries
+        // neither detail nor error.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          // Same low count, but its window has already reset.
+          await feedBudget(150, Math.floor(Date.now() / 1000) - 60);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        const recovered = degradedRows('watch_budget_recovered');
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]).not.toHaveProperty('detail');
+        expect(recovered[0]).not.toHaveProperty('error');
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps the recovery row payload-free on the eligibility path too', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        const recovered = degradedRows('watch_budget_recovered');
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]).not.toHaveProperty('detail');
+        expect(recovered[0]).not.toHaveProperty('error');
+      });
+
+      it('records the budget on every page of a real paginate', async () => {
+        // R1-1: the hook's stated rationale is per-page coverage, so a single
+        // request cannot pin it. Register the ADAPTER's own captured wrapper
+        // on a real client and paginate for real: if a future @octokit change
+        // stops routing page requests through 'request', the last page's
+        // count never lands and this goes red.
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        const client = new Octokit({
+          auth: 'test-token',
+          request: {
+            fetch: async (url: string) => {
+              const parsed = new URL(String(url));
+              const page = Number(parsed.searchParams.get('page') ?? '1');
+              const headers: Record<string, string> = {
+                'content-type': 'application/json',
+                // Distinct per page: the LAST one must be what survives.
+                'x-ratelimit-remaining': page === 1 ? '4000' : '321',
+                'x-ratelimit-reset': String(
+                  Math.floor(Date.now() / 1000) + 3600,
+                ),
+              };
+              if (page < 2) {
+                const next = new URL(parsed);
+                next.searchParams.set('page', '2');
+                headers['link'] = `<${next}>; rel="next"`;
+              }
+              return new Response(
+                JSON.stringify({
+                  total_count: 2,
+                  check_runs: [
+                    {
+                      name: `job-${page}`,
+                      status: 'completed',
+                      conclusion: 'success',
+                    },
+                  ],
+                }),
+                { status: 200, headers },
+              );
+            },
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        const wrap = mockOctokit.__requestWrapper as Parameters<
+          typeof client.hook.wrap
+        >[1];
+        client.hook.wrap('request', wrap);
+        const rows = await client.paginate(
+          'GET /repos/{owner}/{repo}/commits/{ref}/check-runs',
+          { owner: 'o', repo: 'r', ref: 's', per_page: 1 },
+        );
+        // Two pages really were fetched, and the last page's reading won.
+        expect(rows).toHaveLength(2);
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(321);
+      });
     });
 
     it('keeps watching known PRs and the baseline when the snapshot is partial', async () => {

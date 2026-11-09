@@ -350,9 +350,15 @@ class WorkspaceCsiSessionGuardTest {
     @Test
     void privateWriterCannotBorrowAnUnboundConnection() {
         ready();
-        assertThatThrownBy(this::acquire).isInstanceOf(IllegalStateException.class)
+        var grant = acquire();
+        assertThat(grant.writerGeneration()).isEqualTo(1);
+        assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+        var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head");
+        assertThatThrownBy(() -> journal.renewWriter("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", grant.writerGeneration(), 60_000L)))
+                .isInstanceOf(IllegalStateException.class)
                 .hasMessage("CSI mutation requires its original transaction connection");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head", Integer.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head")).isEqualTo(before);
     }
 
     @Test
