@@ -386,16 +386,19 @@ function isDestructiveCommandUnchecked(
       reason:
         'This command mentions "git commit --amend" in text the guard cannot prove inert. Routed to manual approval instead of blocking (issue #13570).',
     };
-  } else if (recognition === 'invocation') {
+  } else if (
+    recognition === 'invocation' ||
+    recognition === 'unprovable-invocation'
+  ) {
     const outcome = amendExemptionOutcome(cwd, command);
-    if (outcome === 'foreign') {
+    if (outcome === 'foreign' && recognition === 'invocation') {
       return {
         blocked: true,
         reason:
           'Blocked "git commit --amend": the target commit was not made by the agent in this session. To proceed, use manual approval.',
       };
     }
-    if (outcome === 'unattributable') {
+    if (outcome !== 'exempt') {
       amendAsk = {
         blocked: false,
         ask: true,

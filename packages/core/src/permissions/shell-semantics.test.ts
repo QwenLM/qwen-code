@@ -1039,15 +1039,22 @@ describe('commandContainsGitAmend xargs value-flag attribution', () => {
     expect(commandContainsGitAmend(command)).toBe(true);
   });
 
-  // `-e`/`-l` keep an OPTIONAL attached value, so a detached word there cannot
-  // be told from the program: that position stays fail-closed on purpose.
-  it.each([
-    'ls | xargs -e END rm',
-    'ls | xargs -l rm',
-    'ls | xargs -e END git commit --amend',
-  ])('still fails closed on a detached optional value: %s', (command) => {
-    expect(commandContainsGitAmend(command)).toBe(true);
-  });
+  // `-e`/`-l` keep an OPTIONAL attached value only: a detached word is the
+  // program, so an ordinary command there must not fail closed (#16075
+  // review, R18-1).
+  it.each(['ls | xargs -e END rm', 'ls | xargs -l rm'])(
+    'reads the detached word as the program: %s',
+    (command) => {
+      expect(commandContainsGitAmend(command)).toBe(false);
+    },
+  );
+
+  it.each(['ls | xargs -e END git commit --amend'])(
+    'still sees a real amend behind the detached program: %s',
+    (command) => {
+      expect(commandContainsGitAmend(command)).toBe(true);
+    },
+  );
 });
 
 // R1-1 (second round): constructs whose argv or data flow the hand-rolled

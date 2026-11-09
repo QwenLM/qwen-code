@@ -317,7 +317,6 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // consumer is not always the first word of the line.
     'git commit \\\n--amend --no-edit',
     "bash -c'git commit --amend --no-edit'",
-    'bash -c',
     "echo hi; bash <<'EOF'\ngit commit --amend --no-edit\nEOF",
     // `$'…'` is ANSI-C quoting: still one word, so the payload is the same
     // invocation and must not read as an unmodelled expansion.
@@ -349,7 +348,9 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
 
-  it('fails closed when eval nesting exceeds the unwrap depth cap', () => {
+  // R18-1: fail-closed without a positive amend goes to the approval prompt,
+  // not a hard block — the payload here is unprovable, not a proven amend.
+  it('asks when eval nesting exceeds the unwrap depth cap', () => {
     // The cap is 8; a benign chain deeper than that is still refused rather
     // than allowed, so pathological nesting cannot hide an amend. The payload
     // must be benign — a real amend reaches depth 9 and returns true on its
@@ -358,7 +359,68 @@ describe('isDestructiveCommand — git commit --amend', () => {
       (inner) => `eval '${inner}'`,
       'echo hi',
     );
-    expectBlocked(deep, 'amend the commit', 'amend');
+    expectAsk(deep, 'amend the commit');
+  });
+
+  // R18-1: an empty `-c` payload proves nothing; ask instead of hard-blocking.
+  it('asks on an execution wrapper with no payload', () => {
+    expectAsk('bash -c', 'amend the commit');
+  });
+
+  // R16-1: seven spellings that answered 'none' while bash amends. Each must
+  // now reach a human — a hard block for a positively identified amend, an
+  // approval prompt for an unprovable one — never a silent allow.
+  it.each([
+    '(( 1 << 2 )) / X=git; $X commit --amend',
+    "script -t -c 'git commit --am' /dev/null",
+    "X=$'git\\ncommit --amend'; $X",
+    "X=ls; eval 'X=git'; $X commit --amend",
+    "echo $$'q\\'$(git commit --am''end)",
+  ])('blocks a positively identified R16-1 amend: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  it.each([
+    'sudo -R /chroot git${IFS}commit${IFS}--amend',
+    "printf '%1s%s' g 'it commit --amend' | bash",
+  ])('asks on an unprovable R16-1 amend: %s', (command) => {
+    expectAsk(command, 'amend the commit');
+  });
+
+  // R18-1: ordinary commands the fail-closed recognizer used to report as
+  // positively identified amends must run without a block or a prompt.
+  it('allows the ordinary commands R18-1 hard-denied', () => {
+    expectAllowed(
+      [
+        'for f in *.ts; do echo "$f"; done',
+        'for i in 1 2 3; do echo $i; done',
+        'ls | xargs -l rm',
+        'ls | xargs -e END rm',
+        'git -c user.name=$USER commit -m msg',
+        'git -c core.pager=$PAGER log --oneline',
+      ],
+      'amend the commit',
+    );
+  });
+
+  // R18-1 must not degrade the provable cases: a resolvable alias amend and
+  // a real amend behind a detached xargs program stay hard-blocked.
+  it('keeps the provable amends blocked after R18-1', () => {
+    expectBlocked(
+      "git -c ALIAS.x='commit --amend' x",
+      'amend the commit',
+      'amend',
+    );
+    expectBlocked(
+      'GIT_CONFIG_PARAMETERS="\'alias.x=commit --amend\'" git x',
+      'amend the commit',
+      'amend',
+    );
+    expectBlocked(
+      'ls | xargs -e END git commit --amend',
+      'amend the commit',
+      'amend',
+    );
   });
 
   // `sh -c -- '…'` puts an option terminator before the program; reading `--`
@@ -652,9 +714,6 @@ describe('isDestructiveCommand — R10 recognizer seams', () => {
     'git commit$1 --amend',
     'git commit$@ --amend',
     'git commit$* --amend',
-    // A global flag's VALUE decides what the flag does: `-c $X` can expand
-    // to an alias definition that turns `y` into `commit --amend`.
-    'git -c $X y --no-edit',
     // A trailing `\c` stays literal; it must not swallow the closing quote
     // and the rest of the line (#16075 review, R8-2 / R10-1). `\cZ` still
     // decodes as a control escape.
@@ -669,6 +728,13 @@ describe('isDestructiveCommand — R10 recognizer seams', () => {
     "git -c ALIAS.x='commit --amend' x",
   ])('blocks a real amend through a measured seam: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  // A global flag's VALUE decides what the flag does: `-c $X` can expand to
+  // an alias definition — but without a resolvable amend it is unprovable,
+  // so R18-1 routes it to approval instead of a hard block.
+  it('asks on an unresolvable git -c value', () => {
+    expectAsk('git -c $X y --no-edit', 'amend the commit');
   });
 
   it.each([
