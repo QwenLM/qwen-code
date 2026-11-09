@@ -1651,6 +1651,8 @@ public class SurfaceAdmissionAcceptanceTest {
                             + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_RESOURCES, SESSION_AGENT_TRACE ->
+                "{\"sessionId\":\"" + session + "\"}";
             case USER_MESSAGE_QUERY -> "{\"sessionId\":\"" + session + "\"}";
             case USER_MESSAGE_COMMAND -> publicSurface
                     ? "{\"action\":\"resume\"}"

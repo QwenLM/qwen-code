@@ -34,6 +34,7 @@ public class ManagedDiagnosticsController {
     @PostMapping("/api/agent/web-shell/v1/session-resources/query")
     public ResponseEntity<JsonNode> queryResources(TenantContext tenant,
             @Valid @RequestBody WebShellSessionRequest request) {
+        tenant.requireActorId();
         return resources(tenant, request.sessionId());
     }
 
@@ -47,6 +48,7 @@ public class ManagedDiagnosticsController {
     @PostMapping("/api/agent/web-shell/v1/session-agent-trace/query")
     public ResponseEntity<JsonNode> queryTraces(TenantContext tenant,
             @Valid @RequestBody WebShellDiagnosticTraceRequest request) {
+        tenant.requireActorId();
         return traces(tenant, request.sessionId(), request.cursor(), request.limit() == null ? 20 : request.limit());
     }
 
