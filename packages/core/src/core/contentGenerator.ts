@@ -213,6 +213,12 @@ export type ContentGeneratorConfig = {
   // text-only tool results as strings while leaving the default spec-compliant
   // content-part shape unchanged.
   toolResultContentFormat?: 'parts' | 'string';
+  // When true, a tool that declares no arguments is still sent with a
+  // `parameters` object, for servers that type
+  // `tools[].function.parameters` as a required field and reject the omission.
+  // It stays an explicit per-route opt-in:
+  // docs/design/2026-09-17-parameterless-tool-parameters.md.
+  toolParametersMandatory?: boolean;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic
