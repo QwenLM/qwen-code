@@ -6831,9 +6831,7 @@ describe('Session', () => {
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
       // The skill review gate skips retries too: scheduling one here would
       // dispatch a background agent for a turn the user did not author.
-      expect(
-        mockLlmClient.runManagedAutoSkillReview,
-      ).not.toHaveBeenCalled();
+      expect(mockLlmClient.runManagedAutoSkillReview).not.toHaveBeenCalled();
       // A retry skips managed auto-memory, but the turn still ends `end_turn`,
       // so the follow-up suggestion fires and reads the process-global
       // cache-safe slot. The turn boundary has to refresh it anyway, or the

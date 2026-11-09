@@ -11285,10 +11285,9 @@ Other open files:
       });
 
       it('should not review when auto-skill is disabled', () => {
-        vi.spyOn(
-          client['config'],
-          'getAutoSkillEnabled',
-        ).mockReturnValue(false);
+        vi.spyOn(client['config'], 'getAutoSkillEnabled').mockReturnValue(
+          false,
+        );
 
         client.runManagedAutoSkillReview();
 
