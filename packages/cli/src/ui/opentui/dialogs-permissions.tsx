@@ -48,6 +48,7 @@ import {
   useDialogSelect,
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { permissionRuleLabel } from '../utils/permission-rule-label.js';
 
 import {
   clipToWidth,
@@ -198,6 +199,12 @@ export interface PermissionRuleEntry {
   toolName: string;
   type: 'allow' | 'ask' | 'deny';
   scope: string;
+  /**
+   * The rule opens a specifier and does not end at its closing `)`, so it
+   * matches nothing. Balance is not the test: `Bash(rm -rf /)*` is balanced
+   * and still invalid.
+   */
+  invalid?: boolean;
 }
 
 /** The workspace-directory add validation, exactly as the ink dialog runs it. */
@@ -356,7 +363,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   const ruleListItems = [
     { label: t('Add a new rule…'), key: '__add__', value: '__add__' },
     ...filteredRules.map((r) => ({
-      label: r.raw,
+      label: permissionRuleLabel(r),
       value: r.raw,
       key: `${r.type}-${r.scope}-${r.raw}`,
     })),
@@ -623,7 +630,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         if (rule.invalid) {
           setRuleInputError(
             t(
-              'Malformed rule: unbalanced parentheses. Use the format ToolName(specifier).',
+              'Malformed rule: write it as ToolName(specifier), with the "(" and ")" around the whole specifier.',
             ),
           );
           return;

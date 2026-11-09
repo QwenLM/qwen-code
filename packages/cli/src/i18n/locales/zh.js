@@ -2843,4 +2843,5 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已退出 Qwen，请使用 /auth 登录其他账号。',
   'Tip: Run /usage to see your plan usage.': '提示：运行 /usage 查看套餐用量。',
+  '(unparsable)': '（无法解析）',
 };

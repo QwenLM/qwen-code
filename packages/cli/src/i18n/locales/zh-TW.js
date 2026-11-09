@@ -2640,4 +2640,5 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已登出 Qwen，請使用 /auth 登入其他帳號。',
   'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
+  '(unparsable)': '（無法解析）',
 };
