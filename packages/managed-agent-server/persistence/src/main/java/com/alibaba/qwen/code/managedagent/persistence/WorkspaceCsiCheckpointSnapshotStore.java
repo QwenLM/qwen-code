@@ -142,7 +142,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 JdbcRuntimeBindingRepository.harnessDrainKey(key.path("tenantId").asText()),
                 JdbcRuntimeBindingRepository.harnessDrainKey(key.path("sessionId").asText()));
         scope(head, key);
-        require((number(head, "storage_version") == 1 || number(head, "storage_version") == 2) && "READY".equals(head.get("recovery_status"))
+        require(List.of(1L, 2L, 3L).contains(number(head, "storage_version")) && "READY".equals(head.get("recovery_status"))
                 && Set.of("ACTIVE", "SEALED").contains(text(head, "state"))
                 && number(head, "compacted_through_revision") == 0
                 && number(head, "activation_epoch") == binding.path("activationEpoch").longValue());

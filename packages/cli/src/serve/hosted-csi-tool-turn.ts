@@ -12,7 +12,11 @@ import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/c
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import {
+  CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+  CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+} from './managed-csi-file-profile.js';
+import { getManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -338,7 +342,11 @@ export class HostedCsiToolTurn {
           toolName: invocation.toolName,
           executionCallId: invocation.executionCallId,
           invocationBindingId: invocation.executionCallId,
-          capabilityVersion: CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+          capabilityVersion: getManagedSessionDiagnostics(
+            this.session.authority,
+          )
+            ? CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST
+            : CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
           policyVersion: 'csi-files-retirement-policy/1',
           mediaVersion: null,
           modelMessageId: batchId,

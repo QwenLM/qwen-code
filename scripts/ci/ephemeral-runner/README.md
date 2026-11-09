@@ -177,15 +177,24 @@ remove unrelated runners or run a global Docker prune.
 
 A container or network whose slot state was lost is reconciled from its
 `qwen.instance` label, so an interrupted `docker create` no longer wedges the
-slot permanently. Resources whose label does not identify this pool and slot,
-or that disagree about the identity, still block it for manual reconciliation.
-The label carries the instance name, not the registration's display name, so
+slot permanently. With no slot state, every leftover in the slot's namespace
+is an orphan: when the labels disagree about the identity, the whole pile is
+swept without a GitHub identity and the slot replenishes. Registrations are
+then swept by the slot's naming scheme, but only when every leftover carried
+this slot's identity prefix and GitHub reports the registration offline —
+this relies on each host having a unique `poolId`, so the prefix cannot name
+another host's runners. A foreign or missing identity label still blocks
+registration sweeping for manual reconciliation (the foreign resource itself
+is removed from the slot namespace). The label carries the instance name, not
+the registration's display name, so
 recovery matches registrations under both the bare display name written by
 older versions and the current suffixed one; an ambiguous match still blocks
 the slot rather than deleting anything.
 A runner deletion GitHub rejects (for example while it still reports the runner
 busy) keeps the slot state and is retried, instead of dropping the only record
-that can remove the registration.
+that can remove the registration. The identity-less sweep deletes
+registrations before removing the resources, so a rejected deletion is still
+retried on the next cycle while the pile remains.
 
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service

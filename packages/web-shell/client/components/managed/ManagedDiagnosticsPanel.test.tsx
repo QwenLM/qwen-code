@@ -6,7 +6,9 @@ import { I18nProvider } from '../../i18n';
 import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
 import type { ManagedDiagnosticsProvider } from './managed-agent-provider';
 import {
+  diagnosticContext,
   diagnosticResources,
+  diagnosticStats,
   diagnosticTrace,
 } from './managed-diagnostics.test-fixtures';
 
@@ -21,6 +23,8 @@ describe('ManagedDiagnosticsPanel', () => {
     root = createRoot(container);
     onOpenChild = vi.fn();
     provider = {
+      getContextUsage: vi.fn().mockResolvedValue(diagnosticContext),
+      getStatistics: vi.fn().mockResolvedValue(diagnosticStats),
       getResources: vi.fn().mockResolvedValue(diagnosticResources),
       listAgentTrace: vi.fn().mockResolvedValue(diagnosticTrace),
     };
@@ -60,6 +64,45 @@ describe('ManagedDiagnosticsPanel', () => {
     });
   }
 
+  it('shows estimated categories and unknown usage independently of the saved request', async () => {
+    vi.mocked(provider.getContextUsage).mockResolvedValue({
+      ...diagnosticContext,
+      stale: true,
+      staleReasons: ['context_changed'],
+    });
+    await render();
+    const panel = document.querySelector('[role="tabpanel"]')!;
+    expect(panel.textContent).toContain('model-a');
+    expect(panel.textContent).toContain('Input tokensUnknown');
+    expect(panel.textContent).toContain('System prompt100');
+    expect(panel.textContent).toContain('predates a context change');
+    expect(panel.textContent).toContain('Categories are local estimates');
+    expect(
+      document
+        .querySelector('[role="tab"][aria-selected="true"]')
+        ?.getAttribute('aria-controls'),
+    ).toBe(panel.id);
+  });
+
+  it('displays the Session-owned model totals and preserves partial coverage', async () => {
+    vi.mocked(provider.getStatistics).mockResolvedValue({
+      ...diagnosticStats,
+      availability: 'partial',
+      coverageReasons: ['legacy_history'],
+    });
+    await render();
+    await selectTab('Model statistics');
+    expect(document.body.textContent).toContain(
+      'Counts belong to this Session',
+    );
+    expect(document.body.textContent).toContain(
+      'Some observations are unavailable',
+    );
+    expect(document.body.textContent).toContain('Input tokens100');
+    expect(document.body.textContent).toContain('Backoff retry calls0');
+    expect(document.body.textContent).not.toContain('Input tokensUnknown');
+  });
+
   it('keeps manual Skills and historical MCP discovery visible without claiming live connectivity', async () => {
     await render('zh-CN');
     await selectTab('资源');
@@ -69,6 +112,31 @@ describe('ManagedDiagnosticsPanel', () => {
     expect(document.body.textContent).toContain('历史发现结果');
     expect(document.body.textContent).toContain('不代表服务器当前在线');
     expect(provider.getResources).toHaveBeenCalledTimes(1);
+  });
+
+  it('labels token totals that cover only some model calls', async () => {
+    const statistics = diagnosticStats.statistics!;
+    vi.mocked(provider.getStatistics).mockResolvedValue({
+      ...diagnosticStats,
+      availability: 'partial',
+      coverageReasons: ['missing_usage'],
+      statistics: {
+        ...statistics,
+        totals: {
+          ...statistics.totals,
+          requests: { ...statistics.totals.requests, total: 2, error: 1 },
+        },
+      },
+    });
+    await render();
+    await selectTab('Model statistics');
+    expect(document.body.textContent).toContain(
+      'Input tokens100 (Recorded calls: 1/2)',
+    );
+    expect(document.body.textContent).toContain('Reasoning tokensUnknown');
+    expect(document.body.textContent).toContain(
+      'Some token usage fields were not reported.',
+    );
   });
 
   it('offers a child link only for an authorized child identity', async () => {
@@ -115,6 +183,20 @@ describe('ManagedDiagnosticsPanel', () => {
       'Some resource entries were omitted',
     );
     expect(document.body.textContent).toContain('Tools · Partial');
+  });
+
+  it('shows an unknown observation time and the specific model coverage gap', async () => {
+    vi.mocked(provider.getStatistics).mockResolvedValue({
+      ...diagnosticStats,
+      availability: 'partial',
+      coverageReasons: ['unclosed_turn'],
+      statistics: { ...diagnosticStats.statistics!, observedAt: 0 },
+    });
+    await render();
+    await selectTab('Model statistics');
+    expect(document.body.textContent).toContain('ObservedUnknown');
+    expect(document.body.textContent).toContain('A prior turn did not settle.');
+    expect(document.body.textContent).not.toContain('1970');
   });
 
   it('keeps the previous-page control after a failed trace page without retaining old rows', async () => {
