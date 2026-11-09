@@ -847,8 +847,11 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 等配置继续决定默认和高级模式的可选操作，`composerPlaceholders` 占位文字覆盖继续
 生效。
 宿主若已通过 `renderComposerToolbarStart` 渲染自己的附件／添加入口，传入
-`hostOwnsAddMenu: true` 可隐藏内置 ＋ 菜单（主聊天、分屏与托管会话页一致），
-避免两个加号并排；其它工具栏按钮不受影响。
+`hostOwnsAddMenu: true` 可隐藏内置 ＋ 菜单（主聊天、分屏与托管会话页一致，
+触屏的 commands-only 加号同样让位），避免两个加号并排。`workflowMode` 的菜单
+入口随菜单一起隐藏，此时改为在工具栏提供可开关的 Workflow 回退。与从
+`composerToolbarActions` 中去掉 `addMenu` 不同（那只作用主输入框），本开关
+覆盖全部输入框表面。
 
 ### 品牌（白标）
 

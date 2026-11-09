@@ -751,8 +751,13 @@ export interface WebShellCustomization {
   /**
    * The host already renders its own add ("+") entry in
    * `renderComposerToolbarStart`. Hides the built-in composer AddMenu in the
-   * main, split-pane, and managed composers so the two entries do not sit
-   * side by side. Other toolbar actions are unaffected.
+   * main, split-pane, and managed composers, and the touch composer's
+   * commands-only entry, so the two entries do not sit side by side.
+   *
+   * Workflow loses its menu entry with the menu, so it falls back to a
+   * toolbar switch that can turn it both ways. Unlike leaving `addMenu` out
+   * of `composerToolbarActions` — which only reaches the main composer — this
+   * flag covers every composer surface.
    */
   hostOwnsAddMenu?: boolean;
   renderComposerHeader?: ComposerHeaderRenderer;
