@@ -7186,6 +7186,104 @@ describe('ChatEditor Workflow mode', () => {
     expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(true);
   });
 
+  it('marks the switch unavailable but dismissible while the requested mode cannot take effect', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      workflowModeStatus: 'ready',
+      workflowMode: {
+        requested: true,
+        available: false,
+        effective: false,
+        reason: 'workflow_unavailable',
+      },
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const label = container.querySelector(
+      '[data-web-shell-workflow-switch]',
+    )!;
+    expect(label.hasAttribute('data-unavailable')).toBe(true);
+    const control = workflowSwitch(container)!;
+    expect(control.disabled).toBe(false);
+    act(() => control.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it('makes the switch inert while a Workflow write is pending', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      workflowModePending: true,
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const label = container.querySelector(
+      '[data-web-shell-workflow-switch]',
+    )!;
+    expect(label.hasAttribute('data-disabled')).toBe(true);
+    const control = workflowSwitch(container)!;
+    expect(control.disabled).toBe(true);
+    act(() => control.click());
+    expect(onWorkflowModeChange).not.toHaveBeenCalled();
+  });
+
+  it('makes the switch inert without a change handler', () => {
+    const container = renderChatEditor({
+      ...ready,
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+    });
+    const label = container.querySelector(
+      '[data-web-shell-workflow-switch]',
+    )!;
+    expect(label.hasAttribute('data-disabled')).toBe(true);
+    expect(workflowSwitch(container)!.disabled).toBe(true);
+  });
+
+  it('makes the switch inert while the session is unbound', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      workflowModeStatus: 'unbound',
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const label = container.querySelector(
+      '[data-web-shell-workflow-switch]',
+    )!;
+    expect(label.hasAttribute('data-disabled')).toBe(true);
+    const control = workflowSwitch(container)!;
+    expect(control.disabled).toBe(true);
+    act(() => control.click());
+    expect(onWorkflowModeChange).not.toHaveBeenCalled();
+  });
+
+  it('takes the built-in add entry away from the simple variant too', () => {
+    const owned = renderChatEditor({
+      ...ready,
+      customization: { composerVariant: 'simple', hostOwnsAddMenu: true },
+      onWorkflowModeChange: vi.fn(),
+    });
+    expect(
+      owned.querySelector('[data-web-shell-composer-variant="simple"]'),
+    ).not.toBeNull();
+    expect(
+      owned.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBeNull();
+    expect(workflowSwitch(owned)).toBeNull();
+
+    const builtin = renderChatEditor({
+      ...ready,
+      customization: { composerVariant: 'simple' },
+      onWorkflowModeChange: vi.fn(),
+    });
+    expect(
+      builtin.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps no switch while the add menu holds the Workflow entry', () => {
     const container = renderChatEditor({
       ...ready,

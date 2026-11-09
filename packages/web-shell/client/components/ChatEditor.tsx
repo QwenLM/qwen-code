@@ -2553,8 +2553,11 @@ export const ChatEditor = memo(
       showWorkflowInAddMenu && Boolean(workflowControl?.mode?.requested);
     const showWorkflowSwitch =
       showWorkflowAction && !showWorkflowInAddMenu && workflowControl !== null;
+    const workflowUnavailable =
+      workflowControl?.mode?.requested === true &&
+      workflowControl.mode.available === false;
     const workflowChipUnavailable =
-      showWorkflowChip && workflowControl?.mode?.effective === false;
+      showWorkflowChip && workflowUnavailable;
     const workflowChipTooltip = workflowControl
       ? workflowControl.disabled
         ? workflowControl.description
@@ -3423,6 +3426,7 @@ export const ChatEditor = memo(
                     data-web-shell-workflow-switch
                     data-workflow-state={workflowControl.status}
                     data-disabled={workflowControl.disabled ? '' : undefined}
+                    data-unavailable={workflowUnavailable ? '' : undefined}
                   >
                     {showWorkflowLabel ? (
                       <span className={styles.toolBtnText}>Workflow</span>

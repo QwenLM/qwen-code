@@ -1577,7 +1577,13 @@ export interface WebShellProps {
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /**
    * The host renders its own add ("+") entry in
-   * `renderComposerToolbarStart`; hide the built-in composer AddMenu.
+   * `renderComposerToolbarStart`; hide the built-in composer AddMenu in the
+   * main, split-pane, and managed composers, and the touch composer's
+   * commands trigger (slash icon, "All commands" label). The default-variant
+   * toolbar carries a Workflow switch instead of the lost menu entry;
+   * `composerVariant: 'simple'` renders no toolbar leading area, so it gets
+   * no Workflow fallback and the flag only takes its built-in menu away.
+   * See `WebShellCustomization.hostOwnsAddMenu` for the full contract.
    */
   hostOwnsAddMenu?: boolean;
   /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
