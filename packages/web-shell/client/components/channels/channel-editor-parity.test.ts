@@ -435,6 +435,45 @@ describe('Email parity (real plugin vs editor projection)', () => {
     expect(config['address']).toBe('renamed@example.com');
   });
 
+  it('keeps an explicitly stored STARTTLS choice on an unrelated save', () => {
+    // The default-seeding must not override a deliberate false: a mailbox
+    // configured for STARTTLS (143/587) stays that way after an unrelated edit.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'agent-mail',
+      config: {
+        type: 'email',
+        address: 'agent@example.com',
+        imapHost: 'imap.example.com',
+        imapUser: 'agent@example.com',
+        smtpHost: 'smtp.example.com',
+        smtpUser: 'agent@example.com',
+        privatePolicy: 'allowlist',
+        imapSecure: false,
+        smtpSecure: false,
+      },
+      secrets: {
+        imapPassword: { present: true, source: 'environment' },
+        smtpPassword: { present: true, source: 'environment' },
+      },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(emailDescriptor, instance);
+    expect(draft.values['imapSecure']).toBe(false);
+    expect(draft.values['smtpSecure']).toBe(false);
+    draft.values['folder'] = 'Archive';
+
+    const { config } = buildChannelUpsertRequest(
+      emailDescriptor,
+      draft,
+      'rev-3',
+      instance,
+    );
+    expect(config['imapSecure']).toBe(false);
+    expect(config['smtpSecure']).toBe(false);
+    expect(config['folder']).toBe('Archive');
+  });
+
   it('declares upper bounds the editor enforces inline', () => {
     // The runtime (email config.ts) rejects above these maxima; without a
     // declared `maximum` the editor let them through and the save failed with
