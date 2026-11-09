@@ -4138,7 +4138,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         let posted = task.errorCommentPosted === true;
         // Bound-session delivery is private: a failure must not post a public
         // error comment. The fallback path clears delivery before retrying.
-        if (!posted && !stillBound && task.privateOnly !== true) {
+        // A failed public attempt is run again on a later poll until the
+        // budget is spent (see isRecoverableInboundTask), so the comment,
+        // which asks the user to mention the bot again, waits for the last.
+        if (
+          !posted &&
+          !stillBound &&
+          task.privateOnly !== true &&
+          attempts >= MAX_INBOUND_TASK_ATTEMPTS
+        ) {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
