@@ -727,6 +727,29 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write(REPO_SETTINGS)],
     ],
     [
+      // bash has no word-boundary requirement for `<<`: `cat<<EOF` is a heredoc.
+      'reads a glued heredoc opener the way bash does',
+      "cat<<EOF\nit's fine\nEOF\necho '{}' > .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'keeps a glued inert heredoc body out of the operations',
+      "cat<<'EOF'\nrm -rf /tmp/z\nEOF",
+      [],
+    ],
+    [
+      'does not read a shift inside arithmetic as a heredoc opener',
+      'echo $((8<<2))',
+      [],
+    ],
+    [
+      // Without the arithmetic guard the `2` becomes a delimiter and the next
+      // line is swallowed as its body, hiding the settings write.
+      'does not let an arithmetic shift swallow the next line as a heredoc body',
+      "echo $((8<<2))\necho '{}' > .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
       'handles `cd --` and other POSIX flag forms before the target',
       "cd -- .qwen && printf '{}' > settings.local.json",
       [write('/repo/.qwen/settings.local.json')],

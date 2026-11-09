@@ -55,6 +55,7 @@ import {
 import {
   isDestructiveCommand,
   extractLastUserPrompt,
+  amendNeedsApproval,
 } from './destructive-commands.js';
 import type { PermissionCheckContext } from './types.js';
 
@@ -900,6 +901,14 @@ export async function evaluateAutoMode(
         via: 'blocked:destructive-command',
         reason: destructiveResult.reason,
       };
+    }
+    // An `git commit --amend` mention the guard cannot prove is either a
+    // program or data (issue #13570) goes to the user instead of being
+    // hard-blocked: the approval path lets them decide.
+    if (
+      amendNeedsApproval(command, input.ctx.cwd ?? input.config.getTargetDir?.())
+    ) {
+      return { via: 'fallback', reason: 'safety_check' };
     }
   }
 

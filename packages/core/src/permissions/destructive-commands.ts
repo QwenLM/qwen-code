@@ -20,10 +20,6 @@
 
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
-import {
-  amendMentionsProvablyInert,
-  commandContainsGitAmend,
-} from './shell-semantics.js';
 
 /**
  * Destructive git commands that discard local work.
@@ -43,7 +39,7 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
  * blocked unless a narrow prover shows each occurrence is inert data.
  * The recognizer can therefore only add denials, never relax one.
  */
-const GIT_AMEND_PATTERN = /\bgit\s+commit\s+--amend\b/;
+const GIT_AMEND_PATTERN = /\bgit\b[^\n]*?\bcommit\s+--amend\b/;
 
 /**
  * IaC destroy commands that tear down infrastructure.
@@ -158,6 +154,23 @@ export function registerSessionCommit(sha: string): void {
 }
 
 /**
+ * Whether a literal `git commit --amend` mention must go to manual approval.
+ *
+ * The guard cannot prove that a mention inside shell text is data rather than a
+ * program — hand-scanning shell syntax to prove inertness was tried for seven
+ * rounds without converging (issue #13570). Instead of hard-blocking, AUTO mode
+ * routes an unproven mention to the approval path, where the user decides.
+ * A commit this session created needs no approval: it is the agent's own work.
+ */
+export function amendNeedsApproval(
+  command: string,
+  cwd: string = process.cwd(),
+): boolean {
+  const expanded = command + ' ' + stripShellQuotes(command);
+  return GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd);
+}
+
+/**
  * Check whether a `git commit --amend` targets a commit made this session.
  * Reads the current HEAD commit SHA and checks against registered session commits.
  */
@@ -220,17 +233,6 @@ export function isDestructiveCommand(
         reason: `Blocked destructive git command: "${matched}". To proceed, explicitly mention discarding local work in your prompt.`,
       };
     }
-  }
-
-  const amendRecognized =
-    commandContainsGitAmend(command) ||
-    (GIT_AMEND_PATTERN.test(expanded) && !amendMentionsProvablyInert(command));
-  if (amendRecognized && !isAmendOfSessionCommit(cwd)) {
-    return {
-      blocked: true,
-      reason:
-        'Blocked "git commit --amend": the target commit was not made by the agent in this session. To proceed, use manual approval.',
-    };
   }
 
   for (const pattern of IAC_DESTROY_PATTERNS) {
