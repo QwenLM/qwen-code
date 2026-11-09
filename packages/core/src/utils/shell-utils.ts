@@ -618,11 +618,12 @@ const ANSI_C_SIMPLE: Record<string, string> = {
 export function decodeAnsiCEscape(
   body: string,
   index: number,
-): { text: string; length: number } | null {
+): { bytes: number[]; length: number } | null {
   if (body[index] !== '\\' || index + 1 >= body.length) return null;
   const next = body[index + 1]!;
   const simple = ANSI_C_SIMPLE[next];
-  if (simple !== undefined) return { text: simple, length: 2 };
+  if (simple !== undefined)
+    return { bytes: [...Buffer.from(simple)], length: 2 };
   if (next === 'x' || next === 'u' || next === 'U') {
     const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
     const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
@@ -634,11 +635,14 @@ export function decodeAnsiCEscape(
       // `String.fromCodePoint` throws above U+10FFFF; keep the escape literal
       // instead of throwing out of the permission guard.
       if (next !== 'x' && code > 0x10ffff) {
-        return { text: body.slice(index, index + length), length };
+        return {
+          bytes: [...Buffer.from(body.slice(index, index + length))],
+          length,
+        };
       }
       return {
-        text:
-          next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code),
+        bytes:
+          next === 'x' ? [code] : [...Buffer.from(String.fromCodePoint(code))],
         length,
       };
     }
@@ -648,16 +652,18 @@ export function decodeAnsiCEscape(
   // closing quote as the operand would swallow the rest of the command line.
   if (next === 'c' && index + 2 < body.length && body[index + 2] !== "'") {
     return {
-      text: String.fromCharCode(
-        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
-      ),
-      length: 3,
+      bytes: [
+        body[index + 2] === '?'
+          ? 0x7f
+          : body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
+      ],
+      length: body[index + 2] === '\\' && body[index + 3] === '\\' ? 4 : 3,
     };
   }
   if (next >= '0' && next <= '7') {
     const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
     return {
-      text: String.fromCharCode(parseInt(digits, 8) & 0xff),
+      bytes: [parseInt(digits, 8) & 0xff],
       length: 1 + digits.length,
     };
   }
@@ -669,18 +675,20 @@ export function decodeAnsiCEscape(
  * `$'--\0x'` is the word `--`; the rest of the segment is dropped.
  */
 function decodeAnsiCWord(body: string): string {
-  let out = '';
+  const bytes: number[] = [];
   for (let index = 0; index < body.length; index++) {
     const escape = decodeAnsiCEscape(body, index);
     if (!escape) {
-      out += body[index]!;
+      const literal = String.fromCodePoint(body.codePointAt(index)!);
+      for (const byte of Buffer.from(literal)) bytes.push(byte);
+      index += literal.length - 1;
       continue;
     }
-    if (escape.text === '\0') break;
-    out += escape.text;
+    if (escape.bytes.includes(0)) break;
+    for (const byte of escape.bytes) bytes.push(byte);
     index += escape.length - 1;
   }
-  return out;
+  return Buffer.from(bytes).toString('utf8');
 }
 
 /**
@@ -772,8 +780,8 @@ function shellWordQuoteRemoval(
       continue;
     }
     if (ch === '$') {
-      if (token[i + 1] === '"') {
-        i++;
+      if (token[dollarAt] === '"') {
+        i = dollarAt;
         continue;
       }
       hasExpansion = true;
@@ -870,7 +878,9 @@ export function stripShellWrapper(command: string): string {
       // The resolved word, not its spelling: an ANSI-C or locale payload
       // (`$'cat > /etc/motd'`, `$"…"`) is the script bash runs, so the
       // operators and paths inside it stay visible to the callers.
-      const removed = shellWordQuoteRemoval(commandToken.token);
+      const removed = shellWrapperCommandConsumesRest(wrapperToken.token)
+        ? null
+        : shellWordQuoteRemoval(commandToken.token);
       const innerCommand =
         removed !== null && !removed.hasExpansion ? removed.text : value;
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
@@ -1539,10 +1549,6 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
-  /** The `-c` payload word carries an expansion that cannot be resolved. */
-  wrapperPayloadUnresolved?: boolean;
-  /** Spawn this text; the analysis reads the decoded payload instead. */
-  spawnOverride?: string;
 }
 
 export interface NormalizedMonitorCommand {
@@ -1550,8 +1556,6 @@ export interface NormalizedMonitorCommand {
   safetyCommand: string;
   spawnCommand: string;
   strippedTrailingAmp: boolean;
-  /** See {@link ParsedMonitorShellWrapper.wrapperPayloadUnresolved}. */
-  wrapperPayloadUnresolved?: boolean;
 }
 
 function takeLeadingToken(
@@ -1829,44 +1833,16 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerQuote: '',
         };
       }
-      const { value: stripped, quote } = stripSymmetricQuotes(
+      const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
         commandToken.token,
       );
-      const removed = shellWordQuoteRemoval(commandToken.token);
-      const innerArgsSuffix = commandToken.rest.replace(/^[ \t]+/, '');
-      if (removed?.hasExpansion && quote === '') {
-        // The payload word cannot be resolved (`bash -c $X`): the shell runs a
-        // script the rules would have to guess, so hand the whole command back
-        // and let the cron gate refuse it instead of reading `$X` as the script.
-        return {
-          innerCommand: trimmed,
-          innerQuote: '',
-          wrapperPayloadUnresolved: true,
-        };
-      }
-      // Project the resolved word so an ANSI-C or locale payload reaches op
-      // extraction; it cannot be re-quoted for the spawn, so the command is
-      // passed through exactly as written.
-      if (
-        removed !== null &&
-        !removed.hasExpansion &&
-        removed.text !== stripped
-      ) {
-        return {
-          wrapperTokens,
-          innerCommand: removed.text,
-          innerQuote: '',
-          innerArgsSuffix,
-          spawnOverride: trimmed,
-        };
-      }
       return {
         wrapperTokens,
-        innerCommand: stripped,
-        innerQuote: quote,
+        innerCommand,
+        innerQuote,
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
-        innerArgsSuffix,
+        innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
       };
     }
 
@@ -1897,14 +1873,8 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const {
-    wrapperTokens,
-    innerCommand,
-    innerQuote,
-    innerArgsSuffix,
-    wrapperPayloadUnresolved,
-    spawnOverride,
-  } = parseMonitorShellWrapper(command);
+  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
+    parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -1927,7 +1897,7 @@ export function normalizeMonitorCommand(
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
-  const rebuiltSpawn = wrapperTokens
+  const spawnCommand = wrapperTokens
     ? [
         wrapperTokens.join(' '),
         innerQuote
@@ -1938,14 +1908,12 @@ export function normalizeMonitorCommand(
         .filter(Boolean)
         .join(' ')
     : analysisCommand;
-  const spawnCommand = spawnOverride ?? rebuiltSpawn;
 
   return {
     analysisCommand,
     safetyCommand,
     spawnCommand,
     strippedTrailingAmp,
-    ...(wrapperPayloadUnresolved ? { wrapperPayloadUnresolved: true } : {}),
   };
 }
 

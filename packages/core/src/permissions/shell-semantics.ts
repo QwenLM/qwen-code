@@ -108,6 +108,16 @@ function tokenize(
   let current = '';
   // One char per char of `current`: '1' if typed unquoted and unescaped.
   let bare = '';
+  let wordStarted = false;
+  let tildeQuoted = false;
+  let ansiCBytes: number[] = [];
+  const flushAnsiC = () => {
+    if (ansiCBytes.length === 0) return;
+    const text = Buffer.from(ansiCBytes).toString('utf8');
+    current += text;
+    bare += '0'.repeat(text.length);
+    ansiCBytes = [];
+  };
   let inSingle = false;
   let inDouble = false;
   // `$'…'` keeps its own quote state: `\'` does not close it and `\n` is a
@@ -124,6 +134,16 @@ function tokenize(
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
+    if (
+      !inSingle &&
+      !inAnsiC &&
+      !escaped &&
+      ch === '\\' &&
+      command[i + 1] === '\n'
+    ) {
+      i++;
+      continue;
+    }
     const afterDollar = pendingDollar;
     pendingDollar = false;
 
@@ -143,21 +163,15 @@ function tokenize(
       if (ch === '\\') {
         const escape = decodeAnsiCEscape(command, i);
         if (!escape) {
-          current += '\\';
-          bare += '0';
+          ansiCBytes.push(0x5c);
           continue;
         }
-        if (escape.text === '\0') {
+        if (escape.bytes.includes(0)) {
           ansiCTruncated = true;
           i += escape.length - 1;
           continue;
         }
-        current += escape.text;
-        // `bare` holds one entry per UTF-16 unit of `current`; an astral
-        // escape such as `\U0001F600` decodes to two units, and a single
-        // entry desynced the positional map so trailing syntax (`)`)
-        // stayed glued to the token.
-        bare += '0'.repeat(escape.text.length);
+        for (const byte of escape.bytes) ansiCBytes.push(byte);
         i += escape.length - 1;
         continue;
       }
@@ -165,11 +179,19 @@ function tokenize(
         inAnsiC = false;
         continue;
       }
-      current += ch;
-      bare += '0';
+      const literal = String.fromCodePoint(command.codePointAt(i)!);
+      for (const byte of Buffer.from(literal)) ansiCBytes.push(byte);
+      i += literal.length - 1;
       continue;
     }
 
+    let quoteAt = i + 1;
+    while (command.startsWith('\\\n', quoteAt)) quoteAt += 2;
+    if (!(ch === '$' && command[quoteAt] === "'")) flushAnsiC();
+    if (ch === "'" || ch === '"' || ch === '\\') {
+      if (!current.includes('/')) tildeQuoted = true;
+      wordStarted = true;
+    }
     if (escaped) {
       current += ch;
       bare += '0';
@@ -177,13 +199,6 @@ function tokenize(
       continue;
     }
     if (ch === '\\' && !inSingle) {
-      // Bash removes a backslash-newline continuation outright, joining the
-      // word it interrupts, so a continuation cannot hide the `$'…'` or
-      // `$"…"` opener that follows it.
-      if (command[i + 1] === '\n') {
-        i++;
-        continue;
-      }
       escaped = true;
       continue;
     }
@@ -194,11 +209,15 @@ function tokenize(
       let next = i + 1;
       while (command[next] === '\\' && command[next + 1] === '\n') next += 2;
       if (command[next] === "'") {
+        wordStarted = true;
+        if (!current.includes('/')) tildeQuoted = true;
         inAnsiC = true;
         i = next;
         continue;
       }
       if (command[next] === '"') {
+        wordStarted = true;
+        if (!current.includes('/')) tildeQuoted = true;
         inDouble = true;
         i = next;
         continue;
@@ -214,17 +233,32 @@ function tokenize(
       continue;
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      if (current) {
-        pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
+      if (wordStarted) {
+        if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
+        if (current) {
+          pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
+        } else {
+          tokens.push('');
+          bares?.push('');
+        }
         current = '';
         bare = '';
+        wordStarted = false;
+        tildeQuoted = false;
       }
       continue;
     }
     current += ch;
+    wordStarted = true;
     bare += inSingle || inDouble ? '0' : '1';
   }
+  flushAnsiC();
+  if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
   if (current) pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
+  else if (wordStarted) {
+    tokens.push('');
+    bares?.push('');
+  }
   return tokens;
 }
 
@@ -427,17 +461,18 @@ function extractRedirects(
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
-    // A quoted or decoded operator is data, not syntax. `$'\x3e'` decodes to
-    // `>` and the tokenizer marks every decoded char as quoted, so without
-    // reading that marking `cat $'\x3e' > /tmp/t` reported a phantom write to
-    // `>` and lost the real one.
     const tokBare = bares?.[i];
-    const isDecodedDataWord =
-      tokBare !== undefined &&
-      tokBare.length === tok.length &&
-      !tokBare.includes('1');
-    // A word that is nothing but quote content can only be an argument.
-    if (isDecodedDataWord) continue;
+    const syntax =
+      tokBare === undefined
+        ? tok
+        : tok
+            .split('')
+            .map((character, index) =>
+              '<>&'.includes(character) && tokBare[index] !== '1'
+                ? '\0'
+                : character,
+            )
+            .join('');
     const targetBare = (index: number): string | undefined => bares?.[index];
 
     // ── `>&word`, `N>&word`, `<&word` with an unquoted `>&`/`<&` ─────────
@@ -463,7 +498,7 @@ function extractRedirects(
     }
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (tok === '>' || tok === '1>') {
+    if (syntax === '>' || syntax === '1>') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
@@ -473,7 +508,7 @@ function extractRedirects(
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '>>' || tok === '1>>') {
+    } else if (syntax === '>>' || syntax === '1>>') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
@@ -483,13 +518,13 @@ function extractRedirects(
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '<<' || tok === '<<-') {
+    } else if (syntax === '<<' || syntax === '<<-') {
       toRemove.add(i);
       if (tokens[i + 1]) {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '<') {
+    } else if (syntax === '<') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
@@ -499,7 +534,12 @@ function extractRedirects(
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') {
+    } else if (
+      syntax === '2>' ||
+      syntax === '2>>' ||
+      syntax === '&>' ||
+      syntax === '&>>'
+    ) {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
       if (target) {
@@ -517,10 +557,10 @@ function extractRedirects(
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
+      const m = syntax.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
       if (m) {
         const op = m[1]!;
-        const target = m[2]!;
+        const target = tok.slice(op.length);
         if (op.startsWith('<<')) {
           toRemove.add(i);
           continue;
@@ -2333,7 +2373,9 @@ function resolveCdTargetCwd(
   const targetIsDecoded =
     targetBare !== undefined &&
     targetBare.length === target.length &&
-    !targetBare.includes('1') &&
+    (!targetBare.includes('1') ||
+      (targetBare.startsWith('0') &&
+        (target === '~' || target.startsWith('~/')))) &&
     !isShellAbsolutePath(target);
 
   return {

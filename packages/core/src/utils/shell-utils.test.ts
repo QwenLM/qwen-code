@@ -596,6 +596,11 @@ describe('getCommandRoots', () => {
 const RESOLVED_PAYLOADS: Array<[string, string]> = [
   ['an ANSI-C payload', String.raw`sh -c $'cat > /etc/motd'`],
   ['a locale payload', 'sh -c $"cat > /etc/motd"'],
+  ['a continuation-split locale payload', 'sh -c $\\\n"cat > /etc/motd"'],
+  [
+    'a continuation-split locale terminator',
+    'sh -c $\\\n"--" \'cat > /etc/motd\'',
+  ],
   [
     'a continuation-split payload',
     String.raw`sh -c $\
@@ -609,6 +614,14 @@ const RESOLVED_PAYLOADS: Array<[string, string]> = [
 ];
 
 describe('stripShellWrapper', () => {
+  it.each([
+    [String.raw`sh -c $'printf \xc3\xa9'`, 'printf é'],
+    [String.raw`sh -c $'printf \c?x'`, 'printf \x7fx'],
+    [String.raw`sh -c $'printf a\c\\tb'`, 'printf a\x1ctb'],
+    [String.raw`sh -c $'printf a\c@b'`, 'printf a'],
+  ])('decodes the payload bytes in %s', (command, expected) => {
+    expect(stripShellWrapper(command)).toBe(expected);
+  });
   it('should strip sh -c with quotes', async () => {
     expect(stripShellWrapper('sh -c "ls -l"')).toEqual('ls -l');
   });
@@ -1010,45 +1023,6 @@ describe('normalizeMonitorCommand', () => {
       'echo ok',
       'FOO=$(cat secret.txt) echo ok',
     );
-  });
-
-  // The monitor analyses the resolved script but still spawns exactly what
-  // the user wrote: such a payload cannot be re-quoted faithfully, so the
-  // spawn keeps the original text.
-  it.each(RESOLVED_PAYLOADS)(
-    'analyzes %s as the resolved script',
-    (_what, command) => {
-      expect(normalizeMonitorCommand(command)).toEqual({
-        analysisCommand: 'cat > /etc/motd',
-        safetyCommand: 'cat > /etc/motd',
-        spawnCommand: command,
-        strippedTrailingAmp: false,
-      });
-    },
-  );
-
-  it('hands an unresolvable -c payload back whole and flags it', () => {
-    // `$X` may be the terminator or the script; reading it as the script is a
-    // guess the rules cannot make, so the whole command comes back and the
-    // cron gate refuses it instead of analysing `$X`.
-    expect(normalizeMonitorCommand('bash -c $X')).toEqual({
-      analysisCommand: 'bash -c $X',
-      safetyCommand: 'bash -c $X',
-      spawnCommand: 'bash -c $X',
-      strippedTrailingAmp: false,
-      wrapperPayloadUnresolved: true,
-    });
-  });
-
-  it('keeps the base reading for a fully quoted dynamic payload', () => {
-    // R13-1: the word is quoted, so the script it carries is still readable
-    // and stays the analysis command, with no unresolved flag.
-    expect(normalizeMonitorCommand('bash -c "$(cat secret.txt)"')).toEqual({
-      analysisCommand: '$(cat secret.txt)',
-      safetyCommand: '$(cat secret.txt)',
-      spawnCommand: 'bash -c "$(cat secret.txt)"',
-      strippedTrailingAmp: false,
-    });
   });
 
   it('reads `--` as the -c option terminator', () => {

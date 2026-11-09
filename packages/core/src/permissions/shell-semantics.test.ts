@@ -876,6 +876,35 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
 });
 
 describe('ANSI-C wrapper payloads', () => {
+  it.each([
+    [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],
+    [String.raw`cat $'\xc3'$'\xa9'`, [read('/repo/é')]],
+    [String.raw`cat $'a\c\\tb'`, [read('/repo/a\x1ctb')]],
+    [String.raw`cat $'\c?'`, [read('/repo/\x7f')]],
+    [String.raw`cat $'\x3e'/etc/passwd`, [read('/repo/>/etc/passwd')]],
+    ['echo hi ">"/tmp/x', []],
+    ["echo hi >'>'x/../settings.json", [write('/repo/settings.json')]],
+  ] as const)(
+    'keeps decoded bytes and operators distinct: %s',
+    (command, expected) => {
+      expect(across(command)).toEqual(expected);
+    },
+  );
+
+  it.each(["cd $''", "cd ''"])(
+    'keeps an empty cd argument uncertain: %s',
+    (command) => {
+      expect(across(`${command}; cat > settings.json`)).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+    },
+  );
+  it('keeps a redirect after a continuation-split PID visible', () => {
+    expect(across("cat $\\\n$'a\\' > /etc/motd")).toContainEqual(
+      write('/etc/motd'),
+    );
+  });
+
   // The script word is the word the shell resolves: an ANSI-C, locale or
   // continuation-split payload carries the operations that run, so the write
   // inside it must reach the permission scan.
@@ -913,6 +942,8 @@ describe('quoted and decoded tilde targets', () => {
   // match (#16075 review, R2-8).
   it.each([
     ['a quoted tilde', 'cat > "~/x"'],
+    ['an empty quote before the tilde', 'cat > ""~/x'],
+    ['an empty quote in the tilde prefix', 'cat > ~""/x'],
     ['a single-quoted tilde', "cat > '~/x'"],
     ['a backslash-escaped tilde', String.raw`cat > \~/x`],
   ])('does not expand %s in a redirect target', (_what, command) => {
@@ -932,6 +963,21 @@ describe('quoted and decoded tilde targets', () => {
     // `cd $'\x7e'` is the literal `~` directory and may not exist at all, so
     // the rest of the segment runs in a cwd the analysis cannot know.
     expect(across(String.raw`cd $'\x7e' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  it.each([String.raw`$'\x7e'/x`, '"~"/x', String.raw`\~/x`])(
+    'keeps a literal tilde prefix uncertain: %s',
+    (target) => {
+      expect(across(`cd ${target}; cat > settings.json`)).toEqual([
+        uncertainWrite('/repo/~/x/settings.json'),
+      ]);
+    },
+  );
+
+  it('keeps an empty quote in a cd tilde prefix uncertain', () => {
+    expect(across("cd ~''; cat > settings.json")).toEqual([
       uncertainWrite('/repo/~/settings.json'),
     ]);
   });

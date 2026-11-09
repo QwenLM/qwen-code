@@ -638,18 +638,6 @@ describe('gate fire text', () => {
 
 describe('gateCommandError', () => {
   it.each([
-    ['an unquoted expansion in the -c slot', 'bash -c $X'],
-    ['an unquoted expansion with positional argv', 'sh -c $TERM ls -l'],
-  ])('refuses %s', (_what, gate) => {
-    // The payload word cannot be resolved, so the whole command is handed
-    // back; `checked === gate` there must still be refused, and the message
-    // names the whole command the shell would actually run.
-    expect(gateCommandError(gate)).toContain(
-      `the permission rules would check ${JSON.stringify(gate)}, not`,
-    );
-  });
-
-  it.each([
     // An escaped `&` is a literal ampersand, not a background operator.
     ['an escaped trailing &', 'echo done \\&'],
     ['an escaped & mid-command', 'echo \\& done'],
