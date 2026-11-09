@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import {
   describeDwsCommandFailure,
   DwsClient,
@@ -109,6 +110,59 @@ describe('DWS command process', () => {
     expect(error.message).toContain('sender is not in the conversation');
     expect(error.message.startsWith('…')).toBe(false);
     expect(error.message.length).toBeLessThan(800);
+  });
+
+  it('survives the callers 300-code-point head truncation', async () => {
+    const banner = `${'progress line\n'.repeat(100)}error: sender is not in the conversation\n`;
+    vi.mocked(execFile).mockImplementation(((
+      _file,
+      _args,
+      _options,
+      callback,
+    ) => {
+      queueMicrotask(() =>
+        callback(
+          Object.assign(new Error('Command failed'), { code: 1 }),
+          '',
+          banner,
+        ),
+      );
+      return { exitCode: 1, kill: vi.fn() };
+    }) as unknown as typeof execFile);
+
+    const error = (await new DwsClient({ executable: '/opt/dws' })
+      .assertCompatible()
+      .catch((caught: unknown) => caught)) as DwsCommandError;
+
+    expect(sanitizeLogText(error.message, 300)).toContain(
+      'sender is not in the conversation',
+    );
+    expect(sanitizeLogText(error.message, 200)).toContain(
+      'sender is not in the conversation',
+    );
+  });
+
+  it.each([
+    ['ENOENT', '(ENOENT)'],
+    ['ABORT_ERR', '(ABORT_ERR)'],
+  ])('does not label the errno %s as an exit status', (code, expected) => {
+    const message = describeDwsCommandFailure(['version'], code, '');
+
+    expect(message).toContain(expected);
+    expect(message).not.toContain('exit');
+  });
+
+  it('does not label a timeout kill as an exit status', () => {
+    const message = describeDwsCommandFailure(['version'], null, '');
+
+    expect(message).toContain('(null)');
+    expect(message).not.toContain('exit');
+  });
+
+  it('omits the code entirely when the process never reported one', () => {
+    expect(describeDwsCommandFailure(['version'], undefined, '')).toBe(
+      'DWS command failed: `dws version`.',
+    );
   });
 
   it('does not leak flag values from a send-shaped argv', () => {

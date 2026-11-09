@@ -137,15 +137,18 @@ export type DwsCommandRunner = (
 
 export type DwsCommandOutcome = 'not_sent' | 'unknown';
 
-const DWS_ERROR_DETAIL_MAX_CHARS = 600;
+// Callers keep the head of the composed message within 200 code points, and
+// the subcommand plus exit detail already spends about 30 of them.
+const DWS_ERROR_DETAIL_MAX_CHARS = 150;
 
 /**
  * Compose the text a `DwsCommandError` carries. The exit code alone
  * (`DWS command failed (1)`) is the same for every failure the CLI can hit and
  * names neither the subcommand nor what it printed, so a user reading the
  * channel log — which only repeats this message — has nothing to act on.
- * Callers log through `sanitizeLogText`, so newlines are rendered visibly and
- * the detail is bounded here to keep that truncation meaningful.
+ * Callers log through `sanitizeLogText`, which keeps the HEAD of this message
+ * within a 200–300 code-point budget, so the bound below has to leave the
+ * reason inside that window instead of past it.
  */
 export function describeDwsCommandFailure(
   args: readonly string[],
@@ -157,26 +160,41 @@ export function describeDwsCommandFailure(
   // generated reply — or the trailing `--format json` that `run()` appends.
   // Keeping flag values would both leak outbound message content into stderr
   // and spend the caller's 300-code-point log budget before the exit code and
-  // the stderr tail, which are the only parts worth reading.
+  // the stderr reason, which are the only parts worth reading.
   const rest = args[0] === '--profile' ? args.slice(2) : args;
   const firstFlag = rest.findIndex((arg) => arg.startsWith('-'));
   const subcommand = firstFlag === -1 ? rest : rest.slice(0, firstFlag);
+  // `code` is an exit status only when the child actually exited. A spawn
+  // failure reports an errno string and a timeout kill reports `null`, so
+  // labelling those `exit <value>` would name a status the process never
+  // produced.
   const detail = [
     `\`dws ${subcommand.join(' ')}\``,
-    code === undefined ? '' : `(exit ${String(code)})`,
+    typeof code === 'number'
+      ? `(exit ${String(code)})`
+      : code === undefined
+        ? ''
+        : `(${String(code)})`,
   ]
     .filter(Boolean)
     .join(' ');
-  const output = stderr.trim();
-  if (!output) {
+  // The reason a failing CLI prints is its last meaningful line. A banner or a
+  // progress log can be hundreds of code points long, and the whole composed
+  // message is head-truncated by every caller, so keeping a tail wider than
+  // that budget would push the reason past the cut.
+  const reason =
+    stderr
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1) ?? '';
+  if (!reason) {
     return `DWS command failed: ${detail}.`;
   }
-  // Keep the tail: a CLI that fails after printing a banner or a progress log
-  // puts the actual reason at the end.
   const bounded =
-    output.length > DWS_ERROR_DETAIL_MAX_CHARS
-      ? `…${output.slice(-DWS_ERROR_DETAIL_MAX_CHARS)}`
-      : output;
+    reason.length > DWS_ERROR_DETAIL_MAX_CHARS
+      ? `${reason.slice(0, DWS_ERROR_DETAIL_MAX_CHARS - 1)}…`
+      : reason;
   return `DWS command failed: ${detail}: ${bounded}`;
 }
 
