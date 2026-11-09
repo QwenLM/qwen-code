@@ -41,7 +41,7 @@ The worker sends `model-complete {id, input}` to the main thread and waits for `
 
 - Model names: `haiku` runs the configured fast model at its selected endpoint, or the session's model when none is set. `sonnet` and `opus` use the session's model. Explicit model ids keep their provider qualification and must name the session's model or a configured model that supports text. The selected endpoint uses its own credentials and headers. OAuth routes require cached credentials.
 - `maxTokens` defaults to 1024 and rejects above a curated output limit.
-- `BaseLlmClient.generateText` sends the prompt as the one user message and `system` as the system instruction. The client makes a single attempt and rejects HTTP redirects. Reasoning is off unless the request names an `effort`.
+- `BaseLlmClient.generateText` sends the prompt as the one user message and `system` as the system instruction. Provider settings cannot replace the model or messages, add tools or history, or raise the output cap. The client makes a single attempt and rejects HTTP redirects.
 - An empty reply is `empty-reply`. A failure is `api-error` with the HTTP status and a kind from the shared `classifyApiError`, plus `overloaded` and `model_not_found`. An abort or elapsed `timeoutMs` is `aborted`.
 - `usage` uses the same four-count conversion as `turn.complete`, now shared.
 - A reply over half a Mod payload keeps its head and tail around a marker.
@@ -50,9 +50,9 @@ The worker sends `model-complete {id, input}` to the main thread and waits for `
 
 The guest relays its `signal` by token. On abort it sends an internal `model.abort`. The worker starts the caller's deadline before middleware runs. A signal or deadline cancels the model call, its middleware and any descendant model requests, and resolves `aborted`. An already aborted signal resolves `aborted` without a request.
 
-QuickJS executes pending promise jobs at the realm level. A model deadline takes effect for these jobs at the next hook or API boundary, with the VM execution budget still in effect.
+QuickJS executes pending promise jobs at the realm level. Per-call deadlines and hook budgets take effect for these jobs at the next hook or API boundary, with the VM execution budget still in effect.
 
-A call belongs to its dispatch. When the dispatch is abandoned or ends, the worker cancels the host operation, and the host aborts every call still running for that root.
+A call belongs to its dispatch. When the dispatch is abandoned or ends, the worker cancels the host operation, and the host aborts every call still running for that root. If an outgoing `session.end` runs after the host has switched sessions, its model calls resolve `aborted`.
 
 ### 4. Budgets
 
@@ -62,7 +62,7 @@ The hook's own budget pauses during `$` calls. When the worker is waiting only o
 
 - The model call lives in the CLI, not core: it needs `Config`, `BaseLlmClient` and the CLI's error classifier, and the ACP host will reuse it from there.
 - Unknown model ids are refused rather than passed through, because the client's silent fallback to the session model would bill and answer as another model.
-- Reasoning stays off by default, as on every Qwen Code side request; a Mod that wants reasoning says so with `effort`.
+- Without `effort`, the client uses the provider's reasoning controls. On Gemini it suppresses thought summaries and leaves thinking at the provider default.
 - One attempt, so a Mod's call does not hold the session's single dispatch slot through a retry loop; the result carries what a Mod needs to retry.
 
 ## Differences from Claude Code
@@ -70,7 +70,7 @@ The hook's own budget pauses during `$` calls. When the worker is waiting only o
 - `haiku`, `sonnet` and `opus` are read as Qwen Code's fast and session models.
 - `effort` turns reasoning on but its level is not sent; Claude Code sends the level.
 - `cache` marks are accepted but not sent.
-- Claude Code's default reasoning is the model's own; Qwen Code's is off.
+- Claude Code uses the model's reasoning default. Qwen Code requests the provider's opt-out when available.
 - A session runs one Mod dispatch at a time, so a running call holds up every other Mod hook in the session. Claude Code runs background work on timers; Qwen Code has none yet.
 
 ## Validation and acceptance

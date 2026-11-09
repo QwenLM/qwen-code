@@ -70,7 +70,10 @@ import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 import type { ResolvedReasoning } from '../reasoning-overrides.js';
-import { ensureReasoningContentOnAssistantMessage } from './provider/utils.js';
+import {
+  ensureReasoningContentOnAssistantMessage,
+  filterIsolatedModelOverrides,
+} from './provider/utils.js';
 import {
   getEffectiveReasoning,
   resolveReasoningForModel,
@@ -1668,6 +1671,30 @@ export class ContentGenerationPipeline {
       }
     }
 
+    const requestLimit = request.config?.maxOutputTokens;
+    if (retryContext.getStore()?.singleAttempt && requestLimit !== undefined) {
+      const limit = Math.min(
+        requestLimit,
+        getWireOutputBudget(baseRequest) ?? requestLimit,
+        getWireOutputBudget(providerRequest) ?? requestLimit,
+      );
+      // Keep a provider's chosen output field, without sending a conflicting
+      // max_tokens alongside it. The request's cap applies after extra_body.
+      if (hasProviderOutputBudgetKey(typed)) {
+        delete providerRequest.max_tokens;
+        for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+          const value = typed[key];
+          if (value === undefined) continue;
+          typed[key] =
+            typeof value === 'number' && value > 0
+              ? Math.min(value, limit)
+              : limit;
+        }
+      } else {
+        providerRequest.max_tokens = limit;
+      }
+      delete typed['max_output_tokens'];
+    }
     return providerRequest;
   }
 
@@ -1715,7 +1742,9 @@ export class ContentGenerationPipeline {
   ): Record<string, unknown> {
     const defaultSamplingParams =
       this.config.provider.getDefaultGenerationConfig();
-    const configSamplingParams = this.contentGeneratorConfig.samplingParams;
+    const configSamplingParams = filterIsolatedModelOverrides(
+      this.contentGeneratorConfig.samplingParams,
+    );
 
     // Helper function to get parameter value with priority: config > request > default
     const getParameterValue = <T>(

@@ -41,7 +41,7 @@ worker 向主线程发送 `model-complete {id, input}`，等待 `model-result {i
 
 - 模型名：`haiku` 使用 fast model 及其选定的端点，未设置时用会话模型。`sonnet` 和 `opus` 使用会话模型。显式模型 id 保留供应商限定符，必须指向会话模型或已配置且支持文本的模型。选中的端点使用自己的凭据和请求头。OAuth 路由需要已有的缓存凭据。
 - `maxTokens` 默认 1024，超过已知的输出上限时拒绝。
-- `BaseLlmClient.generateText` 把 prompt 作为唯一一条用户消息发送，`system` 作为系统指令。客户端只尝试一次，并拒绝 HTTP 重定向。除非请求指定了 `effort`，否则关闭推理。
+- `BaseLlmClient.generateText` 把 prompt 作为唯一一条用户消息发送，`system` 作为系统指令。供应商配置不能替换模型或消息、添加工具或历史记录，也不能提高输出上限。客户端只尝试一次，并拒绝 HTTP 重定向。
 - 回复为空时结果是 `empty-reply`。失败时是 `api-error`，带 HTTP 状态码，以及由共用的 `classifyApiError` 给出的错误类别，另加 `overloaded` 和 `model_not_found`。中止或 `timeoutMs` 到期时是 `aborted`。
 - `usage` 使用与 `turn.complete` 相同的四项计数换算，这段换算现在是共用的。
 - 回复超过 Mod 载荷的一半时，只保留首尾，中间用标记替代。
@@ -50,9 +50,9 @@ worker 向主线程发送 `model-complete {id, input}`，等待 `model-result {i
 
 guest 通过 token 转发自己的 `signal`，中止时发出内部的 `model.abort`。worker 在中间件运行前开始计算调用方的截止时间。信号中止或到期时，取消模型调用、其中间件及子模型请求，并返回 `aborted`。已中止的信号直接返回 `aborted`，不发请求。
 
-QuickJS 在 realm 层级执行待处理的 Promise 任务。模型截止时间在这些任务到达下一处 hook 或 API 边界时生效，VM 执行预算仍然适用。
+QuickJS 在 realm 层级执行待处理的 Promise 任务。调用截止时间和 hook 预算在这些任务到达下一处 hook 或 API 边界时生效，VM 执行预算仍然适用。
 
-调用属于发起它的 dispatch。dispatch 被放弃或结束时，worker 取消宿主操作，宿主中止该根上仍在运行的所有调用。
+调用属于发起它的 dispatch。dispatch 被放弃或结束时，worker 取消宿主操作，宿主中止该根上仍在运行的所有调用。若宿主已经切换会话，旧会话的 `session.end` 发起的模型调用返回 `aborted`。
 
 ### 4. 预算
 
@@ -62,7 +62,7 @@ hook 自己的预算在 `$` 调用期间暂停。worker 只等待模型请求时
 
 - 模型调用放在 CLI 而不是 core：它需要 `Config`、`BaseLlmClient` 和 CLI 的错误分类器，ACP 宿主以后也从这里复用。
 - 未知的模型 id 直接拒绝，不透传，因为客户端会静默退回会话模型，以另一个模型的身份计费和回答。
-- 推理默认关闭，与 Qwen Code 所有的旁路请求一致；需要推理的 Mod 用 `effort` 声明。
+- 未指定 `effort` 时，客户端使用供应商的推理控制。Gemini 路由不返回思考摘要，模型仍按供应商的默认方式推理。
 - 只尝试一次，避免 Mod 的调用在重试循环里一直占着会话唯一的 dispatch 位置；结果里带有 Mod 自行重试所需的信息。
 
 ## 与 Claude Code 的差异
@@ -70,7 +70,7 @@ hook 自己的预算在 `$` 调用期间暂停。worker 只等待模型请求时
 - `haiku`、`sonnet`、`opus` 被解读为 Qwen Code 的 fast model 和会话模型。
 - `effort` 会打开推理，但不发送级别；Claude Code 会发送级别。
 - 接受 `cache` 标记但不发送。
-- Claude Code 默认使用模型自己的推理设置；Qwen Code 默认关闭。
+- Claude Code 使用模型的默认推理设置。Qwen Code 在供应商支持的情况下请求关闭推理。
 - 一个会话同一时间只运行一个 Mod dispatch，所以调用进行时，会话里其他所有 Mod hook 都要等待。Claude Code 把后台工作放在定时器上运行；Qwen Code 还没有定时器。
 
 ## 验证与验收

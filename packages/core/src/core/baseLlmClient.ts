@@ -23,10 +23,7 @@ import type {
 } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
-import {
-  buildAgentContentGeneratorConfig,
-  resolveCredentialField,
-} from '../models/content-generator-config.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { QWEN_OAUTH_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
 import {
   buildModelIdContext,
@@ -885,13 +882,30 @@ export class BaseLlmClient {
       (!selector?.authType || selector.authType === mainAuthType) &&
       matchesMainBaseUrl
     ) {
-      return {
-        contentGenerator: this.getCurrentContentGenerator(),
-        contentGeneratorConfig: mainGeneratorConfig,
-        retryAuthType: mainAuthType,
-        retryErrorCodes: mainRetryErrorCodes,
-        model: requestModel,
-      };
+      // The default URL can be shared by an implicit row and an explicit one.
+      const pinnedModel =
+        opts?.isolatedRoute && requested.baseUrl !== undefined
+          ? this.resolveModelAcrossAuthTypes(
+              requested.model,
+              selector,
+              requested.baseUrl,
+            )
+          : undefined;
+      const matchesRegistryPin =
+        !pinnedModel ||
+        (pinnedModel.registryBaseUrl ?? null) ===
+          ('reasoningRouteBaseUrl' in mainGeneratorConfig
+            ? mainGeneratorConfig.reasoningRouteBaseUrl
+            : this.config.getCurrentModelRegistryBaseUrl?.());
+      if (matchesRegistryPin) {
+        return {
+          contentGenerator: this.getCurrentContentGenerator(),
+          contentGeneratorConfig: mainGeneratorConfig,
+          retryAuthType: mainAuthType,
+          retryErrorCodes: mainRetryErrorCodes,
+          model: requestModel,
+        };
+      }
     }
 
     const { contentGenerator, contentGeneratorConfig } =
@@ -1063,23 +1077,6 @@ export class BaseLlmClient {
     const generatorPromise = Promise.resolve()
       .then(async () => {
         const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
-        // An omitted envKey can use the provider default, but never to move
-        // the active session credential onto an unrelated endpoint.
-        const defaultApiKey =
-          isolatedRoute && !resolvedModel.envKey
-            ? resolveCredentialField(
-                undefined,
-                undefined,
-                resolvedModel.authType,
-                'apiKey',
-              )
-            : undefined;
-        const activeApiKey = isolatedRoute
-          ? this.config.getContentGeneratorConfig()?.apiKey
-          : undefined;
-        const defaultMatchesActive =
-          defaultApiKey !== undefined &&
-          defaultApiKey.trim() === activeApiKey?.trim();
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
           targetModel,
@@ -1087,9 +1084,7 @@ export class BaseLlmClient {
             authType: resolvedModel.authType,
             apiKey: resolvedModel.envKey
               ? (process.env[resolvedModel.envKey] ?? undefined)
-              : defaultMatchesActive
-                ? undefined
-                : defaultApiKey,
+              : undefined,
             baseUrl: resolvedModel.baseUrl,
             ...(isolatedRoute && {
               isolatedRoute,
@@ -1097,13 +1092,6 @@ export class BaseLlmClient {
             }),
           },
         );
-        // Suppressing a conflicting key is an auth error, not a request to
-        // switch a key-based route to Vertex Application Default Credentials.
-        if (defaultMatchesActive && !targetConfig.apiKey) {
-          throw new Error(
-            `Model '${targetModel}' cannot use the primary model's implicit API key. Configure an envKey for this model.`,
-          );
-        }
         if (resolvedModel.capabilities?.vision) {
           targetConfig.modalities = {
             ...targetConfig.modalities,

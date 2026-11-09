@@ -479,9 +479,9 @@ the caller's budget. Neither does `$.prompt.submit`, whose call can outlive the
 hook that made it: the time the other Mods' `prompt.submit` hooks take while a
 hook awaits it counts as the hook's own. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
-uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
-trusted native waits described above; load and command roots retain continuous
-60-second limits. All `session.end` work shares 1.5 seconds. Native tool timeouts
+uninterrupted guest execution slice at 10 seconds. A dispatch waiting only on a
+host model request pauses its clock. Tool roots also exclude the trusted native
+waits described above. All `session.end` work shares 1.5 seconds. Native tool timeouts
 and permission decisions still apply. The scheduler's optional execution timeout
 defaults to disabled and does not impose an approval deadline; individual tools
 retain their own timeout policies.
@@ -559,7 +559,8 @@ that started it, so a sleep the hook does not await cannot hold up the dispatch.
 
 `$.model.complete(request, {signal})` runs one text completion on the session's
 own client, with no tools, no history and no system prompt but the request's
-`system`. `request` takes the fields Claude Code 2.1.319 declares:
+`system`. Provider settings cannot replace those request fields or raise the
+output cap. `request` takes the fields Claude Code 2.1.319 declares:
 
 | Field       | Meaning                                                                                                                                                                    |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -604,13 +605,16 @@ It reads the prompt as text with the caller's blocks beside it in `promptBlocks`
 and `systemBlocks`; passing `system: null` or `false` down sends no system
 prompt. The `signal` does not cross into the event.
 The caller's signal and deadline still apply while these hooks run. Cancelling
-the call also cancels model requests started by its hooks.
+the call also cancels model requests started by its hooks. For pending QuickJS
+promise jobs the deadline takes effect at the next hook or API boundary, with
+the VM execution budget still in effect.
 
 Qwen Code differs from Claude Code here:
 
-- Reasoning stays off, as on Qwen Code's other side requests, unless the
-  request names an `effort`; then the model reasons at its configured level.
-  The named level itself is not sent yet.
+- Without `effort`, the client uses the provider's reasoning controls. On Gemini
+  it suppresses thought summaries and leaves thinking at the provider default.
+  With `effort`, the model uses the configured level. Qwen Code does not send
+  the named level yet.
 - `cache` marks are accepted and not sent; the cache counts in `usage` are what
   the provider reports.
 - The call is tried once. Retry from `status` and `error` when a kind such as
@@ -620,9 +624,10 @@ Qwen Code differs from Claude Code here:
 - A reply too long for a Mod payload keeps its head and tail around a
   truncation marker.
 
-A model call ends with its dispatch. The hook's budget pauses while it awaits
-the call. The dispatch's 60-second budget pauses when the worker is waiting
-only on the host model request, including inside a `tool.check` hook. A session
+A model call ends with its dispatch. If the host has already switched sessions,
+model calls from the old `session.end` resolve `aborted`. The hook's budget pauses
+while it awaits the call. The dispatch's 60-second budget pauses when the worker
+is waiting only on the host model request, including inside a `tool.check` hook. A session
 runs one Mod dispatch at a time, so other hooks in the session wait for it.
 Keep calls short, bound them with `timeoutMs`, and cache answers you will need
 again.

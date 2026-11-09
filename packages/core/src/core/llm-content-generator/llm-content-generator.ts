@@ -270,8 +270,12 @@ export class LlmContentGenerator implements ContentGenerator {
       generation && this.cliConfig
         ? resolveReasoningForModel(this.cliConfig, generation, model)
         : undefined;
-    if (resolved && requestThinking?.includeThoughts === false)
+    if (
+      requestThinking?.includeThoughts === false &&
+      (resolved || retryContext.getStore()?.singleAttempt)
+    ) {
       return requestThinking;
+    }
     const reasoning = generation
       ? getEffectiveReasoning(generation, resolved)
       : undefined;

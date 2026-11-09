@@ -13,19 +13,26 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it('disables redirects on the real Google SDK for single-attempt calls only', async () => {
+it('keeps the Mod reasoning opt-out and disables redirects on the real Google SDK', async () => {
   const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () =>
     Response.json({
       candidates: [{ content: { parts: [{ text: 'answer' }], role: 'model' } }],
     }),
   );
   vi.stubGlobal('fetch', fetch);
-  const generator = new LlmContentGenerator({
-    apiKey: 'test-key',
-    vertexai: false,
-    httpOptions: { baseUrl: 'https://example.test' },
-  });
-  const request = { model: 'gemini-test', contents: 'hello' };
+  const generator = new LlmContentGenerator(
+    {
+      apiKey: 'test-key',
+      vertexai: false,
+      httpOptions: { baseUrl: 'https://example.test' },
+    },
+    { model: 'gemini-test', reasoning: { effort: 'high' } },
+  );
+  const request = {
+    model: 'gemini-test',
+    contents: 'hello',
+    config: { thinkingConfig: { includeThoughts: false } },
+  };
 
   const answer = await retryContext.run(
     {
@@ -51,6 +58,14 @@ it('disables redirects on the real Google SDK for single-attempt calls only', as
     url,
     expect.not.objectContaining({ redirect: 'error' }),
   );
+  expect(
+    JSON.parse(String(fetch.mock.calls[0][1]?.body)).generationConfig
+      .thinkingConfig,
+  ).toEqual({ includeThoughts: false });
+  expect(
+    JSON.parse(String(fetch.mock.calls[1][1]?.body)).generationConfig
+      .thinkingConfig,
+  ).toEqual({ includeThoughts: true, thinkingLevel: 'HIGH' });
 });
 
 it.each([

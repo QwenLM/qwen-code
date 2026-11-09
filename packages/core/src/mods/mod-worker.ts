@@ -145,6 +145,9 @@ const assertLive = (call?: ModInvocation, modelScope?: ModModelScope) => {
   if (callAbandoned(call) || modelAbandoned(modelScope))
     throw new Error('Mod dispatch cancelled or timed out.');
 };
+const assertBudget = (call: ModInvocation) => {
+  if (call.budget.expired) throw new ModTimeoutError();
+};
 
 // The root's clock stops while all it waits on is the host: a native tool
 // or a model call.
@@ -181,10 +184,7 @@ class Realm {
   private sliceDeadline = Infinity;
   private executingCall?: ModInvocation;
   private notifying = false;
-  constructor(
-    readonly plugin: ModPlugin,
-    readonly index: number,
-  ) {
+  constructor(readonly plugin: ModPlugin) {
     this.runtime.setMemoryLimit(64 * 1024 * 1024);
     this.runtime.setMaxStackSize(1024 * 1024);
     this.runtime.setInterruptHandler(() => {
@@ -192,14 +192,10 @@ class Realm {
       if (this.notifying) return false;
       if (abandoned()) return true;
       const active = this.executingCall;
-      if (active) return active.budget.expired || callAbandoned(active);
-      // Pending promise jobs do not identify their invocation. Model scope
-      // cancellation is checked by the owner at its hook and API boundaries.
-      return [...calls.values()].some(
-        (call) =>
-          call.plugin === index &&
-          call.live &&
-          (call.budget.expired || (!call.modelScope && callAbandoned(call))),
+      // A pending promise job has no invocation ID. Per-call limits are
+      // enforced at its own hook and API boundaries instead.
+      return (
+        active !== undefined && (active.budget.expired || callAbandoned(active))
       );
     });
     const bridge = this.vm.newFunction('modCall', (id, kind, data) => {
@@ -254,6 +250,7 @@ class Realm {
       ) {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
+        assertBudget(call);
         const json = this.vm.getString(input);
         if (name !== 'validate' && Buffer.byteLength(json) > MOD_MAX_BYTES)
           throw new Error('Mod result is too large.');
@@ -268,7 +265,7 @@ class Realm {
         return this.vm.undefined;
       }
       if (name === 'aborted')
-        return call?.aborted || callAbandoned(call)
+        return call?.aborted || call?.budget.expired || callAbandoned(call)
           ? this.vm.true
           : this.vm.false;
       return this.vm.newNumber(
@@ -336,6 +333,7 @@ class Realm {
     data: ModInput,
   ): Promise<unknown> {
     assertLive(call);
+    assertBudget(call);
     const input = this.vm.newString(JSON.stringify({ ...data, id: call.id }));
     try {
       return await this.settle(
@@ -450,7 +448,7 @@ async function bounded(
     });
     const result = await Promise.race([Promise.resolve().then(run), expiry]);
     assertLive(call);
-    if (call.budget.expired) throw new ModTimeoutError();
+    assertBudget(call);
     return result;
   } catch (error) {
     call.aborted = true;
@@ -678,9 +676,12 @@ async function hostCall(
   method: string,
   payload: unknown,
 ): Promise<unknown> {
+  const models = method === 'model.complete';
   const call = calls.get(id);
-  if (!call?.live || callAbandoned(call))
+  if (!call?.live || callAbandoned(call)) {
+    if (models) return ABORTED_MODEL_CALL;
     throw new Error('Mod continuation is no longer active.');
+  }
   if (
     !record(payload) ||
     !Array.isArray(payload['frames']) ||
@@ -694,6 +695,12 @@ async function hostCall(
       registration,
     })),
   ];
+  // A caller's `options.signal` aborted: not an event, so no hook hears it.
+  if (method === 'model.abort') {
+    modelSignals.get(call.plugin + ':' + String(payload['token']))?.abort();
+    return undefined;
+  }
+  assertBudget(call);
   const value = payload['value'];
   if (method === 'next') {
     let task: Promise<unknown>;
@@ -713,14 +720,8 @@ async function hostCall(
       updateActivity();
     }
   }
-  // A caller's `options.signal` aborted: not an event, so no hook hears it.
-  if (method === 'model.abort') {
-    modelSignals.get(call.plugin + ':' + String(payload['token']))?.abort();
-    return undefined;
-  }
   if (!isModMethod(method)) throw new Error('Mod API not supported: ' + method);
   const plugin = realms[call.plugin].plugin;
-  const models = method === 'model.complete';
   if (models && !runsModels)
     throw new Error('Mod model.complete: this host runs no model calls.');
   // A submitted prompt raises prompt.submit as a typed one does, through
@@ -847,7 +848,7 @@ async function hostCall(
       detached ? undefined : call,
       modelScope,
     );
-    if (modelScope) assertLive(undefined, modelScope);
+    if (modelScope) assertLive(model ? call : undefined, modelScope);
     if (!record(result)) throw new Error('Invalid Mod API result.');
     if (submits) return queueArrived(result, arrived, plugin.name);
     if ('deny' in result) throw new Error(String(result['deny']));
@@ -862,7 +863,10 @@ async function hostCall(
       ? invoke()
       : call.budget.lend(invoke));
   } catch (error) {
-    if (model && modelAbandoned(modelScope)) return ABORTED_MODEL_CALL;
+    if (model && (modelAbandoned(modelScope) || callAbandoned(call))) {
+      model.abort();
+      return ABORTED_MODEL_CALL;
+    }
     throw error;
   } finally {
     clearTimeout(modelTimer);
@@ -1168,7 +1172,7 @@ port.on('message', async (request: ModWorkerRequest) => {
       );
       for (const plugin of request.plugins) {
         assertLive();
-        const realm = new Realm(plugin, realms.length);
+        const realm = new Realm(plugin);
         realms.push(realm);
         try {
           await realm.load();

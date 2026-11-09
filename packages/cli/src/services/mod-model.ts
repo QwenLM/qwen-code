@@ -192,8 +192,8 @@ export async function completeModModel(
               ? tokenLimit(model.modelId, 'output')
               : maxTokens,
           ),
-          // Reasoning stays off, as on every side query, unless the Mod asks
-          // for an effort; the level itself is not sent yet.
+          // Providers apply their own opt-out. An effort uses the route's
+          // configured level.
           thinkingConfig: { includeThoughts: input.effort !== undefined },
         },
         isolatedRequest: true,

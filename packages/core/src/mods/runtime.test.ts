@@ -10,6 +10,7 @@ import { ModRuntime, type ModPromptQueue } from './runtime.js';
 import { ModBudget } from './dispatch.js';
 import {
   MOD_MAX_BYTES,
+  MOD_TIMEOUT_MS,
   type ModLog,
   type ModModelCompleteInput,
   type ModModelCompleteResult,
@@ -1797,6 +1798,89 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(cut).toEqual([true]);
     });
 
+    it('skips a model request whose signal aborts during serialization', async () => {
+      const host = vi.fn<ModModelHost>(async () => ({
+        isAnswered: true,
+        text: 'late',
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          fixture(`
+            const listeners = new Set();
+            const stop = {
+              aborted: false,
+              addEventListener: (type, fn) => listeners.add(fn),
+              removeEventListener: (type, fn) => listeners.delete(fn),
+            };
+            const result = await $.model.complete({
+              toJSON() {
+                stop.aborted = true;
+                for (const listener of listeners) listener();
+                return {model:'m', prompt:'skip'};
+              },
+            }, {signal: stop});
+            return {text: JSON.stringify({result, listeners: listeners.size})};`),
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(await runtime.runCommand('hello', '', signal())),
+      ).toEqual({ result: aborted, listeners: 0 });
+      expect(host).not.toHaveBeenCalled();
+    });
+
+    it.each(['host', 'middleware'])(
+      'settles a retained %s model call as aborted when its dispatch ends',
+      async (mode) => {
+        const cut = vi.fn();
+        const host = vi.fn<ModModelHost>(
+          (_, active) =>
+            new Promise((_, reject) => {
+              active.addEventListener('abort', () => {
+                cut();
+                reject(active.reason);
+              });
+            }),
+        );
+        const runtime = await createModels(
+          [
+            `let pending;
+            export function register(on) {
+              on('session.start', async ($, e, next) => {
+                await $.command.register({name:'hello', description:'Hello'});
+                return next(e);
+              });
+              on('command.run', async ($, e) => {
+                if (e.args === 'start') {
+                  pending = $.model.complete({model:'m', prompt:'${mode}'});
+                  void pending.catch(() => {});
+                  await $.clock.sleep(50);
+                  return {text:'started'};
+                }
+                return {text:JSON.stringify(await pending)};
+              });
+              on('model.complete', {prompt:'middleware'}, async ($, e, next) => {
+                await $.model.complete({model:'m', prompt:'inner'});
+                return next({...e, prompt:'stale'});
+              });
+            }`,
+          ],
+          host,
+        );
+        expect(
+          await runtime.runCommand('hello', 'start', AbortSignal.timeout(3000)),
+        ).toBe('started');
+        expect(
+          JSON.parse(await runtime.runCommand('hello', 'read', signal())),
+        ).toEqual(aborted);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          mode === 'host' ? 'host' : 'inner',
+        ]);
+        expect(cut).toHaveBeenCalledOnce();
+      },
+    );
+
     it.each(['signal', 'timeout'])(
       'cancels middleware and its nested model call on %s',
       async (mode) => {
@@ -1892,6 +1976,55 @@ describe('ModRuntime with the real QuickJS worker', () => {
         ]);
       },
     );
+
+    it('recovers an expired hook without interrupting its resumed sibling', async () => {
+      const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+        isAnswered: true,
+        text: prompt,
+        usage,
+      }));
+      const runtime = await createModels(
+        [
+          `export function register(on) {
+            on('session.start', async ($, e, next) => {
+              await $.command.register({name:'hello', description:'Hello'});
+              return next(e);
+            });
+            on('command.run', async ($) => {
+              const slow = $.model.complete({model:'m', prompt:'slow'});
+              await $.clock.sleep(${MOD_TIMEOUT_MS - 400});
+              const normal = $.model.complete({model:'m', prompt:'raw'});
+              return {text:JSON.stringify(await Promise.all([slow, normal]))};
+            });
+            on('model.complete', async ($, e, next) => {
+              if (e.prompt === 'slow') {
+                await $.clock.sleep(${MOD_TIMEOUT_MS + 1000});
+                return next(e);
+              }
+              await Promise.resolve();
+              const end = Date.now() + 750;
+              while (Date.now() < end) {}
+              return next({...e, prompt:'sanitized'});
+            }).catch(($, e, next) => {
+              if (e.prompt === 'slow' && next.error.kind === 'timeout')
+                return {value:{isAnswered:true, text:'recovered', usage:${JSON.stringify(usage)}}};
+            });
+          }`,
+        ],
+        host,
+      );
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', '', AbortSignal.timeout(16000)),
+        ),
+      ).toEqual([
+        { isAnswered: true, text: 'recovered', usage },
+        { isAnswered: true, text: 'sanitized', usage },
+      ]);
+      expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+        'sanitized',
+      ]);
+    }, 20_000);
 
     it('does not forward a request after middleware exhausts its deadline', async () => {
       const host = vi.fn<ModModelHost>(async () => ({

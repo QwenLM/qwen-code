@@ -32,6 +32,7 @@ import {
 } from '../../deepseek-reasoning.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { filterIsolatedModelOverrides } from './utils.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
@@ -233,7 +234,9 @@ export class DefaultOpenAICompatibleProvider
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
-    const extraBody = this.contentGeneratorConfig.extra_body;
+    const extraBody = filterIsolatedModelOverrides(
+      this.contentGeneratorConfig.extra_body,
+    );
 
     // Apply output token limits to ensure max_tokens is set appropriately
     // This prevents occupying too much context window with output reservation

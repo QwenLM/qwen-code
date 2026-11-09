@@ -5,7 +5,41 @@
  */
 
 import type OpenAI from 'openai';
+import { retryContext } from '../../../utils/retryContext.js';
 import type { ExtendedChatCompletionAssistantMessageParam } from '../converter.js';
+
+const ISOLATED_MODEL_REQUEST_FIELDS = new Set([
+  'model',
+  'messages',
+  'input',
+  'instructions',
+  'prompt',
+  'conversation',
+  'previous_response_id',
+  'tools',
+  'tool_choice',
+  'parallel_tool_calls',
+  'functions',
+  'function_call',
+  'web_search_options',
+  'enable_search',
+  'search_options',
+  'n',
+  'stream',
+  'stream_options',
+]);
+
+export function filterIsolatedModelOverrides<T extends Record<string, unknown>>(
+  overrides: T | undefined,
+): Partial<T> | undefined {
+  // Mod completions have a single-attempt context even on the active model.
+  if (!overrides || !retryContext.getStore()?.singleAttempt) return overrides;
+  return Object.fromEntries(
+    Object.entries(overrides).filter(
+      ([key]) => !ISOLATED_MODEL_REQUEST_FIELDS.has(key),
+    ),
+  ) as Partial<T>;
+}
 
 // Some thinking-mode OpenAI-compatible APIs require `reasoning_content` to be
 // replayed on every prior assistant turn, even when the model returned no

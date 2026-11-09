@@ -432,7 +432,15 @@ export class ModSession implements ICommandLoader {
             ? undefined
             : (prompt) => this.queuePrompt(prompt),
           (input, modelSignal) =>
-            completeModModel(this.config, input, modelSignal),
+            completeModModel(
+              this.config,
+              input,
+              // During a session switch, the old session.end still runs
+              // after Config has already adopted the new identity.
+              this.sessionId === this.config.getSessionId()
+                ? modelSignal
+                : AbortSignal.abort(),
+            ),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({

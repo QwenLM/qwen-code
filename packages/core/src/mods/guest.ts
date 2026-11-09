@@ -153,10 +153,12 @@ export const MOD_GUEST_FACTORY = String.raw`
     }});
   };
   let modelTokens = 0;
-  const call = (id, frames, kind, value, extra) => bridge(id, kind, encode({ ...extra, value, frames })).then(json => {
+  const abortedModel = frozen({ isAnswered: false, reason: 'aborted', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+  const unpack = json => {
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
-  });
+  };
+  const call = (id, frames, kind, value, extra) => bridge(id, kind, encode({ ...extra, value, frames })).then(unpack);
   const api = (id, frames) => {
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
@@ -196,12 +198,22 @@ export const MOD_GUEST_FACTORY = String.raw`
           if (!object(options) || keys(options).some(k => k !== 'signal')) throw new Error('Invalid Mod model.complete options');
           const { signal } = options;
           if (signal !== undefined && (!object(signal) || typeof signal.addEventListener !== 'function')) throw new Error('Invalid Mod model.complete signal');
-          if (signal?.aborted) return frozen({ isAnswered: false, reason: 'aborted', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+          if (signal?.aborted) return abortedModel;
           const token = ++modelTokens;
-          const abort = () => { call(id, frames, 'model.abort', {}, { token }).catch(() => {}); };
-          signal?.addEventListener('abort', abort);
+          let aborted = false;
+          let published = false;
+          const abort = () => {
+            aborted = true;
+            if (published) call(id, frames, 'model.abort', {}, { token }).catch(() => {});
+          };
           try {
-            return await call(id, frames, 'model.complete', request, { token });
+            signal?.addEventListener('abort', abort);
+            if (signal?.aborted || aborted) return abortedModel;
+            const json = encode({ token, value: request, frames });
+            if (signal?.aborted || aborted) return abortedModel;
+            const pending = bridge(id, 'model.complete', json);
+            published = true;
+            return await pending.then(unpack);
           } finally {
             signal?.removeEventListener?.('abort', abort);
           }

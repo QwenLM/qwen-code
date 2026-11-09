@@ -35,7 +35,7 @@ export interface RetryAttemptContext {
    * immediately before `await fn()` to avoid measurement drift across layers.
    */
   readonly requestSetupMs: number;
-  /** Also skip SDK and adapter retries within this attempt. */
+  /** Mod completion attempt. The wire also rejects redirects and keeps the call's request fields. */
   readonly singleAttempt?: boolean;
 }
 

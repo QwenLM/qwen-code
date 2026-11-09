@@ -1250,6 +1250,74 @@ describe('ContentGenerationPipeline', () => {
     });
 
     it.each([
+      ['max_tokens', 111, 8],
+      ['max_completion_tokens', 111, 8],
+      ['max_new_tokens', 4, 4],
+    ])(
+      'keeps the isolated Mod request envelope and bounds %s',
+      async (outputField, configuredLimit, expectedLimit) => {
+        const body = await retryContext.run(
+          {
+            attempt: 1,
+            retryTotalDelayMs: 0,
+            requestSetupMs: 0,
+            singleAttempt: true,
+          },
+          () =>
+            executeWith(
+              {
+                samplingParams: {
+                  messages: [{ role: 'system', content: 'sampling override' }],
+                  enable_search: true,
+                  n: 2,
+                },
+                extra_body: {
+                  model: 'different-model',
+                  messages: [{ role: 'user', content: 'body override' }],
+                  tools: [{ type: 'function' }],
+                  functions: [{ name: 'legacy-function' }],
+                  web_search_options: { search_context_size: 'low' },
+                  search_options: { forced_search: true },
+                  stream: true,
+                  fixture_option: 'preserved',
+                  [outputField]: configuredLimit,
+                },
+              },
+              userRequest('requested-model', { maxOutputTokens: 8 }),
+              'side-query:mod-model-complete',
+              DefaultOpenAICompatibleProvider,
+            ),
+        );
+
+        expectFields(body, {
+          model: 'requested-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          tools: undefined,
+          functions: undefined,
+          enable_search: undefined,
+          web_search_options: undefined,
+          search_options: undefined,
+          n: undefined,
+          stream: false,
+          fixture_option: 'preserved',
+          max_tokens: undefined,
+          [outputField]: expectedLimit,
+        });
+      },
+    );
+
+    it('keeps configured hosted search options for ordinary requests', async () => {
+      const search = { search_context_size: 'low' };
+      const body = await executeWith(
+        { extra_body: { web_search_options: search } },
+        userRequest(),
+        'normal-prompt',
+        DefaultOpenAICompatibleProvider,
+      );
+      expect(body['web_search_options']).toEqual(search);
+    });
+
+    it.each([
       {
         name: 'preserving unrelated chat_template_kwargs',
         extraBody: {
