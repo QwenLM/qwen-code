@@ -50,6 +50,8 @@ interface Scenario {
   approvals?: Array<'allow' | 'deny'>;
   /** Presses Esc once this text is on screen. */
   cancelOn?: string;
+  /** Disconnects the first response once this text is visible. */
+  disconnectOn?: string;
   /** Submits `input` once `on` is on screen, while the turn runs. */
   queue?: { on: string; input: string };
   /** Presses Ctrl+Y this many times after the prompt, each after a turn. */
@@ -388,18 +390,33 @@ describeTui(SUITE, () => {
     for (const file of ['system.json', 'defaults.json'])
       json(join(scratch, file), { $version: 4 });
 
+    const { disconnectOn } = scenario;
+    const firstChunkRead = deferred();
     let streamingIndex = 0;
-    server = await startFakeOpenAIServer(({ body }) =>
-      body['stream'] === true
-        ? scenario.reply(
-            (body['messages'] ?? []) as JsonObject[],
-            workspace,
-            streamingIndex++,
-          )
-        : (scenario.sideReply?.(body) ?? {
+    server = await startFakeOpenAIServer(async ({ body }) => {
+      if (body['stream'] !== true) {
+        return (
+          scenario.sideReply?.(body) ?? {
             content: '{"selected_memories":[]}',
-          }),
-    );
+          }
+        );
+      }
+      const index = streamingIndex++;
+      const response = await scenario.reply(
+        (body['messages'] ?? []) as JsonObject[],
+        workspace,
+        index,
+      );
+      if (index === 0 && disconnectOn) {
+        return {
+          ...response,
+          holdAfterChunks: 1,
+          holdUntil: firstChunkRead.promise,
+          disconnectAfterContentChunks: 2,
+        };
+      }
+      return response;
+    });
     session = await InteractiveSession.start({
       cwd: workspace,
       cols: 100,
@@ -458,8 +475,18 @@ describeTui(SUITE, () => {
       await session!.idle(1_000, 30_000);
     };
 
-    for (const prompt of scenario.prompts) {
+    for (const [index, prompt] of scenario.prompts.entries()) {
       await session.send(prompt);
+      if (index === 0 && disconnectOn) {
+        try {
+          await until(
+            async () => (await session!.viewport()).includes(disconnectOn),
+            'the first response chunk is visible',
+          );
+        } finally {
+          firstChunkRead.resolve();
+        }
+      }
       for (const answer of scenario.approvals ?? []) {
         // The viewport, not the whole output, which still holds the
         // previous approval.
@@ -562,6 +589,7 @@ describeTui(SUITE, () => {
     return { promise, resolve };
   };
   let leaderWaiting = deferred();
+  const retryPrefix = 'A clockwork fox ';
 
   const allScenarios: Scenario[] = [
     {
@@ -727,18 +755,11 @@ describeTui(SUITE, () => {
       rounds: 1,
       batches: 0,
       prompts: ['Tell me a story.'],
-      // The connection drops once the TUI has read the first chunk, so the
-      // client continues after it. Dropped right after the chunk, whether the
-      // chunk survives the drop depends on how fast the TUI reads it.
+      disconnectOn: retryPrefix.trimEnd(),
       reply: (_messages, _dir, index) =>
         index === 0
-          ? {
-              contentChunks: ['Once ', ''],
-              holdAfterChunks: 1,
-              holdUntil: sleep(1_000),
-              disconnectAfterContentChunks: 2,
-            }
-          : { contentChunks: ['Once ', 'upon a time.'] },
+          ? { contentChunks: [retryPrefix, ''] }
+          : { contentChunks: [retryPrefix, 'followed the moon.'] },
     },
     {
       name: 'two prompts in one session',

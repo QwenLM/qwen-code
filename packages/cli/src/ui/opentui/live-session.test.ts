@@ -4339,8 +4339,8 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     },
   );
 
-  it('runs none of the calls of a round that detected a loop', async () => {
-    const runs: number[] = [];
+  it('settles tool cards when a round detects a loop', async () => {
+    const runs = [];
     for (const onShared of [false, true]) {
       let sends = 0;
       const send = vi.fn(function* () {
@@ -4349,14 +4349,22 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
         yield { type: 'loop_detected' };
       });
       const config = createFakeConfig(send);
-      await drain(
+      const events = await drain(
         livePromptEvents(onShared ? shared(config) : config, 'start'),
       );
-      runs.push(send.mock.calls.length);
+      const items = events.reduce<readonly LiveHistoryItem[]>(
+        foldLiveEvent,
+        [],
+      );
+      runs.push({
+        sends: send.mock.calls.length,
+        card: items.find((item) => item.kind === 'tool' && item.id === 't1'),
+      });
     }
-    // The current path runs the calls collected before the loop was
-    // detected; the shared round keeps them from running, as in Ink.
-    expect(runs).toEqual([2, 1]);
+    expect(runs).toMatchObject([
+      { sends: 2, card: { done: true, success: true } },
+      { sends: 1, card: { done: true, success: false, summary: 'cancelled' } },
+    ]);
   });
 
   it("closes the round's stream when the turn is no longer current", async () => {

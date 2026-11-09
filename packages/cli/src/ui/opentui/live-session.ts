@@ -1013,12 +1013,20 @@ export async function* livePromptEvents(
       }
       for (const event of acceptedSteerEvents.splice(0)) yield event;
       if (!streamFailed) options?.onPreparedRequest?.(undefined);
-      if (sharedRound) {
-        // Any stop reason, a detected loop included, keeps the round's calls
-        // from running.
-        const round = sharedRound.result();
-        if (round && !round.stop) pending.push(...round.calls);
+      const round = sharedRound?.result();
+      if (round?.stop) {
+        // These calls already have visible cards, but will never be scheduled.
+        for (const { callId } of round.calls) {
+          yield {
+            type: 'tool-end',
+            id: callId,
+            success: false,
+            summary: 'cancelled',
+          };
+        }
+        return;
       }
+      if (round) pending.push(...round.calls);
     }
     if (pending.length === 0 || abort.aborted) return;
 
