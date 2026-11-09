@@ -1,5 +1,9 @@
 # Safe and observable large-session restore timeouts
 
+[English](2026-08-07-safe-session-restore-timeout.md) | [简体中文](2026-08-07-safe-session-restore-timeout.zh-CN.md)
+
+The [ACP startup and restore budgets design](acp-startup-restore-budgets.md) ([简体中文](acp-startup-restore-budgets.zh-CN.md)) supersedes the original preparation timing and timeout-response scope in this record. Its shared monotonic deadline and preparation-expiry contract are current; the dispatched-request fencing and cleanup design below remains applicable.
+
 ## Context
 
 Issue #8678 exposed that session restore reconstructs the persisted JSONL transcript before it can return an ACP `loadSession` or `unstable_resumeSession` response. Large transcripts can therefore exceed the bridge's former shared 10-second initialization timeout. The bridge cannot cancel the underlying ACP request because the current SDK does not expose its JSON-RPC request id or a cancellation operation.
@@ -37,6 +41,8 @@ The WebUI passes server budget plus 10 seconds to SDK load/resume and uses serve
 
 ## Restore ownership and terminal arbitration
 
+Preparation expiry dispatches no ACP restore. It releases admission and the in-flight entry, installs no abandoned-restore fence, and allows an immediate same-ID retry. The abandonment lifecycle below applies only after ACP dispatch.
+
 `inFlightRestores` owns two promises: a public promise returned to callers and a settlement promise representing the real ACP request plus cleanup. It also owns the session-id fence and accounts for restore capacity. On normal success, registration transfers capacity to the live session and may release admission; after abandonment, the fence, admission, and in-flight capacity remain until real settlement.
 
 An explicit lifecycle flag arbitrates the deadline and ACP result. Whichever observes `active` first changes the public terminal state. This avoids relying on `Promise.race` callback ordering at an equal-time boundary.
@@ -56,7 +62,7 @@ The abandoned notification fence has no TTL and remains until the channel exits 
 
 ## Channel safety
 
-At timeout, the bridge removes the id from `pendingRestoreIds`, clears its early events, and records the id in the channel's `unsettledAbandonedRestores`. If the channel has no live sessions, pending spawn, other restore, or workspace-control operation, it is synchronously marked dying and its child is killed asynchronously; the 504 response does not wait for TERM/KILL escalation. The outer `qwen serve` process continues running.
+At a dispatched-request timeout, the bridge removes the id from `pendingRestoreIds`, clears its early events, and records the id in the channel's `unsettledAbandonedRestores`. If the channel has no live sessions, pending spawn, other restore, or workspace-control operation, it is synchronously marked dying and its child is killed asynchronously; the 504 response does not wait for TERM/KILL escalation. The outer `qwen serve` process continues running.
 
 If any sibling work exists, the child remains alive. A late cleanup failure sets a distinct quarantine bit and does not set `isDying`, so sibling attach, prompt, close, and workspace control continue. Fresh work is rejected before capacity checks so the stable error is `acp_channel_unavailable` rather than a coincidental session-limit response. Once visible work drains, the child is recycled and a subsequent request can create a clean channel.
 
@@ -66,13 +72,13 @@ Shutdown waits each real settlement promise, but every ACP request is raced with
 
 ## Error contract
 
-`SessionRestoreTimeoutError` subclasses `BridgeTimeoutError` but is classified first as `restore_timeout`. REST returns HTTP 504 with a budget-derived `Retry-After` clamped to 5–120 seconds and the fields `code`, `errorKind`, `retryable`, `sessionId`, `action`, and `timeoutMs`. ACP HTTP and WebSocket return JSON-RPC `-32603` with the same data plus `httpStatus: 504` and `retryAfterSeconds`.
+`SessionRestoreTimeoutError` subclasses `BridgeTimeoutError` but is classified first as `restore_timeout`. Both timeout phases return REST HTTP 504 with `code`, `errorKind`, `retryable: true`, `sessionId`, `action`, and the configured `timeoutMs`. Preparation expiry adds `dispatched: false`, has no `Retry-After` or abandoned-restore fence, and allows an immediate same-ID retry. After ACP dispatch, the response retains a budget-derived `Retry-After` clamped to 5–120 seconds while the id stays fenced until the request and cleanup settle. ACP HTTP and WebSocket return JSON-RPC `-32603` with the same data plus `httpStatus: 504`; only the dispatched case includes `retryAfterSeconds`.
 
 A channel closed to fresh work rejects it with HTTP/ACP status 503 and code and error kind `acp_channel_unavailable`. `reason` distinguishes the two causes: `restore_cleanup_failed` (cleanup of a timed-out restore failed, so the child's state is unknown) and `restore_settlement_overdue` (an abandoned restore has still not settled one restore budget after its deadline).
 
 ## Observability
 
-The bridge creates a restore span and always injects its trace context into ACP load/resume metadata. It records action, channel id, session id, configured budget, public result, late result, and cleanup or quarantine result without transcript content.
+For dispatched requests, the bridge creates a restore span and always injects its trace context into ACP load/resume metadata. It records action, channel id, session id, configured budget, public result, late result, and cleanup or quarantine result without transcript content.
 
 The child continues that context in `qwen-code.daemon.session_restore` and records durations for settings load, live restore or persistence existence check, config setup, authentication, filesystem setup, session registration/replay, and response construction. The first failing stage is recorded as `failed_stage`.
 

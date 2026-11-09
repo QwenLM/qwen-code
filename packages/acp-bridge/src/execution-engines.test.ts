@@ -4243,6 +4243,15 @@ describe('paired per-engine operations', () => {
         failed: 0,
       });
     const request = { language: 'zh', syncOutputLanguage: true };
+    const recordRestoreTelemetry = (
+      event: NonNullable<BridgeTelemetry['event']>,
+    ): BridgeTelemetry => ({
+      captureContext: () => undefined,
+      runWithContext: async (_context, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      injectPromptContext: (request) => request,
+      event,
+    });
 
     it('reaches both engines and adds up their counts', async () => {
       const log: string[] = [];
@@ -4450,6 +4459,8 @@ describe('paired per-engine operations', () => {
       'does not dispatch session/%s after language delivery outlasts the deadline without timer delivery',
       async (action) => {
         vi.useFakeTimers();
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        const event = vi.fn();
         vi.setSystemTime(0);
         const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
         const language = deferred<Record<string, unknown>>();
@@ -4464,6 +4475,7 @@ describe('paired per-engine operations', () => {
             initializeTimeoutMs: 1_000,
             sessionRestoreTimeoutMs: 100,
             maxSessions: 1,
+            telemetry: recordRestoreTelemetry(event),
           },
           engineChannel('legacy'),
           managed,
@@ -4490,6 +4502,19 @@ describe('paired per-engine operations', () => {
           expect(managed.agent.resumeSessionCalls).toHaveLength(0);
           expect(error).toBeInstanceOf(SessionRestoreTimeoutError);
           expect(error).toMatchObject({ dispatched: false });
+          expect(event).toHaveBeenCalledWith(
+            'session.restore.public_result',
+            expect.objectContaining({
+              'qwen-code.daemon.session_restore.result': 'timeout',
+              'qwen-code.daemon.session_restore.preparation_stage':
+                'dispatch_boundary',
+            }),
+          );
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'phase=preparation; stage=dispatch_boundary; decision=release_admission',
+            ),
+          );
           expect(managed.killed).toBe(false);
           await expect(restore()).resolves.toMatchObject({
             sessionId: restoreRequest.sessionId,
@@ -4503,6 +4528,8 @@ describe('paired per-engine operations', () => {
 
     it('expires during language delivery without a late restore or lost admission', async () => {
       vi.useFakeTimers();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const event = vi.fn();
       const language = deferred<Record<string, unknown>>();
       const managed = engineChannel('managed', {
         extMethodImpl: async (method) => {
@@ -4515,6 +4542,7 @@ describe('paired per-engine operations', () => {
           initializeTimeoutMs: 1_000,
           sessionRestoreTimeoutMs: 100,
           maxSessions: 1,
+          telemetry: recordRestoreTelemetry(event),
         },
         engineChannel('legacy'),
         managed,
@@ -4527,6 +4555,19 @@ describe('paired per-engine operations', () => {
         .catch((error: unknown) => error);
       await vi.advanceTimersByTimeAsync(100);
       expect(await restore).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(event).toHaveBeenCalledWith(
+        'session.restore.public_result',
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.result': 'timeout',
+          'qwen-code.daemon.session_restore.preparation_stage':
+            'language_delivery',
+        }),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'phase=preparation; stage=language_delivery; decision=release_admission',
+        ),
+      );
       expect(managed.agent.loadSessionCalls).toHaveLength(0);
       expect(managed.killed).toBe(false);
       language.resolve({ language: 'zh', sessions: 0, failed: 0 });

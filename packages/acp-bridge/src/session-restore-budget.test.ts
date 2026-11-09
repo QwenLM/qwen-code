@@ -14,6 +14,18 @@ import type { AcpChannel } from './channel.js';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 import { SessionRestoreTimeoutError } from './status.js';
 
+function recordTelemetry(
+  event: NonNullable<BridgeTelemetry['event']>,
+): BridgeTelemetry {
+  return {
+    captureContext: () => undefined,
+    runWithContext: async (_context, fn) => await fn(),
+    withSpan: async (_operation, _attributes, fn) => await fn(),
+    injectPromptContext: (request) => request,
+    event,
+  };
+}
+
 describe('session restore budget', () => {
   it.each(['load', 'resume'] as const)(
     'includes cold startup in the session/%s deadline',
@@ -33,9 +45,11 @@ describe('session restore budget', () => {
       const factory = new Promise<AcpChannel>((resolve) => {
         releaseFactory = resolve;
       });
+      const event = vi.fn();
       const bridge = makeBridge({
         initializeTimeoutMs: 10_000,
         channelFactory: () => factory,
+        telemetry: recordTelemetry(event),
       });
       const request = { sessionId: `cold-${action}`, workspaceCwd: WS_A };
       let settledAt: number | undefined;
@@ -63,6 +77,19 @@ describe('session restore budget', () => {
         expect(settledAt).toBe(60_000);
         expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
         expect(await outcome).toMatchObject({ action, timeoutMs: 60_000 });
+        expect(event).toHaveBeenCalledWith(
+          'session.restore.public_result',
+          expect.objectContaining({
+            'qwen-code.daemon.session_restore.result': 'timeout',
+          }),
+        );
+        expect(
+          event.mock.calls.find(
+            ([name]) => name === 'session.restore.public_result',
+          )?.[1],
+        ).not.toHaveProperty([
+          'qwen-code.daemon.session_restore.preparation_stage',
+        ]);
         expect(settledAt).toBeLessThan(70_000);
         expect(handle.killed).toBe(true);
       } finally {
@@ -119,26 +146,20 @@ describe('session restore budget', () => {
 
   it('expires while waiting for a channel without a late restore or capacity leak', async () => {
     vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const handle = makeChannel();
     let releaseFactory!: (channel: AcpChannel) => void;
     const factory = new Promise<AcpChannel>((resolve) => {
       releaseFactory = resolve;
     });
     const event = vi.fn();
-    const telemetry: BridgeTelemetry = {
-      captureContext: () => undefined,
-      runWithContext: async (_context, fn) => await fn(),
-      withSpan: async (_operation, _attributes, fn) => await fn(),
-      injectPromptContext: (request) => request,
-      event,
-    };
     const bridge = makeBridge({
       initializeTimeoutMs: 100,
       sessionRestoreTimeoutMs: 50,
       channelIdleTimeoutMs: 1_000,
       maxSessions: 1,
       channelFactory: () => factory,
-      telemetry,
+      telemetry: recordTelemetry(event),
     });
 
     try {
@@ -156,7 +177,14 @@ describe('session restore budget', () => {
         expect.objectContaining({
           'qwen-code.daemon.session_restore.result': 'timeout',
           'qwen-code.daemon.session_restore.timeout_ms': 50,
+          'qwen-code.daemon.session_restore.preparation_stage':
+            'channel_readiness',
         }),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'phase=preparation; stage=channel_readiness; decision=release_admission',
+        ),
       );
       await vi.advanceTimersByTimeAsync(30);
       releaseFactory(handle.channel);
@@ -169,15 +197,154 @@ describe('session restore budget', () => {
       expect(
         handle.agent.loadSessionCalls.map((call) => call.sessionId),
       ).toEqual(['expired']);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(handle.killed).toBe(false);
     } finally {
       releaseFactory(handle.channel);
       await bridge.shutdown();
+      stderr.mockRestore();
       vi.useRealTimers();
     }
   });
 
+  it.each(['load', 'resume'] as const)(
+    'applies the configured idle policy after abandoned session/%s preparation warms a channel',
+    async (action) => {
+      for (const channelIdleTimeoutMs of [0, 1_000]) {
+        vi.useFakeTimers();
+        const handle = makeChannel();
+        let releaseFactory!: (channel: AcpChannel) => void;
+        const factory = new Promise<AcpChannel>((resolve) => {
+          releaseFactory = resolve;
+        });
+        const bridge = makeBridge({
+          initializeTimeoutMs: 100,
+          sessionRestoreTimeoutMs: 50,
+          channelIdleTimeoutMs,
+          channelFactory: () => factory,
+        });
+        const request = { sessionId: `idle-${action}`, workspaceCwd: WS_A };
+        try {
+          const outcome = (
+            action === 'load'
+              ? bridge.loadSession(request)
+              : bridge.resumeSession(request)
+          ).catch((error: unknown) => error);
+          await vi.advanceTimersByTimeAsync(50);
+          expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+          expect(await outcome).toMatchObject({ dispatched: false });
+          await vi.advanceTimersByTimeAsync(30);
+          releaseFactory(handle.channel);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(handle.agent.loadSessionCalls).toHaveLength(0);
+          expect(handle.agent.resumeSessionCalls).toHaveLength(0);
+          await vi.advanceTimersByTimeAsync(999);
+          expect(handle.killed).toBe(false);
+          await vi.advanceTimersByTimeAsync(2);
+          expect(handle.killed).toBe(channelIdleTimeoutMs > 0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          expect(handle.killed).toBe(channelIdleTimeoutMs > 0);
+        } finally {
+          releaseFactory(handle.channel);
+          await bridge.shutdown();
+          vi.useRealTimers();
+        }
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'allows a healthy session/%s to use a small positive remainder',
+    async (action) => {
+      vi.useFakeTimers();
+      const handle = makeChannel();
+      let releaseFactory!: (channel: AcpChannel) => void;
+      const factory = new Promise<AcpChannel>((resolve) => {
+        releaseFactory = resolve;
+      });
+      const bridge = makeBridge({
+        initializeTimeoutMs: 100,
+        sessionRestoreTimeoutMs: 50,
+        channelFactory: () => factory,
+      });
+      const request = { sessionId: `fast-${action}`, workspaceCwd: WS_A };
+      try {
+        const outcome =
+          action === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request);
+        await vi.advanceTimersByTimeAsync(49);
+        releaseFactory(handle.channel);
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(outcome).resolves.toMatchObject({
+          sessionId: request.sessionId,
+        });
+        expect(handle.killed).toBe(false);
+        expect(
+          action === 'load'
+            ? handle.agent.loadSessionCalls
+            : handle.agent.resumeSessionCalls,
+        ).toHaveLength(1);
+      } finally {
+        releaseFactory(handle.channel);
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'classifies a non-timeout session/%s preparation rejection as failure',
+    async (action) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const event = vi.fn();
+      const failure = new Error('engine selection failed');
+      const channelFactory = vi.fn(async () => makeChannel().channel);
+      const bridge = makeBridge({
+        telemetry: recordTelemetry(event),
+        executionEngines: {
+          legacy: channelFactory,
+          managed: channelFactory,
+          select: async () => {
+            throw failure;
+          },
+        },
+      });
+      const request = { sessionId: `rejected-${action}`, workspaceCwd: WS_A };
+      try {
+        await expect(
+          action === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request),
+        ).rejects.toBe(failure);
+        expect(channelFactory).not.toHaveBeenCalled();
+        expect(event).toHaveBeenCalledWith(
+          'session.restore.public_result',
+          expect.objectContaining({
+            'qwen-code.daemon.session_restore.result': 'failure',
+          }),
+        );
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('phase=preparation'),
+        );
+        expect(
+          event.mock.calls.find(
+            ([name]) => name === 'session.restore.public_result',
+          )?.[1],
+        ).not.toHaveProperty([
+          'qwen-code.daemon.session_restore.preparation_stage',
+        ]);
+      } finally {
+        await bridge.shutdown();
+        stderr.mockRestore();
+      }
+    },
+  );
+
   it('expires during engine selection without later starting either engine', async () => {
     vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const event = vi.fn();
     const managed = makeChannel({
       loadSessionImpl: () => ({
         _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
@@ -194,6 +361,7 @@ describe('session restore budget', () => {
       initializeTimeoutMs: 100,
       sessionRestoreTimeoutMs: 50,
       maxSessions: 1,
+      telemetry: recordTelemetry(event),
       executionEngines: {
         legacy: legacyFactory,
         managed: managedFactory,
@@ -207,6 +375,18 @@ describe('session restore budget', () => {
         .catch((error: unknown) => error);
       await vi.advanceTimersByTimeAsync(50);
       expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(event).toHaveBeenCalledWith(
+        'session.restore.public_result',
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.preparation_stage':
+            'engine_selection',
+        }),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'phase=preparation; stage=engine_selection; decision=release_admission',
+        ),
+      );
       releaseSelection('managed');
       await vi.advanceTimersByTimeAsync(0);
       expect(legacyFactory).not.toHaveBeenCalled();
@@ -220,6 +400,7 @@ describe('session restore budget', () => {
     } finally {
       releaseSelection('managed');
       await bridge.shutdown();
+      stderr.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -228,6 +409,8 @@ describe('session restore budget', () => {
     'does not dispatch session/%s after engine selection outlasts the deadline without timer delivery',
     async (action) => {
       vi.useFakeTimers();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const event = vi.fn();
       vi.setSystemTime(0);
       const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
       const handle = makeChannel({
@@ -247,6 +430,7 @@ describe('session restore budget', () => {
       const bridge = makeBridge({
         sessionRestoreTimeoutMs: 50,
         maxSessions: 1,
+        telemetry: recordTelemetry(event),
         executionEngines: { legacy, managed, select: () => selection },
       });
       const request = { sessionId: 'stalled-selection', workspaceCwd: WS_A };
@@ -261,6 +445,18 @@ describe('session restore budget', () => {
         vi.setSystemTime(51);
         releaseSelection('managed');
         expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+        expect(event).toHaveBeenCalledWith(
+          'session.restore.public_result',
+          expect.objectContaining({
+            'qwen-code.daemon.session_restore.preparation_stage':
+              'engine_selection',
+          }),
+        );
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'phase=preparation; stage=engine_selection; decision=release_admission',
+          ),
+        );
         expect(legacy).not.toHaveBeenCalled();
         expect(managed).not.toHaveBeenCalled();
         await expect(restore()).resolves.toMatchObject({
@@ -271,6 +467,7 @@ describe('session restore budget', () => {
         releaseSelection('managed');
         await bridge.shutdown();
         clock.mockRestore();
+        stderr.mockRestore();
         vi.useRealTimers();
       }
     },
