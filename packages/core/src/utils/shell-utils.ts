@@ -849,7 +849,16 @@ export function stripShellWrapper(command: string): string {
       // cmd/PowerShell have no option parser: `--` stays a literal program.
       let markerRest = token.rest;
       if (!shellWrapperCommandConsumesRest(wrapperToken.token)) {
-        markerRest = restAfterOptionTerminator(markerRest) ?? markerRest;
+        const afterTerminator = restAfterOptionTerminator(markerRest);
+        if (afterTerminator !== null) {
+          markerRest = afterTerminator;
+        } else if (
+          isOptionTerminatorWord(takeLeadingToken(markerRest)?.token ?? '')
+        ) {
+          // A lone terminator with no payload word is a flag-only wrapper;
+          // keep the base reading so the gates keep refusing it.
+          return trimmed;
+        }
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
