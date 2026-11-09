@@ -683,13 +683,18 @@ export async function runNonInteractive(
     const emitMaxSessionTurnsResult = async (): Promise<number> => {
       const message =
         'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
-      if (outputFormat === OutputFormat.TEXT) {
+      if (outputFormat !== OutputFormat.STREAM_JSON) {
+        // Preserve the established exit-code/stderr contract for text and
+        // batch JSON output. Stream JSON is the only format that carries the
+        // terminal error as a result envelope.
+        await settleBeforeTerminalOutput();
         await handleMaxTurnsExceededError(config);
       }
       const metrics = uiTelemetryService.getMetrics();
       await emitResult({
         isError: true,
         errorMessage: message,
+        subtype: 'error_max_turns',
         durationMs: Date.now() - startTime,
         apiDurationMs: totalApiDurationMs,
         numTurns: turnCount,
