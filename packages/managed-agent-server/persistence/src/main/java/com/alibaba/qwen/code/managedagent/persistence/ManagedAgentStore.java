@@ -113,8 +113,7 @@ public class ManagedAgentStore implements AgentStateStore {
             @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
             @Nullable SessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
             @Lazy @Nullable ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
-        String approvalMode =
-                properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
+        String approvalMode = properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
@@ -130,9 +129,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
-            throw new IllegalArgumentException(
-                    "qwen.managed-agent.agent-revision must contain 1-128"
-                            + " characters");
+            throw new IllegalArgumentException("qwen.managed-agent.agent-revision must contain 1-128 characters");
         }
 
         AgentStoreRows storeRows = new AgentStoreRows(harnessRules, jdbc, objectMapper);
@@ -163,7 +160,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, null, null);
     }
 
     @Override
@@ -172,7 +169,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, memoryStoreId);
     }
 
     @Override

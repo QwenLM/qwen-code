@@ -112,15 +112,7 @@ final class AgentSessionAdmissions {
     Admission insertSessionCommand(String tenantId, String actorId,
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest) {
-        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
-                requestDigest, agentId, requestedRevision, title, input, payloadDigest, null);
-    }
-
-    Admission insertSessionCommand(String tenantId, String actorId,
-            String operation, String idempotencyKey, String requestDigest,
-            String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
@@ -128,6 +120,7 @@ final class AgentSessionAdmissions {
         Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 null, actorId, pin);
+        ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), memoryStoreId);
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
@@ -251,6 +244,7 @@ final class AgentSessionAdmissions {
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 target, actorId, pin, null, planMode, modelId);
+        ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), command.memoryStoreId());
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
@@ -575,7 +569,7 @@ final class AgentSessionAdmissions {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key, approval_mode,"
+                        + " creator_actor_key, owner_actor_key, owner_only, approval_mode,"
                         + " parent_session_id, root_session_id,"
                         + " parent_child_run_id, child_depth)"
                         + " SELECT tenant_id, ?, agent_id,"
@@ -587,7 +581,7 @@ final class AgentSessionAdmissions {
                         + ", context_config_ref, context_revision,"
                         + " workspace_config_ref, workspace_policy_ref, "
                         + (toolProfile == null ? "tool_profile" : "?")
-                        + ", creator_actor_key, approval_mode,"
+                        + ", creator_actor_key, COALESCE(owner_actor_key, creator_actor_key), owner_only, approval_mode,"
                         + " ?, ?, ?, ?"
                         + " FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",

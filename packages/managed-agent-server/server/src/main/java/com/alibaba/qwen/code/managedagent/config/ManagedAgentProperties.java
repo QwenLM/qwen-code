@@ -64,6 +64,7 @@ public class ManagedAgentProperties
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
@@ -97,6 +98,19 @@ public class ManagedAgentProperties
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     @Getter(AccessLevel.NONE)
     private Environment environment;
+
+    @Getter
+    @Setter
+    public static class Memory {
+        private boolean enabled;
+        private String endpoint;
+        private String apiKey;
+    }
+
+    @Override
+    public boolean isMemoryEnabled() {
+        return memory.isEnabled();
+    }
 
     public boolean admitsPublicChildAgents() {
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
