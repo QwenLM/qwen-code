@@ -390,8 +390,9 @@ it('reports the required Linux check only when the build and every shard pass', 
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
   expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
-  // The gate remains on the original association-gated runner, while test
-  // shards can opt into the disposable pool for untrusted forks.
+  // The gate follows the shards' fleet (the sibling aggregates' shape):
+  // pinning a REQUIRED context to the manually sized disposable pool
+  // parked it in an empty-runner queue for 110 minutes.
   expect(gate['runs-on']).toBe(
     '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
   );
