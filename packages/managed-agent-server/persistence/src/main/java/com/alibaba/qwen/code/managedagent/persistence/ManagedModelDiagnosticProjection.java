@@ -59,7 +59,9 @@ final class ManagedModelDiagnosticProjection {
                     new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
             return body != null && body.path("schemaVersion").asInt() == 2;
         });
-        return diagnostics ? 3 : promotes ? 2 : 1;
+        boolean activity = validated.stream().anyMatch(resource ->
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
+        return activity ? 4 : diagnostics ? 3 : promotes ? 2 : 1;
     }
 
     static void validateResource(StoredResource resource) {

@@ -151,6 +151,10 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.Store.class,
+                            List.of("MemoryStore")),
+                    entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.StoreList.class,
+                            List.of("MemoryStoreList")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.OptionsRequest.class, List.of("WebShellSessionWorktreeOptionsRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.QueryRequest.class, List.of("WebShellSessionWorktreeQueryRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.InspectRequest.class, List.of("WebShellSessionWorktreeInspectRequest")),
@@ -263,6 +267,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.WebShellActivityQueryRequest.class,
+                            List.of("WebShellActivityQueryRequest")),
                     entry(ApiModels.ManagedMcpServerPin.class,
                             List.of("ManagedMcpServerPin")),
                     entry(ApiModels.ManagedMcpManagementCommand.class,
@@ -1726,6 +1732,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "sessionWorktreeCleanup", 404,
                 post("/v1/agents/workspaces/ws-default/worktrees/missing/cleanup").header(TENANT, workspaceTenant).principal(actor)
                         .header(IDEMPOTENCY_KEY, "cleanup"), null);
+        exchange(drift, "createPersonalMemoryStore", 503,
+                post("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), "{}");
+        exchange(drift, "listPersonalMemoryStores", 503,
+                get("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), null);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1766,6 +1776,26 @@ class ManagedAgentApiContractTest {
                             body.substring(0, body.length() - 1) + "," + extra + "}");
                 }
             }
+        }
+        for (String suffix : List.of("activity-stats", "activity")) {
+            boolean statistics = "activity-stats".equals(suffix);
+            String operation = statistics ? "SessionActivityStatistics" : "SessionActivity";
+            String path = "/v1/agents/sessions/{id}/" + suffix;
+            var read = get(path, session).header(TENANT, tenant).principal(principal);
+            if (!statistics) {
+                read.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 200, read, null);
+            var unauthorized = get(path, session).header(TENANT, tenant);
+            if (!statistics) {
+                unauthorized.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 401, unauthorized, null);
+            String body = "{\"sessionId\":\"" + session + "\"" + (statistics ? "}" : ",\"kind\":\"tools\"}");
+            String web = WEB_SHELL + "/session-" + suffix + "/query";
+            exchange(drift, "query" + operation, 200, post(web).header(TENANT, tenant).principal(principal), body);
+            exchange(drift, "query" + operation, 401, post(web).header(TENANT, tenant), body);
+            exchange(drift, "query" + operation, 400, post(web).header(TENANT, tenant).principal(principal), "{}");
         }
     }
 

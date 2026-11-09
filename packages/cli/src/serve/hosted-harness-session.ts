@@ -6,6 +6,10 @@
 
 import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import {
+  enableManagedExecutionDiagnostics,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import {
   parsePublicChildModelRoute,
   type PublicChildExtensionAgent,
   type PublicChildModelRoute,
@@ -143,6 +147,11 @@ import {
   harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import {
+  HostedMemorySession,
+  findHostedMemoryResults,
+  parseHostedMemoryStoreId,
+} from './hosted-memory-session.js';
 import { collectNestedResourceRefs } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
@@ -681,6 +690,8 @@ interface HostedSession {
   agentDefinition?: HostedAgentDefinition;
   modelConfigDigest?: string;
   modelConfig?: HostedModelConfigReader;
+  memoryStoreId?: string;
+  memory?: HostedMemorySession;
   sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
   baseSkills?: HostedSkillCatalog;
@@ -3721,7 +3732,7 @@ async function executeHostedTurn(
   }
   if (resumeApproval) {
     const plan = resumeApproval.plan;
-    if (plan.runtime.provisionerKind) {
+    if (plan.runtime?.provisionerKind) {
       if (
         !brokerOptions ||
         session.mcp ||
@@ -3759,6 +3770,7 @@ async function executeHostedTurn(
             : undefined;
         onResumeReady?.();
         if (
+          plan.runtime &&
           questionRecoveryBroker &&
           original.state === 'requested' &&
           !abort.signal.aborted &&
@@ -3999,13 +4011,14 @@ async function executeHostedTurn(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant' && deltas) {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -4022,7 +4035,8 @@ async function executeHostedTurn(
         // runner's own dispatch, and the Session's broker-backed tool
         // surface belongs to model turns.
         toolTurn =
-          workflowLaunch === undefined && session.toolProfile && brokerOptions
+          workflowLaunch === undefined &&
+          ((session.toolProfile && brokerOptions) || session.memory)
             ? new HostedWorkspaceToolTurn(
                 brokerOptions,
                 session.managed,
@@ -4039,6 +4053,8 @@ async function executeHostedTurn(
                 await hostedApprovalForTurn(session, promptId),
                 {
                   recoveryBroker: questionRecoveryBroker,
+                  memory: session.memory,
+                  memoryOnly: !session.toolProfile,
                   mcp: session.mcp,
                   hooks: session.hooks,
                   skills: session.skills,
@@ -4177,6 +4193,15 @@ async function executeHostedTurn(
                   workspaceContext,
                   agentDefinition: session.agentDefinition,
                   modelConfig: session.modelConfig,
+                  memory: session.memory,
+                  recallUserInput: authority
+                    .eventsInSequenceRange(1, authority.committedSequence)
+                    .some(
+                      (event) =>
+                        event.kind === 'input.accepted' &&
+                        event.payload['inputId'] === promptId &&
+                        event.payload['source'] === 'hosted-harness',
+                    ),
                   publicChildModelRoute: session.publicChildModelRoute,
                   modelSelection: await readHostedTurnModelSelection(
                     session.managed,
@@ -4857,11 +4882,13 @@ export function registerHostedHarnessSessionRoutes(
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
     let modelConfigDigest: string | undefined;
+    let memoryStoreId: string | undefined;
     let sessionSkillsRef: ManagedSessionDurableRef | undefined;
     try {
       modelConfigDigest = parseHostedModelConfigDigest(
         body?.['modelConfigDigest'],
       );
+      memoryStoreId = parseHostedMemoryStoreId(body?.['memoryStoreId']);
       sessionSkillsRef = parseSessionSkillsRef(body?.['sessionSkillsRef']);
       agentDefinition = parseHostedAgentDefinition(
         body?.['agentDefinition'],
@@ -5134,7 +5161,8 @@ export function registerHostedHarnessSessionRoutes(
           resident.agentDefinition,
           agentDefinition,
         )) ||
-        resident.modelConfigDigest !== modelConfigDigest)
+        resident.modelConfigDigest !== modelConfigDigest ||
+        resident.memoryStoreId !== memoryStoreId)
     ) {
       error(res, 409, 'hosted_agent_definition_conflict');
       return;
@@ -5673,10 +5701,17 @@ export function registerHostedHarnessSessionRoutes(
           }
           const model = await findHostedModelRequest(resident.managed, parked);
           const approval =
-            resident.toolProfile && brokerOptions
+            (resident.toolProfile && brokerOptions) || resident.memory
               ? await findHostedApprovalContinuation(resident.managed, parked)
               : undefined;
-          if (model || approval) {
+          const memoryResults =
+            resident.memory &&
+            !model &&
+            !approval &&
+            (await parkNeedsNoRuntimeSettlement(resident.managed))
+              ? await findHostedMemoryResults(resident.managed, parked)
+              : undefined;
+          if (model || approval || memoryResults) {
             const user = (await resident.managed.sink.project()).find(
               (item) => item.type === 'user' && item.daemonPromptId === parked,
             );
@@ -5701,7 +5736,7 @@ export function registerHostedHarnessSessionRoutes(
               resident,
               sessionId,
               cwd,
-              { promptId: parked, text, parts: [] },
+              { promptId: parked, text, parts: memoryResults ?? [] },
               brokerOptions,
               approval,
               model,
@@ -6027,6 +6062,7 @@ export function registerHostedHarnessSessionRoutes(
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
                   ...(modelConfigDigest ? { modelConfigDigest } : {}),
+                  ...(memoryStoreId ? { memoryStoreId } : {}),
                   ...(publicChildAgentsVersion === 1
                     ? { publicChildAgentsVersion }
                     : {}),
@@ -6082,6 +6118,8 @@ export function registerHostedHarnessSessionRoutes(
       });
       if (stores.supportsModelDiagnostics?.())
         await enableManagedSessionDiagnostics(managed);
+      if (stores.supportsExecutionDiagnostics?.())
+        await enableManagedExecutionDiagnostics(managed);
       if (!acceptingWork()) {
         await managed.close();
         error(res, 409, 'hosted_harness_quiescing');
@@ -6119,6 +6157,11 @@ export function registerHostedHarnessSessionRoutes(
         ) {
           throw new Error('Session model configuration binding changed.');
         }
+        if (
+          parseHostedMemoryStoreId(definition?.['memoryStoreId']) !==
+          memoryStoreId
+        )
+          throw new Error('Session personal memory binding changed.');
         savedAgentDefinition = parseHostedAgentDefinition(
           definition?.['agentDefinition'],
         );
@@ -6261,6 +6304,12 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(memoryStoreId
+          ? {
+              memoryStoreId,
+              memory: new HostedMemorySession(stores, memoryStoreId),
+            }
+          : {}),
         ...(modelConfigDigest
           ? {
               modelConfigDigest,
@@ -7453,10 +7502,13 @@ export function registerHostedHarnessSessionRoutes(
       // recoverable instead of 409'ing before this arm is consulted (R8-1).
       if (
         unsettled &&
-        session.toolProfile &&
-        ((takeover && !session.hooks && !session.mcp) ||
-          extensionsCommandStepTakeover) &&
-        brokerOptions
+        ((takeover &&
+          !session.hooks &&
+          !session.mcp &&
+          ((session.toolProfile && brokerOptions) || session.memory)) ||
+          (session.toolProfile &&
+            brokerOptions &&
+            extensionsCommandStepTakeover))
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -7489,7 +7541,7 @@ export function registerHostedHarnessSessionRoutes(
       if (
         takeover &&
         unsettled &&
-        session.skills &&
+        (session.skills || session.memory) &&
         !resume &&
         !resumeApproval &&
         !committedModelOutput &&
@@ -7505,15 +7557,24 @@ export function registerHostedHarnessSessionRoutes(
         const calls = assistant?.message?.parts?.flatMap((part) =>
           part.functionCall ? [part.functionCall] : [],
         );
-        if (calls?.length && calls.every((call) => call.name === 'skill')) {
-          await answerResumedTurnCalls({
-            session: managed,
-            sessionId,
-            cwd,
-            promptId: unsettled,
-            skills: session.skills,
-            hooks: session.hooks,
-          });
+        const memoryResults = session.memory
+          ? await findHostedMemoryResults(managed, unsettled)
+          : undefined;
+        if (
+          memoryResults ||
+          (session.skills &&
+            calls?.length &&
+            calls.every((call) => call.name === 'skill'))
+        ) {
+          if (!memoryResults)
+            await answerResumedTurnCalls({
+              session: managed,
+              sessionId,
+              cwd,
+              promptId: unsettled,
+              skills: session.skills,
+              hooks: session.hooks,
+            });
           const projected = (await managed.sink.project()).filter(
             (record) => record.daemonPromptId === unsettled,
           );
@@ -7525,7 +7586,7 @@ export function registerHostedHarnessSessionRoutes(
             .join('\n');
           if (!text)
             throw new HostedToolRecoveryRequiredError(
-              'Original Skill Prompt is missing.',
+              'Original Prompt is missing.',
             );
           const lastAssistant = projected.findLastIndex(
             (record) => record.type === 'assistant',
@@ -7533,9 +7594,11 @@ export function registerHostedHarnessSessionRoutes(
           resume = {
             promptId: unsettled,
             text,
-            parts: projected
-              .slice(lastAssistant + 1)
-              .flatMap((record) => record.message?.parts ?? []),
+            parts:
+              memoryResults ??
+              projected
+                .slice(lastAssistant + 1)
+                .flatMap((record) => record.message?.parts ?? []),
           };
         }
       }
@@ -11337,13 +11400,14 @@ export function registerHostedHarnessSessionRoutes(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant') {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -11370,6 +11434,8 @@ export function registerHostedHarnessSessionRoutes(
           session.shell,
           await hostedApprovalForTurn(session, promptId),
           {
+            memory: session.memory,
+            memoryOnly: !session.toolProfile,
             mcp: session.mcp,
             skills: session.skills,
             extensionConfig: session.extensionBundle
@@ -11622,6 +11688,7 @@ export function registerHostedHarnessSessionRoutes(
             },
             prompt: '',
             promptId,
+            memory: session.memory,
             ...(session.stores
               ? {
                   userMessages: {

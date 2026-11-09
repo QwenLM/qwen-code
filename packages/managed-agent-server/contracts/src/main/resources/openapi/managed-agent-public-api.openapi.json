@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.103.0",
+    "version": "1.105.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
   },
   "servers": [
@@ -204,7 +204,7 @@
         "tags": ["Public Sessions"],
         "operationId": "createSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the server-selected profile, and a Session pinned to a stored definition may include initial input when its single tools entry selected a profile from the deployment's definition tool-profile allowlist. Otherwise Workspace creation must have empty input. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports idle ACTIVE Sessions through their admitted Workspace lifecycle protocol, including v2 Shell/MCP, or reliably CLOSED/ARCHIVED Sessions; directory-change submission is retired; previously admitted durable cwd_change operations remain queryable and continue settling. This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn \u2014 403 session_operation_forbidden below the role and 409 workspace_unavailable past it, or 404 session_not_found without Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness. A stored AgentDefinition may be selected by agent_id: an explicit agent_revision pins that revision, an omitted one resolves the latest revision at admission and pins it for the Session's life, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported with error.field naming the refused field. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Invalid approval or files-off can refuse attachment. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof. ",
+        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the server-selected profile, and a Session pinned to a stored definition may include initial input when its single tools entry selected a profile from the deployment's definition tool-profile allowlist. Otherwise Workspace creation must have empty input. Newly bound qwen-code Sessions, including empty creation, persist hosted-workspace-shell/1 with mandatory default/auto-edit approval when the Shell deployment opt-in is enabled; otherwise they persist hosted-workspace-files/1 with the configured file approval mode. The switch does not override a stored AgentDefinition's compiled profile or approval mode. Public callers cannot select the built-in profile. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports idle ACTIVE Sessions through their admitted Workspace lifecycle protocol, including v2 Shell/MCP, or reliably CLOSED/ARCHIVED Sessions; directory-change submission is retired; previously admitted durable cwd_change operations remain queryable and continue settling. This surface has no per-caller capability flag for later Turns, so callers must handle a refused later Turn — 403 session_operation_forbidden below the role and 409 workspace_unavailable past it, or 404 session_not_found without Workspace read. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness. A stored AgentDefinition may be selected by agent_id: an explicit agent_revision pins that revision, an omitted one resolves the latest revision at admission and pins it for the Session's life, an unknown agent or revision answers 404 agent_not_found, and definition content that cannot take effect yet answers 409 agent_definition_unsupported with error.field naming the refused field. Shell Sessions additionally require the Shell opt-in and valid persisted approval for fresh Turns; disabling only Shell admission preserves original-key replay and accepted approvals and cancellation while Workspace files remain enabled and persisted approval remains valid. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Invalid approval or files-off can refuse attachment. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof. ",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1979,7 +1979,7 @@
         "tags": ["Public Sessions"],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible \u2014 its pre-delete status \u2014 rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible — its pre-delete status — rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2369,7 +2369,7 @@
         "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from the record domains the server projects \u2014 Monitor runs today, the others arrive with their stages. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view.",
+            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from the record domains the server projects — Monitor runs today, the others arrive with their stages. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3075,7 +3075,7 @@
       "delete": {
         "tags": ["Public Resources"],
         "operationId": "retireAgentAutomation",
-        "description": "Retires the definition: its chain ends and freezes, no later occurrence fires, and committed runs keep their history. Idempotent under its Idempotency-Key and for an already retired definition. 409 automation_unavailable when the deployment has not enabled automation \u2014 a 503 of the same code means the Harness is unavailable and is retryable.",
+        "description": "Retires the definition: its chain ends and freezes, no later occurrence fires, and committed runs keep their history. Idempotent under its Idempotency-Key and for an already retired definition. 409 automation_unavailable when the deployment has not enabled automation — a 503 of the same code means the Harness is unavailable and is retryable.",
         "x-qwen-implementation-status": "partial",
         "parameters": [
           {
@@ -3679,7 +3679,7 @@
             }
           }
         },
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible \u2014 its pre-delete status \u2014 rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made."
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the Session's recorded owner with current read access (404 unreadable, 403 readable non-owner). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible — its pre-delete status — rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made."
       }
     },
     "/v1/agent-channels/{channelId}/deliveries/{deliveryId}": {
@@ -7527,6 +7527,79 @@
         "summary": "Read recent current Session Items and page toward older Items"
       }
     },
+    "/v1/agents/memory-stores": {
+      "post": {
+        "tags": ["Personal Memory"],
+        "operationId": "createPersonalMemoryStore",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Creates or returns the trusted actor's one personal Store. Requires memory enablement. The request cannot select an owner or tenant.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current authenticated user's personal memory resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryStore"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "get": {
+        "tags": ["Personal Memory"],
+        "operationId": "listPersonalMemoryStores",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists only the trusted actor's personal Store (zero or one).",
+        "responses": {
+          "200": {
+            "description": "Current authenticated user's personal memory resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryStoreList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/v1/agents/sessions/{sessionId}/context-usage": {
       "parameters": [
         {
@@ -7945,6 +8018,237 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/WebShellDiagnosticTraceRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/activity-stats": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "description": "Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Bounded Session execution diagnostics with explicit coverage.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticActivityStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["Public Sessions"],
+        "operationId": "getSessionActivityStatistics"
+      }
+    },
+    "/api/agent/web-shell/v1/session-activity-stats/query": {
+      "post": {
+        "description": "Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Bounded Session execution diagnostics with explicit coverage.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticActivityStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["WebShell"],
+        "operationId": "querySessionActivityStatistics",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellSessionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/activity": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "description": "Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Bounded Session execution diagnostics with explicit coverage.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticActivityPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["Public Sessions"],
+        "operationId": "getSessionActivity",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["tools", "files", "skills"]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/web-shell/v1/session-activity/query": {
+      "post": {
+        "description": "Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Bounded Session execution diagnostics with explicit coverage.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "private, no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDiagnosticActivityPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "tags": ["WebShell"],
+        "operationId": "querySessionActivity",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellActivityQueryRequest"
               }
             }
           }
@@ -8812,7 +9116,7 @@
         "schema": {
           "type": "boolean"
         },
-        "description": "True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible \u2014 a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and answers the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route, which does not re-read it; operation responses represent the original operation at its current state."
+        "description": "True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 on the public create route, which re-reads the Session before responding, and answers the recorded 202 admission carrying the tombstoned sessionId on the WebShell create route, which does not re-read it; operation responses represent the original operation at its current state."
       },
       "RequestId": {
         "schema": {
@@ -9270,6 +9574,12 @@
             },
             "required": [],
             "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
+          },
+          "memory_store_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
           }
         }
       },
@@ -9515,6 +9825,14 @@
                 "type": "null"
               }
             ]
+          },
+          "memory_store_id": {
+            "type": "string",
+            "description": "The personal MemoryStore selected at creation; absent when memory is disabled."
+          },
+          "owner_only": {
+            "type": "boolean",
+            "description": "When true, only the owning actor with existing Workspace grants may access this Session. Private children inherit visibility without inheriting the Store binding."
           }
         }
       },
@@ -10310,6 +10628,12 @@
             },
             "required": [],
             "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
+          },
+          "memoryStoreId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
           }
         }
       },
@@ -14850,7 +15174,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "The target Session; required on create. On update it must be absent or equal to the created Session \u2014 a different value is refused with 400 invalid_automation."
+            "description": "The target Session; required on create. On update it must be absent or equal to the created Session — a different value is refused with 400 invalid_automation."
           },
           "goal": {
             "type": "string",
@@ -18150,6 +18474,38 @@
         },
         "required": ["workspaceId", "worktreeId", "idempotencyKey"]
       },
+      "MemoryStore": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "created_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "description": "One personal MemoryStore per authenticated tenant and actor. Provider credentials and namespace are not exposed."
+      },
+      "MemoryStoreList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/MemoryStore"
+            }
+          }
+        }
+      },
       "ManagedModelStatisticsBucket": {
         "type": "object",
         "additionalProperties": false,
@@ -19328,6 +19684,16 @@
                 "type": "null"
               }
             ]
+          },
+          "predecessorTaskId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -19432,6 +19798,1188 @@
             ]
           }
         }
+      },
+      "ManagedActivityMetrics": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["requested", "admission", "execution", "delivery"],
+        "properties": {
+          "requested": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "admission": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["allowed", "denied", "invalid", "unknown"],
+            "properties": {
+              "allowed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "denied": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "invalid": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "execution": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "not_started",
+              "running",
+              "success",
+              "error",
+              "cancelled",
+              "unknown"
+            ],
+            "properties": {
+              "not_started": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "running": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "success": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "error": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cancelled": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "delivery": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pending",
+              "complete",
+              "partial",
+              "unavailable",
+              "unknown"
+            ],
+            "properties": {
+              "pending": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "partial": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unavailable": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "ManagedActivityFile": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation", "path", "cwdRelative"],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": ["read", "write", "edit"]
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cwdRelative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedActivitySkill": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resourceKind", "name", "pin", "origin", "delivery"],
+        "properties": {
+          "resourceKind": {
+            "type": "string",
+            "enum": ["skill", "extension_command"]
+          },
+          "name": {
+            "type": "string"
+          },
+          "pin": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": ["user", "model", "unknown"]
+          },
+          "delivery": {
+            "type": "string",
+            "enum": ["complete", "partial", "unknown"]
+          }
+        }
+      },
+      "ManagedActivityInvocation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "invocationId",
+          "assistantMessageId",
+          "ordinal",
+          "toolName",
+          "functionCallId",
+          "providerCallId",
+          "executionCallId",
+          "taskId",
+          "toolKind",
+          "serverId",
+          "admission",
+          "execution",
+          "delivery",
+          "capture",
+          "file",
+          "skill",
+          "requestSequence",
+          "requestedAt"
+        ],
+        "properties": {
+          "invocationId": {
+            "type": "string"
+          },
+          "assistantMessageId": {
+            "type": "string"
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "functionCallId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerCallId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "executionCallId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "taskId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "toolKind": {
+            "type": "string",
+            "enum": ["builtin", "mcp", "hosted", "unknown"]
+          },
+          "serverId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "admission": {
+            "type": "string",
+            "enum": ["allowed", "denied", "invalid", "unknown"]
+          },
+          "execution": {
+            "type": "string",
+            "enum": [
+              "not_started",
+              "running",
+              "success",
+              "error",
+              "cancelled",
+              "unknown"
+            ]
+          },
+          "delivery": {
+            "type": "string",
+            "enum": ["pending", "complete", "partial", "unavailable", "unknown"]
+          },
+          "capture": {
+            "type": "string",
+            "enum": ["complete", "partial", "unavailable", "unknown"]
+          },
+          "file": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedActivityFile"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skill": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedActivitySkill"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requestSequence": {
+            "type": "string"
+          },
+          "requestedAt": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "conflictingEvidence": {
+            "type": "boolean"
+          },
+          "taskState": {
+            "type": "string"
+          },
+          "taskRuntimeState": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "ManagedActivityStatistics": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tools",
+          "files",
+          "skills",
+          "otherTools",
+          "otherSkills",
+          "toolBuckets",
+          "skillBuckets",
+          "skillLoads",
+          "extensionCommands",
+          "fileOperations"
+        ],
+        "properties": {
+          "tools": {
+            "$ref": "#/components/schemas/ManagedActivityMetrics"
+          },
+          "files": {
+            "$ref": "#/components/schemas/ManagedActivityMetrics"
+          },
+          "skills": {
+            "$ref": "#/components/schemas/ManagedActivityMetrics"
+          },
+          "otherTools": {
+            "$ref": "#/components/schemas/ManagedActivityMetrics"
+          },
+          "otherSkills": {
+            "$ref": "#/components/schemas/ManagedActivityMetrics"
+          },
+          "toolBuckets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "name", "metrics"],
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "metrics": {
+                  "$ref": "#/components/schemas/ManagedActivityMetrics"
+                },
+                "resource": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["resourceKind", "name", "pin"],
+                  "properties": {
+                    "resourceKind": {
+                      "type": "string",
+                      "enum": ["skill", "extension_command"]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "pin": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "skillBuckets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "name", "metrics"],
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "metrics": {
+                  "$ref": "#/components/schemas/ManagedActivityMetrics"
+                },
+                "resource": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["resourceKind", "name", "pin"],
+                  "properties": {
+                    "resourceKind": {
+                      "type": "string",
+                      "enum": ["skill", "extension_command"]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "pin": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "skillLoads": {
+            "$ref": "#/components/schemas/ManagedActivityMetrics"
+          },
+          "extensionCommands": {
+            "$ref": "#/components/schemas/ManagedActivityMetrics"
+          },
+          "fileOperations": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["read", "write", "edit"],
+            "properties": {
+              "read": {
+                "$ref": "#/components/schemas/ManagedActivityMetrics"
+              },
+              "write": {
+                "$ref": "#/components/schemas/ManagedActivityMetrics"
+              },
+              "edit": {
+                "$ref": "#/components/schemas/ManagedActivityMetrics"
+              }
+            }
+          }
+        }
+      },
+      "ManagedDiagnosticActivityStats": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "scope",
+          "readRevision",
+          "coverageStartSequence",
+          "coveredThroughSequence",
+          "startedAt",
+          "availability",
+          "coverageReasons",
+          "statistics"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "const": "self"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverageStartSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coveredThroughSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "statistics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedActivityStatistics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedActivityToolsPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "scope",
+          "readRevision",
+          "coverageStartSequence",
+          "coveredThroughSequence",
+          "startedAt",
+          "availability",
+          "coverageReasons",
+          "kind",
+          "items",
+          "hasMore",
+          "nextCursor"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "const": "self"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverageStartSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coveredThroughSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "const": "tools"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedActivityInvocation"
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedActivityFilesPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "scope",
+          "readRevision",
+          "coverageStartSequence",
+          "coveredThroughSequence",
+          "startedAt",
+          "availability",
+          "coverageReasons",
+          "kind",
+          "items",
+          "hasMore",
+          "nextCursor"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "const": "self"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverageStartSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coveredThroughSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "const": "files"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "invocationId",
+                "assistantMessageId",
+                "ordinal",
+                "toolName",
+                "functionCallId",
+                "providerCallId",
+                "executionCallId",
+                "taskId",
+                "toolKind",
+                "serverId",
+                "admission",
+                "execution",
+                "delivery",
+                "capture",
+                "file",
+                "skill",
+                "requestSequence",
+                "requestedAt"
+              ],
+              "properties": {
+                "invocationId": {
+                  "type": "string"
+                },
+                "assistantMessageId": {
+                  "type": "string"
+                },
+                "ordinal": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "toolName": {
+                  "type": "string"
+                },
+                "functionCallId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "providerCallId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "executionCallId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "taskId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "toolKind": {
+                  "type": "string",
+                  "enum": ["builtin", "mcp", "hosted", "unknown"]
+                },
+                "serverId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "admission": {
+                  "type": "string",
+                  "enum": ["allowed", "denied", "invalid", "unknown"]
+                },
+                "execution": {
+                  "type": "string",
+                  "enum": [
+                    "not_started",
+                    "running",
+                    "success",
+                    "error",
+                    "cancelled",
+                    "unknown"
+                  ]
+                },
+                "delivery": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "complete",
+                    "partial",
+                    "unavailable",
+                    "unknown"
+                  ]
+                },
+                "capture": {
+                  "type": "string",
+                  "enum": ["complete", "partial", "unavailable", "unknown"]
+                },
+                "file": {
+                  "$ref": "#/components/schemas/ManagedActivityFile"
+                },
+                "skill": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ManagedActivitySkill"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requestSequence": {
+                  "type": "string"
+                },
+                "requestedAt": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "conflictingEvidence": {
+                  "type": "boolean"
+                },
+                "taskState": {
+                  "type": "string"
+                },
+                "taskRuntimeState": {
+                  "type": ["string", "null"]
+                }
+              }
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedActivitySkillsPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schemaVersion",
+          "sessionId",
+          "scope",
+          "readRevision",
+          "coverageStartSequence",
+          "coveredThroughSequence",
+          "startedAt",
+          "availability",
+          "coverageReasons",
+          "kind",
+          "items",
+          "hasMore",
+          "nextCursor"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "const": "self"
+          },
+          "readRevision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverageStartSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coveredThroughSequence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "coverageReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "const": "skills"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "invocationId",
+                "assistantMessageId",
+                "ordinal",
+                "toolName",
+                "functionCallId",
+                "providerCallId",
+                "executionCallId",
+                "taskId",
+                "toolKind",
+                "serverId",
+                "admission",
+                "execution",
+                "delivery",
+                "capture",
+                "file",
+                "skill",
+                "requestSequence",
+                "requestedAt"
+              ],
+              "properties": {
+                "invocationId": {
+                  "type": "string"
+                },
+                "assistantMessageId": {
+                  "type": "string"
+                },
+                "ordinal": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "toolName": {
+                  "type": "string"
+                },
+                "functionCallId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "providerCallId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "executionCallId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "taskId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "toolKind": {
+                  "type": "string",
+                  "enum": ["builtin", "mcp", "hosted", "unknown"]
+                },
+                "serverId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "admission": {
+                  "type": "string",
+                  "enum": ["allowed", "denied", "invalid", "unknown"]
+                },
+                "execution": {
+                  "type": "string",
+                  "enum": [
+                    "not_started",
+                    "running",
+                    "success",
+                    "error",
+                    "cancelled",
+                    "unknown"
+                  ]
+                },
+                "delivery": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "complete",
+                    "partial",
+                    "unavailable",
+                    "unknown"
+                  ]
+                },
+                "capture": {
+                  "type": "string",
+                  "enum": ["complete", "partial", "unavailable", "unknown"]
+                },
+                "file": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ManagedActivityFile"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skill": {
+                  "$ref": "#/components/schemas/ManagedActivitySkill"
+                },
+                "requestSequence": {
+                  "type": "string"
+                },
+                "requestedAt": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "conflictingEvidence": {
+                  "type": "boolean"
+                },
+                "taskState": {
+                  "type": "string"
+                },
+                "taskRuntimeState": {
+                  "type": ["string", "null"]
+                }
+              }
+            }
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "WebShellActivityQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "kind"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["tools", "files", "skills"]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          }
+        }
+      },
+      "ManagedDiagnosticActivityPage": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ManagedActivityToolsPage"
+          },
+          {
+            "$ref": "#/components/schemas/ManagedActivityFilesPage"
+          },
+          {
+            "$ref": "#/components/schemas/ManagedActivitySkillsPage"
+          }
+        ]
       },
       "ManagedExtensionImportMetadata": {
         "type": "object",

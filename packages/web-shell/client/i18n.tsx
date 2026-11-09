@@ -1949,6 +1949,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
   'scheduledTasks.workspace': 'Workspace',
+  'scheduledTasks.workspaceFixedByHost': 'Fixed by host',
   'scheduledTasks.session.label': 'Conversation',
   'scheduledTasks.session.dedicated': 'Dedicated task conversation',
   'scheduledTasks.session.current': 'Current conversation',
@@ -2664,6 +2665,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
+  'sidebar.selectSessions': 'Select sessions',
+  'sidebar.exitSelection': 'Exit selection',
+  'sidebar.selectedSessions': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'session' : 'sessions'} selected`,
   'sidebar.unpin': 'Unpin',
   'sidebar.sessionGroup': 'Group',
   'sidebar.groupFilter': 'Session group',
@@ -4840,6 +4845,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
     'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+  'channels.editor.field.github.prCommentWatch': 'PR Comment Watch',
+  'channels.editor.field.github.prCommentWatch.description':
+    'Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it. Enabled by default; turn off to disable. Requires Deliver To PR-Bound Sessions.',
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
     'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
@@ -6950,6 +6958,7 @@ const ZH: Messages = {
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
   'scheduledTasks.workspace': '工作区',
+  'scheduledTasks.workspaceFixedByHost': '由宿主固定',
   'scheduledTasks.session.label': '会话',
   'scheduledTasks.session.dedicated': '独立任务会话',
   'scheduledTasks.session.current': '当前会话',
@@ -7608,6 +7617,9 @@ const ZH: Messages = {
   'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
+  'sidebar.selectSessions': '多选对话',
+  'sidebar.exitSelection': '退出多选',
+  'sidebar.selectedSessions': (v) => `已选择 ${v?.count ?? 0} 个对话`,
   'sidebar.unpin': '取消置顶',
   'sidebar.sessionGroup': '分组',
   'sidebar.groupFilter': '会话分组',

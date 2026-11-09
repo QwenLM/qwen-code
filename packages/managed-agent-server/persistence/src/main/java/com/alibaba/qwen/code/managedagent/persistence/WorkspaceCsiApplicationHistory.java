@@ -217,6 +217,11 @@ final class WorkspaceCsiApplicationHistory {
         Row modelStatistics = WorkspaceCsiApplicationInventory.modelStatisticsReference(baseline.table("ma_session_journal_tx").rows(),
                 baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(), baseline.table("ma_resource_ref").rows(),
                 original, WorkspaceCsiApplicationImage.sole(baseline, "ma_operation").number("settlement_deadline_ms"));
+        List<Row> activityReferences = CsiFilesRetirementProfile.hasActivityDiagnostics(original.getScope())
+                ? CsiActivityDiagnosticProjection.references(baseline.table("ma_session_journal_tx").rows(),
+                        baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(),
+                        baseline.table("ma_resource_ref").rows(), original,
+                        WorkspaceCsiApplicationImage.sole(baseline, "ma_operation").number("settlement_deadline_ms")) : List.of();
         for (Row row : baseline.table("ma_resource").rows()) {
             if (row.membership() == Membership.ORIGINAL) {
                 scope(row, original);
@@ -228,7 +233,8 @@ final class WorkspaceCsiApplicationHistory {
             if (row.membership() == Membership.ORIGINAL) {
                 scope(row, original);
                 if (modelContext != null && Arrays.equals(modelContext.bytes(), row.bytes())
-                        || modelStatistics != null && Arrays.equals(modelStatistics.bytes(), row.bytes())) {
+                        || modelStatistics != null && Arrays.equals(modelStatistics.bytes(), row.bytes())
+                        || activityReferences.stream().anyMatch(edge -> Arrays.equals(edge.bytes(), row.bytes()))) {
                     continue;
                 }
                 require(sessionScope.equals(row.text("session_scope_key")) && row.number("journal_revision") != null

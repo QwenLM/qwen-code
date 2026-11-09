@@ -101,6 +101,30 @@ describe('github plugin validateConfig', () => {
     expect(validate({ prWatchEvents: [] })).toBeUndefined();
   });
 
+  it('accepts the default-on prCommentWatch without bound delivery', () => {
+    // The editor emits the descriptor default (true) even for channels that
+    // never enable bound delivery; it is inert there, not a validation error.
+    expect(validate({ prCommentWatch: true })).toBeUndefined();
+    expect(validate({ prCommentWatch: false })).toBeUndefined();
+    expect(
+      validate({ deliverToBoundSessions: true, prCommentWatch: true }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a non-boolean prCommentWatch', () => {
+    expect(validate({ prCommentWatch: 'yes' })).toContain(
+      'prCommentWatch must be a boolean',
+    );
+  });
+
+  it('defaults prCommentWatch to enabled in the management descriptor', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'prCommentWatch',
+    );
+    expect(field?.kind).toBe('boolean');
+    expect(field?.default).toBe('true');
+  });
+
   it('builds the prWatchEvents UI options from the adapter vocabulary (R2-18)', () => {
     const field = plugin.management?.fields.find(
       (candidate) => candidate.key === 'prWatchEvents',

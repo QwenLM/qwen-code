@@ -93,6 +93,19 @@ class WorkspaceFileStoreTest {
     }
 
     @Test
+    void personalSessionLocatorDoesNotChangeSharedWorkspaceFileAccess() {
+        var locator = session("personal");
+        jdbc.update("UPDATE ma_session SET owner_only=1 WHERE tenant_id=? AND session_id=?", "tenant", "personal");
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES (?,?,?,'OPERATOR')",
+                "tenant", workspace, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "other"));
+        assertThat(files.scope("tenant", "actor", locator).binding().getCwdRelative()).isEqualTo("src");
+        assertThat(files.scope("tenant", "other", workspace, ".").binding().getWorkspaceId()).isEqualTo(workspace);
+        assertThatThrownBy(() -> files.scope("tenant", "other", locator))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
+    }
+
+    @Test
     void sessionFilesPreservePinnedContextButRequireTheSshNodeActorAllowlist() {
         var locator = session("session");
         var remote = properties.getRuntimeBroker().getSsh();

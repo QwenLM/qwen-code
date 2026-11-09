@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -123,6 +124,7 @@ public class ManagedExtensionRecordStore
     private final AgentStateStore sessions;
     private final ManagedTaskEventStore taskEvents;
     private final ManagedModelDiagnosticProjection modelDiagnostics;
+    private final ManagedActivityDiagnosticProjection activityDiagnostics;
     private final ManagedMcpSettingsProjection mcpSettingsProjection;
 
     @Autowired
@@ -132,6 +134,7 @@ public class ManagedExtensionRecordStore
         this.sessions = sessions;
         this.taskEvents = taskEvents;
         this.modelDiagnostics = new ManagedModelDiagnosticProjection(jdbc, this);
+        this.activityDiagnostics = new ManagedActivityDiagnosticProjection(jdbc, this);
         this.mcpSettingsProjection = new ManagedMcpSettingsProjection(jdbc, sessions);
     }
 
@@ -193,6 +196,33 @@ public class ManagedExtensionRecordStore
 
     public ModelDiagnostics findModelDiagnostics(String tenantId, String sessionId) {
         return modelDiagnostics.findModelDiagnostics(tenantId, sessionId);
+    }
+
+    public JsonNode findActivityStatistics(String tenantId, String sessionId) {
+        return activityDiagnostics.find(tenantId, sessionId,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.STATS, "latest");
+    }
+
+    boolean rebuildActivityBatch(String tenant, String workspace, String session, long version, long revision, long sequence, String digest,
+            Function<String, StoredResource> resources) {
+        return activityDiagnostics.rebuildBatch(tenant, workspace, session, version, revision, sequence, digest, resources);
+    }
+
+    public String diagnosticCommittedSequence(String tenantId, String sessionId) {
+        return jdbc.queryForList("SELECT committed_sequence FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?"
+                + " AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", Long.class,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId).stream()
+                .findFirst().map(Object::toString).orElse(null);
+    }
+
+    public ActivityPage listActivity(String tenantId, String sessionId, String domain, long upperSequence,
+            Long beforeCreatedAt, String beforeKey, int limit) {
+        require(java.util.Set.of(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.TOOLS,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.FILES,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.SKILLS).contains(domain),
+                "Invalid activity domain.");
+        return activityDiagnostics.page(tenantId, sessionId, domain, upperSequence, beforeCreatedAt, beforeKey, limit);
     }
 
     static Map<String, WebShellModelContext> findModelContexts(JdbcTemplate jdbc,
@@ -445,6 +475,7 @@ public class ManagedExtensionRecordStore
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
+            activityDiagnostics.apply(tenantId, workspaceId, sessionId, event, resources);
             if ("context.compacted".equals(kind)) {
                 projectContextCompaction(tenantId, workspaceId, sessionId, event, resources, occurredAt);
             }
@@ -1670,20 +1701,15 @@ public class ManagedExtensionRecordStore
                         "Session message from a child must come from the"
                                 + " Session its run attached.");
             }
+            ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
             return;
         }
         // The lineage is stamped at creation and never changes, so a plain
         // read decides; read directly, since a store built beside no
         // public Session table holds no AgentStateStore.
-        List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
-                        + " parent_child_run_id FROM ma_session"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                (result, row) -> new String[] {
-                        result.getString("parent_session_id"),
-                        result.getString("parent_child_run_id") },
-                tenantId, sessionId);
-        String parent = lineage.isEmpty() ? null : lineage.get(0)[0];
-        String edge = lineage.isEmpty() ? null : lineage.get(0)[1];
+        String[] lineage = ManagedSessionMessageRoutes.lineage(jdbc, tenantId, sessionId);
+        String parent = lineage == null ? null : lineage[0];
+        String edge = lineage == null ? null : lineage[1];
         boolean follows = parent != null && childRunId.equals(edge)
                 && (outbound ? target == null || target.equals(parent)
                         : sender.equals(parent));
@@ -1695,6 +1721,7 @@ public class ManagedExtensionRecordStore
                             : "Session message from a parent must follow this"
                                     + " Session's lineage.");
         }
+        ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
     }
 
     /**
@@ -1721,15 +1748,9 @@ public class ManagedExtensionRecordStore
             // to_parent on the member's own journal: the lineage is
             // stamped at creation and never changes, so a plain read
             // decides, exactly like the message channel's.
-            List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
-                            + " parent_child_run_id FROM ma_session"
-                            + " WHERE tenant_id = ? AND session_id = ?",
-                    (result, row) -> new String[] {
-                            result.getString("parent_session_id"),
-                            result.getString("parent_child_run_id") },
-                    tenantId, sessionId);
-            String parent = lineage.isEmpty() ? null : lineage.get(0)[0];
-            String edge = lineage.isEmpty() ? null : lineage.get(0)[1];
+            String[] lineage = ManagedSessionMessageRoutes.lineage(jdbc, tenantId, sessionId);
+            String parent = lineage == null ? null : lineage[0];
+            String edge = lineage == null ? null : lineage[1];
             boolean follows = parent != null && childRunId.equals(edge)
                     && (target == null || target.equals(parent));
             if (!follows) {
@@ -1738,6 +1759,7 @@ public class ManagedExtensionRecordStore
                         "Session command to a parent must follow this"
                                 + " Session's lineage.");
             }
+            ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
             return;
         }
         // to_parent's receipt on the lead's journal: exactly H4d-b's
@@ -1756,6 +1778,7 @@ public class ManagedExtensionRecordStore
         require(sender.equals(attachedNode.textValue()),
                 "Session command from a child must come from the Session"
                         + " its run attached.");
+        ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
     }
 
     /**
