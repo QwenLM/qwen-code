@@ -729,9 +729,9 @@ where transcript logs do.
 
 ### A Mod's own prompt
 
-In headless runs and the Ink terminal, `$.prompt.submit({ text })` submits a
-prompt of the Mod's own. It starts a turn once the session is idle, after the
-turn that is running, and never joins a running turn:
+In headless runs and the Ink and OpenTUI terminals, `$.prompt.submit({ text })`
+submits a prompt of the Mod's own. It starts a turn once the session is idle,
+after the turn that is running, and never joins a running turn:
 
 ```javascript
 export function register(on) {
@@ -774,7 +774,10 @@ export function register(on) {
   not hold it.
 - In the OpenTUI terminal the prompt's turn starts after the prompts and
   commands the person queued, and waits while a dialog is open, a `!` command
-  runs or a command the person sent is still running.
+  runs, something the person sent is still being routed or run as a command,
+  and while a Goal is active. OpenTUI runs no Goal continuation turns, so an
+  active Goal holds the prompt until a turn of the person's ends the Goal or
+  the person runs `/goal pause` or `/goal clear`.
 - In both terminals the transcript shows the prompt as the line
   `Mod <name>: <text>`, live and when the session is resumed, with `asUser`
   too, and it does not enter the input history.
@@ -783,7 +786,10 @@ export function register(on) {
   `$.prompt.submit refused: …` appears where transcript logs do. In a headless
   run, the prompt the run was given is the person's, and in a stream-json
   session each message the client sends is, a slash command too. In the Ink
-  and OpenTUI terminals, each prompt or command the person sends is.
+  and OpenTUI terminals, each prompt or command the person sends is; one
+  queued during a turn counts when it runs. In OpenTUI, text steered into a
+  running turn counts as soon as the turn takes it; in Ink it does not, and
+  the count and a stop hold until the person's next prompt runs.
 - `/clear` and `/resume` start the new session with no prompts queued and the
   count at 0. A prompt submitted while the old session ends, from a
   `session.end` hook for instance, resolves to
