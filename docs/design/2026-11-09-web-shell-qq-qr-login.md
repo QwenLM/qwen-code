@@ -206,9 +206,10 @@ state, cancel. Render the QR to a data URL server-side with a new `qrcode`
 dependency in `packages/cli` (D4). On success, write `appID` and `appSecret` into
 the channel config through the existing `ChannelSecretUpdate` path (D3).
 
-Add a capability key alongside `channel_management`
-(`packages/cli/src/serve/capabilities.ts:448`) so older clients can detect
-support.
+No new daemon capability key was added. Detection is per channel type instead:
+the catalog carries `supportsQrLogin`, so a client learns which adapters offer a
+scan without a separate global flag. An earlier draft proposed a key alongside
+`channel_management`; that was dropped as redundant.
 
 ### Layer 4 — SDK
 

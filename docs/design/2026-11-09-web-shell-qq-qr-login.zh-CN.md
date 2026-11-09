@@ -181,8 +181,9 @@ instructions 字段由 `managementFieldsWithSharedControls()` 自动追加,不�
 依赖在服务端把二维码渲染成 data URL(见 D4)。成功后,通过既有的
 `ChannelSecretUpdate` 路径把 `appID` 与 `appSecret` 写入渠道配置(见 D3)。
 
-在 `channel_management` 旁边新增一个 capability key
-(`packages/cli/src/serve/capabilities.ts:448`),以便旧客户端能探测支持情况。
+未新增 daemon 的 capability key。探测改为按渠道类型进行:目录携带
+`supportsQrLogin`,客户端因此无需单独的全局标志即可知道哪些适配器支持扫码。
+早期草稿曾提议在 `channel_management` 旁边加一个 key,因冗余而弃用。
 
 ### 第 4 层 —— SDK
 
