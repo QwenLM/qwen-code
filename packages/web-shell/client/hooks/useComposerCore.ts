@@ -82,7 +82,7 @@ import {
   inputHighlight,
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
-import { isEditableTarget } from '../utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import { QUOTE_FENCE_OPEN } from '../utils/quoteReference';
 import {
@@ -4632,10 +4632,24 @@ export function useComposerCore(
       if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
       // Only capture keystrokes if the target is within the web-shell container
-      // or if no specific element has focus (document.body is active)
+      // or if no specific element has focus (document.body is active). A
+      // marked focus region (the managed page's non-interactive tabindex=-1
+      // wrapper) parks focus without intent to interact, so it counts as
+      // body focus too — otherwise clicking the pane silences "type anywhere".
       const target = event.target as Node;
       const isWithinContainer = containerRef.current?.contains(target);
-      const isBodyFocused = document.activeElement === document.body;
+      // The focused element must be read from the container's own root: in a
+      // shadow-root mount `document.activeElement` and `event.target` both
+      // retarget to the host, which would make a parked focus region look
+      // unfocused and silence "type anywhere". The region must also wrap this
+      // composer: two managed shells can share one shadow root, and their
+      // parked wrappers are then siblings, so the attribute alone would let
+      // one shell capture the keystrokes aimed at the other.
+      const activeRegion = getShadowAwareActiveElement(containerRef.current);
+      const isBodyFocused =
+        document.activeElement === document.body ||
+        (activeRegion?.hasAttribute('data-web-shell-focus-region') === true &&
+          activeRegion.contains(containerRef.current));
       if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;

@@ -2,8 +2,9 @@ package com.alibaba.qwen.code.managedagent.maintenance;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeAccess;
@@ -101,8 +102,8 @@ public final class WorkspaceCsiRuntimeMain {
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var sessions = new JdbcRuntimeSessionRepository(source);
         var http = new HttpRuntimeTransport();
-        var nativeStore = new ManagedSessionStore(jdbc,
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null, null,
+        var nativeStore = new JdbcManagedSessionStore(jdbc,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null,
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);

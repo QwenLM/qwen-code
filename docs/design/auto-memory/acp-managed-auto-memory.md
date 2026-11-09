@@ -1,5 +1,7 @@
 # ACP Managed Auto-Memory Lifecycle
 
+[English](acp-managed-auto-memory.md) | [简体中文](acp-managed-auto-memory.zh-CN.md)
+
 **Status:** Implemented
 
 **Target baseline:** `QwenLM/qwen-code@43d46be912f41e797e6a5aaa34bfaf4a16e06efa` (`0.22.0`)
@@ -12,7 +14,8 @@
 
 ACP sessions should use the existing managed auto-memory implementation, with
 the same Recall delivery semantics as interactive sessions and with Extract and
-Dream scheduled once after a complete, successful logical user turn.
+Dream scheduled once after a complete, successful logical user turn that is not
+an authenticated channel prompt.
 
 This design deliberately does **not** add a new coordinator class. Every ACP
 `Session` already has a per-session `Config`, and that `Config` already owns one
@@ -69,8 +72,9 @@ algorithm.
 2. Preserve the original pre-hook prompt as the Recall query.
 3. Preserve the provider requirement that all leading `functionResponse` parts
    remain before injected reminder text.
-4. Schedule Extract and Dream exactly once after a successful logical user turn,
-   using the final complete chat history.
+4. Schedule Extract and Dream exactly once after a successful logical user turn
+   that is not an authenticated channel prompt, using the final complete chat
+   history.
 5. Reuse existing cancellation, deduplication, telemetry, cursor, queue, lock,
    and pressure semantics.
 6. Keep the production change small enough to audit exhaustively.
@@ -129,7 +133,8 @@ Only a fresh, model-bound user turn begins the lifecycle.
 
 | ACP input                                            |                      Recall |          Extract/Dream | Notes                                                       |
 | ---------------------------------------------------- | --------------------------: | ---------------------: | ----------------------------------------------------------- |
-| Ordinary `session/prompt`                            |                         yes |              yes, once | Includes authenticated channel prompts.                     |
+| Ordinary `session/prompt`                            |                         yes |              yes, once |                                                             |
+| Authenticated channel prompt                         |                         yes |                     no | It relays a channel's message, often not the person's.      |
 | Model-bound slash command or skill                   |                         yes |              yes, once | Locally handled slash commands return before Recall begins. |
 | User-origin Goal turn                                |                         yes |              yes, once | `goalTurn.origin === 'user'`.                               |
 | Retry                                                |                          no |                     no | It is another attempt at the same logical turn.             |
@@ -326,7 +331,19 @@ prompt response, schedule background memory only when:
 - the result is `stopReason === 'end_turn'`;
 - the result was not a graceful loop-protection stop;
 - the invocation is a fresh user turn;
+- the invocation is not an authenticated channel prompt;
 - managed auto-memory is enabled.
+
+A channel prompt still runs Recall and the structured-recall metadata
+migration; only Extract and Dream are skipped. Independently of managed
+auto-memory, the daemon also generates no follow-up suggestion after one. On the
+experimental shared agent loop the session sets `skipMemoryExtraction` on every
+round of a channel turn, and `LlmClient` skips Extract and Dream at whichever
+round's stop ends the turn. In a session that also takes the person's own
+prompts, the next fresh prompt's Extract reads the recent conversation tail,
+relayed messages included while they are still in it. Input the person sends at
+a tool boundary of a running channel turn joins that turn and shares its skip;
+that Extract can still read it from the tail.
 
 Foreground user prompts throw on loop detection and already bypass this point.
 Authenticated channel prompts and Goal turns intentionally convert the same
@@ -437,10 +454,10 @@ sequenceDiagram
 
 ### Production
 
-| File                                                  | Change                                                                                                                                                                                                                                              |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core/src/core/client.ts`                    | Extract the existing Recall begin/consume/finalize operations into public methods and migrate the current UserQuery/ToolResult callsites to them. No behavior change for interactive use.                                                           |
-| `packages/cli/src/acp-integration/session/Session.ts` | Classify fresh user turns, call the shared Recall API, inject initial/refined results at safe send points, finalize Recall, preserve graceful loop-stop provenance, record completed tools, and schedule Extract/Dream once after clean completion. |
+| File                                                  | Change                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core/src/core/client.ts`                    | Extract the existing Recall begin/consume/finalize operations into public methods and migrate the current UserQuery/ToolResult callsites to them. No behavior change for interactive use.                                                                                                  |
+| `packages/cli/src/acp-integration/session/Session.ts` | Classify fresh user turns, call the shared Recall API, inject initial/refined results at safe send points, finalize Recall, preserve graceful loop-stop provenance, record completed tools, and schedule Extract/Dream once after clean completion of a turn that is not a channel prompt. |
 
 No other production file should be necessary. In particular, do not add a file
 under `packages/core/src/memory/`: the memory algorithms and manager API already
@@ -496,6 +513,8 @@ Add focused tests for the following observable contracts:
    Extract or Dream.
 10. A non-cancelled ACP tool calls the existing completed-tool recorder once;
     duplicate and cancelled tools do not.
+11. An authenticated channel prompt schedules neither Extract nor Dream on the
+    native or the shared-loop path, while its metadata migration still runs.
 
 ### ACP integration test
 
@@ -544,7 +563,8 @@ The implementation is complete only if all of these hold:
 7. Every started ACP Recall is consumed or finalized on all exits.
 8. Extract sees history after the final tool and Stop-hook continuation.
 9. Extract and Dream are each scheduled at most once per fresh successful user
-   turn and never for cancelled, failed, or gracefully loop-stopped turns.
+   turn and never for cancelled, failed, gracefully loop-stopped, or
+   authenticated channel prompt turns.
 10. The ACP prompt response does not wait for Extract or Dream completion.
 
 ## Rejected alternatives

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
@@ -30,6 +31,17 @@ final class RuntimeBrokerSupport {
             "prepared", "executing", "cancel_requested", "settled",
             "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
+
+    static void requireSameSession(RuntimeSession actual,
+            RuntimeSession requested) {
+        if (!actual.getHarnessSessionId().equals(
+                requested.getHarnessSessionId())
+                || !actual.getTurnKind().equals(requested.getTurnKind())
+                || !actual.getScope().equals(requested.getScope())) {
+            throw conflict("runtime_session_conflict",
+                    "runtimeSessionId belongs to another Session identity");
+        }
+    }
 
     static <T> CompletionStage<T> safeStage(
             Supplier<CompletionStage<T>> supplier) {
@@ -83,6 +95,13 @@ final class RuntimeBrokerSupport {
             }
             throw new CompletionException(cause);
         });
+    }
+
+    static boolean workerRefusedRelease(Throwable error) {
+        Throwable cause = unwrap(error);
+        return cause instanceof RuntimeBrokerException failure
+                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
+                        || "managed_runtime_release_timeout".equals(failure.getCode()));
     }
 
     static Throwable unwrap(Throwable error) {
@@ -186,6 +205,18 @@ final class RuntimeBrokerSupport {
         return "settled".equals(name)
                 ? Map.of("state", name, "result", response.get("result"))
                 : Map.of("state", name);
+    }
+
+    static CompletionStage<HarnessSessionResolver.Capabilities> resolveCapabilities(
+            HarnessSessionResolver sessionResolver, String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        String id = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
+        return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
+                "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
+                    if (value == null || value.scope() == null) {
+                        throw unavailable("runtime_scope_resolution_failed", "Runtime scope resolver returned no scope");
+                    }
+                    return value;
+                });
     }
 
     static CompletionStage<RuntimeScope> resolveScope(HarnessSessionResolver sessionResolver,

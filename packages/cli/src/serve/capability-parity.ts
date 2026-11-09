@@ -102,6 +102,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   unstable_session_resume: LEGACY_ONLY('deprecated alias of the legacy resume'),
   session_list: { standing: 'managed', evidence: 'surface:SESSION_LIST' },
+  session_last_user_prompt_sort: LEGACY_ONLY(
+    'no question-time sorting in Managed',
+  ),
   session_catalog_batch: LEGACY_ONLY('no batched catalog route in Managed'),
   session_info: LEGACY_ONLY('aggregate counts are a legacy disk scan'),
   session_source_metadata: NO_MANAGED_EQUIVALENT(
@@ -182,28 +185,28 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'Managed auth is the Control plane bearer and signature scheme',
   ),
   workspace_memory: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   workspace_memory_remember: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   workspace_memory_remember_project_scope: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   workspace_memory_remember_user_scope: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   workspace_memory_forget: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   workspace_memory_forget_scope: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   workspace_memory_dream: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   memory_import_v1: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   workspace_agents: NO_MANAGED_EQUIVALENT(
     'Managed agent definitions are tenant resources, not workspace files',
@@ -218,15 +221,19 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_env: NO_MANAGED_EQUIVALENT('no Managed workspace env route'),
   workspace_preflight: NO_MANAGED_EQUIVALENT('no Managed preflight route'),
   session_context: NO_MANAGED_EQUIVALENT('no Managed session context route'),
-  session_context_usage: NO_MANAGED_EQUIVALENT(
-    'no Managed context usage route',
-  ),
+  session_context_usage: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_CONTEXT_USAGE',
+  },
   session_supported_commands: NO_MANAGED_EQUIVALENT(
     'no Managed supported-commands route',
   ),
   session_tasks: { standing: 'managed', evidence: 'surface:TASK_LIST' },
   session_agents: NO_MANAGED_EQUIVALENT('no Managed session agent listing'),
-  session_agent_trace: NO_MANAGED_EQUIVALENT('no Managed agent trace route'),
+  session_agent_trace: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_AGENT_TRACE',
+  },
   scheduled_task_session_reuse: {
     standing: 'managed',
     evidence: 'surface:AUTOMATION_RUN',
@@ -243,11 +250,15 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'tool:monitor',
   },
-  session_stats: NO_MANAGED_EQUIVALENT('no Managed session statistics route'),
+  session_stats: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_MODEL_STATISTICS',
+  },
   session_lsp: NO_MANAGED_EQUIVALENT('no LSP in the Managed execution profile'),
-  session_resources: NO_MANAGED_EQUIVALENT(
-    'no Managed session resources route',
-  ),
+  session_resources: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_RESOURCES',
+  },
   session_status: NO_MANAGED_EQUIVALENT(
     'Managed Sessions are read, not status-probed',
   ),
@@ -386,6 +397,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
+  workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
+    'no Managed Git ignore query route',
+  ),
   workspace_mcp_restart: {
     standing: 'managed',
     evidence: 'surface:MCP_MANAGEMENT',
@@ -476,6 +490,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_display_name: NO_MANAGED_EQUIVALENT(
     'Workspace identity is the registered directory',
   ),
+  workspace_order: NO_MANAGED_EQUIVALENT(
+    'daemon-local workspace presentation order',
+  ),
   scratch_workspace_registration: {
     standing: 'managed',
     evidence: 'surface:WORKSPACE_CREATE',
@@ -508,7 +525,7 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   workspace_qualified_voice: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   workspace_qualified_memory: NO_MANAGED_EQUIVALENT(
-    'issue #15075: no Managed memory CRUD',
+    'issue #15075: no equivalent Workspace memory-file API; personal MemoryStores use explicit Session binding',
   ),
   extension_management_v2: NO_MANAGED_EQUIVALENT(
     'Managed packages use a separate Session-pinned lifecycle contract',
@@ -627,6 +644,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'PUB_STREAM_SEAL',
   'STORE_APPROVAL_QUERY',
   'STORE_MODEL_CONFIG_QUERY',
+  'STORE_MEMORY_QUERY',
   'STORE_USER_MESSAGE_CLAIM',
   'STORE_EXECUTION_AUTHORIZE',
   'STORE_LIFECYCLE_AUTHORIZE',
@@ -656,17 +674,24 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
  * `SESSION_CONTEXT_COMPRESSION` compresses a Session's context,
  * `SESSION_RECOVERY_QUERY` reads a Session's recovery state and
  * `SESSION_RECOVERY_RECHECK` re-runs its recovery checks.
+ * Personal MemoryStore create/list differs from Workspace memory-file CRUD.
  */
 export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'EXTENSION_ARCHIVE',
   'EXTENSION_CONFIG_APPLY',
   'EXTENSION_CONFIG_GET',
   'EXTENSION_GET',
+  'EXTENSION_INSPECTION',
   'EXTENSION_LIST',
   'EXTENSION_OPERATION',
   'EXTENSION_PUBLISH',
   'EXTENSION_SETTINGS_GET',
   'EXTENSION_SETTINGS_SET',
+  'MEMORY_STORE_CREATE',
+  'MEMORY_STORE_LIST',
+  'RUNTIME_SKILL_IMPORT',
+  'SESSION_ACTIVITY',
+  'SESSION_ACTIVITY_STATS',
   'SESSION_CONTEXT_COMPRESSION',
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',

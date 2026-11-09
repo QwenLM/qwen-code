@@ -331,6 +331,11 @@ export type DaemonGitOperation =
   | 'revert'
   | 'bisect';
 
+export interface DaemonWorkspaceGitIgnoredPaths {
+  v: 1;
+  ignoredPaths: string[];
+}
+
 /**
  * Current Git metadata returned from a workspace Git status route.
  *
@@ -1616,7 +1621,14 @@ export interface DaemonRestoredSession extends DaemonSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at least once for this session
+   * Publish-time summary/unverified-seed boundary captured with a full load
+   * snapshot in eventEpoch. A suffix starting after it excludes those sources,
+   * not other partial/truncated/degraded content. Zero precedes the first event;
+   * absence is not zero. Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed for this session
    * (load only): `compactedReplay`/`liveJournal` may lag behind live
    * events. Clients should prefer the full transcript (see
    * `fullTranscriptAvailable`) over the degraded snapshot.
@@ -1736,6 +1748,9 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1931,6 +1946,8 @@ export type DaemonSessionGroupFilter =
   | (string & {});
 
 export interface DaemonSessionListPageOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -3810,11 +3827,28 @@ export interface DaemonSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
+     * whose window is at least 100 ms. With `totalThroughputOutputTokens` it
+     * gives the generation-window rate that clients before
+     * `totalOutputSpeedDurationMs` show.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
+    /**
+     * Time from the first to the last visible output, summed over every timed
+     * request like `totalTtftMs`. Absent from older daemons.
+     */
+    totalTimedGenerationDurationMs?: number;
+    /**
+     * Output tokens, reasoning counted once, of the timed requests that
+     * reported any. Absent from older daemons.
+     */
+    totalOutputSpeedTokens?: number;
+    /**
+     * TTFT plus generation time of the requests in `totalOutputSpeedTokens`:
+     * output speed divides the tokens by it. Absent from older daemons.
+     */
+    totalOutputSpeedDurationMs?: number;
   };
   /**
    * Most recent timed, non-internal responses (oldest first, at most 200).
@@ -3825,8 +3859,14 @@ export interface DaemonSessionStatsModelMetrics {
     /** Event time, epoch ms. */
     at: number;
     ttftMs: number;
-    /** Generation window; below 100 ms it measures no output rate. */
+    /**
+     * From the first to the last visible output. Output speed divides
+     * `outputTokens` by `ttftMs + generationMs`; for a daemon without
+     * `generation.totalOutputSpeedDurationMs`, by `generationMs` when it is at
+     * least 100 ms.
+     */
     generationMs: number;
+    /** Reasoning counted once; older daemons sent the provider's count. */
     outputTokens: number;
     /** Subagent that issued the request; absent for the main conversation. */
     source?: string;

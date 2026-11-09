@@ -1855,6 +1855,112 @@ describe('useComposerCore paste', () => {
     expect(latest!.getText()).toBe('!');
   });
 
+  it('captures type-anywhere keystrokes when focus parks on a marked focus region', async () => {
+    await mount();
+    // The managed page wrapper is a non-interactive tabindex=-1 parking spot
+    // for discard/task-panel focus, and it wraps the composer; typing there
+    // must still reach the editor.
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    region.appendChild(container!);
+    document.body.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(region);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      region.remove();
+    }
+  });
+
+  it('captures type-anywhere keystrokes when a shadow mount parks focus on a focus region', async () => {
+    await mount();
+    // A shadow-root mount retargets document.activeElement and event.target to
+    // the host, so the parked wrapper has to be read from the container root.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    region.appendChild(container!);
+    shadow.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(host);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('leaves keystrokes to the shell that owns the parked focus region', async () => {
+    await mount();
+    // Two managed shells can share one shadow root and park focus on sibling
+    // wrappers; only the shell whose wrapper contains this composer may take
+    // the keystroke, otherwise it lands in the wrong conversation.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    const ownRegion = document.createElement('div');
+    ownRegion.tabIndex = -1;
+    ownRegion.setAttribute('data-web-shell-focus-region', '');
+    ownRegion.appendChild(container!);
+    const foreignRegion = document.createElement('div');
+    foreignRegion.tabIndex = -1;
+    foreignRegion.setAttribute('data-web-shell-focus-region', '');
+    shadow.appendChild(foreignRegion);
+    shadow.appendChild(ownRegion);
+    try {
+      act(() => foreignRegion.focus());
+      expect(shadow.activeElement).toBe(foreignRegion);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => foreignRegion.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('leaves keystrokes alone when focus parks on an unmarked focusable element', async () => {
+    await mount();
+    const outside = document.createElement('div');
+    outside.tabIndex = -1;
+    document.body.appendChild(outside);
+    try {
+      act(() => outside.focus());
+      expect(document.activeElement).toBe(outside);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => outside.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
+    } finally {
+      outside.remove();
+    }
+  });
+
   it('leaves a long paste inline in shell mode', async () => {
     await mount();
     act(() => latest!.toggleShellMode());
