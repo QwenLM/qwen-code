@@ -31,6 +31,16 @@
  * below. Rare enough — lint.js saw five commits in the months before this
  * check — that an occasional "rebase, the gate moved" is cheap.
  *
+ * Containment is a proxy, and for eslint.config.js's global `ignores` array it
+ * over-rejects. Lint scope is `tree \ ignores`, so a branch's green covers what
+ * the base gate checks exactly when the branch's ignores are a SUBSET of the
+ * base's: adding an ignore on the base only shrinks what the base checks, and
+ * the branch already validated the larger scope. All nine measured freshness
+ * reds in one eight-hour window named one such addition (#16200 ignoring a
+ * built host bundle). `narrowsToIgnoredScope` below drops that verdict; a
+ * base-side REMOVAL fails the subset test and still reddens the branch. See
+ * docs/design/2026-11-09-lint-gate-freshness-ignores-subset.md.
+ *
  * Fail-open on API errors: with no required status checks this step is
  * advisory by convention (red means do not merge), and a GitHub API
  * brownout must not hold every PR hostage. The warning stays in the log.
@@ -65,9 +75,10 @@ export const GATE_FILES = [
  * curl honours HTTPS_PROXY/NO_PROXY on the ECS runners' squid egress;
  * node's global fetch does not (undici needs a ProxyAgent that builtins
  * alone cannot construct). `-f` turns HTTP errors into a non-zero exit,
- * which execFile rejects — the caller's fail-open catches both shapes.
+ * which execFile rejects — callers catch both shapes, but not alike: the JSON
+ * path reaches main()'s fail-open, the text path the narrowing's fail-closed.
  */
-async function curlJson(path, token) {
+async function curlRaw(path, token, accept) {
   try {
     const { stdout } = await execFileAsync(
       'curl',
@@ -79,14 +90,14 @@ async function curlJson(path, token) {
         '-H',
         `Authorization: Bearer ${token}`,
         '-H',
-        'Accept: application/vnd.github+json',
+        `Accept: ${accept}`,
         '-H',
         'X-GitHub-Api-Version: 2022-11-28',
         `https://api.github.com${path}`,
       ],
       { maxBuffer: 16 * 1024 * 1024 },
     );
-    return JSON.parse(stdout);
+    return stdout;
   } catch (error) {
     // execFile's message embeds the full argv — including the bearer token.
     // Actions masks the exact secret in logs, but a local run would print
@@ -101,13 +112,93 @@ async function curlJson(path, token) {
   }
 }
 
+async function curlJson(path, token) {
+  return JSON.parse(await curlRaw(path, token, 'application/vnd.github+json'));
+}
+
+// Raw, not the JSON representation: the contents API returns an empty `content`
+// field above 1 MB, which would silently disable the narrowing as a file grows.
+function curlText(path, token) {
+  return curlRaw(path, token, 'application/vnd.github.raw');
+}
+
 function firstLine(message) {
   return message.split('\n', 1)[0];
 }
 
+const ESLINT_CONFIG = 'eslint.config.js';
+
+/**
+ * Split eslint.config.js into the entries of its FIRST `ignores: [...]` block
+ * and `rest`, the file with that whole block removed. The first block is the
+ * global one; the config-scoped arrays further down stay in `rest` and keep
+ * being compared byte for byte.
+ *
+ * Line-anchored on purpose. This suite is in HELPER_TESTS_DEP_FREE, so the
+ * import closure is node: builtins — no parser — and importing the config
+ * itself would execute branch-controlled code. Anchoring the literal at the
+ * start of the line is what keeps prose in a trailing comment from being read
+ * as an entry. An unexpected line returns null ("cannot narrow"), never a
+ * silently shortened list.
+ */
+export function splitGlobalIgnores(text) {
+  const lines = text.split('\n');
+  const start = lines.findIndex((line) => /^\s*ignores:\s*\[\s*$/.test(line));
+  if (start === -1) return null;
+  const end = lines.findIndex(
+    (line, index) => index > start && /^\s*\],?\s*$/.test(line),
+  );
+  if (end === -1) return null;
+  const entries = [];
+  for (const line of lines.slice(start + 1, end)) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('//')) continue;
+    const entry = /^'((?:[^'\\]|\\.)*)'\s*,?\s*(?:\/\/.*)?$/.exec(trimmed);
+    if (!entry) return null;
+    entries.push(entry[1]);
+  }
+  return {
+    entries,
+    rest: [...lines.slice(0, start), ...lines.slice(end + 1)].join('\n'),
+  };
+}
+
+/**
+ * True when the base-side eslint.config.js change cannot invalidate this
+ * branch: everything outside the global ignores array is byte-identical, and
+ * the branch excludes no more than the base does. See the header for why the
+ * subset runs in this direction.
+ */
+async function narrowsToIgnoredScope({ fetchText, repo, baseSha, headSha }) {
+  const [baseText, headText] = await Promise.all(
+    [baseSha, headSha].map((sha) =>
+      fetchText(
+        `/repos/${repo}/contents/${ESLINT_CONFIG}?ref=${encodeURIComponent(sha)}`,
+      ),
+    ),
+  );
+  const base = splitGlobalIgnores(baseText);
+  const head = splitGlobalIgnores(headText);
+  if (!base || !head) return false;
+  // A negated entry RE-INCLUDES files, so entries are not purely subtractive
+  // and the subset argument does not hold. Measured on eslint 9.29.0 with
+  // lintFiles: base ['**/*.gen.ts', '!**/keep.gen.ts'] lints keep.gen.ts while
+  // head ['**/*.gen.ts'] lints nothing, yet head is a subset of base. Refuse to
+  // narrow when either side has one. `isPathIgnored` is not a usable oracle
+  // here — it reports both shapes as ignored.
+  if ([...base.entries, ...head.entries].some((entry) => entry.startsWith('!')))
+    return false;
+  return (
+    base.rest === head.rest &&
+    head.entries.every((entry) => base.entries.includes(entry))
+  );
+}
+
 /**
  * Return the gate files whose latest base-side change this branch does not
- * contain. `fetchJson(path)` is injected so tests never touch the network.
+ * contain. `fetchJson(path)` and `fetchText(path)` are injected so tests never
+ * touch the network; `fetchText` is consulted only to narrow an
+ * eslint.config.js verdict that already came back stale.
  *
  * Containment uses the swapped three-dot compare `S...head`: its status is
  * "ahead"/"identical" exactly when S is an ancestor of (or equal to) head;
@@ -115,6 +206,7 @@ function firstLine(message) {
  */
 export async function findStaleGateFiles({
   fetchJson,
+  fetchText,
   repo,
   baseRef,
   headSha,
@@ -151,7 +243,27 @@ export async function findStaleGateFiles({
       };
     }),
   );
-  return verdicts.filter((verdict) => !verdict.contained);
+  const stale = verdicts.filter((verdict) => !verdict.contained);
+  const narrowed = await Promise.all(
+    stale.map(async (verdict) => {
+      if (verdict.file !== ESLINT_CONFIG) return verdict;
+      try {
+        const ignorable = await narrowsToIgnoredScope({
+          fetchText,
+          repo,
+          baseSha: verdict.sha,
+          headSha,
+        });
+        return ignorable ? null : verdict;
+      } catch {
+        // Fail closed. Propagating would reach main()'s fail-open and discard
+        // every OTHER gate file's verdict too, so a transient curl failure on
+        // this one optional refinement would become a blanket pass.
+        return verdict;
+      }
+    }),
+  );
+  return narrowed.filter((verdict) => verdict !== null);
 }
 
 export function renderReport(stale, baseRef) {
@@ -183,16 +295,21 @@ async function main() {
   }
   try {
     const fetchJson = (path) => curlJson(path, GITHUB_TOKEN);
+    const fetchText = (path) => curlText(path, GITHUB_TOKEN);
     const stale = await findStaleGateFiles({
       fetchJson,
+      fetchText,
       repo: GITHUB_REPOSITORY,
       baseRef: BASE_REF,
       headSha: HEAD_SHA,
     });
     if (stale.length === 0) {
+      // Not "contains every change": the ignores narrowing can pass a branch
+      // that lacks a base-side addition, because that addition cannot
+      // invalidate it.
       console.log(
-        `Lint gate freshness OK: this branch contains every '${BASE_REF}' ` +
-          `change to the ${GATE_FILES.length} gate files.`,
+        `Lint gate freshness OK: no '${BASE_REF}' change to the ` +
+          `${GATE_FILES.length} gate files invalidates this branch.`,
       );
       return;
     }
