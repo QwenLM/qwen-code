@@ -41,6 +41,7 @@ const WORKTREE_BRANCH = 'fix/x';
 const GH_STUB = `#!/usr/bin/env bash
 set -u
 state_dir="\${GH_STUB_STATE_DIR:?}"
+printf '%s\t%s\n' "$PWD" "$*" >> "$state_dir/calls.log"
 branch=$(git branch --show-current 2>/dev/null || echo detached)
 marker="$state_dir/$(printf '%s' "$branch" | tr '/' '_')"
 if [ "\${1:-}" = "repo" ] && [ "\${2:-}" = "view" ]; then
@@ -112,6 +113,10 @@ describe.skipIf(process.platform === 'win32')(
       git(repo, 'init', '--initial-branch=main', '.');
       git(repo, 'config', 'user.name', 'Test');
       git(repo, 'config', 'user.email', 'test@example.com');
+      // A developer's global `commit.gpgsign = true` would otherwise fail every
+      // fixture commit (no usable key), while CI without a global config stays
+      // green. Repo-local config also covers the linked worktree via commondir.
+      git(repo, 'config', 'commit.gpgsign', 'false');
       git(repo, 'remote', 'add', 'origin', 'https://github.com/o/r.git');
       fs.writeFileSync(path.join(repo, 'README.md'), 'base\n');
       git(repo, 'add', 'README.md');
@@ -190,6 +195,27 @@ describe.skipIf(process.platform === 'win32')(
         ...(directory ? { directory } : {}),
       });
       return invocation.execute(new AbortController().signal);
+    };
+
+    /**
+     * Wait until the binding hook has actually queried gh (pre-run AND
+     * post-run `pr view` legs are logged) before a negative assertion. The
+     * hook is fire-and-forget, so without this edge a "nothing bound" check
+     * could pass simply because the write has not landed yet.
+     */
+    const waitForAttributionLegs = async (timeoutMs = 15_000) => {
+      const deadline = Date.now() + timeoutMs;
+      const logPath = path.join(tmp, 'gh-state', 'calls.log');
+      for (;;) {
+        const raw = fs.existsSync(logPath)
+          ? fs.readFileSync(logPath, 'utf8')
+          : '';
+        const views = raw
+          .split('\n')
+          .filter((line) => line.includes('\tpr view')).length;
+        if (views >= 2 || Date.now() > deadline) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
     };
 
     const waitForSidecar = async (timeoutMs = 15_000) => {
@@ -306,6 +332,29 @@ describe.skipIf(process.platform === 'win32')(
       expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
     });
 
+    it('falls back visibly when the worktree does not exist at the pre-run snapshot', async () => {
+      // R1-2: before spawn the future worktree path resolves upward to the
+      // launch repo, while post-run gh runs on the new worktree branch. Those
+      // disagree, so binding declines; the run must not hide that behind a
+      // `resolved` result with no notice.
+      const created = path.join(
+        repo,
+        '.qwen',
+        'worktrees',
+        'created-during-run',
+      );
+      const result = await run(
+        `git worktree add '${created}' -b fix/created-during-run && cd '${created}' && gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain(
+        'PR auto-binding fell back to the launch directory',
+      );
+
+      await waitForAttributionLegs();
+      expect((await readSessionPrs(sidecar)) ?? []).toEqual([]);
+    });
+
     it('falls back with a notice when the cd target is an expansion', async () => {
       // The create really runs and really creates the worktree's PR; only the
       // attribution is unprovable, because the resolver refuses to guess what
@@ -325,10 +374,44 @@ describe.skipIf(process.platform === 'win32')(
             path.join(tmp, 'gh-state', WORKTREE_BRANCH.replace(/\//g, '_')),
           ),
         ).toBe(true);
+        // Wait for the hook's gh legs to be logged before asserting nothing
+        // bound. Reading immediately would pass merely because the write has
+        // not landed yet — the very oracle this case exists to pin.
+        await waitForAttributionLegs();
         expect((await readSessionPrs(sidecar)) ?? []).toEqual([]);
       } finally {
         if (original === undefined) delete process.env['WORKTREE_PATH'];
         else process.env['WORKTREE_PATH'] = original;
+      }
+    });
+
+    it('keeps the git fixture working when a global git config enables signing', () => {
+      // R1-8: `GIT_CONFIG_NOSYSTEM` only screens /etc/gitconfig. A developer's
+      // `~/.gitconfig` with `commit.gpgsign = true` used to fail every fixture
+      // commit while CI without a global config stayed green. Reproduce that
+      // hostile HOME and assert the repo-local remedy makes commits succeed.
+      const hostileHome = path.join(tmp, 'hostile-home');
+      fs.mkdirSync(hostileHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(hostileHome, '.gitconfig'),
+        '[commit]\n\tgpgsign = true\n',
+      );
+      const original = process.env['HOME'];
+      process.env['HOME'] = hostileHome;
+      try {
+        const r = path.join(tmp, 'signing-repo');
+        fs.mkdirSync(r);
+        git(r, 'init', '--initial-branch=main', '.');
+        git(r, 'config', 'user.name', 'Test');
+        git(r, 'config', 'user.email', 'test@example.com');
+        git(r, 'config', 'commit.gpgsign', 'false');
+        fs.writeFileSync(path.join(r, 'f'), 'x\n');
+        git(r, 'add', 'f');
+        git(r, 'commit', '-m', 'base');
+        expect(git(r, 'rev-parse', 'HEAD')).toMatch(/^[0-9a-f]{40}$/);
+      } finally {
+        if (original === undefined) delete process.env['HOME'];
+        else process.env['HOME'] = original;
       }
     });
   },

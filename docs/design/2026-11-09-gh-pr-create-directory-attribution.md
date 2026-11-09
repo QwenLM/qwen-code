@@ -156,8 +156,15 @@ channel as `attributionWarning` and the long-run hint):
 > parameter to the repository you create the PR in, or register the PR on the
 > session after creating it.
 
-The notice is static: it is decided before spawn, so it does not depend on the
-fire-and-forget binding hook completing. `launch` and `resolved` emit nothing.
+The notice accompanies only a FOREGROUND run that settled with exit code 0 —
+an uninterrupted one, or one whose promote was refused after the child had
+already exited — which are exactly the runs the binding gate sees. A failed or
+cancelled create produced no PR to register, so nothing is told: the condition
+is `kind === 'opaque' && (!result.aborted || wasPromoteRefused) && exitCode === 0`.
+The resolver outcome is computed before spawn, so the notice never depends on
+the fire-and-forget binding hook completing, but that settled-success condition
+applies in every case, not merely for `opaque`. `launch` and `resolved` emit
+nothing.
 
 ## Design decisions and rationale
 
@@ -418,11 +425,94 @@ round-2 fix narrowed one hole and opened an adjacent one, and only a reviewer
 re-running binding outcomes against both the parent and the previous head caught
 them. The design's own probe and diff reading did not.
 
+### Review round 4 (2026-11-09, re-review of `96d41924410`)
+
+The re-review confirmed round 3's fixes and reported two Critical regressions,
+one Suggestion on the notice wording, and several test-efficacy gaps. All were
+reproduced against the head before fixing.
+
+1. **R1-1 (Critical) — the walk still proved directories the shell never
+   entered.** `pushd -n DIR` pushes without moving; a same-named function
+   (`cd() { :; }`, `gh() { … }`) shadows the builtin; `command`/`builtin`/`time`
+   prefixes hide which command actually runs; `bash -c "…"` is a separate
+   shell; `shopt -s lastpipe` lets a pipeline's last element move the current
+   shell; `trap … DEBUG` can move between any two commands; and
+   `git worktree add … && cd <new> && gh pr create` snapshots a path that does
+   not exist yet. Each now returns `opaque` (launch attribution + visible
+   notice) instead of silently resolving a wrong directory. Function shadowing
+   is registered in execution order and scoped to the current shell, so a
+   definition after the create or inside a subshell/pipeline does not poison an
+   earlier `cd`.
+2. **R1-2 (Critical) — a resolved directory replaced the launch directory for
+   both legs with no fallback.** When the derived directory has no git repo
+   (`findGitRoot` returns null) or the command names a DIFFERENT repository
+   (`--repo` / `GH_REPO`), both legs now re-point at the launch directory and
+   re-snapshot there — what the parent commit always did. An errored gh answer
+   inside a REAL repo still fails closed (no re-point). The explicit repo is
+   read from the create AST node (quote-aware) and from `ghPrCreateInlineEnv`;
+   `--repo` overrides `GH_REPO`; `GITHUB_REPOSITORY` is an Actions context
+   variable, not a gh repo override, and is ignored. Fork parent keys count as
+   the same attribution family.
+3. **R1-4 (Suggestion) — notice wording.** The notice section and acceptance
+   criterion 2 now state the notice fires only on a settled, successful
+   foreground run (exit 0, not aborted, or promote-refused after the child
+   exited). A failed or cancelled create emits nothing.
+4. **R1-5 (Suggestion) — negative assertion had no happens-before edge.** The
+   real-filesystem expansion-fallback case now waits for both pre-run and
+   post-run `pr view` legs to be logged (`waitForAttributionLegs`) before
+   asserting nothing bound, so it cannot pass merely because the write has not
+   landed yet.
+5. **R1-6 (Suggestion) — promote-refused notice disjunct unpinned.** Added a
+   test asserting the notice fires for an opaque create that is promote-refused
+   after settling, and a control asserting no notice for a non-opaque
+   promote-refused create.
+6. **R1-7 (Suggestion) — pipeline non-leak unpinned.** Added a test asserting
+   `cd /test/dir/nested | cat && gh pr create` attributes in the launch
+   directory with no notice.
+7. **R1-8 (Suggestion) — git fixture signing.** The real-git fixture sets
+   `commit.gpgsign = false` repo-locally and adds a regression with a hostile
+   `~/.gitconfig` enabling signing, so a developer's global config cannot fail
+   every fixture commit.
+8. **R2-1 (Suggestion) — raw string compare at separator arms.** The `||` and
+   non-`&&` arms now compare `path.resolve(current) !== path.resolve(dir)`, so a
+   `directory` param with a trailing slash no longer invents a move and emits a
+   spurious notice.
+
+Self-audit during this round found and fixed four additional defects introduced
+by the fixes themselves: global function pre-scanning poisoned creates before
+the definition and leaked subshell/pipeline scope; whole-command `--repo` regex
+matched PR-body text and quoted values incorrectly; `--repo`/`GH_REPO`
+precedence was inverted; and `GITHUB_REPOSITORY` was wrongly treated as a repo
+override. Each is pinned by a dedicated test.
+
+Round-4 verification: **469 passed** (458 in the existing file, including 74
+directory-resolution tests, plus 11 real-filesystem tests), core typecheck
+exit 0, ESLint and Prettier clean. Mutation witnesses N–X each kill their named
+cases with controls surviving:
+
+| Mutation                                                | Result                                                 |
+| ------------------------------------------------------- | ------------------------------------------------------ |
+| N — drop separator normalisation                        | trailing-slash case reds                               |
+| O — disable wrapper fail-closed                         | 4 wrapper cases red, 2 unrelated-prefix controls green |
+| P — disable nested-shell guard                          | nested-shell case red, `sh -c 'echo ok'` control green |
+| Q — drop lastpipe check                                 | lastpipe case red, ordinary pipeline control green     |
+| R — disable worktree-add guard                          | unit + real-filesystem cases red                       |
+| S — disable trap guard                                  | DEBUG-trap case red                                    |
+| T — restore global function pre-scan                    | 3 scope/order controls red, direct-shadow case green   |
+| U — revert to text repo matching                        | 5 repo cases red, equals-form + parent controls green  |
+| V — relax error re-point                                | fail-closed case red, non-repo fallback green          |
+| W — drop fork parent key                                | parent-repo case red                                   |
+| X — disable current-shell subtree function registration | compound-shadow case red, subshell controls green      |
+
+Every mutation was restored from a byte-level backup; the final `shell.ts`
+SHA-256 matches the pre-mutation freeze (`5d00698edc5738c1f5880a12104c3936d91f0b92ec7b0a097a22bd5a9cf59dfc`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.
-- Every shape the resolver cannot prove behaves exactly as before, plus a
-  notice when a directory change was involved.
+- Every shape the resolver cannot prove behaves exactly as before. When such a
+  directory change is involved, a settled, successful foreground run carries a
+  notice; a failed or cancelled create emits nothing.
 - No existing attribution gate is weakened; all 22 pre-existing binding tests
   still pass.
 - The `bindGhPrCreate` docstring and its post-run resolution comment no longer

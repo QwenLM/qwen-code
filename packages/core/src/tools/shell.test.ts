@@ -880,6 +880,74 @@ describe('ShellTool', () => {
       );
     });
 
+    it('re-points both legs at the launch directory when the create targeted it from a non-repo directory', async () => {
+      // `cd <scratch-nonrepo> && GH_REPO=o/r gh pr create …`: the derived
+      // directory has no git repository, so its snapshot is `error` and both
+      // legs fall back to the launch directory — what the parent commit did.
+      // The stub order is the call order: scratch pre-run, launch pre-run
+      // after re-pointing, launch post-run.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'error' })
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ ...branchPr(77), headRefName: 'main' });
+
+      await runShell(
+        'cd /scratch/norepo && GH_REPO=o/r gh pr create --title t --body b',
+        PR_77,
+      );
+
+      expectBound(77);
+      expect(fetchCurrentBranchNameMock).toHaveBeenCalledWith('/test/dir');
+      // GH_REPO is inline env, so the verification legs receive an env
+      // overlay rather than `undefined`; assert the launch-directory call.
+      expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+        '/test/dir',
+        expect.any(Object),
+      );
+    });
+
+    it('does not re-point a gh error in a real repo', async () => {
+      // Only a missing repository justifies the launch fallback. This file
+      // auto-mocks fs, so prove git identity through the primitive findGitRoot
+      // actually consumes. A gh flake in a real checkout must still hit the
+      // errored-snapshot gate, not bind an existing launch-branch PR.
+      vi.mocked(fs.existsSync).mockImplementation(
+        (candidate) => candidate === path.join('/test/dir', '.git'),
+      );
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'error',
+      });
+      await runShell('cd nested && gh pr create --fill', PR_77);
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-points on an explicit --repo flag naming a different repository', async () => {
+      // `cd <another-checkout> && gh pr create --repo o/r`: the other checkout
+      // resolves to a DIFFERENT repo key, so the flag cannot mean that repo.
+      // Attributing there would decline (no PR for its branch), while the
+      // parent commit bound the launch repo's PR. With a same-repo flag the
+      // resolver would instead keep the worktree (pinned by the quoted-title
+      // case).
+      fetchAttributionRepoKeysMock.mockImplementation((dir) =>
+        dir === '/other/checkout'
+          ? Promise.resolve({ resolved: 'github.com/other/checkout' })
+          : Promise.resolve({ resolved: 'github.com/o/r' }),
+      );
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ ...branchPr(77), headRefName: 'main' });
+
+      await runShell(
+        'cd /other/checkout && gh pr create --repo o/r --head main --title t --body b',
+        PR_77,
+      );
+
+      expectBound(77);
+    });
+
     it('does not re-emit when the resolved PR is already bound', async () => {
       // The pre-run snapshot missed the PR (a gh flake), so the resolution
       // reaches persistence; the write reports it alreadyBound, so nothing is
@@ -914,6 +982,60 @@ describe('ShellTool', () => {
       });
 
       expectBound(77);
+    });
+
+    it('emits the fallback notice when an opaque create is promote-refused', async () => {
+      // The notice condition mirrors the binding gate `(!aborted ||
+      // wasPromoteRefused) && exitCode === 0`. An opaque create that settles
+      // after a refused promote must still be told, or a simplification to
+      // `!aborted && exitCode === 0` would silently drop it.
+      mockCreatedPr(77);
+      const result = await runShell(
+        'cd $WORKTREE && gh pr create --fill',
+        PR_77,
+        0,
+        {
+          result: { aborted: true },
+          promote: (promoteAc) => promoteAc.abort({ kind: 'background' }),
+        },
+      );
+
+      expect(result.llmContent).toContain(SHELL_PR_BINDING_DIRECTORY_NOTICE);
+    });
+
+    it('emits no fallback notice for a promote-refused NON-opaque create', async () => {
+      // The disjunct exists only when the create actually fell back. With a
+      // provable directory, promote-refused runs bind normally and nothing
+      // should be said — a guard that fires unconditionally would spuriously
+      // warn on the happy path.
+      mockCreatedPr(77);
+      const result = await runShell('gh pr create --fill', PR_77, 0, {
+        result: { aborted: true },
+        promote: (promoteAc) => promoteAc.abort({ kind: 'background' }),
+      });
+
+      expect(result.llmContent).not.toContain(
+        SHELL_PR_BINDING_DIRECTORY_NOTICE,
+      );
+      expectBound(77);
+    });
+
+    it('emits no fallback notice for a cancelled create', async () => {
+      // A cancelled run never reached the binding gate, so it must not be
+      // told that binding fell back. Pairs with the promote-refused case to
+      // keep the two disjuncts honest.
+      const result = await runShell(
+        'cd $WORKTREE && gh pr create --fill',
+        PR_77,
+        0,
+        {
+          result: { aborted: true, exitCode: 130 },
+        },
+      );
+
+      expect(result.llmContent).not.toContain(
+        SHELL_PR_BINDING_DIRECTORY_NOTICE,
+      );
     });
 
     it('does not bind when a promote succeeds mid-run (documented scope)', async () => {
@@ -1081,6 +1203,45 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir', 'nested'));
       });
 
+      it.each(['command printf ok', "sh -c 'echo ok'"])(
+        'keeps an unrelated prefix resolvable: %s',
+        async (prefix) => {
+          mockCreatedPr(77);
+          await runShell(
+            `${prefix} && cd /test/dir/nested && gh pr create --fill`,
+            PR_77,
+          );
+          await expectAttributedIn(resolved('/test/dir/nested'));
+        },
+      );
+
+      it('ignores a same-named function defined after the create', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create --fill; cd() { :; }',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('ignores a function scoped to an already-finished subshell', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          '(cd() { :; }) && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('ignores a function scoped to a pipeline subshell', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; } | cat && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
       it('resolves a relative cd against the launch directory', async () => {
         mockCreatedPr(77);
         await runShell('cd nested && gh pr create --fill', PR_77);
@@ -1119,6 +1280,79 @@ describe('ShellTool', () => {
         await expectAttributedIn(
           resolved('/test/dir', '.qwen/worktrees/fix-16712'),
         );
+      });
+
+      it.each([
+        ["--repo 'o/r'", 'a single-quoted repo flag'],
+        ['--repo "o/r"', 'a double-quoted repo flag'],
+        ['--repo=o/r', 'an equals-form repo flag'],
+        [
+          "--body 'explains --repo someone/else'",
+          'a repo-looking flag inside the PR body',
+        ],
+      ])('keeps %s attribution in the worktree: %s', async (args) => {
+        mockCreatedPr(77);
+        await runShell(`cd /test/dir/nested && gh pr create ${args}`, PR_77);
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('keeps a quoted same-repo GH_REPO attribution in the worktree', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd /test/dir/nested && GH_REPO='o/r' gh pr create --fill",
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('gives an explicit repo flag precedence over GH_REPO', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd /test/dir/nested && GH_REPO='other/r' gh pr create --repo o/r --fill",
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('does not treat GITHUB_REPOSITORY as a gh repo override', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd /test/dir/nested && GITHUB_REPOSITORY='other/r' gh pr create --fill",
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('accepts a parent repo flag in a fork worktree', async () => {
+        // gh attributes fork checkouts to both resolved and parent identities;
+        // an explicit parent --repo is still the same attribution family, not
+        // a reason to re-point at the launch directory.
+        fetchAttributionRepoKeysMock.mockResolvedValue({
+          resolved: 'github.com/fork/r',
+          parent: 'github.com/o/r',
+        });
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create --repo o/r --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
       it('resolves a double-quoted literal path', async () => {
@@ -1240,6 +1474,23 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir', 'nested'));
       });
 
+      it('does not treat a cd inside a pipeline as moving the directory', async () => {
+        // The pipeline arm returns `dir` unchanged because bash runs elements
+        // in subshells. With the create OUTSIDE the element, that return value
+        // is observable: threading the element's result would attribute in the
+        // subshell's directory and lose the launch binding the parent made.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir/nested | cat && gh pr create --fill',
+          PR_77,
+        );
+
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
       it('emits no notice when the command never changes directory', async () => {
         mockCreatedPr(77);
         const result = await runShell('gh pr create --fill', PR_77);
@@ -1256,6 +1507,25 @@ describe('ShellTool', () => {
           PR_77,
         );
         await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('normalises a trailing slash in the directory param at the separator arms', async () => {
+        // R2-1: `cwd` is the raw directory param, while a literal cd target is
+        // joined with path.resolve. A raw compare at `;` would invent a move
+        // and emit an actionable-looking notice for a same-directory command.
+        // Both gh legs must still receive the parameter exactly as supplied.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir; gh pr create --fill',
+          PR_77,
+          0,
+          { directory: '/test/dir/' },
+        );
+
+        await expectAttributedIn('/test/dir/');
         expect(result.llmContent).not.toContain(
           SHELL_PR_BINDING_DIRECTORY_NOTICE,
         );
@@ -1343,6 +1613,56 @@ describe('ShellTool', () => {
         [
           'a cd in the right branch of an OR-list',
           'true || cd /test/dir/nested && gh pr create --fill',
+        ],
+        // bash pushes without moving for `-n`; and a same-named function
+        // shadows the builtin with a no-op, so `cd <wt>` does not move.
+        [
+          'pushd -n which only pushes the stack',
+          'pushd -n /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a function that shadows cd',
+          'cd() { :; }; cd /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a function that shadows gh itself',
+          'gh() { command gh "$@"; }; cd /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a compound-statement function shadow',
+          '{ cd() { :; }; }; cd /test/dir/nested && gh pr create --fill',
+        ],
+        // R1-1: unmodelled execution contexts can move a different shell (or
+        // hide which builtin actually runs), so launch attribution must stay
+        // conservative and visible instead of silently resolving nothing.
+        [
+          'a builtin cd prefix',
+          'builtin cd /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a command cd prefix',
+          'command cd /test/dir/nested && gh pr create --fill',
+        ],
+        ['a time cd prefix', 'time cd /test/dir/nested && gh pr create --fill'],
+        [
+          'a command env chdir create',
+          'command env -C /elsewhere gh pr create --fill',
+        ],
+        [
+          'a nested shell create',
+          'bash -c "cd /test/dir/nested && gh pr create --fill"',
+        ],
+        [
+          'a lastpipe cd',
+          'shopt -s lastpipe; echo ok | cd /test/dir/nested; gh pr create --fill',
+        ],
+        [
+          'a DEBUG trap that moves',
+          "trap 'cd /test/dir/nested' DEBUG; :; gh pr create --fill",
+        ],
+        [
+          'a worktree created before its snapshot',
+          'git worktree add /test/dir/new -b fix/w && cd /test/dir/new && gh pr create --fill',
         ],
       ])('falls back with a notice for %s', async (_label, command) => {
         mockCreatedPr(77);

@@ -58,6 +58,7 @@ import {
   type AttributionRepoKeys,
   type BranchPullRequestSnapshot,
 } from '../utils/github-prs.js';
+import { findGitRoot } from '../utils/gitUtils.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -952,7 +953,7 @@ type ShellSyntaxNode = Parser.SyntaxNode;
  */
 type GhPrCreateDirectory =
   | { kind: 'launch' }
-  | { kind: 'resolved'; directory: string }
+  | { kind: 'resolved'; directory: string; repository?: string }
   | { kind: 'opaque' };
 
 /**
@@ -1143,8 +1144,14 @@ async function resolveGhPrCreateDirectory(
     if (root.hasError) return { kind: 'launch' };
 
     let found: string | undefined;
+    let createRepo: string | undefined;
     let opaque = false;
+    let lastpipeEnabled = false;
     const cdpathSet = assignsCdpath(root);
+    // Function definitions take effect only when the walk reaches them in the
+    // current shell. Pre-scanning the whole tree would let a definition AFTER
+    // the create (or inside a subshell) wrongly shadow an earlier cd.
+    const shadowed = new Set<string>();
 
     const visit = (node: ShellSyntaxNode, dir: string): string => {
       if (found !== undefined || opaque) return dir;
@@ -1178,11 +1185,17 @@ async function resolveGhPrCreateDirectory(
             if (child.type === 'comment') continue;
             if (found !== undefined || opaque) return current;
             if (separator === '||') {
-              if (current !== dir || subtreeMayChangeDirectory(child)) {
+              if (
+                path.resolve(current) !== path.resolve(dir) ||
+                subtreeMayChangeDirectory(child)
+              ) {
                 opaque = true;
                 return current;
               }
-            } else if (separator !== '&&' && current !== dir) {
+            } else if (
+              separator !== '&&' &&
+              path.resolve(current) !== path.resolve(dir)
+            ) {
               opaque = true;
               return current;
             }
@@ -1193,8 +1206,19 @@ async function resolveGhPrCreateDirectory(
         }
         case 'pipeline': {
           // Bash runs pipeline elements in subshells, so a `cd` inside one
-          // does not leak; every element sees the incoming directory.
+          // does not leak; every element sees the incoming directory. With
+          // `shopt -s lastpipe` the last element runs in THIS shell instead.
+          const pipelineInCurrentShell = lastpipeEnabled;
+          const inheritedShadowed = new Set(shadowed);
           for (const child of node.namedChildren) visit(child, dir);
+          if (!pipelineInCurrentShell) {
+            // Function definitions and shopt inside ordinary pipeline
+            // elements die with their subshell and cannot affect outer cd.
+            lastpipeEnabled = false;
+            shadowed.clear();
+            for (const name of inheritedShadowed) shadowed.add(name);
+          }
+          if (lastpipeEnabled && subtreeMayChangeDirectory(node)) opaque = true;
           return dir;
         }
         case 'redirected_statement': {
@@ -1205,9 +1229,85 @@ async function resolveGhPrCreateDirectory(
           }
           return current;
         }
+        case 'function_definition': {
+          const name = node.childForFieldName('name')?.text;
+          if (name) shadowed.add(name);
+          // The body executes only if the function is called. If it can move
+          // the directory itself, no later invoke can be attributed safely.
+          if (subtreeMayChangeDirectory(node)) opaque = true;
+          return dir;
+        }
         case 'command': {
-          if (commandRunsGhPrCreate(createCandidateText(node))) {
-            const program = commandNodeProgram(node);
+          const program = commandNodeProgram(node);
+          // A same-named function shadows the builtin, so `cd()` / `pushd()` /
+          // `gh()` moving or creating nothing here is mis-attributed if we
+          // trust the name alone. No later command of that name is provable.
+          if (shadowed.has(program)) {
+            opaque = true;
+            return dir;
+          }
+          const candidateText = createCandidateText(node);
+          const candidateRunsCreate = commandRunsGhPrCreate(candidateText);
+          // These prefixes hide the command whose cwd semantics matter:
+          // `command cd`, `builtin cd`, `time cd`, or `command env -C … gh`.
+          // An unrelated `command printf` must not block a later provable cd.
+          if (
+            ['command', 'builtin', 'time'].includes(program) &&
+            (candidateRunsCreate ||
+              node.namedChildren.some((c) =>
+                DIRECTORY_CHANGING_COMMANDS.has(programBasename(c.text)),
+              ))
+          ) {
+            opaque = true;
+            return dir;
+          }
+          // A trap can run an arbitrary cd between any later two commands.
+          if (program === 'trap') {
+            opaque = true;
+            return dir;
+          }
+          // A quoted `bash -c`/`sh -c` body is a separate shell program. Only
+          // a body that the execution gate recognises as a create is opaque;
+          // `sh -c 'echo ok' && cd w && gh pr create` remains resolvable.
+          if (
+            ['bash', 'sh', 'zsh', 'dash', 'ksh'].includes(program) &&
+            node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === '-c',
+            ) &&
+            commandRunsGhPrCreate(node.text)
+          ) {
+            opaque = true;
+            return dir;
+          }
+          if (program === 'git') {
+            // The snapshot precedes spawn, so a worktree created by this very
+            // command does not exist yet. findGitRoot on its future path would
+            // find the launch repo and snapshot the wrong branch. Fail closed
+            // for any worktree creation before the create.
+            const words = node.namedChildren
+              .filter((c) => c.type === 'word')
+              .map((c) => c.text);
+            if (
+              words.some(
+                (word, i) => word === 'worktree' && words[i + 1] === 'add',
+              )
+            ) {
+              opaque = true;
+              return dir;
+            }
+          }
+          if (
+            program === 'shopt' &&
+            node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === '-s',
+            ) &&
+            node.namedChildren.some(
+              (c) => c.type === 'word' && c.text === 'lastpipe',
+            )
+          ) {
+            lastpipeEnabled = true;
+          }
+          if (candidateRunsCreate) {
             const shiftSet =
               program === 'env'
                 ? ENV_FLAGS_SHIFT_CWD
@@ -1220,11 +1320,32 @@ async function resolveGhPrCreateDirectory(
             ) {
               opaque = true;
             } else {
+              const args = node.namedChildren;
+              for (let i = 0; i < args.length; i++) {
+                const arg = args[i]!;
+                let valueNode: ShellSyntaxNode | undefined;
+                let inlineValue: string | undefined;
+                if (arg.text === '--repo') {
+                  valueNode = args[i + 1];
+                } else if (arg.text.startsWith('--repo=')) {
+                  inlineValue = arg.text.slice('--repo='.length);
+                } else {
+                  continue;
+                }
+                createRepo =
+                  inlineValue ??
+                  (valueNode?.type === 'raw_string' ||
+                  valueNode?.type === 'word'
+                    ? valueNode.text.replace(/^'(.*)'$/, '$1')
+                    : valueNode?.type === 'string'
+                      ? valueNode.namedChildren.map((c) => c.text).join('')
+                      : valueNode?.text);
+                break;
+              }
               found = dir;
             }
             return dir;
           }
-          const program = commandNodeProgram(node);
           // `eval`/`source`/`.` run code in this shell that can move it
           // without naming a target here, and `popd` rotates a stack we do
           // not model. None of them is attributable from the command text.
@@ -1238,6 +1359,19 @@ async function resolveGhPrCreateDirectory(
             return dir;
           }
           if (program === 'cd' || program === 'pushd') {
+            // `pushd -n DIR` pushes DIR without entering it, and `pushd -N` /
+            // `+N` rotate the stack. Any option therefore means this is not a
+            // plain directory change, however literal the target looks.
+            if (
+              program === 'pushd' &&
+              node.namedChildren.some(
+                (c) =>
+                  c.type === 'word' && c.text.startsWith('-') && c.text !== '-',
+              )
+            ) {
+              opaque = true;
+              return dir;
+            }
             const target = literalCdTarget(node);
             // `pushd +N` / `pushd -N` rotate the directory stack instead of
             // naming a path; only `cd` may treat `+1` as a directory name.
@@ -1259,6 +1393,25 @@ async function resolveGhPrCreateDirectory(
           // Subshells, compound statements and control flow: a directory
           // change inside them is not attributable from here, but a subtree
           // that never moves the directory cannot cost us a binding either.
+          // A function definition inside a CURRENT-shell subtree (compound
+          // statement, control flow) can still shadow a later builtin even
+          // when its body contains no cd; register it conservatively. A real
+          // subshell's definitions die with it and must not leak.
+          if (
+            node.type !== 'subshell' &&
+            node.type !== 'command_substitution' &&
+            node.type !== 'process_substitution'
+          ) {
+            const stack = [node];
+            while (stack.length > 0) {
+              const current = stack.pop()!;
+              if (current.type === 'function_definition') {
+                const name = current.childForFieldName('name')?.text;
+                if (name) shadowed.add(name);
+              }
+              stack.push(...current.namedChildren);
+            }
+          }
           if (subtreeMayChangeDirectory(node)) opaque = true;
           return dir;
         }
@@ -1278,7 +1431,7 @@ async function resolveGhPrCreateDirectory(
     ) {
       return { kind: 'launch' };
     }
-    return { kind: 'resolved', directory: found };
+    return { kind: 'resolved', directory: found, repository: createRepo };
   } finally {
     // The tree lives in WASM memory; every other parseShellCommand consumer
     // releases it, and a daemon session outlives many creates.
@@ -2983,6 +3136,43 @@ export class ShellToolInvocation extends BaseToolInvocation<
         fetchCurrentBranchName(attributionDir),
         fetchAttributionRepoKeys(attributionDir, preRunGhEnv),
       ]);
+      // The derived directory returns `error` (no git repo there), or the
+      // command names a DIFFERENT repository than the derived one's own
+      // (`--repo` / `GH_REPO`). In both, snapshotting it hides a binding the
+      // launch directory would have made, so re-point both legs at the launch
+      // directory and re-snapshot there — what the parent commit always did.
+      // An explicit repo naming the SAME key as the derived one (e.g.
+      // `--repo o/r` in a worktree of o/r) is NOT a trigger: that is an
+      // ordinary create and must keep attributing to the worktree.
+      const repoKeysBare = [
+        preRunRepoKeys?.resolved,
+        preRunRepoKeys?.parent,
+      ].flatMap((key) => (key ? [key.replace(/^[^/]+\//, '')] : []));
+      const explicitRepo =
+        (ghPrCreateDirectory.kind === 'resolved'
+          ? ghPrCreateDirectory.repository
+          : undefined) ??
+        // A real --repo flag overrides env for gh, so it must win here too.
+        // GITHUB_REPOSITORY is an Actions context variable, not gh's repo
+        // override; treating it as one would strand a local-repo create.
+        inlineEnv?.['GH_REPO'];
+      // An errored gh answer inside a REAL repo still fails closed. Re-point
+      // on error only when findGitRoot independently proves there is no repo;
+      // otherwise a transient gh flake could bind an existing launch PR.
+      const targetsOtherRepo =
+        (preRunPrSnapshot?.status === 'error' &&
+          findGitRoot(attributionDir) === null) ||
+        (explicitRepo !== undefined &&
+          repoKeysBare.length > 0 &&
+          !repoKeysBare.includes(explicitRepo));
+      if (attributionDir !== cwd && targetsOtherRepo) {
+        attributionDir = cwd;
+        [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
+          fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
+          fetchCurrentBranchName(cwd),
+          fetchAttributionRepoKeys(cwd, preRunGhEnv),
+        ]);
+      }
     }
 
     let cumulativeOutput: string | AnsiOutput = '';

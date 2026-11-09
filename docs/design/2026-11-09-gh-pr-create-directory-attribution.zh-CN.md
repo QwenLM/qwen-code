@@ -108,7 +108,7 @@ const attributionDir =
 > parameter to the repository you create the PR in, or register the PR on the
 > session after creating it.
 
-这条 notice 是静态的：它在 spawn 之前就决定，因此不依赖 fire-and-forget 的绑定 hook 是否完成。`launch` 与 `resolved` 不发任何东西。
+这条 notice 只随以退出码 0 收尾的前台运行发出——未中断的运行，或子进程已退出后 promote 被拒的运行——这恰好就是绑定闸门能看到的那批运行。create 失败或被取消时没有 PR 需要登记，因此什么也不说：条件是 `kind === 'opaque' && (!result.aborted || wasPromoteRefused) && result.exitCode === 0`。解析结果在 spawn 之前就已算出，因此它不依赖 fire-and-forget 的绑定 hook 是否完成，但这个「已成功收尾」条件对每一种情况都成立，不只是对 `opaque`。`launch` 与 `resolved` 不发任何东西。
 
 ## 关键决策与理由
 
@@ -195,10 +195,43 @@ const attributionDir =
 
 至此共发现并修掉十五个缺陷。其中三个由本设计自己的跟进修复引入，这是值得记录的模式：第二轮的每个修复都收窄了一个洞、同时打开了相邻的另一个，只有评审者把绑定结果同时对父提交与上一个 head 重跑才抓到。本设计自己的探针与读 diff 都没抓到。
 
+### 第四轮评审（2026-11-09，复评 `96d41924410`）
+
+复评确认第三轮的修复，并报出两条 Critical 回归、一条 notice 措辞 Suggestion 及若干测试效力缺口。全部先对 head 复现再修。
+
+1. **R1-1（Critical）——走查仍在证明 shell 实际不会进入的目录。** `pushd -n DIR` 只入栈不移动；同名函数（`cd() { :; }`、`gh() { … }`）遮蔽内建；`command`/`builtin`/`time` 前缀隐藏实际执行的命令；`bash -c "…"` 是独立 shell；`shopt -s lastpipe` 让管道最后一个元素移动当前 shell；`trap … DEBUG` 可在任意两条命令间移动；`git worktree add … && cd <new> && gh pr create` 快照时目标路径尚不存在。这些形状现在一律返回 `opaque`（启动目录归因 + 可见 notice），不再静默解析出错误目录。函数遮蔽按执行顺序登记且限定在当前 shell，因此 create 之后或子 shell/管道内的定义不会污染前面的 `cd`。
+2. **R1-2（Critical）——解析目录替换了两条腿的启动目录且无回退。** 当解析目录没有 git 仓库（`findGitRoot` 返回 null）或命令指向**不同**仓库（`--repo` / `GH_REPO`）时，两条腿现在回退到启动目录并重新快照——即父提交一贯的行为。真实仓库内的 gh 错误仍失败关闭（不回退）。显式仓库从 create AST 节点（引号感知）与 `ghPrCreateInlineEnv` 读取；`--repo` 优先于 `GH_REPO`；`GITHUB_REPOSITORY` 是 Actions 上下文变量而非 gh 仓库覆盖，予以忽略。fork parent key 视为同一归因族。
+3. **R1-4（Suggestion）——notice 措辞。** notice 段与验收标准第 2 条现在明确：notice 只在已成功收尾的前台运行（exit 0、未中断，或子进程退出后 promote 被拒）发出；create 失败或被取消则不发。
+4. **R1-5（Suggestion）——否定断言缺少 happens-before 边。** 真实文件系统展开回退用例现在先等 pre-run 与 post-run 两条 `pr view` 腿都被记录（`waitForAttributionLegs`），再断言未绑定，避免仅因写入尚未落地而假绿。
+5. **R1-6（Suggestion）——promote-refused notice 分支无钉子。** 新增用例断言 opaque create 在 settle 后 promote 被拒时仍发 notice，并加对照断言非 opaque 的 promote-refused create 不发。
+6. **R1-7（Suggestion）——管道不泄漏无钉子。** 新增用例断言 `cd /test/dir/nested | cat && gh pr create` 归因到启动目录且不发 notice。
+7. **R1-8（Suggestion）——git 夹具签名。** 真实 git 夹具在仓库本地设 `commit.gpgsign = false`，并新增一条敌对 `~/.gitconfig` 启用签名的回归，使开发机全局配置不会让所有夹具提交失败。
+8. **R2-1（Suggestion）——分隔符分支的裸字符串比较。** `||` 与非 `&&` 分支现在比较 `path.resolve(current) !== path.resolve(dir)`，带尾斜杠的 `directory` 参数不再虚构目录变更并发出假 notice。
+
+本轮自审还发现并修掉修复自身引入的四个缺陷：全局函数预扫描污染了定义之前的 create 并泄漏子 shell/管道作用域；整条命令的 `--repo` 正则误匹配 PR 正文与引号值；`--repo`/`GH_REPO` 优先级颠倒；`GITHUB_REPOSITORY` 被误当作仓库覆盖。每个都有专用用例钉住。
+
+第四轮验证：**469 passed**（既有文件 458 条，含 74 条目录解析用例；真实文件系统 11 条），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 N–X 各自杀掉点名用例且对照存活：
+
+| 变异                             | 结果                                          |
+| -------------------------------- | --------------------------------------------- |
+| N —— 去掉分隔符归一化            | 尾斜杠用例变红                                |
+| O —— 禁用 wrapper 失败关闭       | 4 条 wrapper 用例红，2 条无关前缀对照绿       |
+| P —— 禁用 nested-shell 守卫      | nested-shell 用例红，`sh -c 'echo ok'` 对照绿 |
+| Q —— 去掉 lastpipe 检查          | lastpipe 用例红，普通管道对照绿               |
+| R —— 禁用 worktree-add 守卫      | 单测 + 真实文件系统用例红                     |
+| S —— 禁用 trap 守卫              | DEBUG-trap 用例红                             |
+| T —— 恢复全局函数预扫描          | 3 条作用域/顺序对照红，直接遮蔽用例绿         |
+| U —— 退回文本仓库匹配            | 5 条仓库用例红，等号形式 + parent 对照绿      |
+| V —— 放宽 error 回退             | fail-closed 用例红，非仓库回退绿              |
+| W —— 去掉 fork parent key        | parent-repo 用例红                            |
+| X —— 禁用当前 shell 子树函数登记 | 复合语句遮蔽用例红，子 shell 对照绿           |
+
+每次变异都从字节级备份还原；最终 `shell.ts` 的 SHA-256 与变异前冻结一致（`5d00698edc5738c1f5880a12104c3936d91f0b92ec7b0a097a22bd5a9cf59dfc`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。
-- 解析器证明不了的每种形状行为与之前完全一致，涉及目录变更时额外发一条 notice。
+- 解析器证明不了的每种形状行为与之前完全一致。涉及此类目录变更时，已成功收尾的前台运行会附带一条 notice；create 失败或被取消则不发。
 - 既有归因闸门一条未被削弱；22 条既有绑定用例全部仍绿。
 - `bindGhPrCreate` 的 docstring 及其 post-run 解析注释不再声称启动目录是唯一的归因目录，也不再声称 backfill 能救回内部 `cd` 的 create。（2026-08-20 的会话 PR 绑定设计文档从未作出该声称，故保持不动；目录行为以本文档为准。）
 
