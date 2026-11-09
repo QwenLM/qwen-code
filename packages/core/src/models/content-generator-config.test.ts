@@ -177,6 +177,47 @@ describe('buildAgentContentGeneratorConfig', () => {
       );
       expect(result.thinkingMandatory).toBeUndefined();
     });
+
+    it('keeps the auto-compaction override only when retaining the parent model', () => {
+      const parent = { ...parentConfig, autoCompactThreshold: 0.25 };
+
+      expect(
+        buildOver('custom-model', { authType: 'openai' }, parent)
+          .autoCompactThreshold,
+      ).toBeUndefined();
+      expect(
+        buildOver(parent.model, { authType: 'openai' }, parent)
+          .autoCompactThreshold,
+      ).toBe(0.25);
+      expect(
+        buildOver(undefined, { authType: 'openai' }, parent)
+          .autoCompactThreshold,
+      ).toBe(0.25);
+      expect(parent.autoCompactThreshold).toBe(0.25);
+    });
+
+    it.each([undefined, parentConfig.model])(
+      'clears the auto-compaction override when model %s moves to another endpoint',
+      (modelId) => {
+        const parent = { ...parentConfig, autoCompactThreshold: 0.25 };
+
+        expect(
+          buildOver(
+            modelId,
+            { authType: 'openai', baseUrl: 'https://other.example.com' },
+            parent,
+          ).autoCompactThreshold,
+        ).toBeUndefined();
+        expect(
+          buildOver(
+            modelId,
+            { authType: 'openai', baseUrl: parent.baseUrl },
+            parent,
+          ).autoCompactThreshold,
+        ).toBe(0.25);
+        expect(parent.autoCompactThreshold).toBe(0.25);
+      },
+    );
   });
 
   describe('cross-provider, no registry match', () => {
@@ -335,6 +376,29 @@ describe('buildAgentContentGeneratorConfig', () => {
       );
       expect(result.enableRequestMetadata).toBeUndefined();
     });
+
+    it.each([undefined, 0.5])(
+      'uses the registered child auto-compaction threshold %s without changing the parent',
+      (autoCompactThreshold) => {
+        const parent = { ...parentConfig, autoCompactThreshold: 0.25 };
+        const result = buildRegistry(
+          {
+            ...openaiResolved,
+            generationConfig: {
+              ...openaiResolved.generationConfig,
+              ...(autoCompactThreshold === undefined
+                ? {}
+                : { autoCompactThreshold }),
+            },
+          },
+          { authType: 'openai' },
+          parent,
+        );
+
+        expect(result.autoCompactThreshold).toBe(autoCompactThreshold);
+        expect(parent.autoCompactThreshold).toBe(0.25);
+      },
+    );
 
     it.each(['image', 'voice'] as const)(
       'rejects %s-only models for agent content generation',
