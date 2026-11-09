@@ -2162,7 +2162,7 @@ function persistedNotificationAgent(agent: AgentIdentity): {
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
-  persisted?: true;
+  persisted?: boolean;
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
 }
@@ -2887,6 +2887,11 @@ export class Session implements SessionContext {
    * notification.
    */
   private peerNotificationsSealed = false;
+  /**
+   * Peer items the pre-close flush landed as cold copies. A rolled-back close
+   * clears their `persisted` mark so the warm delivery is recorded too.
+   */
+  #peerItemsLandedByFlush = new Set<QueuedBackgroundNotification>();
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
   private pendingDeletedApiPromptIds: Set<string> | undefined;
@@ -5319,6 +5324,14 @@ export class Session implements SessionContext {
       // irreversible managed-shutdown path never runs this closure, so its
       // seal holds, and `disposed` returns above keep the terminal one.
       this.peerNotificationsSealed = false;
+      // The close was rolled back after a pre-close flush: those reports are
+      // about to be delivered warm, so their persisted mark must not suppress
+      // the warm record (R2-21). A cold copy alone describes a report the
+      // model was never told about.
+      for (const landed of this.#peerItemsLandedByFlush) {
+        landed.persisted = false;
+      }
+      this.#peerItemsLandedByFlush.clear();
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -5458,6 +5471,13 @@ export class Session implements SessionContext {
    */
   flushPendingPeerNotifications(): void {
     this.peerNotificationsSealed = true;
+    // Remember what this flush lands: the mark is cleared if the close is
+    // rolled back and the report is delivered warm afterwards (R2-21).
+    for (const item of this.notificationQueue) {
+      if (item.kind === 'peer' && !item.persisted) {
+        this.#peerItemsLandedByFlush.add(item);
+      }
+    }
     this.#landUndrainedPeerNotifications();
   }
 

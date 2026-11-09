@@ -22172,6 +22172,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getId: () => id,
       isIdle: () => true,
       cancelPendingPrompt: vi.fn(),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       getConfig: () => ({
         ...mockConfig,
         getTargetDir: vi.fn().mockReturnValue(admissionRoot),
@@ -22248,6 +22249,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getId: () => id,
       isIdle: () => true,
       cancelPendingPrompt: vi.fn(),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       getConfig: () => ({
         ...mockConfig,
         getTargetDir: vi.fn().mockReturnValue(admissionRoot),
@@ -32871,6 +32873,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       flushPendingPeerNotifications: vi.fn(),
       dispose: vi.fn(),
     };
@@ -32910,6 +32913,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockReturnValue(cancelSettled),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       flushPendingPeerNotifications: vi.fn(),
       dispose: vi.fn(),
     };
@@ -32938,6 +32942,50 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('waits for the cancelled turn to settle before landing peer reports', async () => {
+    // `cancelPendingPrompt` only aborts the controller, so a flush gated on it
+    // can run while the delivery loop is still parked with the report already
+    // spliced out of the queue (R2-1). The wait has to be on the turn.
+    let releaseSettle: () => void = () => {};
+    const settled = new Promise<void>((resolve) => {
+      releaseSettle = resolve;
+    });
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      waitForActiveTurnsToSettle: vi.fn().mockReturnValue(settled),
+      flushPendingPeerNotifications: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    const shutdown = agent.beginManagedShutdown();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(liveSession.flushPendingPeerNotifications).not.toHaveBeenCalled();
+    expect(innerConfig.closeSessionWriter).not.toHaveBeenCalled();
+
+    releaseSettle();
+    await shutdown.writerShutdown;
+
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still closes the writers when a peer flush throws during managed shutdown', async () => {
     const innerConfig = makeRestoreInnerConfig();
     const liveSession = {
@@ -32946,6 +32994,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       flushPendingPeerNotifications: vi.fn(() => {
         throw new Error('mailbox write failed');
       }),
@@ -33920,11 +33969,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       cancelPromptAdmission: vi.fn(
         (controller: AbortController, reason: string) =>
           controller.abort(reason),
       ),
-      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       isTurnIdle: vi.fn().mockReturnValue(true),
       dispose: replacementDispose,
     } as unknown as InstanceType<typeof Session>;

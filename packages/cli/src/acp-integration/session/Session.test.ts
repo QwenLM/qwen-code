@@ -1741,11 +1741,46 @@ describe('Session', () => {
           }),
         }),
       );
-      expect(
-        mockChatRecordingService.recordNotification,
-      ).not.toHaveBeenCalled();
       await vi.waitFor(() =>
         expect(vi.mocked(mockChat.sendMessageStream)).toHaveBeenCalled(),
+      );
+      // The drain records the warm copy before prompting the leader, so the
+      // property under test is "recorded", not "not yet recorded" (R2-18).
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).toHaveBeenCalled();
+      session.dispose();
+    });
+
+    it('records the warm copy after a rolled-back flush landed the report cold', async () => {
+      // R2-21: the pre-close flush writes the cold copy and marks the item
+      // persisted. When the close is rolled back the release re-drains the same
+      // item to the leader; without clearing the mark the warm record is
+      // skipped and the transcript keeps only the "model never told" copy.
+      const internals = session as unknown as {
+        notificationQueue: Array<Record<string, unknown>>;
+      };
+      internals.notificationQueue.push({
+        taskId: 'peer-rolled-back',
+        kind: 'peer',
+        status: 'message',
+        modelText: 'peer report',
+        displayText: 'peer report',
+        continuesTodoStopGuardWorkChain: false,
+        agent: { agentName: 'reviewer', depth: 1, kind: 'teammate' },
+      });
+      const releaseClose = session.beginClose();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      session.flushPendingPeerNotifications();
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        1,
+      );
+      releaseClose();
+      await vi.waitFor(() =>
+        expect(vi.mocked(mockChat.sendMessageStream)).toHaveBeenCalled(),
+      );
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledTimes(
+        2,
       );
       session.dispose();
     });
