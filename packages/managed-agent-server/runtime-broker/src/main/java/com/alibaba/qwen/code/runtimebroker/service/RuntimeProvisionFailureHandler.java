@@ -34,6 +34,21 @@ final class RuntimeProvisionFailureHandler {
         this.blockRecovery = blockRecovery;
     }
 
+    /**
+     * Retryable provider answers that keep an already-placed external worker
+     * adoptable: capacity and unavailable/shutdown. Both external kinds share
+     * them under scratch and under registered-storage (managed-context)
+     * placement, so a transient provider answer never buries a recoverable
+     * worker behind a permanent recovery block.
+     */
+    static boolean externalRetryable(RuntimeProvisionRequest request,
+            RuntimeBrokerException failure) {
+        return ExternalRuntimeKinds.isExternal(request.getProvisionerKind())
+                && failure.getStatusCode() == 503
+                && ("runtime_external_capacity".equals(failure.getCode())
+                        || "runtime_external_unavailable".equals(failure.getCode()));
+    }
+
     static boolean isLocalCapacityRefusal(RuntimeProvisionRequest request, Throwable error) {
         return "local-process".equals(request.getProvisionerKind())
                 && unwrap(error) instanceof RuntimeBrokerException failure

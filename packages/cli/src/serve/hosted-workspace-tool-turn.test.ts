@@ -29,6 +29,7 @@ import {
   createHttpManagedSessionStores,
   ManagedSessionStoreHttpError,
   type HttpToolPublicationOwner,
+  type ManagedMemoryQuery,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionRecords } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-projection.js';
@@ -76,6 +77,7 @@ import {
   hostedActionAllowed,
   hostedApprovalAsks,
   resolveHostedAction,
+  readHostedActionOptions,
   type HostedApprovalMode,
   type HostedApprovalSettings,
 } from './hosted-tool-approval.js';
@@ -87,10 +89,20 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import {
+  HostedMemorySession,
+  HOSTED_MEMORY_TOOLS,
+  findHostedMemoryResults,
+} from './hosted-memory-session.js';
+import { readHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { writeHostedTodos } from './hosted-todo-session.js';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
+import {
+  enableManagedExecutionDiagnostics,
+  parseManagedExecutionEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import {
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CAPABILITY_DIGEST,
@@ -102,6 +114,7 @@ const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
+  readWorkspaceContext: vi.fn(),
   warm: vi.fn(),
   resolveCapabilities: vi.fn(),
   acquire: vi.fn(),
@@ -138,6 +151,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
+    readWorkspaceContext = broker.readWorkspaceContext;
     warm = broker.warm;
     resolveCapabilities = broker.resolveCapabilities;
     acquire = (...args: unknown[]) => {
@@ -315,31 +329,38 @@ beforeEach(async () => {
   harness = createManagedHarnessHandle(session);
   await harness.ensureRunnable();
   broker.workspaceContext.mockResolvedValue([]);
+  broker.readWorkspaceContext.mockResolvedValue({
+    cwdRelative: '.',
+    contextRevision: '1',
+  });
   broker.prepare.mockImplementation(async () => randomUUID());
   broker.execute.mockResolvedValue({
     executionStatus: 'success',
     responseParts: [{ text: 'original result' }],
   });
-  commit = async (type, messageParts, model, identity) => {
+  commit = async (type, messageParts, model, identity, diagnostics) => {
     const uuid = identity?.uuid ?? randomUUID();
-    await session.sink.write({
-      uuid,
-      parentUuid: null,
-      sessionId: sessionKey.sessionId,
-      timestamp: identity?.timestamp ?? new Date().toISOString(),
-      model,
-      type,
-      cwd: root,
-      version: 'test',
-      daemonPromptId: 'prompt',
-      ...(identity?.clientInitiatedSkills
-        ? { clientInitiatedSkills: true }
-        : {}),
-      message: {
-        role: type === 'assistant' ? 'model' : 'user',
-        parts: messageParts,
+    await session.sink.write(
+      {
+        uuid,
+        parentUuid: null,
+        sessionId: sessionKey.sessionId,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        model,
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        ...(identity?.clientInitiatedSkills
+          ? { clientInitiatedSkills: true }
+          : {}),
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts: messageParts,
+        },
       },
-    });
+      diagnostics,
+    );
     return uuid;
   };
   messageFitsInline.mockReturnValue(true);
@@ -424,6 +445,7 @@ it.each(['none', 'public', 'member'] as const)(
 );
 
 it('persists the model-facing Skill batch budget so replay cannot restore discarded text', async () => {
+  await enableManagedExecutionDiagnostics(session);
   const body = 'FIRST_MARKER' + 'x'.repeat(400 * 1024) + 'LAST_MARKER';
   const skills = new HostedSkillCatalog([
     { name: 'first', description: 'First', body, model_invocable: false },
@@ -460,7 +482,193 @@ it('persists the model-facing Skill batch budget so replay cannot restore discar
     JSON.parse(JSON.stringify(result)),
   );
   expect(skills.response({ skill: 'first' })).toContain(body);
+  const evidence = await Promise.all(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['role'] === 'tool_result',
+      )
+      .map(async (event) =>
+        parseManagedExecutionEvidence(
+          await session.resources.read(
+            assertManagedSessionDurableRef(
+              event.payload['diagnosticsRef'],
+              'diagnosticsRef',
+            ),
+          ),
+        ),
+      ),
+  );
+  expect(
+    evidence
+      .flatMap((value) => value.observations)
+      .map((value) => [
+        value.execution,
+        value.skill?.origin,
+        value.skill?.delivery,
+      ]),
+  ).toEqual([
+    ['success', 'user', 'partial'],
+    ['success', 'user', 'partial'],
+  ]);
 });
+
+it.each(['plan', 'member', 'invalid', 'resident'] as const)(
+  'records the refusal admission and leaves collateral calls unknown (%s)',
+  async (reason) => {
+    await enableManagedExecutionDiagnostics(session);
+    let batch: ToolCallRequestInfo[] = calls;
+    if (reason === 'plan' || reason === 'member') {
+      vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+      turn = createTurn(
+        false,
+        { mode: 'auto-edit' },
+        undefined,
+        undefined,
+        reason === 'plan' ? 'public' : 'member',
+      );
+    } else if (reason === 'invalid') {
+      batch = [{ ...calls[0], args: { file_path: 123 } }, calls[1]];
+    } else {
+      broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+      turn = createTurn();
+      batch = [
+        calls[0],
+        {
+          ...calls[1],
+          name: 'web_fetch',
+          args: { url: 'https://example.com' },
+        },
+      ];
+    }
+    const signal = new AbortController().signal;
+    await turn.declarations(signal);
+    await turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      signal,
+    );
+    const event = session.authority.lastEventOfKind('message.committed')!;
+    const evidence = parseManagedExecutionEvidence(
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['diagnosticsRef'],
+          'diagnosticsRef',
+        ),
+      ),
+    );
+    expect(evidence.observations.map((value) => value.admission)).toEqual(
+      reason === 'invalid' ? ['invalid', 'unknown'] : ['unknown', 'denied'],
+    );
+    expect(
+      evidence.observations.every((value) => value.execution === 'not_started'),
+    ).toBe(true);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['policy', 'invalid', 'collateral'] as const)(
+  'keeps Hook refusal classification when a sibling has invalid Unicode (%s)',
+  async (reason) => {
+    await enableManagedExecutionDiagnostics(session);
+    const fire = vi
+      .fn<HostedHookSession['fire']>()
+      .mockImplementation(async (event, _occurrence, input) => {
+        if (event !== HookEventName.PreToolUse) return undefined;
+        if (input['tool_name'] === 'run_shell_command')
+          return {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedInput: { command: '\ud800' },
+            },
+          };
+        if (reason === 'policy') return { decision: 'block', reason: 'policy' };
+        if (reason === 'invalid')
+          return {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedInput: { file_path: '../outside' },
+            },
+          };
+        return undefined;
+      });
+    turn = createTurn(true, { mode: 'yolo' }, hookSession(fire));
+    const batch: ToolCallRequestInfo[] = [
+      calls[0],
+      { ...calls[1], name: 'run_shell_command', args: { command: 'pwd' } },
+    ];
+    await turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    );
+    const event = session.authority.lastEventOfKind('message.committed')!;
+    const evidence = parseManagedExecutionEvidence(
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['diagnosticsRef'],
+          'diagnosticsRef',
+        ),
+      ),
+    );
+    expect(evidence.observations.map((value) => value.admission)).toEqual([
+      reason === 'policy'
+        ? 'denied'
+        : reason === 'invalid'
+          ? 'invalid'
+          : 'unknown',
+      'invalid',
+    ]);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  [{ cwdRelative: 'docs', contextRevision: '7' }, 'docs/file.txt'],
+  [null, null],
+])(
+  'records explicit read diagnostics with execution-time cwd %j',
+  async (context, expectedPath) => {
+    await enableManagedExecutionDiagnostics(session);
+    broker.readWorkspaceContext.mockResolvedValue(context);
+    await turn.execute(
+      [calls[0]],
+      [parts[0]],
+      'model',
+      new AbortController().signal,
+    );
+    const event = session.authority.lastEventOfKind('message.committed')!;
+    const evidence = parseManagedExecutionEvidence(
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['diagnosticsRef'],
+          'diagnosticsRef',
+        ),
+      ),
+    );
+    expect(evidence.observations).toEqual([
+      expect.objectContaining({
+        admission: 'allowed',
+        execution: 'success',
+        delivery: 'complete',
+        toolKind: 'builtin',
+        file: expect.objectContaining({
+          operation: 'read',
+          path: expectedPath,
+        }),
+      }),
+    ]);
+    expect(session.authority.lastEventOfKind('tool.receipt')).toBeUndefined();
+  },
+);
 
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
@@ -654,6 +862,7 @@ it.each([
 );
 
 it('recovers the original Skill body after the assistant commits but its result does not', async () => {
+  await enableManagedExecutionDiagnostics(session);
   const skills = publishedSkills();
   const originalCommit = commit;
   commit = async (...args) => {
@@ -692,6 +901,25 @@ it('recovers the original Skill body after the assistant commits but its result 
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
   expect(broker.execute).not.toHaveBeenCalled();
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    execution: 'success',
+    skill: {
+      resourceKind: 'skill',
+      name: 'review',
+      origin: 'model',
+      delivery: 'complete',
+    },
+  });
+  expect(evidence.observations[0].skill?.pin).toMatch(/^[0-9a-f]{64}$/);
 });
 
 it('preserves a mixed-batch Skill refusal when its result was not committed', async () => {
@@ -887,6 +1115,30 @@ it('settles the turn over a held Runtime and owes it to the close (#13856)', asy
   await turn.consumeResults();
   await expect(turn.finish()).resolves.toBeUndefined();
   expect(turn.runtimeHeld).toBe(true);
+});
+
+it('never registers a held Runtime for a Hook-configured turn (R27-1 known gap)', async () => {
+  // Every producer of session.heldRuntimeTurns keys on runtimeHeld, and a
+  // Hook turn cannot set it: finish() skips broker.release() when hooks are
+  // configured, so the 409 runtime_session_held catch that assigns `held`
+  // never runs. The v2 close's drain therefore does not reach this shape and
+  // the detach still parks on recovery-required. Pinning the producer fact
+  // keeps that drain from being mistaken for a fix of the Hook shape; lifting
+  // it needs a keep-READY drain, which the terminal release here cannot be
+  // (a deterministic owner would get a RELEASED tombstone, R13-1/R14-1).
+  turn = createTurn(
+    false,
+    undefined,
+    hookSession(vi.fn() as unknown as HostedHookSession['fire']),
+  );
+  broker.release.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).not.toHaveBeenCalled();
+  expect(turn.runtimeHeld).toBe(false);
 });
 
 it('keeps the honesty contract for a busy refusal (#13856)', async () => {
@@ -5654,6 +5906,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     'edit',
     'run_shell_command',
     'todo_write',
+    ...HOSTED_MEMORY_TOOLS,
     'agent',
     'send_message',
     'team_create',
@@ -5667,6 +5920,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_TODO_WRITE_TOOL.name,
+    ...HOSTED_MEMORY_TOOLS,
     HOSTED_AGENT_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,
@@ -13060,4 +13314,518 @@ it('honors an explicit Session allow rule for an extension command step', async 
   );
   expect(permission.allowed).toBe(true);
   expect(actionIds()).toEqual([]);
+});
+
+it('commits a refusal when a Hook expands MCP arguments beyond the durable input budget', async () => {
+  await enableManagedExecutionDiagnostics(session);
+  const name = 'mcp_echo';
+  const mcp = {
+    broker,
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
+    toolInput: (_tool: string, args: Record<string, unknown>) => ({
+      toolName: 'managed_mcp_call',
+      input: { serverId: 'server', arguments: args },
+    }),
+  };
+  const fire = vi
+    .fn<HostedHookSession['fire']>()
+    .mockImplementation(async (event) =>
+      event === HookEventName.PreToolUse
+        ? replaceWith({ payload: 'x'.repeat(100 * 1024) })()
+        : undefined,
+    );
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'yolo', timeoutMs: 60000 }, waiters },
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      hooks: hookSession(fire),
+    },
+  );
+  await turn.declarations(new AbortController().signal);
+  const call = { ...calls[0], name, args: { payload: 'short' } };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).resolves.toBeDefined();
+});
+
+it('records an unavailable path for a rejected lone-surrogate file name', async () => {
+  await enableManagedExecutionDiagnostics(session);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  await turn.consumeResults();
+  const call = { ...calls[0], args: { file_path: 'docs/\ud800.txt' } };
+  expect(call.args.file_path.charCodeAt(5)).toBe(0xd800);
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0].file?.path).toBeNull();
+});
+
+function createMemoryTurn(
+  query: (input: ManagedMemoryQuery) => Promise<unknown>,
+  mode: HostedApprovalMode = 'yolo',
+  planMode = false,
+) {
+  broker.warm.mockClear();
+  return new HostedWorkspaceToolTurn(
+    planMode ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode, timeoutMs: 60_000 }, waiters },
+    {
+      memory: new HostedMemorySession({ memory: query }, 'memstore_personal'),
+      memoryOnly: !planMode,
+      ...(planMode
+        ? { profile: 'hosted-workspace-files/1', publicPlanMode: true }
+        : {}),
+    },
+  );
+}
+
+const personalMemoryCall = (
+  name = 'context_remember',
+  args: Record<string, unknown> = { content: 'remember this' },
+): ToolCallRequestInfo => ({
+  ...calls[0],
+  name,
+  args,
+});
+const memoryParts = (call: ToolCallRequestInfo): Part[] => [
+  { functionCall: { id: call.callId, name: call.name, args: call.args } },
+];
+const memoryQuery = (result: Record<string, unknown>) =>
+  vi.fn(async (request: ManagedMemoryQuery) =>
+    request.operation === 'binding'
+      ? { enabled: true, memoryStoreId: 'memstore_personal' }
+      : result,
+  );
+
+it('does not declare personal memory tools without an explicit binding', async () => {
+  const names = (await turn.declarations(new AbortController().signal)).map(
+    (tool) => tool.name,
+  );
+  expect(
+    names.some((name) =>
+      HOSTED_MEMORY_TOOLS.includes(
+        name as (typeof HOSTED_MEMORY_TOOLS)[number],
+      ),
+    ),
+  ).toBe(false);
+});
+
+it('runs personal memory without a Broker and persists a runtime-free continuation', async () => {
+  const query = memoryQuery({ status: 'unknown' });
+  turn = createMemoryTurn(query);
+  const call = personalMemoryCall();
+  const result = await turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response).toMatchObject({
+    status: 'unknown',
+    executionStatus: 'error',
+  });
+  expect(broker.warm).not.toHaveBeenCalled();
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  expect(saved.plan.runtime).toBeNull();
+  expect(saved.plan.calls[0].call.name).toBe('context_remember');
+  expect(await findHostedMemoryResults(session, 'prompt')).toEqual(
+    JSON.parse(JSON.stringify(result)),
+  );
+  await turn.resumeCommittedResults();
+  await turn.finish();
+  await turn.cleanup();
+  expect(
+    query.mock.calls.filter(([request]) => request.operation === 'remember'),
+  ).toHaveLength(1);
+});
+
+it('requires personal memory write approval and does not dispatch denied content', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  turn = createMemoryTurn(query, 'default');
+  const call = personalMemoryCall();
+  const running = turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  expect(JSON.stringify(await running)).toContain('denied');
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('preapproves personal memory reads under the ordinary default policy', async () => {
+  const query = memoryQuery({
+    status: 'ok',
+    items: [{ memoryId: 'entry', content: 'known' }],
+  });
+  turn = createMemoryTurn(query, 'default');
+  const call = personalMemoryCall('context_search', { query: 'known' });
+  const result = await turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response?.['status']).toBe('ok');
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      ),
+  ).toBe(false);
+  expect(broker.warm).not.toHaveBeenCalled();
+});
+
+it('withholds personal memory mutations in Plan Mode', async () => {
+  vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  turn = createMemoryTurn(query, 'yolo', true);
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining(['context_search', 'context_get']),
+  );
+  expect(declarations.map((tool) => tool.name)).not.toContain(
+    'context_remember',
+  );
+  const call = personalMemoryCall();
+  await turn.execute(
+    [call],
+    memoryParts(call),
+    'model',
+    new AbortController().signal,
+  );
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('replays personal memory results after losing the local tool result without repeating the provider write', async () => {
+  let providerWrites = 0;
+  const remembered = new Map<string, Record<string, unknown>>();
+  const query = vi.fn(async (request: ManagedMemoryQuery): Promise<unknown> => {
+    if (request.operation === 'binding')
+      return { enabled: true, memoryStoreId: 'memstore_personal' };
+    expect(request.operation).toBe('remember');
+    const key = JSON.stringify([request.inputId, request.callId]);
+    let result = remembered.get(key);
+    if (!result) {
+      providerWrites++;
+      result = { status: 'stored', memoryId: `entry-${providerWrites}` };
+      remembered.set(key, result);
+    }
+    return result;
+  });
+  const originalCommit = commit;
+  let loseResponse = true;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result' && loseResponse) {
+      loseResponse = false;
+      throw new Error('lost before tool result persistence');
+    }
+    return originalCommit(...args);
+  };
+  turn = createMemoryTurn(query);
+  const call = personalMemoryCall();
+  await expect(
+    turn.execute(
+      [call],
+      memoryParts(call),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  commit = originalCommit;
+  turn = createMemoryTurn(query);
+  const result = await turn.resumeSavedNativeBatch(
+    saved,
+    saved.plan.calls.length,
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response?.['memoryId']).toBe('entry-1');
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => ({
+        inputId: request.inputId,
+        callId: request.callId,
+      })),
+  ).toEqual([
+    { inputId: 'prompt', callId: call.callId },
+    { inputId: 'prompt', callId: call.callId },
+  ]);
+  expect(providerWrites).toBe(1);
+  expect(broker.warm).not.toHaveBeenCalled();
+  expect(broker.acquire).not.toHaveBeenCalled();
+  await turn.finish();
+});
+
+it('reuses committed memory results when recovering a partially completed batch', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  const batch = [
+    personalMemoryCall(),
+    { ...personalMemoryCall(), callId: 'second', args: { content: 'next' } },
+  ];
+  const originalCommit = commit;
+  let commits = 0;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result' && ++commits === 2)
+      throw new Error('lost second result');
+    return originalCommit(...args);
+  };
+  turn = createMemoryTurn(query);
+  await expect(
+    turn.execute(
+      batch,
+      batch.flatMap(memoryParts),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await findHostedMemoryResults(session, 'prompt')).toBeUndefined();
+  await session.sink.write({
+    uuid: 'umsg_later:1',
+    parentUuid: null,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    type: 'user',
+    subtype: 'mid_turn_user_message',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: { role: 'user', parts: [{ text: 'A later input' }] },
+  });
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  commit = originalCommit;
+  turn = createMemoryTurn(query);
+  const result = await turn.resumeSavedNativeBatch(
+    saved,
+    saved.plan.calls.length,
+    new AbortController().signal,
+  );
+  expect(result.map((part) => part.functionResponse?.id)).toEqual([
+    'call-0',
+    'second',
+  ]);
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => [request.callId, request.inputId]),
+  ).toEqual([
+    ['call-0', 'prompt'],
+    ['second', 'prompt'],
+    ['second', 'prompt'],
+  ]);
+  expect(
+    (await session.sink.project()).filter(
+      (entry) => entry.type === 'tool_result',
+    ),
+  ).toHaveLength(2);
+  expect(await findHostedMemoryResults(session, 'prompt')).toHaveLength(2);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('associates each memory batch with its preceding queued input', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  turn = createMemoryTurn(query);
+  const inputIds = ['umsg_queued:2', 'umsg_next:3'];
+  for (const inputId of inputIds) {
+    await session.sink.write({
+      uuid: inputId,
+      parentUuid: null,
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      subtype: 'mid_turn_user_message',
+      cwd: root,
+      version: 'test',
+      daemonPromptId: 'prompt',
+      message: { role: 'user', parts: [{ text: 'Please remember this' }] },
+    });
+    const batch = [0, 1].map((index) => ({
+      ...personalMemoryCall(),
+      callId: `${inputId}:${index}`,
+    }));
+    await turn.execute(
+      batch,
+      batch.flatMap(memoryParts),
+      'model',
+      new AbortController().signal,
+    );
+    await turn.consumeResults();
+  }
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => [request.callId, request.inputId]),
+  ).toEqual(
+    inputIds.flatMap((inputId) =>
+      [0, 1].map((index) => [`${inputId}:${index}`, inputId]),
+    ),
+  );
+});
+
+it('refuses restored personal memory mutations while Plan Mode is active', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('lost result');
+    return originalCommit(...args);
+  };
+  turn = createMemoryTurn(query);
+  const call = personalMemoryCall();
+  await expect(
+    turn.execute(
+      [call],
+      memoryParts(call),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const planned = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'hosted.batch.planned')!;
+  const saved = await readHostedApprovalContinuation(
+    session,
+    planned.payload['planRef'] as unknown as ManagedSessionDurableRef,
+    'prompt',
+  );
+  expect(saved.plan.runtime).toBeNull();
+  commit = originalCommit;
+  vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+  turn = createMemoryTurn(query, 'yolo', true);
+  await expect(
+    turn.resumeSavedNativeBatch(
+      saved,
+      saved.plan.calls.length,
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(
+    query.mock.calls.filter(([request]) => request.operation === 'remember'),
+  ).toHaveLength(1);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('restores an approved personal memory action without a Runtime or a second approval', async () => {
+  const query = memoryQuery({ status: 'stored', memoryId: 'entry' });
+  vi.spyOn(waiters, 'wait').mockRejectedValueOnce(
+    new Error('Harness replaced'),
+  );
+  turn = createMemoryTurn(query, 'default');
+  const call = personalMemoryCall();
+  await expect(
+    turn.execute(
+      [call],
+      memoryParts(call),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const [actionId] = actionIds();
+  const options = await readHostedActionOptions(
+    session,
+    session.authority.action(actionId)!,
+  );
+  expect(options.v).toBe(3);
+  if (options.v !== 3) throw new Error('Missing saved approval');
+  expect(query.mock.calls.map(([request]) => request.operation)).toEqual([
+    'binding',
+  ]);
+  await resolveHostedAction(session, waiters, actionId, answer('allow'));
+  await harness.resolveDurableWait();
+  const saved = await readHostedApprovalContinuation(
+    session,
+    options.continuationRef,
+    'prompt',
+  );
+  expect(saved.plan.runtime).toBeNull();
+  turn = createMemoryTurn(query, 'default');
+  const result = await turn.resumeSavedNativeBatch(
+    saved,
+    saved.plan.approvalOrdinal + 1,
+    new AbortController().signal,
+  );
+  expect(result[0].functionResponse?.response?.['status']).toBe('stored');
+  expect(actionIds()).toEqual([actionId]);
+  expect(
+    query.mock.calls.filter(([request]) => request.operation === 'remember'),
+  ).toHaveLength(1);
+  expect(broker.warm).not.toHaveBeenCalled();
+  expect(broker.acquire).not.toHaveBeenCalled();
 });
