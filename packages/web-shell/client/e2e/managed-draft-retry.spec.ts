@@ -31,6 +31,8 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
         return route.fulfill({ json: { supported: false, data: [] } });
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
       if (path.endsWith('/sessions/query'))
         return route.fulfill({ json: { data: sessions, hasMore: false } });
       if (path.endsWith('/sessions/get'))
@@ -103,7 +105,9 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     await editor.fill('  Accepted A input  ');
     await editor.press('Enter');
     await expect(
-      page.getByText('The request outcome is unconfirmed', { exact: false }),
+      page.getByText('The previous message was not confirmed as submitted', {
+        exact: false,
+      }),
     ).toBeVisible();
     await choose('B');
     await expect(editor).toContainText('Unrelated B draft');
@@ -115,6 +119,12 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     if (retryFrom === 'owner') {
       await choose('A');
       await expect(editor).toContainText('Accepted A input');
+    } else {
+      // A foreign session owns no retry affordance: it redirects to the
+      // conversation holding the pending prompt instead.
+      await page
+        .getByRole('button', { name: 'Open the original conversation' })
+        .click();
     }
 
     await page.getByRole('button', { name: 'Retry the same request' }).click();

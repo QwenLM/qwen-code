@@ -128,19 +128,24 @@ this recovery exception.
 
 | Surface    | Behavior                                                                                                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin                                                        |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files        |
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register`, `session.version` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                    |
+| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
+| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and, in headless and Ink sessions, those a Mod submits, described in [Turn events](#turn-events)      |
+| Prompts    | `prompt.submit` in headless runs and the Ink and OpenTUI terminals, and `$.prompt.submit` in headless runs and the Ink terminal, described in [Submitted prompts](#submitted-prompts)   |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
+| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
-JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-state/store, rendering, streaming events and hot reload are not implemented.
+Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
+`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -152,19 +157,22 @@ command names are matched against the resulting name.
 
 ## Middleware and recovery
 
-Patterns select among `session.start`, `session.end`, `command.run`,
-`command.register`, `session.version`, `ui.log`, `tool.call` and `tool.check`. Use an exact name, a prefix such as `command.*`,
+Patterns select among the engine events `session.start`, `session.end`,
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, `prompt.submit`, in the Ink and OpenTUI terminals `ui.render`, and the API event of each supported
+`$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.308 also defines events that Qwen Code does not run yet, such as
-`prompt.submit`, `ui.render` or `classic.Stop`. A registration for one of them,
-or for a prefix such as `prompt.*` that matches none of the events above, loads
+Claude Code 2.1.318 also defines events that Qwen Code does not run yet, such as
+`prompt.fill` or `classic.Stop`. `ui.render` runs only where a host draws it. A registration for one of them,
+or for a prefix such as `classic.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
-`Hooks for unsupported events will not run: prompt.submit, ui.render`. A skipped
+`Hooks for unsupported events will not run: prompt.fill, ui.render`. A skipped
 hook never runs, including a guard and its `.catch`. Names that Claude Code does
-not define, such as `tool.calls`, still reject initialization.
+not define, such as `tool.calls`, still reject initialization. A prefix that
+covers a supported event, such as `prompt.*` or `*`, is not skipped: it hears
+that event.
 
 To refuse such a plugin instead, set its `unsupportedEvents` to `"reject"` in user
 or system settings. Initialization then fails if the plugin registers any skipped
@@ -194,8 +202,9 @@ registrations with matchers, including equal matchers. Each wildcard or negated
 pattern can be registered once. Within a plugin, registration order determines
 the chain; consumers run before their declared dependency providers. A handler
 can answer early, including at `session.start`, preventing later handlers from
-running. Only command `args` can be rewritten on `command.run`; lifecycle and
-command identity fields stay pinned.
+running. Only command `args` can be rewritten on `command.run`, and only a
+prompt's `text` and `context` on `prompt.submit`; lifecycle and command identity
+fields stay pinned.
 
 ## Tool interception
 
@@ -261,8 +270,10 @@ call does not approve it; and a headless run without a permission host denies
 it, giving the model the Mod's reason. A PermissionRequest hook can deny it but
 cannot answer for the user. Qwen's own ask passed up unchanged keeps the current
 approval mode's decision flow. If a native PermissionRequest hook rebuilds the
-arguments, they are checked again. A Mod-authored `rule`, `hook`, `ceiling` or
-`plugin` cannot create host permissions; the host sets `plugin`.
+arguments, they are checked again. A Mod-authored `rule`, `hook`, `setting`,
+`ceiling` or `plugin` cannot create host permissions. The host sets `plugin`.
+It drops a `setting` a hook writes: in Claude Code that field names a Claude
+Code option's own check, and Qwen Code reports none.
 
 Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
 without executing. Native next returns `{ref, result, text, isError?}`.
@@ -389,7 +400,8 @@ with tier `user`. Managed-tier `next.to`, tracing and custom namespace `lent`
 recovery are not available.
 
 API events begin at the chain head. Their input is the command specification,
-`{}` for `session.version`, or the `{text, to}` log payload. Return `next(e)`,
+the `{text, to}` log payload, `{ms}` for `clock.sleep`, the `{breakdown, columns}`
+arguments of `session.usage`, `{turnId}` for `turn.abort`, `{event}` for `ui.invalidate`, or `{}` for the other session and clock methods. Return `next(e)`,
 `{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
 already in the event's call chain are skipped, including their catches. Other
 registrations in the same plugin remain eligible. This re-entry behavior follows
@@ -405,30 +417,66 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.308",
+    "claudeCode": "2.1.318",
     "events": [
+      "clock.now",
+      "clock.sleep",
       "command.register",
       "command.run",
+      "prompt.submit",
+      "session.cwd",
       "session.end",
+      "session.id",
+      "session.model",
+      "session.root",
       "session.start",
+      "session.surface",
+      "session.surfaces",
+      "session.turns",
+      "session.usage",
       "session.version",
       "tool.call",
       "tool.check",
+      "turn.abort",
+      "turn.complete",
+      "turn.start",
+      "ui.invalidate",
       "ui.log"
     ],
-    "methods": ["command.register", "session.version", "ui.log"]
+    "methods": [
+      "clock.now",
+      "clock.sleep",
+      "command.register",
+      "prompt.submit",
+      "session.cwd",
+      "session.id",
+      "session.model",
+      "session.root",
+      "session.surface",
+      "session.surfaces",
+      "session.turns",
+      "session.usage",
+      "session.version",
+      "turn.abort",
+      "ui.invalidate",
+      "ui.log",
+      "ui.resolve"
+    ]
   }
 }
 ```
 
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`, and in OpenTUI `methods` does not list `prompt.submit` yet.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
 drawing hook would not run.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
-cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
-the caller's budget. Catch recovery uses a one-second budget.
+cross-plugin `next` or API calls other than `$.clock.sleep` and `$.prompt.submit`. Pending void `ui.log` notifications do not pause
+the caller's budget. Neither does `$.prompt.submit`, whose call can outlive the
+hook that made it: the time the other Mods' `prompt.submit` hooks take while a
+hook awaits it counts as the hook's own. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
 uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
 trusted native waits described above; load and command roots retain continuous
@@ -464,22 +512,468 @@ to use only the classic hook loader. Claude hooks paths that conversion already
 ignores because they are absolute or outside the extension are also skipped by
 Mod discovery. Mod manifests must be relative paths inside the extension.
 
-## TypeScript and relative imports
+## Session facts and clock
 
-Change the hooks entry to `./register.ts` to use TypeScript. Imports and
-re-exports may use relative paths, extensionless paths, directory `index` files,
-or JavaScript spellings of TypeScript files (`./helper.js` can resolve to
-`helper.ts`). Exact files win. Next come `.js` → `.ts`, `.mjs` → `.mts`, and
-`.cjs` → `.cts` substitutions, followed by `.ts`, `.js`, `.mjs`, `.cjs`, `.mts`,
-`.cts` candidates, trying each file and then its directory index. All six
-suffixes use ESM, including `.cjs` and `.cts`. Module cycles and shared imported
-state within one plugin are supported.
+`$.plugin.name` is the plugin's manifest name and `$.plugin.root` its absolute
+directory, the one that holds `qwen-extension.json` or
+`.claude-plugin/plugin.json`. They are plain properties.
+
+The other methods are API events that resolve to the shapes Claude Code 2.1.318
+declares:
+
+| Method                                | Resolves to                                                                             |
+| ------------------------------------- | --------------------------------------------------------------------------------------- |
+| `$.session.id()`                      | the session's id; it changes after `/clear` and `/resume`                               |
+| `$.session.cwd()`, `$.session.root()` | the session's working directory; the two are the same in Qwen Code                      |
+| `$.session.model()`                   | the main model's id                                                                     |
+| `$.session.turns()`                   | the user turns in the session's transcript, counting resumed turns and not rewound ones |
+| `$.session.surfaces()`                | `["terminal"]` in a terminal, `[]` in a headless run                                    |
+| `$.session.surface()`                 | the first surface, or `null`                                                            |
+| `$.session.usage()`                   | `{startedAt, context: {tokens, window, percent}, rateLimits}`                           |
+| `$.clock.now()`                       | the current time in epoch milliseconds                                                  |
+| `$.clock.sleep(ms, {signal})`         | `undefined`, after `ms` milliseconds                                                    |
+
+`$.session.usage()` reports the figures the status line shows. `tokens` is the
+input of the main conversation's last response, including cached tokens, and
+`window` is the model's context window. `percent` is a whole number. When the
+window size is unknown, `window` is 0 and `percent` is absent. `startedAt` is when the session began;
+for a resumed session it is the session's first record. A branch made with
+`/branch` copies its parent's records, so it keeps the parent's `startedAt` and
+its `turns` include the parent's turns. Qwen Code keeps no cost
+ledger, so `cost` is absent, and `rateLimits` is always empty. `breakdown` and
+`columns` are accepted, but no breakdown is computed. With chat recording turned
+off, `turns` is 0.
+
+The facts are read when a dispatch starts. At a `session.end` caused by `/clear`
+or `/resume`, the id, turns, start time and context figures still describe the
+session that is ending.
+
+Unlike other `$` calls, `$.clock.sleep` charges its wait to the calling hook's
+budget, so a sleep longer than the remaining budget times the hook out. Its
+`signal` option rejects the wait at once when it aborts; pass `next.signal`,
+because the Mod environment has no `AbortController`. A sleep ends with the hook
+that started it, so a sleep the hook does not await cannot hold up the dispatch.
+
+## Turn events
+
+`turn.start` and `turn.complete` follow the main loop's turns: each prompt a
+person submits, from its first model request through its tool calls to the
+answer. A retry with Ctrl+Y and the headless continuation of an interrupted turn
+are turns too. Subagent and teammate turns, scheduled prompts, background
+notifications and goal continuations fire no turn events.
+
+```javascript
+export function register(on) {
+  on('turn.start', ($, e, next) => {
+    $.ui.log(`turn ${e.turnId}: ${e.text}`, { to: 'debug' });
+    return next(e);
+  });
+  on('turn.complete', async ($, e, next) => {
+    const answer = await next(e);
+    if (e.reason !== 'answer') return answer;
+    const { context } = await $.session.usage();
+    return { text: `${context.percent ?? 0}% of the context window used` };
+  });
+}
+```
+
+`turn.start` fires once the prompt is admitted, after UserPromptSubmit hooks let
+it through and before the first model request. A prompt they block has no turn.
+`e.text` is the prompt as submitted, with pasted text expanded, or `""` for a
+retry or a continuation. `e.turnId` is new for each turn. The model request does
+not wait for the hooks, but the turn's tool middleware and its `turn.complete`
+run after them. Cancelling the turn ends the `turn.start` hooks still running,
+including one that calls `$.turn.abort` itself: its code after that call does
+not run.
+
+A prompt longer than 128 KiB as JSON reaches the hooks with its beginning and
+end around the line `[... truncated for Mods ...]`, and `e.isTextTruncated` is
+`true`. A long answer is cut the same way, with `e.isAnswerTruncated`. Claude
+Code passes both whole.
+
+`turn.complete` fires once the turn has ended. A turn still running when the
+session closes ends as `aborted` before `session.end`; a `turn.complete` that is
+already running or queued then still runs, within the same budget. The hook
+receives:
+
+| Field               | Value                                                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `answer`            | the visible text of the turn's last model response, or `""`                                                                            |
+| `durationMs`        | how long the turn took                                                                                                                 |
+| `reason`            | `answer`; `aborted` when a person or a Mod cancelled the turn; `error` when an API error, a loop detection or a session limit ended it |
+| `isAborted`         | `true` when `reason` is `aborted`                                                                                                      |
+| `turnId`            | the id `turn.start` carried                                                                                                            |
+| `usage`             | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model}` summed over the turn's model responses    |
+| `isAnswerTruncated` | `true` when `answer` was cut to fit; absent otherwise                                                                                  |
+
+The fields of both events are pinned. `next(e)` resolves to `{text: e.answer}`,
+with `usage` when the turn has it. Return a different, non-blank `text` to show
+it beneath the answer, up to 4,096 characters:
+
+- in a terminal, as the transcript line `[Mod <plugins>] <text>`;
+- in headless text mode, as the same line on stderr after the answer;
+- in JSON modes, as a `system` `ui_log` message before the result.
+
+The conversation record keeps the answer. In a terminal the hooks run after the
+answer, and the next prompt can already start. A headless run waits for them
+before it writes its result.
+
+`usage` counts only the turn's own model requests; requests made by subagents,
+side queries and compaction are left out. It is absent when no response
+finished. `cache_creation_input_tokens` is 0 unless the provider reports cache
+writes separately, as Anthropic's does. `reason` is never `refusal`.
+
+`$.turn.abort({ turnId })` ends the running turn and its running tools as Esc
+does, but leaves no "Request cancelled." notice and does not put the prompt
+back in the composer. Queued prompts then run. The call rejects when no turn is
+running, when `turnId` is not the running turn's id, or when the turn is already
+ending. In a headless run the turn ends with the error result
+`A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
+its next message. In a headless run a Mod can send a prompt of its own after it
+ends a turn, with [`$.prompt.submit`](#a-mods-own-prompt).
+
+## Submitted prompts
+
+In headless runs and in the Ink and OpenTUI terminals, `prompt.submit` fires for
+each prompt a person submits, and in headless runs for each prompt a Mod submits
+([A Mod's own prompt](#a-mods-own-prompt)), before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
+prompt, attach context the model reads beside it, or drop it:
+
+```javascript
+export function register(on) {
+  on('prompt.submit', ($, e, next) => {
+    if (/AKIA[0-9A-Z]{16}/.test(e.text))
+      return { drop: 'the prompt holds an AWS access key' };
+    return next({
+      ...e,
+      text: e.text.replace(/\bprod\b/g, 'production'),
+      context: [...(e.context ?? []), 'Answer in British English.'],
+    });
+  });
+}
+```
+
+The hook receives:
+
+| Field     | Value                                                                                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks                                          |
+| `context` | absent; each hook that attaches context passes the list on with its own entries added                                                   |
+| `wait`    | `false`                                                                                                                                 |
+| `origin`  | `{kind: 'sdk'}` in headless runs, `{kind: 'composer'}` in the terminals; `{kind: 'plugin', name, asUser?}` for a prompt a Mod submitted |
+
+`origin`, `wait` and `turnId` are pinned. The prompt that enters is the one that
+arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
+what a hook answers after its `next` resolved changes nothing. The rewritten text
+is what the model reads, what `turn.start` hears and what the transcript keeps.
+In a stream-json message with blocks other than text, the rewrite replaces its
+text blocks and the other blocks follow it.
+The context goes to the model after the prompt, in the block that holds
+UserPromptSubmit's context, ahead of it, and is never shown as part of the
+prompt.
+
+`{drop: reason}` stops the prompt before UserPromptSubmit and before any model
+request. The run ends with the error result `Prompt dropped by a hook: <reason>`
+and exit code 1; a stream-json session goes on to its next message. The reason
+is one line, kept to its first 4,096 characters. A hook that answers without
+calling `next` and without a drop also stops the prompt, with the result
+`Prompt not submitted: a hook answered without passing the prompt on`. A hook
+that calls `next` and then answers a drop fails, and its `next` stands.
+
+A hook that fails or times out is skipped, so a broken guard never blocks a
+prompt. Give a guard a `.catch` that drops instead:
+
+```javascript
+on('prompt.submit', guard).catch(($, e, next) =>
+  next.called ? next(e) : { drop: 'the guard failed' },
+);
+```
+
+In the Ink and OpenTUI terminals:
+
+- The hooks hear what the person typed, with pasted text expanded. A paste the
+  rewrite gives back whole stays collapsed, and the model is still told it was
+  pasted. A rewrite that edits inside a paste, removes it or repeats it is
+  refused with an error line, and the prompt comes back to the input box; a
+  hook keeps a paste out by dropping the prompt.
+- Images attached in OpenTUI stay attached to a rewritten prompt. In Ink,
+  attachment references and the notices Qwen Code adds to a prompt for the
+  model alone, such as a resumed worktree, stay ahead of it.
+- In OpenTUI, the prompt's row appears once the hooks let it through.
+- A prompt sent while the Mods are still loading waits for them, so their
+  hooks hear it too.
+- A rewrite also stands in the prompt's row and in the input history that the
+  Up key recalls.
+- A dropped prompt shows the reason as an error line. It is neither shown nor
+  kept in the input history, since it may hold what the hook kept out. It comes
+  back to the input box, ahead of anything typed since, to be edited and sent
+  again.
+- Esc while the hooks run cancels the prompt and hands it back the same way.
+- Slash commands, shell-mode commands, `/btw` questions and scheduled prompts
+  raise no `prompt.submit`. In OpenTUI, slash-form text sent with an attached
+  image goes to the model as a prompt, so the hooks hear it like any prompt.
+- A `?`-form command, such as a `?btw` question, is typed text, so the hooks
+  hear it. In OpenTUI a rewrite must keep the same command: one that leaves
+  `?`-form or names another command is refused with an error line. Context
+  they attach goes with the turn the command starts; a `?btw` question starts
+  none, so its context is not used.
+- In OpenTUI, a prompt typed during a turn shows in the queued-messages strip
+  until it is sent; the hooks hear it then.
+- While a Mod hooks `prompt.submit`, a prompt typed during a turn is not sent
+  into that turn when a tool finishes. It waits for the turn to end, and the
+  hooks hear it when it is sent.
+
+A prompt longer than 128 KiB as JSON reaches no hook, and the line
+`prompt.submit hook skipped: the prompt is too long for a Mod payload` appears
+where transcript logs do.
+
+### A Mod's own prompt
+
+In headless runs and the Ink terminal, `$.prompt.submit({ text })` submits a
+prompt of the Mod's own. It starts a turn once the session is idle, after the
+turn that is running, and never joins a running turn:
+
+```javascript
+export function register(on) {
+  on('turn.complete', ($, e, next) => {
+    if (/TODO/.test(e.answer))
+      void $.prompt.submit({ text: 'List the TODOs you just mentioned.' });
+    return next(e);
+  });
+}
+```
+
+- The prompt raises `prompt.submit` through every hook but the calling one and
+  those it runs beneath, with `origin` `{ kind: 'plugin', name }`, `name` being
+  the Mod's. The Mod's other hooks hear it. They can rewrite it, attach context
+  or drop it, as for a typed prompt.
+- The call resolves once the hooks have answered and the prompt is queued, to
+  `{ text, context?, origin }`, or to `{ drop: reason }` when a hook dropped it
+  or Qwen Code refused it. A call the hook does not await, as above, still
+  queues after the hook returns.
+- What last arrives beneath the hooks is queued, once, even when a hook calls
+  `next(e)` more than once. A text that is empty or only whitespace, or longer
+  than 128 KiB as JSON, from the call or from a hook's rewrite, is not queued:
+  the call resolves to a drop. An input too large for any Mod call rejects.
+- The model is told the prompt came from the Mod and that the person did not
+  type it. With `asUser: true` the model reads the text as the person's own
+  words; `origin` still names the Mod.
+- The transcript records the prompt as the Mod's, with the Mod's name, not as
+  the person's. A stream-json client receives the text as a `user` message,
+  followed by a `system` message with the subtype `mod_prompt` and the data
+  `{ mod }`, before the turn's output.
+- UserPromptSubmit hooks hear the prompt, and its turn raises `turn.start` and
+  `turn.complete` like any other. It counts toward the session turn limit.
+- `@` references in the text are not read.
+- A Mod command that submits a prompt hands work on to the model: its reply is
+  shown, and the prompt's turn follows, in a headless run in the same run. The
+  command itself starts no turn.
+- In the Ink terminal the prompt's turn starts after the prompts the person
+  queued and the background notifications, and waits while a Goal is running.
+  A Monitor update that waits out the minimum interval between its turns does
+  not hold it.
+  The transcript shows it as the line `Mod <name>: <text>`, live and when the
+  session is resumed, with `asUser` too, and it does not enter the input
+  history.
+- The Mods' prompts start at most 8 turns before the person sends a prompt
+  again. Past that a call resolves to a drop, and the line
+  `$.prompt.submit refused: …` appears where transcript logs do. In a headless
+  run, the prompt the run was given is the person's, and in a stream-json
+  session each message the client sends is, a slash command too. In the Ink
+  terminal, each prompt or slash command the person sends is.
+- `/clear` and `/resume` start the new session with no prompts queued and the
+  count at 0. A prompt submitted while the old session ends, from a
+  `session.end` hook for instance, resolves to
+  `{ drop: 'the session is ending' }`.
+- A prompt still queued when the run stops early, on an interrupt, a structured
+  result, a detected loop or a slash command that fails, does not run. In the
+  Ink terminal, neither does one still queued when the person stops a turn,
+  with Esc or by declining every tool it asks to run. Until the person sends a
+  prompt again, a call then resolves to
+  `{ drop: 'the person stopped a turn and has not sent a prompt since' }`, so a
+  `turn.complete` hook of the stopped turn starts no turn. A turn a Mod ends
+  with `$.turn.abort` keeps them.
+- In the OpenTUI terminal the method is not listed in `methods` yet, and a
+  call resolves to `{ drop: 'this host does not run prompts a Mod submits' }`.
+
+These differ from Claude Code:
+
+- Slash commands, background notifications and the continuation of an
+  interrupted turn raise no `prompt.submit`, so `command` and `isMeta` never
+  appear. Slash-form text that OpenTUI sends as a prompt, as above, is heard
+  as a prompt.
+- `attachments` never appears, and `$.prompt.media` does not exist.
+- A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
+  into `{drop}`: the Mod hooks have settled by the time it runs.
+- `next(e)` resolves once the hooks beneath have answered, not once the turn
+  starts. In the same way, `$.prompt.submit` resolves once its prompt is
+  queued.
+- A context the conversation already holds word for word is not sent again.
+  Each Mod context and UserPromptSubmit's context count on their own, so a
+  context that changes every turn does not make the others repeat.
+- `$.prompt.submit` takes no `attachments`.
+
+## Elements
+
+`$.ui.resolve(e)` returns the element table of the terminal: a frozen object
+with no prototype that holds Claude Code's eleven terminal constructors,
+`Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`, `Markdown`,
+`Client`, `Raster` and `Image`. It reads the table without a dispatch. `e` is a
+`ui.render` event; any argument whose `surface` is not `"terminal"` throws.
+
+A constructor takes the props, `children` among them, and returns a frozen
+plain-data element `{ type, props?, hover?, children? }`. Children are
+flattened: `null`, `undefined` and booleans are dropped, arrays are spread and
+numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
+...children)` and `Fragment` globals build the same elements, as Claude Code's
+JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
+its props and its children flattened into an array, and throws for a string tag other than `Box` or `Text`.
+JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
+[TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
+
+A tree a hook returns is judged with Claude Code 2.1.318's rules for `Box` and
+`Text`, and any other element refuses it with
+`<Element> is not drawn by Qwen Code yet`.
+
+`$.ui.invalidate("ui.render")` returns at once and asks for a redraw of the
+sites the plugin's `ui.render` hooks may draw. The cached-answer events
+Claude Code also accepts, such as `prompt.section`, do nothing in Qwen Code.
+Any other name throws. Both methods work in every host, so a `turn.complete`
+hook that asks for a redraw does not fail where nothing is drawn.
+
+## The band above the prompt
+
+The Ink and OpenTUI terminals raise `ui.render` for Claude Code's `AbovePrompt`
+site, a band between the session survey and the prompt input. Headless runs
+draw no site: there a `ui.render` hook is skipped and listed at startup, and
+`$.session.version()` leaves it out.
+
+A hook receives Claude Code's input:
+
+```js
+{
+  surface: 'terminal',
+  component: 'AbovePrompt',
+  requestId: 'above-prompt',
+  viewport: { columns: 120, rows: 40, isFullscreen: true },
+  props: {
+    hasSurvey: false, // the session survey shows above the band
+    isWorking: false, // a model turn runs
+    maxRows: 13, // a third of the terminal's rows, at least 1
+    bodyColumns: 115, // the terminal's width less 5 columns
+    scroll: { offset: 0, bodyRows: 12 },
+    view: {},
+  },
+}
+```
+
+`isFullscreen` is true when Qwen Code draws on the alternate screen. A hook may
+rewrite the props but keep their kinds; changing `surface`, `component`,
+`requestId`, `viewport` or `props.view` fails the hook. `next(e)` resolves to
+the engine's own node, `{ type: 'engine', ref: 0 }`, which draws nothing here.
+With no hook, or with every hook passing `next(e)` on, the band takes no rows.
+
+The band renders after `session.start`, after `/clear`, `/resume` and
+`/branch`, when a plugin calls `$.ui.invalidate("ui.render")`, and when its
+input changes. A change of height alone renders nothing unless it changes
+`maxRows`. A change of width or of `maxRows` renders once it has settled for
+150 milliseconds. Requests fold into one render, and renders run at most every
+34 milliseconds, or every 100 milliseconds for a second after one took longer
+than that. A render waits in the session's queue behind commands, tool calls and
+turn events, and a render that is running is never cancelled for a newer one.
+The band keeps its last tree until a new answer lands, and the prompt never
+waits for it.
+
+The band is drawn with these conversions:
+
+- A string inside a `Box` is drawn as a `Text`.
+- Text wrap values `end` and `middle` become `truncate-end` and
+  `truncate-middle`.
+- Spacing steps become cells: `xs` and `sm` are 1 across and 0 down, `md` 2 and
+  1, `lg` 3 and 1, `xl` 4 and 2.
+- `weight: "semibold"` or `"bold"` draws bold. `size`, `mono`, `tabular` and
+  `dir` are dropped, as Claude Code's terminal drops them. `hover` is checked
+  but not drawn.
+- The theme keys `text`, `subtle`, `inactive`, `success`, `error`, `warning`,
+  `claude` and `suggestion` follow the active Qwen Code theme. Claude Code's
+  other theme keys, such as `permission` or `diffAdded`, draw in the default
+  color. Other colors draw when they are an ANSI color name such as `cyan` or
+  `redBright`, a hex value, `rgb(r, g, b)` or `ansi256(n)`.
+- Text is sanitized for the terminal, as Mod transcript lines are. Tabs
+  become spaces to the next 8-column stop, as in Claude Code.
+
+The band clips horizontal overflow to the composer's width.
+
+A tree that throws while drawn shows nothing, and the next answer is drawn
+afresh. The debug log records each refused tree and adjustment, such as
+`<plugin>: ui.render (AbovePrompt) refused: <reason>; nothing was drawn`.
+
+These differ from Claude Code:
+
+- The band has no collapse mark, focus, scrolling or `n more` row. A tree
+  taller than `maxRows` is clipped. `maxRows` is a third of the terminal's rows,
+  where Claude Code gives the bottom slot's remaining rows on the alternate
+  screen and the terminal's height otherwise.
+- The band shows only under the main conversation, never in an agent tab, and
+  hides while a dialog takes the composer's place.
+- `$.ui.invalidate` takes effect after the dispatch that called it, since Qwen
+  Code Mods have no timers.
+- A render can wait behind a tool call and its approval, and the band keeps its
+  last tree meanwhile. A tool call, command or turn event queued behind a
+  running render waits for it, up to 10 seconds for each `ui.render` hook in
+  the chain.
+- Refusal lines go only to the debug log, since Qwen Code has no hot reload.
+- OpenTUI has no session survey, so `hasSurvey` is always `false` there, and
+  `isWorking` stays `false` while a `!` shell command runs. OpenTUI takes
+  colors as hex values, so ANSI color names and `ansi256()` colors draw as
+  fixed values instead of the terminal's palette, and a `borderColor` border
+  draws undimmed under `borderDimColor`. Its text truncates only in the
+  middle, with `...` where Ink draws `…`: `wrap: "middle"` and
+  `"truncate-middle"` draw that way, and the other truncations cut the text
+  off at the right edge without a mark. Its borders have one stroke per axis,
+  so the `arrow` border draws its top arrow on the bottom edge and its left
+  arrow on the right edge.
+
+## TypeScript, JSX and relative imports
+
+Change the hooks entry to `./register.ts` to use TypeScript, or to
+`./register.tsx` or `./register.jsx` to write JSX. Imports and re-exports may
+use relative paths, extensionless paths, directory `index` files, or JavaScript
+spellings of TypeScript files (`./helper.js` can resolve to `helper.ts`). Exact
+files win. Next come `.js` → `.ts` or `.tsx`, `.jsx` → `.tsx`, `.mjs` → `.mts`
+and `.cjs` → `.cts` substitutions, followed by `.ts`, `.tsx`, `.jsx`, `.js`,
+`.mjs`, `.cjs`, `.mts`, `.cts` candidates, trying each file and then its
+directory index. This is Claude Code's order. All eight suffixes use ESM,
+including `.cjs` and `.cts`. Module cycles and shared imported state within one
+plugin are supported.
+
+JSX compiles with the classic runtime to calls of the `h` and `Fragment`
+globals, as Claude Code compiles it, so `<>...</>` is a column `Box`. A tag is
+one of the constructors `$.ui.resolve(e)` returns, or a function component:
+
+```tsx
+on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  const { Box, Text } = $.ui.resolve(e);
+  return (
+    <Box flexDirection="row" paddingX={1}>
+      <Text bold>☀ Clear</Text>
+      <Text dimColor> {e.props.bodyColumns} columns</Text>
+    </Box>
+  );
+});
+```
+
+Only `.tsx` and `.jsx` files take JSX. As in Claude Code, a module that declares
+its own `h` or `Fragment`, or carries a `@jsx` pragma, points its JSX away from
+the globals. A file that fails to compile reports the first error with its line
+and column, such as
+`Invalid Mod JSX: view.jsx: JSX element 'Text' has no corresponding closing tag. (line 4, column 12).`
 
 Compilation uses fixed options inside the cancellable worker; it does not
 type-check or load `tsconfig.json`, package resolvers or build plugins. Type-only
 imports, including types from `claude-code`, are erased. Runtime value imports
 from `claude-code` require APIs outside this subset and are rejected, as are
-package/Node/URL imports, dynamic imports, `require`, JSX and imported top-level
+package/Node/URL imports, dynamic imports, `require` and imported top-level
 `await`. Guest code continues to execute only in QuickJS.
 
 ## Plugin options
@@ -584,6 +1078,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API is based on Claude Code 2.1.296 declarations, with event names
-recognized from Claude Code 2.1.308, and the
+The author API follows the Claude Code 2.1.318 declarations, event names
+included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).

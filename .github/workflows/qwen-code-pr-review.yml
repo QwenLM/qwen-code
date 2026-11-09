@@ -351,12 +351,25 @@ jobs:
         startsWith(github.event.comment.body, '@qwen-code /review')) ||
        (github.event_name == 'pull_request_review' &&
         startsWith(github.event.review.body, '@qwen-code /review')))
-    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
-    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner. The job IS the write-permission check, so
-    # it cannot route on its own output; downstream jobs already route on the
-    # repository guard alone.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
+    # but runs no agent, checks out nothing, and processes no untrusted PR
+    # content — it only reads event metadata and calls one read API — so it is
+    # safe on the persistent ECS pool whenever the trigger cannot carry fork
+    # code into it:
+    # - PR-payload events (pull_request_target / pull_request_review /
+    #   pull_request_review_comment) keep the canonical same-repo guard: a fork
+    #   head stays on hosted (ephemeral), an in-repo head uses ECS.
+    # - issue_comment (/review, /resolve) and workflow_dispatch carry no
+    #   github.event.pull_request payload at all, so the same-repo guard alone
+    #   fell through to ubuntu-latest for EVERY command — the gate then sat in
+    #   the hosted queue for hours (PR #15286: 3h10m for a 4-second job) while
+    #   the ECS pool was idle. Route them to ECS like qwen-autofix.yml's
+    #   route/review-scan, which apply the same "no PR payload → no fork code →
+    #   persistent pool" rule to their API-only steps (review-scan there loads
+    #   CI_DEV_BOT_PAT; route only the read-only github.token).
+    # The job IS the write-permission check, so it cannot route on its own
+    # output; downstream jobs already route on the repository guard alone.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -380,6 +393,26 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
+          # Harden gh against the pool's shared, writable HOME config. This
+          # gate runs on the persistent ecs-qwen pool for comment/dispatch
+          # triggers; a planted ~/.config/gh (http_unix_socket) would
+          # otherwise receive CI_BOT_PAT and could forge the permission
+          # response that downstream jobs consume as should_review. Same
+          # pins as qwen-autofix.yml's route/review-scan — but NO
+          # `unset GH_TOKEN` here: it is this step's only credential.
+          export GH_HOST=github.com
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step (the gate
+          # fails closed), not continue with an empty GH_CONFIG_DIR that gh
+          # treats as unset — falling back to the shared config.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the persistent pool; do not
+          # leave the minted config dir behind.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           # Select the principal whose permission gates this trigger.
           case "$EVENT_NAME" in
             pull_request_target)
@@ -500,8 +533,9 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    # The schedule switches hk1/hk2 to `ecs-review` at 17:00 Asia/Shanghai
-    # and back to CI at 05:00. Reviews queue while the pool is closed.
+    # The schedule switches the managed fleet to `ecs-review` at 17:00
+    # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
+    # is closed.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -577,7 +611,11 @@ jobs:
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`),
       # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from
       # an interrupted review, or stale per-run capture-tools dirs under
-      # RUNNER_TEMP. Reset all of them per run; never fail the job.
+      # RUNNER_TEMP. Reset all of them per run. The sweeps are best-effort
+      # EXCEPT the agent home: a foreign-owned qwen-home that survives the
+      # reclaim is renamed out of the way, and one that cannot even be
+      # renamed fails the job here, before checkout — proceeding would only
+      # die later at the first settings write (PR #16610 incident).
       - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
@@ -585,7 +623,88 @@ jobs:
           # below) + drop any leftover stage drafts.
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           rm -rf "$QWEN_HOME" 2>/dev/null || true
+          # A foreign-owned leftover defeats the rm above: triage's node
+          # container chowns this same path to uid 1000, and on the shared
+          # pool this host user cannot unlink it. `rm || true` plus mkdir -p
+          # on the still-existing dir both "succeed", so the job used to run
+          # on and die minutes later writing settings.json (PR #16610
+          # incident). Reclaim via sudo when available; otherwise quarantine
+          # it with a same-parent rename, and fail HERE only when even that
+          # is refused — before the checkout, with the cause named.
+          if [ -e "$QWEN_HOME" ]; then
+            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null ||
+              sudo -n chown -R "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            rm -rf "$QWEN_HOME" 2>/dev/null || true
+          fi
+          # A quarantined copy left by an EARLIER run keeps the owner that
+          # made it unremovable. Triage's 'Restore workspace ownership after
+          # agent' hands these names back too (it runs as root in that
+          # container), and this unprivileged sweep deletes them once that has
+          # made them removable — chmod first, because a hand-back restores
+          # the owner without the write bit. It runs BEFORE the rung below, so
+          # it can never delete the copy this run is about to set aside. The
+          # -mmin gate measures the leftover's own mtime, which a same-parent
+          # rename preserves: a copy that was already stale when it was set
+          # aside drains on a later run, a fresh one waits. Name-scoped and
+          # never matching $QWEN_HOME itself. A runner that never runs triage
+          # hands nothing back, so the copies there stay until removed by hand.
+          # -type d is load-bearing: find matches a symlink by name and reports
+          # the link's own mtime, and chmod -R follows a symlink operand, so a
+          # planted `qwen-home.stale-*` link would make this pre-checkout step
+          # rewrite a tree outside RUNNER_TEMP. The rm below only unlinks the
+          # link, so it is no cover. The recursion itself must stay: a
+          # hand-back restores the owner without the write bit, so nested
+          # directories need u+w before rm can unlink them.
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec chmod -R u+rwX {} + 2>/dev/null || true
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec rm -rf {} + 2>/dev/null || true
+          # The deletion above is best-effort, but silence is not: a copy it
+          # could not remove would otherwise look exactly like a clean run,
+          # and the cost of the miss is a full tree walk on every later run.
+          # The report is deliberately NOT age-gated (a partial rm bumps the
+          # directory's own mtime) and never fatal — only the two $QWEN_HOME
+          # checks above may fail this step.
+          survivors="$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' 2>/dev/null | tr '\n' ' ' || true)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::qwen-home quarantine(s) survived the drain (no ownership hand-back has made them removable yet); retried every run, and they need manual cleanup: $survivors"
+          fi
+          # Pool members without passwordless sudo would otherwise lose the
+          # whole review to a directory this user cannot unlink. On Linux a
+          # same-parent rename needs write access to the PARENT, not to the
+          # directory — the one permission this job is known to have, and the
+          # review pool is Linux-only (BSD also rewrites the moved directory's
+          # `..`, so it needs write on the directory itself and the rename
+          # buys nothing there). The review proceeds on a fresh home while the
+          # leftover keeps its contents under a timestamped name. Same posture
+          # as 'Clean stale .qwen before checkout', which renames what it
+          # cannot delete; a read-only parent refuses the rename and still
+          # fails fast below.
+          if [ -e "$QWEN_HOME" ]; then
+            quarantine="${QWEN_HOME}.stale-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+            if mv -- "$QWEN_HOME" "$quarantine" 2>/dev/null; then
+              echo "::warning::could not delete a foreign-owned qwen-home; moved it to $quarantine so this review can proceed — that directory needs manual cleanup"
+            fi
+          fi
+          if [ -e "$QWEN_HOME" ]; then
+            echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           mkdir -p "$QWEN_HOME"
+          # mkdir just created this dir as the runner user, so under a normal
+          # umask it is already usable. This check covers the residual races
+          # and environments: another process re-creating the path between
+          # the sweep and mkdir, or a hostile umask stripping owner bits.
+          # settings.json needs write AND traverse, so test both — -w alone
+          # passes a mode-0600 home that cannot hold the file.
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            sudo -n chown "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            chmod u+rwx "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            echo "::error::fresh qwen-home is not writable by the runner user: $QWEN_HOME"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a
@@ -995,6 +1114,42 @@ jobs:
           fi
           exit 0
 
+      - name: 'Provision review linters (actionlint + shellcheck)'
+        if: "steps.context.outputs.should_run == 'true'"
+        # The review's deterministic script-lint gate spawns actionlint and
+        # shellcheck from PATH; without them every workflow/shell PR caps as
+        # unreviewed and the real-binary regressions never run (PR #16001
+        # review). Install through the repo's own pinned, SHA-256-verified
+        # installer and promote the fresh job-scoped tool dirs onto
+        # GITHUB_PATH — prepended, so the verified bytes shadow anything a
+        # shared runner left on PATH. The install is unconditional (no
+        # `command -v` shortcut): a pre-existing binary is exactly the plant
+        # the capture-tools step refuses to trust. Failure degrades, not
+        # blocks: the gate caps the review as unreviewed, disclosed.
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |-
+          node --input-type=module -e '
+            import { execSync } from "node:child_process";
+            import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+            import { getLinters, getLinterTempDir } from "./scripts/lint.js";
+            const tempDir = getLinterTempDir();
+            rmSync(tempDir, { recursive: true, force: true });
+            mkdirSync(tempDir, { recursive: true });
+            const linters = getLinters();
+            for (const name of ["actionlint", "shellcheck"]) {
+              execSync(linters[name].installer, { stdio: "inherit" });
+              // Verify the install produced its binary BEFORE promoting the
+              // dir: a silent no-op install must fail this step visibly
+              // (continue-on-error tolerates it, the UI shows it), not
+              // degrade to a review lane without linters (PR #16001 F2).
+              const bin = tempDir + "/" + name + "/" + name;
+              if (!existsSync(bin)) throw new Error(name + " installer produced no binary at " + bin);
+              appendFileSync(process.env.GITHUB_PATH, tempDir + "/" + name + "\n");
+            }
+            console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
+          '
+
       - name: 'Prepare review scratch directory'
         id: 'review_scratch'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1010,7 +1165,21 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # Review model, plus the canary split that sends a PR-number slice
+          # of reviews to a second model. All three arrive as variables so a
+          # rollout is a repository-variable change, never a workflow edit:
+          # an empty canary or percent keeps today's single model, and
+          # the bucket selection below turns them into OPENAI_MODEL.
+          REVIEW_MODEL_DEFAULT: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          REVIEW_MODEL_CANARY: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}'
+          REVIEW_MODEL_CANARY_PERCENT: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}'
+          # The canary cohort may also carry its own endpoint: a second
+          # gateway with its own quota, or a provider the default gateway
+          # does not serve. The pair is all-or-nothing — a URL without its
+          # own key would send the default key to another provider, so the
+          # override below refuses that shape and keeps the default cohort.
+          REVIEW_BASE_URL_CANARY: '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}'
+          REVIEW_API_KEY_CANARY: '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}'
           QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
@@ -1150,12 +1319,19 @@ jobs:
           fi
 
           # shellcheck disable=SC2016
+          # Shared by the proxy bypass below and the cohort notice, so the
+          # notice cannot name a host the traffic was not routed through.
+          openai_base_host() {
+            node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)'
+          }
+
+          # shellcheck disable=SC2016
           configure_qwen_network() {
             local openai_host proxy_bin
             if ! command -v node >/dev/null 2>&1; then
               fail "node is required to parse OPENAI_BASE_URL for the proxy bypass."
             fi
-            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            openai_host="$(openai_base_host)"
             if [ -z "$openai_host" ]; then
               fail "Could not parse a hostname from OPENAI_BASE_URL."
             fi
@@ -1390,7 +1566,7 @@ jobs:
 
             echo "qwen_path=$(command -v qwen)"
             qwen --version
-            echo "openai_host=${openai_host}"
+            echo "initial_openai_host=${openai_host}"
             echo "qwen_http_proxy=disabled"
             if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
               echo "child_git_github_proxy=restored"
@@ -1620,6 +1796,96 @@ jobs:
           elif [ "$REVIEW_MODE" = "comment" ]; then
             PROMPT="${PROMPT} --comment"
           fi
+
+          # The percent both consumers read — the bucket test and the cohort
+          # notice below — normalized once so the notice cannot report a split
+          # the bucket test did not apply. Shape follows SALVAGE_ELAPSED_PERCENT
+          # (strip leading zeros, bound the digit count) but clamps to the
+          # opposite pole: there 100 means cede, here it would mean full
+          # rollout, so a typo on a repository variable must land on off. Keep
+          # the digit bound — bash wraps 20-digit values, and
+          # $((10#18446744073709551666)) is 50, a silent half rollout.
+          canary_percent_effective() {
+            local percent="$1"
+            case "$percent" in
+              ''|*[!0-9]*) percent=0 ;;
+            esac
+            percent="${percent#"${percent%%[!0]*}"}"
+            percent="${percent:-0}"
+            if [ "${#percent}" -gt 3 ]; then
+              percent=0
+            fi
+            percent=$((10#$percent))
+            if [ "$percent" -gt 100 ]; then
+              percent=0
+            fi
+            echo "$percent"
+          }
+
+          # A padded canary name (" qwen3-coder-plus ") would reach --model
+          # verbatim, the provider would reject it, and that failure is
+          # terminal for the whole cohort on every re-review round — the same
+          # whitespace class QWEN_REVIEW_ASSETS_REPO above trims for. Trimming
+          # keeps "empty means no split": whitespace-only routes to the
+          # default rather than inventing a cohort.
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY:-}"
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY#"${REVIEW_MODEL_CANARY%%[![:space:]]*}"}"
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY%"${REVIEW_MODEL_CANARY##*[![:space:]]}"}"
+
+          CANARY_PERCENT_EFFECTIVE="$(canary_percent_effective \
+            "${REVIEW_MODEL_CANARY_PERCENT:-}")"
+          REVIEW_BUCKET_COUNT=100
+          if [ "$(( CANARY_PERCENT_EFFECTIVE % 10 ))" -eq 0 ]; then
+            REVIEW_BUCKET_COUNT=10
+          fi
+          REVIEW_BUCKET=unknown
+          REVIEW_COHORT=default
+          case "${PR_NUMBER:-}" in
+            ''|*[!0-9]*) ;;
+            *)
+              REVIEW_BUCKET="$(( 10#$PR_NUMBER % REVIEW_BUCKET_COUNT ))"
+              if [ -n "$REVIEW_MODEL_CANARY" ] &&
+                [ "$(( REVIEW_BUCKET * 100 ))" -lt "$(( CANARY_PERCENT_EFFECTIVE * REVIEW_BUCKET_COUNT ))" ]; then
+                REVIEW_COHORT=canary
+              fi
+              ;;
+          esac
+          OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
+          if [ "$REVIEW_COHORT" = canary ]; then
+            OPENAI_MODEL="$REVIEW_MODEL_CANARY"
+          fi
+
+          # The canary cohort may carry its own endpoint as well as its own
+          # model: REVIEW_BASE_URL_CANARY/REVIEW_API_KEY_CANARY move the
+          # canary's traffic onto a second gateway so its quota is isolated
+          # from the default cohort's. The pair is all-or-nothing — a URL
+          # without its own key would send the default key to another
+          # provider — and an unparseable URL routes nowhere, so both shapes
+          # degrade to the default cohort, the same direction every canary
+          # misconfiguration takes.
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY:-}"
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY#"${REVIEW_BASE_URL_CANARY%%[![:space:]]*}"}"
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY%"${REVIEW_BASE_URL_CANARY##*[![:space:]]}"}"
+          if [ "$REVIEW_COHORT" = canary ] && [ -n "$REVIEW_BASE_URL_CANARY" ]; then
+            if [ -n "${REVIEW_API_KEY_CANARY:-}" ] &&
+              node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
+              OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
+              OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
+            else
+              echo "::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort."
+              OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
+              REVIEW_COHORT=default
+            fi
+          fi
+          export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY
+          REVIEW_ENDPOINT_HOST="$(openai_base_host)"
+          # The run's own record of which cohort served this review: the model
+          # is not carried anywhere else a later comparison could read it (the
+          # cost ledger has tokens, not a model), so a rollout that cannot be
+          # told apart afterwards is unmeasurable. Every field is the resolved
+          # one — the raw percent would certify a split the bucket test
+          # clamped away.
+          echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"
 
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then

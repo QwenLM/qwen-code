@@ -24,6 +24,7 @@ import {
   type ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
+  fencedMountHandback,
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
@@ -121,6 +122,7 @@ export class HostedMcpSession {
     string,
     { configuration: McpConfiguration; catalog: ManagedMcpCatalog }
   >();
+  private extensionServers?: readonly HostedMcpServerPin[];
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -128,8 +130,10 @@ export class HostedMcpSession {
     private readonly admissionServers: readonly HostedMcpServerPin[],
     settings?: HostedMcpSettings,
     sharedBroker?: HostedWorkspaceBroker,
+    extensionView = false,
   ) {
     this.settings = settings;
+    if (extensionView) this.extensionServers = admissionServers;
     const configurations = this.configurations();
     const owners = new Set(
       configurations
@@ -162,7 +166,47 @@ export class HostedMcpSession {
       );
   }
 
+  /**
+   * A non-terminal discard (the extension-drain drop and the owner-moved swap)
+   * releases the instance but leaves its rows 'drained' under the old owner:
+   * releasing them at discard time could strand an apply that later fails and
+   * leaves the durable active naming the previous revision (R14-1). Once a newer
+   * bundle is durably active, though, those superseded rows would make the
+   * reload's constructor see owners.size>1 over non-released rows and throw
+   * (R15-3). At cold load, advance every drained row whose owner is NOT the
+   * active bundle's owner to released. The active owner's own drained rows are
+   * left untouched for the reload to re-initialize (R15-1), so a failed apply
+   * (old owner still active) is never stranded.
+   */
+  static async releaseSupersededDrained(
+    session: ManagedSession,
+    activeOwnerId: string,
+  ): Promise<void> {
+    for (const entry of session.authority.extensionRecordsInDomain(
+      'mcp_configuration',
+    )) {
+      const configuration = parseMcpConfiguration(entry.record);
+      if (
+        configuration.releaseState !== 'drained' ||
+        configuration.runtimeSessionId === activeOwnerId
+      )
+        continue;
+      const released = { ...configuration, releaseState: 'released' as const };
+      await session.authority.commitExtensionRecord(
+        {
+          operation: 'commitMcpRecord',
+          commandId: `${configuration.configurationId}:${entry.revision + 1}`,
+          sessionKey: session.authority.sessionHeader.sessionKey,
+          contentDigest: digest(released),
+        },
+        { domain: 'mcp_configuration', record: released },
+        { class: 'trusted_entry' },
+      );
+    }
+  }
+
   get servers(): readonly HostedMcpServerPin[] {
+    if (this.extensionServers) return this.extensionServers;
     return [
       ...new Map(
         [...this.admissionServers, ...(this.settings?.servers ?? [])].map(
@@ -173,6 +217,11 @@ export class HostedMcpSession {
   }
 
   get selectedServers(): readonly HostedMcpSelection[] {
+    if (this.extensionServers)
+      return this.extensionServers.map((pin) => ({
+        ...pin,
+        state: 'enabled' as const,
+      }));
     return (
       this.settings?.servers ??
       this.admissionServers.map((pin) => ({
@@ -180,6 +229,10 @@ export class HostedMcpSession {
         state: 'enabled' as const,
       }))
     );
+  }
+
+  get managementRevision(): number {
+    return this.settings?.revision ?? 0;
   }
 
   private enabled(serverId: string): boolean {
@@ -260,11 +313,102 @@ export class HostedMcpSession {
     signal?.throwIfAborted();
     if (this.configuring.size)
       throw new HostedMcpConflictError('MCP configuration is in progress.');
-    this.ready ??= this.initialize(signal).catch((cause: unknown) => {
+    this.ready ??= (
+      this.extensionServers
+        ? this.installExtensionServers(
+            this.extensionServers,
+            `extension-load-${digest(this.extensionServers).slice(0, 24)}`,
+            signal,
+          )
+        : this.initialize(signal)
+    ).catch((cause: unknown) => {
       this.ready = undefined;
       throw cause;
     });
     await waitForTurn(this.ready, signal);
+  }
+
+  async drainForExtensionConfiguration(
+    servers: readonly HostedMcpServerPin[],
+    forceServerId?: string,
+  ): Promise<void> {
+    await this.reconcileEffects();
+    const changed = this.configurations().filter(
+      (entry) =>
+        entry.releaseState !== 'released' &&
+        (entry.serverId === forceServerId ||
+          !servers.some(
+            (pin) =>
+              pin.serverId === entry.serverId &&
+              pin.serverRevision === entry.serverRevision &&
+              pin.definitionDigest === entry.run.definition?.definitionDigest,
+          )),
+    );
+    await this.drainConfigurations(changed);
+    for (const entry of changed) {
+      const latest = this.configurations().find(
+        (value) => value.configurationId === entry.configurationId,
+      )!;
+      if (latest.releaseState !== 'released')
+        await this.commitConfiguration({ ...latest, releaseState: 'released' });
+      this.catalogs.delete(entry.serverId);
+      for (const [key, binding] of this.bindings)
+        if (binding.configuration.serverId === entry.serverId)
+          this.bindings.delete(key);
+    }
+    this.extensionServers = servers;
+    this.settings = undefined;
+  }
+
+  async enableExtensionConfiguration(
+    servers: readonly HostedMcpServerPin[],
+    operationId: string,
+  ): Promise<void> {
+    this.extensionServers = servers;
+    this.settings = undefined;
+    await this.installExtensionServers(servers, operationId);
+    this.ready = Promise.resolve();
+  }
+
+  private async installExtensionServers(
+    servers: readonly HostedMcpServerPin[],
+    operationId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    for (const pin of servers) {
+      const matching = this.configurations()
+        .filter(
+          (entry) =>
+            entry.serverId === pin.serverId &&
+            entry.serverRevision === pin.serverRevision &&
+            entry.run.definition?.definitionDigest === pin.definitionDigest &&
+            entry.releaseState === 'active' &&
+            entry.run.state === 'settled',
+        )
+        .at(-1);
+      if (matching) {
+        if (
+          this.catalogs.get(pin.serverId)?.configuration.configurationId !==
+          matching.configurationId
+        )
+          await this.install(pin, matching, undefined, undefined, signal);
+        continue;
+      }
+      const id = `extension-mcp-${digest([operationId, pin.serverId]).slice(0, 48)}`;
+      const previous = this.session.authority.extensionRecord(
+        'mcp_configuration',
+        id,
+      );
+      const revision = previous
+        ? parseMcpConfiguration(previous.record).configRevision - 1
+        : Math.max(
+            0,
+            ...this.configurations()
+              .filter((entry) => entry.serverId === pin.serverId)
+              .map((entry) => entry.configRevision),
+          );
+      await this.configure(id, pin, revision, signal);
+    }
   }
 
   async refresh(signal?: AbortSignal): Promise<void> {
@@ -461,6 +605,34 @@ export class HostedMcpSession {
     signal?.throwIfAborted();
     let configuration: McpConfiguration;
     let operation: ManagedMcpOperationView;
+    if (
+      previous?.releaseState === 'drained' ||
+      previous?.releaseState === 'released'
+    ) {
+      // A non-terminal close leaves the row 'drained', a resting state nothing
+      // else consumes; the journal's one legal exit is 'released' and nothing
+      // admits released->active (R15-1). So start a FRESH row under the SAME
+      // runtimeSessionId rather than reopening: advance a drained predecessor to
+      // released first, then reinstall. A 'released' predecessor is a prior
+      // cycle's advance — the extension path resolves the deterministic id back
+      // to it on the NEXT reload, so it must also reinstall fresh instead of
+      // aborting (R16 fix-induced), exactly as initialize() neutralises a
+      // released previous. The fresh active row keeps the owner id the reload
+      // derives; only marking every row released with nothing active left would
+      // strand the deterministic owner.
+      if (previous.releaseState === 'drained')
+        await this.commitConfiguration({
+          ...previous,
+          releaseState: 'released',
+        });
+      // Past every existing row for this server so the fresh row supersedes them
+      // all (a prior cycle may have left a higher-revision random row behind).
+      configRevision =
+        this.configurations()
+          .filter((entry) => entry.serverId === pin.serverId)
+          .reduce((max, entry) => Math.max(max, entry.configRevision), 0) + 1;
+      previous = undefined;
+    }
     if (previous) {
       if (previous.releaseState !== 'active')
         throw new HostedMcpRecoveryRequiredError();
@@ -602,6 +774,22 @@ export class HostedMcpSession {
       configuration,
       catalog,
     });
+    // A non-terminal close drains EVERY row of the session, but only the latest
+    // per server is reinstalled, so superseded siblings would linger 'drained'
+    // and hold recoveryBlocked (and block mountHandback) forever (R16-1). Now
+    // that the replacing active row under this owner is committed, advance the
+    // remaining same-owner drained rows to released — they are already drained,
+    // so no mcp-release dispatch is owed. Superseded rows under OTHER owners are
+    // the discard-leak case, handled at cold load (releaseSupersededDrained).
+    for (const entry of this.configurations()) {
+      if (
+        entry.serverId === pin.serverId &&
+        entry.runtimeSessionId === this.broker.runtimeSessionId &&
+        entry.releaseState === 'drained' &&
+        entry.configurationId !== configuration.configurationId
+      )
+        await this.commitConfiguration({ ...entry, releaseState: 'released' });
+    }
   }
 
   getCatalogs(): readonly ManagedMcpCatalog[] {
@@ -664,7 +852,7 @@ export class HostedMcpSession {
     for (const { catalog, configuration } of this.bindings.values()) {
       if (
         !this.enabled(catalog.serverId) ||
-        (this.settings &&
+        ((this.settings || this.extensionServers !== undefined) &&
           parseMcpConfiguration(
             this.session.authority.extensionRecord(
               'mcp_configuration',
@@ -889,9 +1077,9 @@ export class HostedMcpSession {
     );
   }
 
-  async close(): Promise<void> {
+  async close(opts: { terminal?: boolean } = {}): Promise<void> {
     await this.reconcileEffects();
-    await this.closeResources();
+    await this.closeResources(opts);
   }
 
   async reconcileEffects(): Promise<void> {
@@ -947,7 +1135,11 @@ export class HostedMcpSession {
     }
   }
 
-  async closeResources(): Promise<void> {
+  async closeResources(opts: { terminal?: boolean } = {}): Promise<void> {
+    // The rule lives on the owner, not the call site (R14-1): every non-delete
+    // close defaults to non-terminal, and only DELETE opts into the terminal
+    // release that persists a RELEASED tombstone.
+    const terminal = opts.terminal ?? false;
     if (
       this.hasPendingOperations() ||
       this.configurations().some(
@@ -988,6 +1180,29 @@ export class HostedMcpSession {
       await this.acquireOwner();
     }
     await this.drainConfigurations(configurations);
+    if (!terminal) {
+      // A detach hands the mount back but keeps the owner re-acquirable
+      // (R14-1): a terminal release would persist a RELEASED tombstone under
+      // the id the next load recomputes, wedging every later acquire. The
+      // drained configurations stay short of `released` on purpose — the
+      // reload derives this owner's id from the configurations that are not
+      // `released`, so marking them released would recompute a different id
+      // and strand the deterministic owner. The handback sweeps nothing, so
+      // live or unproven work refuses it; name that as recovery-required the
+      // way the pending-operation check above does (R14-2).
+      const claim = this.broker.mountClaim();
+      if (claim !== undefined) {
+        try {
+          await this.broker.releaseMount(claim);
+        } catch (cause) {
+          if (!fencedMountHandback(cause)) throw cause;
+          throw new HostedMcpRecoveryRequiredError();
+        }
+      }
+      this.acquired = false;
+      this.ownerReady = false;
+      return;
+    }
     await this.broker.release();
     await this.markReleased(configurations);
   }

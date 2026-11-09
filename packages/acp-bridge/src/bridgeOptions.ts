@@ -352,6 +352,12 @@ export interface BridgeOptions {
    */
   eventRingSize?: number;
   /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Defaults to 8 MiB. Must be a positive safe integer up to 256 MiB;
+   * there is no unlimited sentinel.
+   */
+  eventRingMaxBytes?: number;
+  /**
    * Per-session cap, in serialized bytes, for the in-memory compacted replay
    * snapshot returned by `session/load` late attach. This bounds daemon heap
    * retained for historical replay; the current unfinished live turn remains in
@@ -709,6 +715,8 @@ export interface BridgeOptions {
   onChannelDelivery?: ChannelDeliveryHandler;
   /** Resolves ancestor workflow trust from the owning daemon runtime. */
   onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler;
+  /** Live owner authorization, read immediately before forwarding a prompt. */
+  isWorkflowModeWriteAllowed?: (sessionId: string) => boolean;
 }
 
 /**

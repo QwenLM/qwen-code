@@ -48,6 +48,11 @@ import type {
   ManagedMonitorControl,
   ManagedMonitorOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
 import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedWorkspaceBrokerOptions {
@@ -116,6 +121,37 @@ export function isTerminalUnknownRejection(
   );
 }
 
+/**
+ * The release-mount handback sweeps nothing (unlike the drain release), so it
+ * refuses while any work is still live or unproven — background processes
+ * included. Those refusals are the handback's "keep it attached, retry once it
+ * settles" fence (R14-2): an owner closing non-terminally names them as
+ * recovery-required instead of letting a raw rejection escape as a generic
+ * close failure. The codes are the documented release-mount refusals
+ * (docs/design/workspace-execution-mount-recovery-block-release.md). The 503
+ * reconciliation answer joins them (R15-2): a Broker that restarted beside the
+ * Harness holds no resident Session Context, so it proves nothing was handed
+ * back — name it recovery-required (attached/retryable), exactly as the close's
+ * held-Runtime drain already tolerates it, never read it as a successful handback.
+ * The 409 admission_closed joins them (R15-2): a close, archive or delete racing
+ * the handback owns the mount release through its own drain, so the detach backs
+ * off attached/retryable instead of escaping as a generic close failure.
+ */
+export function fencedMountHandback(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      (cause.code === 'runtime_session_busy' ||
+        cause.code === 'runtime_session_conflict' ||
+        cause.code === 'workspace_writer_unproven' ||
+        cause.code === 'runtime_admission_closed')) ||
+      (cause.status === 503 &&
+        cause.code === 'runtime_reconciliation_required'))
+  );
+}
+
 /** A recovery read asked the original Runtime once and still could not prove
  * whether the command committed. The caller reports the execution as unknown
  * and re-checks later; it must never dispatch the command again. */
@@ -126,9 +162,12 @@ export class HostedWorkspaceBrokerExecutionUnresolved extends Error {
 }
 
 export class HostedWorkspaceBroker {
+  private extensionBinding?: { runtimeBindingId: string; generation: string };
   private readonly baseUrl: URL;
   private leaseAcquired = false;
   private capability?: string;
+  private capabilityResolution?: Promise<void>;
+  provisionerKind?: string;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -141,6 +180,10 @@ export class HostedWorkspaceBroker {
 
   get runtimeSessionId(): string {
     return this.identity.runtimeSessionId;
+  }
+
+  get harnessSessionId(): string {
+    return this.identity.harnessSessionId;
   }
 
   get acquired(): boolean {
@@ -209,6 +252,19 @@ export class HostedWorkspaceBroker {
   async warm(): Promise<void> {
     const response = await this.harnessRequest('/runtimes:warm', {});
     if (response['runtime'] !== undefined) this.readRuntime(response);
+  }
+
+  async resolveCapabilities(): Promise<void> {
+    if (this.capability !== undefined) return;
+    await (this.capabilityResolution ??= this.harnessRequest(
+      '/runtimes:capabilities',
+      {},
+    )
+      .then((response) => this.readRuntime(response))
+      .catch((cause: unknown) => {
+        this.capabilityResolution = undefined;
+        throw cause;
+      }));
   }
 
   async mcpDefinitions(
@@ -281,6 +337,10 @@ export class HostedWorkspaceBroker {
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST &&
         !(
           scope['capabilityDigest'] === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
           scope['isolationClass'] === 'workspace'
@@ -308,6 +368,13 @@ export class HostedWorkspaceBroker {
         generation,
         workspaceGeneration,
       };
+      if (
+        binding['provisionerKind'] !== undefined &&
+        (typeof binding['provisionerKind'] !== 'string' ||
+          binding['provisionerKind'].length === 0)
+      )
+        throw new Error('Runtime Broker provider is invalid.');
+      this.provisionerKind = binding['provisionerKind'] as string | undefined;
     }
   }
 
@@ -574,9 +641,12 @@ export class HostedWorkspaceBroker {
       } catch (error) {
         if (
           error instanceof HostedWorkspaceBrokerRejection &&
-          error.status === 409 &&
-          (error.code === 'runtime_idempotency_conflict' ||
-            error.code === 'runtime_execution_conflict')
+          ((error.status === 409 &&
+            (error.code === 'runtime_idempotency_conflict' ||
+              error.code === 'runtime_execution_conflict')) ||
+            // A payload the Broker refused to parse never became an
+            // invocation, so no poll can turn it into a reply.
+            (error.status === 400 && error.code === 'runtime_payload_invalid'))
         )
           throw error;
         // A lost start reply is not permission to start another invocation.
@@ -730,6 +800,59 @@ export class HostedWorkspaceBroker {
     )
       throw new Error('Runtime Hook response identity is invalid.');
     return result as unknown as ManagedHookOperationView;
+  }
+
+  async extensionControl(
+    operation: ManagedExtensionRuntimeControl,
+  ): Promise<Record<string, unknown>> {
+    const envelope = await this.request(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/extensions/control`,
+      {
+        operation,
+        ...(this.extensionBinding
+          ? {
+              expectedRuntimeBindingId: this.extensionBinding.runtimeBindingId,
+              expectedRuntimeGeneration: this.extensionBinding.generation,
+            }
+          : {}),
+      },
+      true,
+      8 * 1024 * 1024,
+    );
+    this.readRuntime(envelope);
+    this.extensionBinding = {
+      runtimeBindingId: this.runtime!.bindingId,
+      generation: this.runtime!.generation,
+    };
+    const result = object(envelope['result']);
+    if (result['operationId'] !== operation.operationId)
+      throw new Error('Runtime extension response identity is invalid.');
+    return result;
+  }
+
+  async extensionCommand(
+    operation: import('@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js').ManagedExtensionCommandControl,
+  ): Promise<Record<string, unknown>> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !== operation.operationId ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime extension command response is invalid.');
+    return result;
+  }
+
+  expectExtensionRuntime(expected: {
+    runtimeBindingId: string;
+    generation: string;
+  }): void {
+    this.extensionBinding = expected;
   }
 
   /**
@@ -1036,6 +1159,7 @@ export class HostedWorkspaceBroker {
     path: string,
     body?: Record<string, unknown>,
     harnessScoped = false,
+    maximumResponseBytes = 2 * 1024 * 1024,
   ): Promise<Record<string, unknown>> {
     const url = new URL(`/internal/runtime-broker/v1${path}`, this.baseUrl);
     const fields = {
@@ -1077,7 +1201,7 @@ export class HostedWorkspaceBroker {
         const chunk = await reader.read();
         if (chunk.done) break;
         length += chunk.value.length;
-        if (length > 2 * 1024 * 1024) {
+        if (length > maximumResponseBytes) {
           await reader.cancel();
           throw new Error('Runtime Broker response exceeds its limit.');
         }

@@ -3,8 +3,10 @@
  * Analyze failed CI logs and render failure details.
  *
  * main-ci-failure-issue.yml consumes only `analyze` and `comment`: extracted
- * tests populate the failure summary, while the workflow aggregates issues
- * by workflow identity rather than by test or commit signatures.
+ * tests populate the failure summary, and the workflow routes on them — a run
+ * that names failing tests files or reuses a per-signature issue (matched by
+ * the `title` and `searchMarkers` emitted here), while a run without any test
+ * identity shares the workflow's aggregate issue.
  *
  * The legacy `plan`/title/body-renderer pipeline has no shipped caller and is
  * retained for revertability. It places a `qwen-main-ci-failure-test:<key>`
@@ -403,10 +405,16 @@ function cappedTestLines(tests) {
 
 export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
   const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
-  const failedJobs = jobs.filter((job) => job.conclusion === 'failure');
-  const coverage = failedJobs.length
-    ? `${analysis.logCount} of ${failedJobs.length} failed-job logs${analysis.logCount === failedJobs.length ? '' : ' (incomplete coverage)'}.`
-    : `${analysis.logCount}; failed-job entries empty or unavailable.`;
+  // A job that hit its execution cap concludes `cancelled`, not `failure`;
+  // keep it so a timed-out leg is named in the report (#16272, #16214). The
+  // coverage denominator counts the same jobs the body names below it.
+  const namedJobs = jobs.filter((job) =>
+    ['failure', 'cancelled'].includes(job.conclusion),
+  );
+  const logCount = analysis.logCount ?? 0;
+  const coverage = namedJobs.length
+    ? `${logCount} of ${namedJobs.length} failed-job logs${logCount === namedJobs.length ? '' : ' (incomplete coverage)'}.`
+    : `${logCount}; failed-job entries empty or unavailable.`;
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
     `### ${code(analysis.workflow)} failed`,
@@ -415,7 +423,7 @@ export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
     '',
     `- Job logs analyzed: ${coverage}`,
     '',
-    ...failedJobs.map((job) => {
+    ...namedJobs.map((job) => {
       const steps = (job.steps ?? [])
         .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
         .map((step) => code(step.name));

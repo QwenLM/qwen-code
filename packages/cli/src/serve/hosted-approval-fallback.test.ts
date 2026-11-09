@@ -131,6 +131,10 @@ it.each([
         'capabilityDigest',
         'get',
       ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = {
@@ -332,6 +336,7 @@ function approvalSelectionFixture(
       'first',
       {
         requestId: 'first',
+        kind: 'permission',
         inputRevision: 1,
         optionsRef: optionsRef('first', 'call-first', 3),
       },
@@ -340,6 +345,7 @@ function approvalSelectionFixture(
       'legacy',
       {
         requestId: 'legacy',
+        kind: 'permission',
         inputRevision: 1,
         optionsRef: optionsRef('legacy', 'call-legacy', legacyVersion),
       },

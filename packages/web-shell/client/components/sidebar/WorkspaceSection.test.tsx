@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WorkspaceSessionStats } from './workspaceOverviewModel';
+import type { SessionTreeRenderOptions } from './sessionTree';
 
 const {
   workspaceGit,
@@ -128,6 +129,7 @@ function renderSection(
     client: DaemonClient;
     reloadToken: number;
     expanded: boolean;
+    temporarilyCollapsed: boolean;
     sourceType: string;
     channelGroupingEnabled: boolean;
     organizationEnabled: boolean;
@@ -144,11 +146,17 @@ function renderSection(
     sessionStats: WorkspaceSessionStats | null;
     renderSessions: boolean;
     excludePinned: boolean;
+    limitSessions: boolean;
+    editingSessionId: string;
     searchQuery: string;
     gitBranchWanted: boolean;
+    untitledSessionLabel: string;
     renderSession: (
       session: DaemonSessionSummary,
-      options?: { searchSnippet?: string | undefined },
+      options?: {
+        searchSnippet?: string | undefined;
+        tree?: SessionTreeRenderOptions;
+      },
     ) => ReactNode;
     onOpenPathLocally: (cwd: string) => Promise<void>;
     onOpenTerminalLocally: (cwd: string) => Promise<void>;
@@ -164,11 +172,13 @@ function renderSection(
           client={overrides.client ?? makeClient()}
           reloadToken={overrides.reloadToken ?? 0}
           expanded={overrides.expanded}
+          temporarilyCollapsed={overrides.temporarilyCollapsed}
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
+          untitledSessionLabel={overrides.untitledSessionLabel}
           organizationEnabled={overrides.organizationEnabled ?? false}
           sessionCatalogRequestsEnabled={
             overrides.sessionCatalogRequestsEnabled
@@ -176,6 +186,8 @@ function renderSection(
           sessionGroupCatalog={overrides.sessionGroupCatalog}
           sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
           excludePinned={overrides.excludePinned}
+          limitSessions={overrides.limitSessions}
+          editingSessionId={overrides.editingSessionId}
           searchQuery={overrides.searchQuery}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
@@ -308,6 +320,41 @@ describe('WorkspaceSection label', () => {
 
     expect(container.textContent).toContain('Payments API');
     expect(container.textContent).not.toContain('project');
+  });
+
+  it('labels a nameless session instead of showing its id', async () => {
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          displayName: '',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        } as DaemonSessionSummary,
+      ],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+      untitledSessionLabel: 'Untitled session',
+    });
+    await flush();
+
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    if (!row) throw new Error('read-only row was not rendered');
+    expect(row.textContent).toBe('Untitled session');
+    expect(row.textContent).not.toContain('550e8400');
+    // The visible text drops the id; the accessible name keeps it so two
+    // untitled read-only rows are not announced identically.
+    expect(row.getAttribute('aria-label')).toContain('550e8400');
   });
 
   it('shows read-only session details from row hover', async () => {
@@ -1057,11 +1104,93 @@ describe('WorkspaceSection session loading', () => {
     act(() => showAll?.click());
     expect(container.textContent).toContain('Session 6');
 
+    renderSection({ client, expanded: true, temporarilyCollapsed: true });
+    await flush();
+    expect(
+      container
+        .querySelector('button[aria-expanded]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+    expect(
+      container.querySelector<HTMLElement>('[class*="sessions"]')?.style
+        .display,
+    ).toBe('none');
+    expect(container.textContent).toContain('Session 6');
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(
+      container.querySelector<HTMLElement>('[class*="sessions"]')?.style
+        .display,
+    ).not.toBe('none');
+    expect(container.textContent).toContain('Session 6');
+
     renderSection({ client, expanded: false });
     await flush();
     renderSection({ client, expanded: true });
     await flush();
     expect(container.textContent).not.toContain('Session 6');
+  });
+
+  it('keeps the edited row mounted when a refresh reorders it past the preview', async () => {
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    })) as DaemonSessionSummary[];
+    const makeSessionClient = (ordered: DaemonSessionSummary[]) =>
+      ({
+        workspaceByCwd: vi.fn(() => ({
+          workspaceGit,
+          listWorkspaceSessionsPage: vi
+            .fn()
+            .mockResolvedValue({ sessions: ordered }),
+          listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+        })),
+      }) as unknown as DaemonClient;
+    const renderSession = (session: DaemonSessionSummary) =>
+      session.sessionId === 'session-5' ? (
+        <input
+          key={session.sessionId}
+          data-testid="rename-draft"
+          defaultValue="typed draft"
+        />
+      ) : (
+        <div key={session.sessionId}>{session.displayName}</div>
+      );
+
+    renderSection({
+      client: makeSessionClient(sessions),
+      expanded: true,
+      editingSessionId: 'session-5',
+      renderSession,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="rename-draft"]'),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain('Session 6');
+
+    // Another session's activity moves ahead of the edited row, pushing it
+    // past the five-row preview on the next catalog refresh.
+    renderSection({
+      client: makeSessionClient([
+        sessions[5]!,
+        sessions[0]!,
+        sessions[1]!,
+        sessions[2]!,
+        sessions[3]!,
+        sessions[4]!,
+      ]),
+      expanded: true,
+      editingSessionId: 'session-5',
+      renderSession,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Session 6');
+    expect(
+      container.querySelector('[data-testid="rename-draft"]'),
+    ).not.toBeNull();
   });
 
   it('refreshes the catalog when an expanded workspace loses trust', async () => {
@@ -2533,5 +2662,201 @@ describe('WorkspaceSection overview plumbing', () => {
     await flush();
     await openDetailsDialog();
     expect(sessionCount('Total')).toBe('3+');
+  });
+});
+
+describe('WorkspaceSection session tree', () => {
+  function treeClient(sessions: DaemonSessionSummary[]): DaemonClient {
+    return {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+  }
+
+  function treeRow(
+    session: DaemonSessionSummary,
+    options?: {
+      searchSnippet?: string | undefined;
+      tree?: SessionTreeRenderOptions;
+    },
+  ): ReactNode {
+    const tree = options?.tree;
+    return (
+      <div
+        key={session.sessionId}
+        data-session-id={session.sessionId}
+        data-tree-depth={tree?.depth}
+        data-tree-children={tree?.childCount}
+      >
+        {session.displayName}
+        {tree && tree.childCount > 0 ? (
+          <button
+            type="button"
+            aria-label={`toggle ${session.sessionId}`}
+            aria-expanded={tree.expanded}
+            onClick={tree.onToggle}
+          >
+            toggle
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  const parent: DaemonSessionSummary = {
+    sessionId: 'parent',
+    displayName: 'Parent session',
+    sourceType: 'default',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+  } as DaemonSessionSummary;
+  const child: DaemonSessionSummary = {
+    sessionId: 'child',
+    displayName: 'Derived session',
+    parentSessionId: 'parent',
+    sourceType: 'default',
+    updatedAt: '2026-01-03T00:00:00.000Z',
+  } as DaemonSessionSummary;
+
+  it('renders a derived session under its collapsed parent', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Parent session');
+    expect(container.textContent).not.toContain('Derived session');
+    const toggle = container.querySelector<HTMLElement>(
+      '[aria-label="toggle parent"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container
+        .querySelector('[data-session-id="parent"]')
+        ?.getAttribute('data-tree-children'),
+    ).toBe('1');
+  });
+
+  it('reveals the derived session after expanding and remembers it', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[aria-label="toggle parent"]')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain('Derived session');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('1');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.session-tree-expanded:primary',
+      ),
+    ).toContain('parent');
+  });
+
+  it('keeps a matched derived session visible when only it matches', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      searchQuery: 'Derived',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Derived session');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('0');
+  });
+
+  it('expands a parent that also matches the search', async () => {
+    const matchingParent = { ...parent, displayName: 'Derived parent' };
+    const matchingChild = { ...child, displayName: 'Derived child' };
+    renderSection({
+      client: treeClient([matchingParent, matchingChild]),
+      expanded: true,
+      sourceType: 'default',
+      searchQuery: 'Derived',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Derived child');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('1');
+  });
+
+  it('keeps a derived session of a pinned-away parent visible', async () => {
+    const pinnedParent = {
+      ...parent,
+      sessionId: 'pinned-parent',
+      displayName: 'Pinned parent',
+      isPinned: true,
+    } as DaemonSessionSummary;
+    const pinnedChild = {
+      ...child,
+      sessionId: 'pinned-child',
+      displayName: 'Pinned parent child',
+      parentSessionId: 'pinned-parent',
+    } as DaemonSessionSummary;
+    renderSection({
+      client: treeClient([pinnedParent, pinnedChild]),
+      expanded: true,
+      sourceType: 'default',
+      excludePinned: true,
+      renderSession: treeRow,
+    });
+    await flush();
+
+    // The project list lifts the pinned parent out, so the child keeps a flat
+    // row instead of being stranded behind a row this list does not render.
+    expect(container.textContent).toContain('Pinned parent child');
+    expect(
+      container
+        .querySelector('[data-session-id="pinned-child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('0');
+  });
+
+  it('counts a collapsed parent as one preview row', async () => {
+    const others = Array.from({ length: 4 }, (_, index) => ({
+      sessionId: `other-${index}`,
+      displayName: `Other ${index}`,
+      sourceType: 'default',
+      updatedAt: `2026-01-0${index + 4}T00:00:00.000Z`,
+    })) as DaemonSessionSummary[];
+    renderSection({
+      client: treeClient([parent, child, ...others]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).not.toContain('Derived session');
+    expect(container.textContent).not.toContain('Show all');
   });
 });

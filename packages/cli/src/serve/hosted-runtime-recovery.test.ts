@@ -22,6 +22,7 @@ import {
   settleParkedTurnCancelled,
   answerCommittedTurnCalls,
   recoverHostedRuntimeTurn,
+  HostedRecoveryQuiescingError,
   RecoveryDeclined,
   settleInterruptedTurnRuntime,
   type HostedRecoveryTurn,
@@ -45,6 +46,10 @@ import { hostedPromptKey } from './hosted-member-chain.js';
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { HOSTED_TOOL_APPROVAL_POLICY } from './hosted-tool-approval.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import {
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
@@ -133,6 +138,7 @@ describe('recoverHostedRuntimeTurn', () => {
     withIntent = true,
     extraExecutionId?: string,
     runtimeSessionId = PROMPT_ID,
+    readFileInput?: { file_path: string; pages?: string },
   ): Promise<ManagedSession> {
     const session = await open(
       'boot-1',
@@ -189,7 +195,12 @@ describe('recoverHostedRuntimeTurn', () => {
             input:
               toolName === 'glob'
                 ? { pattern: '**/*.ts' }
-                : { file_path: `${ordinal}.txt`, content: 'x' },
+                : toolName === 'read_file'
+                  ? (readFileInput ?? {
+                      file_path: `${ordinal}.pdf`,
+                      pages: '1-3',
+                    })
+                  : { file_path: `${ordinal}.txt`, content: 'x' },
           }),
         }),
       );
@@ -660,7 +671,7 @@ describe('recoverHostedRuntimeTurn', () => {
     await harness.commitDurableWait(
       {
         requestId: ACTION_ID,
-        kind: 'execute',
+        kind: 'permission',
         source: 'tool_call',
         optionsRef: await session.resources.publish(
           'managed-action-options',
@@ -1635,6 +1646,48 @@ describe('recoverHostedRuntimeTurn', () => {
       await replacement.close();
     }
   });
+
+  it.each([false, true])(
+    'keeps quiescing recovery retryable without executing tools (lease already held: %s)',
+    async (leaseAlreadyHeld) => {
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+      const replacement = await open('boot-2', false);
+      try {
+        const checkpoint =
+          await replacement.authority.harnessRunAuthorization();
+        const sequence = replacement.authority.committedSequence;
+        const cause = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+          canStart: () => false,
+          leaseAlreadyHeld,
+        }).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(cause).toBeInstanceOf(HostedRecoveryQuiescingError);
+        expect(cause).not.toBeInstanceOf(RecoveryDeclined);
+        expect(cause).toHaveProperty('message', 'The Harness is quiescing.');
+        expect(execute).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(leaseAlreadyHeld ? 0 : 1);
+        expect(replacement.authority.committedSequence).toBe(sequence);
+        expect(await replacement.authority.harnessRunAuthorization()).toEqual(
+          checkpoint,
+        );
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('declines to re-dispatch a parked execution whose intent is missing', async () => {
     // No tool.intent: the recovery cannot rebuild the original arguments, so
@@ -2741,15 +2794,40 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it.each(['write_file', 'read_file', 'glob'])(
-    'bounds an oversized recovered %s output without replaying it again',
-    async (toolName) => {
-      await parkAtAwaitRuntime(toolName);
+  it.each([
+    { toolName: 'write_file', resident: false },
+    { toolName: 'read_file', resident: false },
+    { toolName: 'read_file', resident: true },
+    { toolName: 'glob', resident: false },
+  ])(
+    'bounds an oversized recovered $toolName output without replaying it again (resident=$resident)',
+    async ({ toolName, resident }) => {
+      const readFileInput = resident
+        ? { file_path: '0.txt' }
+        : { file_path: '0.pdf', pages: '1-3' };
+      await parkAtAwaitRuntime(
+        toolName,
+        false,
+        false,
+        true,
+        undefined,
+        PROMPT_ID,
+        readFileInput,
+      );
       const paths = Array.from(
         { length: 100 },
         (_, index) => 'nested/'.repeat(120) + `file-${index}.ts`,
       );
       vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(
+        resident
+          ? RESIDENT_WORKSPACE_CAPABILITY_DIGEST
+          : WORKSPACE_CAPABILITY_DIGEST,
+      );
       const execute = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'execute')
         .mockResolvedValue({
@@ -2807,8 +2885,18 @@ describe('recoverHostedRuntimeTurn', () => {
           expect(JSON.stringify(response)).not.toContain(
             'Narrow the pattern or path.',
           );
-          if (toolName === 'read_file')
-            expect(JSON.stringify(response)).toContain('offset/limit');
+          if (toolName === 'read_file') {
+            expect(JSON.parse(execute.mock.calls[0][1])).toEqual({
+              toolName: 'read_file',
+              input: readFileInput,
+            });
+            expect(response?.['error']).toContain('offset/limit range');
+            if (resident) {
+              expect(response?.['error']).not.toContain('pages');
+            } else {
+              expect(response?.['error']).toContain('pages range for PDFs');
+            }
+          }
         }
       } finally {
         await replacement.close();

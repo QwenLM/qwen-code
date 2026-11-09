@@ -28,7 +28,13 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import { clearCommand } from '../commands/clearCommand.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { rewindCommand } from '../commands/rewindCommand.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
@@ -56,6 +62,14 @@ const {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
+  },
+}));
+
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
   },
 }));
 
@@ -164,6 +178,56 @@ function createTestCommandPath(path: string): SlashCommand {
 }
 
 describe('useSlashCommandProcessor', () => {
+  it.each(['rewind', 'rollback'])(
+    'marks only the real registry-cloned builtin /%s as slash-origin rewind',
+    async (invocation) => {
+      const actual = await vi.importActual<
+        typeof import('../../services/BuiltinCommandLoader.js')
+      >('../../services/BuiltinCommandLoader.js');
+      const loaderConfig = makeFakeConfig({});
+      vi.spyOn(loaderConfig, 'isInteractive').mockReturnValue(false);
+      const definitions = await new actual.BuiltinCommandLoader(
+        loaderConfig,
+      ).loadCommands(new AbortController().signal);
+      const result = setupProcessorHook(
+        definitions.filter((command) => command.name === 'rewind'),
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      const registered = result.current.slashCommands[0];
+      expect(registered).not.toBe(rewindCommand);
+      expect(registered?.action).toBe(rewindCommand.action);
+      await act(async () => {
+        await result.current.handleSlashCommand(`/${invocation}`);
+      });
+      expect(mockOpenRewindSelector).toHaveBeenCalledExactlyOnceWith(
+        'slash-command',
+      );
+    },
+  );
+
+  it.each([CommandKind.FILE, CommandKind.BUILT_IN])(
+    'does not grant builtin rewind origin to a same-name replacement of kind %s',
+    async (kind) => {
+      const replacement = createTestCommand(
+        {
+          name: 'rewind',
+          action: async () => ({ type: 'dialog', dialog: 'rewind' }),
+        },
+        kind,
+      );
+      const result = setupProcessorHook([rewindCommand], [replacement]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      expect(result.current.slashCommands[0]?.action).not.toBe(
+        rewindCommand.action,
+      );
+      await act(async () => {
+        await result.current.handleSlashCommand('/rewind');
+      });
+      expect(mockOpenRewindSelector).toHaveBeenCalledOnce();
+      expect(mockOpenRewindSelector).not.toHaveBeenCalledWith('slash-command');
+    },
+  );
+
   const mockAddItem = vi.fn();
   const mockUpdateItem = vi.fn();
   const mockClearItems = vi.fn();
@@ -175,6 +239,7 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenModelDialog = vi.fn();
   const mockOpenOutputStyleDialog = vi.fn();
   const mockOpenHelpDialog = vi.fn();
+  const mockOpenRewindSelector = vi.fn();
   const mockSetQuittingMessages = vi.fn();
   const mockClearPendingState = vi.fn();
 
@@ -213,12 +278,13 @@ describe('useSlashCommandProcessor', () => {
     openExtensionsManagerDialog: vi.fn(),
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
-    openRewindSelector: vi.fn(),
+    openRewindSelector: mockOpenRewindSelector,
     clearPendingState: mockClearPendingState,
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    isSubscriptionSignedIn.mockReturnValue(false);
     let nextHistoryItemId = 1;
     mockAddItem.mockImplementation(() => nextHistoryItemId++);
     vi.mocked(BuiltinCommandLoader).mockClear();
@@ -283,6 +349,312 @@ describe('useSlashCommandProcessor', () => {
 
     return result;
   };
+
+  it('removes subscription commands from presentation and manual dispatch for non-subscription auth', async () => {
+    const authType = vi
+      .spyOn(mockConfig, 'getAuthType')
+      .mockReturnValue(undefined);
+    try {
+      const result = setupProcessorHook([
+        logoutCommand,
+        upgradeCommand,
+        helpCommand,
+      ]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      expect(result.current.slashCommands[0]?.name).toBe('help');
+
+      for (const command of [logoutCommand, upgradeCommand]) {
+        await act(async () => {
+          expect(
+            await result.current.handleSlashCommand(`/${command.name}`),
+          ).toEqual({ type: 'handled' });
+        });
+        expect(mockAddItem).toHaveBeenLastCalledWith(
+          {
+            type: MessageType.ERROR,
+            text: `Unknown command: /${command.name}`,
+          },
+          expect.any(Number),
+        );
+      }
+      expect(mockOpenAuthDialog).not.toHaveBeenCalled();
+    } finally {
+      authType.mockRestore();
+    }
+  });
+
+  it('updates subscription command dispatch when auth changes without changing the model', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    let authType = AuthType.QWEN_SUBSCRIPTION;
+    let notify: (model: string) => void = () => {};
+    const auth = vi
+      .spyOn(mockConfig, 'getAuthType')
+      .mockImplementation(() => authType);
+    const subscription = vi
+      .spyOn(mockConfig, 'onModelChange')
+      .mockImplementation((listener) => {
+        notify = listener;
+        return () => {};
+      });
+    const browser = vi
+      .spyOn(mockConfig, 'isBrowserLaunchSuppressed')
+      .mockReturnValue(true);
+    try {
+      const result = setupProcessorHook(
+        [logoutCommand, upgradeCommand, helpCommand],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(3));
+      await act(async () => {
+        await result.current.handleSlashCommand('/logout');
+      });
+      expect(mockAddItem).toHaveBeenLastCalledWith(
+        {
+          type: MessageType.WARNING,
+          text: 'Wait for the current response to finish before signing out.',
+        },
+        expect.any(Number),
+      );
+
+      act(() => {
+        authType = AuthType.USE_OPENAI;
+        notify('same-model');
+      });
+      expect(
+        result.current.slashCommands.map((command) => command.name),
+      ).toEqual(['help']);
+      for (const name of ['logout', 'upgrade']) {
+        await act(async () => {
+          await result.current.handleSlashCommand(`/${name}`);
+        });
+        expect(mockAddItem).toHaveBeenLastCalledWith(
+          { type: MessageType.ERROR, text: `Unknown command: /${name}` },
+          expect.any(Number),
+        );
+      }
+
+      act(() => {
+        authType = AuthType.QWEN_SUBSCRIPTION;
+        notify('same-model');
+      });
+      expect(result.current.slashCommands).toHaveLength(3);
+      await act(async () => {
+        await result.current.handleSlashCommand('/upgrade');
+      });
+      expect(mockAddItem).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Qwen subscription plans:'),
+        }),
+        expect.any(Number),
+      );
+    } finally {
+      auth.mockRestore();
+      subscription.mockRestore();
+      browser.mockRestore();
+    }
+  });
+
+  it.each(['logout', 'upgrade'])(
+    'preserves a custom /%s command with non-subscription auth',
+    async (name) => {
+      const action = vi.fn();
+      const command = createTestCommand({ name, action }, CommandKind.FILE);
+      const result = setupProcessorHook(
+        [logoutCommand, upgradeCommand],
+        [command],
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      await act(async () => {
+        await result.current.handleSlashCommand(`/${name}`);
+      });
+      expect(action).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    ['direct builtin restore', 'restore', CommandKind.BUILT_IN, false, false],
+    ['owned builtin restore', 'restore', CommandKind.BUILT_IN, true, true],
+    ['direct builtin logout', 'logout', CommandKind.BUILT_IN, false, false],
+    ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true],
+    ['same-name logout file command', 'logout', CommandKind.FILE, true, false],
+    ['same-name file command', 'restore', CommandKind.FILE, true, false],
+    ['unrelated builtin', 'other', CommandKind.BUILT_IN, true, false],
+  ] as const)(
+    'scopes the restore/logout submission idle exception: %s',
+    async (_label, name, kind, suppliesOwner, expectedIdle) => {
+      const observedIdle = vi.fn();
+      const isCurrentSubmission = vi.fn(() => true);
+      const command = createTestCommand(
+        {
+          name,
+          action: (context) => {
+            observedIdle(context.ui.isIdleRef.current);
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'scope observed',
+            };
+          },
+        },
+        kind,
+      );
+      const result = setupProcessorHook(
+        kind === CommandKind.BUILT_IN ? [command] : [],
+        kind === CommandKind.FILE ? [command] : [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+      await act(async () => {
+        if (suppliesOwner) {
+          await result.current.handleSlashCommand(
+            `/${name}`,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            isCurrentSubmission,
+          );
+        } else {
+          await result.current.handleSlashCommand(`/${name}`);
+        }
+      });
+      expect(observedIdle).toHaveBeenCalledExactlyOnceWith(expectedIdle);
+      if (expectedIdle) expect(isCurrentSubmission).toHaveBeenCalled();
+      else expect(isCurrentSubmission).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['unchanged', 'changed'] as const)(
+    'keeps command history current across an await when history is %s',
+    async (kind) => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let context: CommandContext | undefined;
+      let before: CommandContext['ui']['history'] = [];
+      let after: CommandContext['ui']['history'] = [];
+      const initial: CommandContext['ui']['history'] = [
+        { id: 10, type: MessageType.INFO, text: 'before-await' },
+      ];
+      const command = createTestCommand({
+        name: 'history-getter',
+        action: async (value) => {
+          context = value;
+          before = value.ui.history;
+          await held;
+          after = value.ui.history;
+          value.ui.addItem(
+            { type: MessageType.INFO, text: 'getter-own-result' },
+            200,
+          );
+        },
+      });
+      mockBuiltinLoadCommands.mockResolvedValue([command]);
+      const hook = renderHook(
+        ({ history }) =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            history,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            true,
+            null,
+            mockUpdateItem,
+          ),
+        { initialProps: { history: initial } },
+      );
+      let pending:
+        | ReturnType<typeof hook.result.current.handleSlashCommand>
+        | undefined;
+      try {
+        await waitFor(() =>
+          expect(
+            hook.result.current.slashCommands.some(
+              (item) => item.name === 'history-getter',
+            ),
+          ).toBe(true),
+        );
+        act(() => {
+          pending = hook.result.current.handleSlashCommand('/history-getter');
+        });
+        await waitFor(() => expect(context).toBeDefined());
+        expect(before).toEqual(initial);
+        const expected =
+          kind === 'changed'
+            ? [
+                ...initial,
+                {
+                  id: 11,
+                  type: MessageType.INFO,
+                  text: 'after-await',
+                } as const,
+              ]
+            : initial;
+        await act(async () => {
+          hook.rerender({ history: expected });
+        });
+        await act(async () => {
+          release();
+          await pending;
+        });
+        const record = vi.mocked(
+          mockConfig.getChatRecordingService()!.recordSlashCommand,
+        );
+        expect(after).toEqual(expected);
+        expect(after.every((item, index) => item === expected[index])).toBe(
+          true,
+        );
+        expect(
+          mockAddItem.mock.calls.filter(
+            ([item]) => item.text === 'getter-own-result',
+          ),
+        ).toHaveLength(1);
+        expect(
+          record.mock.calls.filter(([value]) => value.phase === 'result'),
+        ).toEqual([
+          [
+            {
+              phase: 'result',
+              rawCommand: '/history-getter',
+              outputHistoryItems: [
+                { type: MessageType.INFO, text: 'getter-own-result' },
+              ],
+            },
+          ],
+        ]);
+      } finally {
+        release();
+        await act(async () => {
+          try {
+            await pending;
+          } finally {
+            hook.unmount();
+          }
+        });
+      }
+    },
+  );
 
   describe('Initialization and Command Loading', () => {
     it('retains recovery commands when the Mod loader rejects startup', async () => {

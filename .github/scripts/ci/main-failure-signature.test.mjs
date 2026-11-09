@@ -64,6 +64,75 @@ test('reports failed jobs, steps and tests directly on a PR', () => {
   assert.doesNotMatch(comment, /Windows/);
 });
 
+test('names a timed-out (cancelled) job even when no job concluded failure', () => {
+  // The #16214 incident shape: 1 cancelled, rest success/skipped, 0 failure.
+  // The renderer must still name the timed-out leg, not drop every job.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: '80953e053b40159d',
+      runId: '41743539611',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/41743539611',
+    },
+    jobs: [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        conclusion: 'cancelled',
+        html_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/41743539611/job/9001',
+        steps: [{ name: 'Run E2E tests', conclusion: 'cancelled' }],
+      },
+      { name: 'Build for E2E', conclusion: 'success', steps: [] },
+      { name: 'nightly', conclusion: 'skipped', steps: [] },
+    ],
+  });
+  assert.match(comment, /sandbox:docker.*\/job\/9001/);
+  assert.match(comment, /Run E2E tests/);
+  assert.doesNotMatch(comment, /Build for E2E/);
+  assert.doesNotMatch(comment, /nightly/);
+});
+
+test('admits cancelled jobs but excludes timed_out from the named list and coverage', () => {
+  // Pin the #16280 job filter: only `failure` and `cancelled` conclusions name
+  // a leg. The coverage denominator uses that same list, so a run that names
+  // one timed-out lane never claims its failed-job entries were unavailable.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', logCount: 1, tests: [] },
+    occurrence: {
+      sha: 'a1b2c3d4e5f6a7b8',
+      runId: '41743539612',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/41743539612',
+    },
+    jobs: [
+      {
+        name: 'E2E Test (Linux) - timed out',
+        conclusion: 'cancelled',
+        html_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/41743539612/job/9101',
+        steps: [{ name: 'Run E2E tests', conclusion: 'cancelled' }],
+      },
+      {
+        name: 'E2E Test (Linux) - unsupported conclusion',
+        conclusion: 'timed_out',
+        html_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/41743539612/job/9102',
+        steps: [{ name: 'Run E2E tests', conclusion: 'timed_out' }],
+      },
+      {
+        name: 'Build for E2E',
+        conclusion: 'failure',
+        html_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/41743539612/job/9103',
+        steps: [],
+      },
+    ],
+  });
+  assert.match(comment, /1 of 2 failed-job logs \(incomplete coverage\)\./);
+  assert.match(comment, /timed out.*\/job\/9101/);
+  assert.match(comment, /Build for E2E.*\/job\/9103/);
+  assert.doesNotMatch(comment, /unsupported conclusion|\/job\/9102|timed_out/);
+});
+
 test('keeps contributor text on one line and reports cancelled steps and test overflow', () => {
   const hostile = 'name`\r\n[link](https://example.com)';
   const comment = renderFailureComment({

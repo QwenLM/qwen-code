@@ -1,3 +1,4 @@
+import { requireExtensionSnapshot } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
@@ -15,6 +16,7 @@ import { isManagedApprovalMode } from './managed-agent-provider';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
+import { parseManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import type {
   ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
@@ -38,6 +40,15 @@ export interface JavaManagedAgentProviderOptions
   modelPresets?: readonly ManagedModelPreset[];
   /** Acquire a streaming save target during the user gesture, then call openStream. */
   saveArtifact?: ManagedArtifactSave;
+}
+
+function requireDiagnosticSnapshot<
+  T extends { schemaVersion: 1; sessionId: string },
+>(snapshot: T, sessionId: string): T {
+  if (snapshot?.schemaVersion !== 1 || snapshot.sessionId !== sessionId) {
+    throw new Error('Managed diagnostics identity mismatch');
+  }
+  return snapshot;
 }
 
 type JavaCommandOperation = Awaited<
@@ -112,24 +123,33 @@ export function createJavaManagedAgentProvider(
       approvalMode?: ManagedApprovalMode;
       planMode?: boolean;
       skills?: import('./managed-agent-provider').ManagedSessionSkill[];
+      extensionPins?: import('./managed-extension-types').ManagedExtensionPin[];
+      worktree?: { baseRef?: string };
     },
     command: ManagedAgentCommandOptions,
   ) {
+    const approvalMode = request.approvalMode;
+    if (approvalMode === 'auto')
+      throw new Error('Select Auto after creating the Managed Session.');
     const result = await client.createSession(
       {
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.worktree === undefined
+          ? {}
+          : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
+        ...(request.extensionPins === undefined
+          ? {}
+          : { extensionPins: request.extensionPins }),
         // Without a title the Session list and header fall back to a UUID
         // prefix, unlike the standard shell's prompt-derived title.
         ...(request.text === undefined
           ? {}
           : { title: titleFor(request.text) }),
-        ...(request.approvalMode === undefined
-          ? {}
-          : { approvalMode: request.approvalMode }),
+        ...(approvalMode === undefined ? {} : { approvalMode }),
         ...(request.planMode === undefined
           ? {}
           : { planMode: request.planMode }),
@@ -153,6 +173,17 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    userMessages: {
+      query: (sessionId, options) =>
+        client.queryUserMessages(sessionId, options.signal),
+      command: (sessionId, command, options) =>
+        client.commandUserMessages(
+          sessionId,
+          command,
+          options.idempotencyKey,
+          options.signal,
+        ),
+    },
     lifecycle: {
       submit: (kind, sessionId, command) =>
         client.lifecycleCommand(
@@ -191,12 +222,17 @@ export function createJavaManagedAgentProvider(
         { sessionId, cursor: request.cursor, limit: 100 },
         request.signal,
       ),
+    exportConsistency: 'live',
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
         client.queryWorkspaceFiles(request, command.signal),
       read: (request, command) =>
         client.readWorkspaceFile(request, command.signal),
+      upload: (request, data, command) =>
+        client.uploadWorkspaceFile(request, data, command.signal),
+      queryUpload: (uploadId, command) =>
+        client.queryWorkspaceFileUpload(uploadId, command.signal),
     },
     canCancel: true,
     titleSearch: true,
@@ -246,6 +282,74 @@ export function createJavaManagedAgentProvider(
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
     },
+    extensions: {
+      storageScope: options.productScope?.trim()
+        ? storageKey(options)
+        : undefined,
+      list: (workspaceId, request) =>
+        client.listExtensionPackages(workspaceId, request.signal),
+      publish: (workspaceId, extensionId, digest, manifest, archive, request) =>
+        client.publishExtensionPackage(
+          workspaceId,
+          extensionId,
+          digest,
+          manifest,
+          archive,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      settings: (workspaceId, extensionId, request) =>
+        client.getExtensionSettings(workspaceId, extensionId, request.signal),
+      saveSettings: (workspaceId, extensionId, revision, values, request) =>
+        client.saveExtensionSettings(
+          workspaceId,
+          extensionId,
+          revision,
+          values,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      query: async (sessionId, request) =>
+        requireExtensionSnapshot(
+          await client.queryExtensionConfiguration(
+            sessionId,
+            undefined,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      apply: async (sessionId, selection, request) =>
+        requireExtensionSnapshot(
+          await client.applyExtensionConfiguration(
+            sessionId,
+            selection,
+            request.idempotencyKey,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      operation: async (sessionId, operationId, request) =>
+        requireExtensionSnapshot(
+          await client.queryExtensionConfiguration(
+            sessionId,
+            operationId,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      resume: async (sessionId, operationId, recoverPrevious, request) =>
+        requireExtensionSnapshot(
+          await client.resumeExtensionConfiguration(
+            sessionId,
+            operationId,
+            recoverPrevious,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      package: (workspaceId, pin, request) =>
+        client.getExtensionPackage(workspaceId, pin, request.signal),
+    },
     mcpManagement: {
       storageScope: options.productScope?.trim()
         ? storageKey(options)
@@ -294,6 +398,23 @@ export function createJavaManagedAgentProvider(
         return snapshot;
       },
     },
+    diagnostics: {
+      async getResources(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticResources(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listAgentTrace(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listDiagnosticAgentTrace(
+            { sessionId, cursor: request.cursor, limit: request.limit },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
+    },
     tasks: {
       list: (sessionId, request) =>
         client.listTasks(
@@ -314,220 +435,206 @@ export function createJavaManagedAgentProvider(
           { sessionId, taskId, after: request.after, limit: request.limit },
           request.signal,
         ),
-      ...(options.productScope?.trim()
-        ? {
-            cancel: {
-              async submit(sessionId, taskId, command) {
-                return requireTaskCancelOperation(
-                  await client.cancelTask(
-                    {
-                      sessionId,
-                      taskId,
-                      idempotencyKey: command.idempotencyKey,
-                      requestId: managedRequestId(),
-                    },
-                    command.signal,
-                  ),
-                  sessionId,
-                  taskId,
-                );
+      cancel: {
+        async submit(sessionId, taskId, command) {
+          return requireTaskCancelOperation(
+            await client.cancelTask(
+              {
+                sessionId,
+                taskId,
+                idempotencyKey: command.idempotencyKey,
+                requestId: managedRequestId(),
               },
-              async query(sessionId, taskId, operationId, request) {
-                const operation = requireTaskCancelOperation(
-                  await client.queryOperation(
-                    { sessionId, operationId },
-                    request.signal,
-                  ),
-                  sessionId,
-                  taskId,
-                );
-                if (operation.operationId !== operationId)
-                  throw new Error('Task cancel operation identity mismatch');
-                return operation;
-              },
-            },
-          }
-        : {}),
+              command.signal,
+            ),
+            sessionId,
+            taskId,
+          );
+        },
+        async query(sessionId, taskId, operationId, request) {
+          const operation = requireTaskCancelOperation(
+            await client.queryOperation(
+              { sessionId, operationId },
+              request.signal,
+            ),
+            sessionId,
+            taskId,
+          );
+          if (operation.operationId !== operationId)
+            throw new Error('Task cancel operation identity mismatch');
+          return operation;
+        },
+      },
     },
-    ...(options.productScope?.trim()
-      ? {
-          approvalChange: {
-            async queryOptions(sessionId, request) {
-              const result = await client.getSessionApproval(
-                sessionId,
-                request.signal,
-              );
-              if (
-                !isManagedApprovalMode(result.approvalMode) ||
-                !Number.isSafeInteger(result.approvalRevision) ||
-                result.approvalRevision < 0 ||
-                typeof result.supported !== 'boolean' ||
-                !Array.isArray(result.availableApprovalModes) ||
-                !result.availableApprovalModes.every(isManagedApprovalMode) ||
-                !result.availableApprovalModes.includes(result.approvalMode)
-              )
-                throw new Error('Invalid Session approval options');
-              return {
-                approvalMode: result.approvalMode,
-                approvalRevision: result.approvalRevision,
-                availableApprovalModes: result.availableApprovalModes,
-                supported: result.supported,
-                ...(result.liveSupported === true
-                  ? { liveSupported: true }
-                  : {}),
-                ...(typeof result.planMode === 'boolean'
-                  ? { planMode: result.planMode }
-                  : {}),
-                ...(typeof result.planModeSupported === 'boolean'
-                  ? { planModeSupported: result.planModeSupported }
-                  : {}),
-              };
-            },
-            async submit(sessionId, request, command) {
-              const result = await client.changeApproval(
-                {
-                  ...request,
-                  sessionId,
-                  idempotencyKey: command.idempotencyKey,
-                  requestId: command.requestId,
-                },
-                command.signal,
-              );
-              if (
-                result.sessionId !== sessionId ||
-                result.approvalMode !== request.approvalMode ||
-                !Number.isSafeInteger(result.approvalRevision) ||
-                result.approvalRevision <= request.expectedRevision ||
-                typeof result.replayed !== 'boolean'
-              )
-                throw new Error('Approval change identity mismatch');
-              return {
-                sessionId: result.sessionId,
-                approvalMode: result.approvalMode,
-                approvalRevision: result.approvalRevision,
-                replayed: result.replayed,
-                ...(typeof result.planMode === 'boolean'
-                  ? { planMode: result.planMode }
-                  : {}),
-              };
-            },
-          },
-          modelChange: {
-            async queryOptions(sessionId, request) {
-              const result = await client.getSessionModels(
-                sessionId,
-                request.signal,
-              );
-              const selection = modelSelection(result.modelSelection);
-              if (
-                !selection ||
-                typeof result.supported !== 'boolean' ||
-                !Array.isArray(result.models) ||
-                result.models.some(
-                  (item) =>
-                    !modelId(item.modelId) ||
-                    typeof item.label !== 'string' ||
-                    !item.label.trim(),
-                ) ||
-                new Set(result.models.map((item) => item.modelId)).size !==
-                  result.models.length
-              )
-                throw new Error('Invalid Session model options');
-              return {
-                supported: result.supported,
-                modelSelection: selection,
-                models: result.models.map(({ modelId, label }) => ({
-                  modelId,
-                  label,
-                })),
-              };
-            },
-            async submit(sessionId, request, command) {
-              const result = await client.changeModel(
-                {
-                  ...request,
-                  sessionId,
-                  idempotencyKey: command.idempotencyKey,
-                  requestId: managedRequestId(),
-                },
-                command.signal,
-              );
-              const selection = modelSelection(result.modelSelection);
-              if (
-                result.sessionId !== sessionId ||
-                !selection ||
-                selection.modelId !== request.modelId ||
-                selection.revision <= request.expectedRevision ||
-                typeof result.replayed !== 'boolean'
-              )
-                throw new Error('Model change identity mismatch');
-              return {
-                sessionId,
-                modelSelection: selection,
-                replayed: result.replayed,
-              };
-            },
-          },
-          cwdChange: {
-            async submit(sessionId, request, command) {
-              return requireCwdOperation(
-                await client.changeCwd(
-                  {
-                    ...request,
-                    sessionId,
-                    idempotencyKey: command.idempotencyKey,
-                    requestId: managedRequestId(),
+    approvalChange: {
+      async queryOptions(sessionId, request) {
+        const result = await client.getSessionApproval(
+          sessionId,
+          request.signal,
+        );
+        if (
+          !isManagedApprovalMode(result.approvalMode) ||
+          !Number.isSafeInteger(result.approvalRevision) ||
+          result.approvalRevision < 0 ||
+          typeof result.supported !== 'boolean' ||
+          !Array.isArray(result.availableApprovalModes) ||
+          !result.availableApprovalModes.every(isManagedApprovalMode) ||
+          !result.availableApprovalModes.includes(result.approvalMode) ||
+          (result.permissionRulesSupported !== undefined &&
+            typeof result.permissionRulesSupported !== 'boolean')
+        )
+          throw new Error('Invalid Session approval options');
+        return {
+          approvalMode: result.approvalMode,
+          approvalRevision: result.approvalRevision,
+          availableApprovalModes: result.availableApprovalModes,
+          supported: result.supported,
+          ...(result.permissionRulesSupported === true
+            ? { permissionRulesSupported: true }
+            : {}),
+          ...(result.permissionRules === undefined
+            ? {}
+            : {
+                permissionRules: parseManagedPermissionRules(
+                  result.permissionRules,
+                ),
+              }),
+          ...(result.liveSupported === true ? { liveSupported: true } : {}),
+          ...(typeof result.planMode === 'boolean'
+            ? { planMode: result.planMode }
+            : {}),
+          ...(typeof result.planModeSupported === 'boolean'
+            ? { planModeSupported: result.planModeSupported }
+            : {}),
+        };
+      },
+      async submit(sessionId, request, command) {
+        const { permissionRules, ...selection } = request;
+        const result = await client.changeApproval(
+          {
+            ...selection,
+            ...(permissionRules === undefined
+              ? {}
+              : {
+                  permissionRules: {
+                    allow: [...permissionRules.allow],
+                    ask: [...permissionRules.ask],
+                    deny: [...permissionRules.deny],
                   },
-                  command.signal,
-                ),
-                sessionId,
-              );
-            },
-            async query(sessionId, operationId, request) {
-              const result = requireCwdOperation(
-                await client.queryOperation(
-                  { sessionId, operationId },
-                  request.signal,
-                ),
-                sessionId,
-              );
-              if (result.operationId !== operationId)
-                throw new Error('Cwd operation identity mismatch');
-              return result;
-            },
+                }),
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: command.requestId,
           },
-          contextCompression: {
-            async submit(sessionId, request, command) {
-              return requireContextCompressionOperation(
-                await client.compressContext(
-                  {
-                    ...request,
-                    sessionId,
-                    idempotencyKey: command.idempotencyKey,
-                    requestId: managedRequestId(),
-                  },
-                  command.signal,
+          command.signal,
+        );
+        if (
+          result.sessionId !== sessionId ||
+          result.approvalMode !== request.approvalMode ||
+          !Number.isSafeInteger(result.approvalRevision) ||
+          result.approvalRevision <= request.expectedRevision ||
+          typeof result.replayed !== 'boolean'
+        )
+          throw new Error('Approval change identity mismatch');
+        return {
+          sessionId: result.sessionId,
+          approvalMode: result.approvalMode,
+          approvalRevision: result.approvalRevision,
+          replayed: result.replayed,
+          ...(result.permissionRules === undefined
+            ? {}
+            : {
+                permissionRules: parseManagedPermissionRules(
+                  result.permissionRules,
                 ),
-                sessionId,
-              );
-            },
-            async query(sessionId, operationId, request) {
-              const operation = requireContextCompressionOperation(
-                await client.queryOperation(
-                  { sessionId, operationId },
-                  request.signal,
-                ),
-                sessionId,
-              );
-              if (operation.operationId !== operationId)
-                throw new Error(
-                  'Context compression operation identity mismatch',
-                );
-              return operation;
-            },
+              }),
+          ...(typeof result.planMode === 'boolean'
+            ? { planMode: result.planMode }
+            : {}),
+        };
+      },
+    },
+    modelChange: {
+      async queryOptions(sessionId, request) {
+        const result = await client.getSessionModels(sessionId, request.signal);
+        const selection = modelSelection(result.modelSelection);
+        if (
+          !selection ||
+          typeof result.supported !== 'boolean' ||
+          !Array.isArray(result.models) ||
+          result.models.some(
+            (item) =>
+              !modelId(item.modelId) ||
+              typeof item.label !== 'string' ||
+              !item.label.trim(),
+          ) ||
+          new Set(result.models.map((item) => item.modelId)).size !==
+            result.models.length
+        )
+          throw new Error('Invalid Session model options');
+        return {
+          supported: result.supported,
+          modelSelection: selection,
+          models: result.models.map(({ modelId, label }) => ({
+            modelId,
+            label,
+          })),
+        };
+      },
+      async submit(sessionId, request, command) {
+        const result = await client.changeModel(
+          {
+            ...request,
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: managedRequestId(),
           },
-        }
-      : {}),
+          command.signal,
+        );
+        const selection = modelSelection(result.modelSelection);
+        if (
+          result.sessionId !== sessionId ||
+          !selection ||
+          selection.modelId !== request.modelId ||
+          selection.revision <= request.expectedRevision ||
+          typeof result.replayed !== 'boolean'
+        )
+          throw new Error('Model change identity mismatch');
+        return {
+          sessionId,
+          modelSelection: selection,
+          replayed: result.replayed,
+        };
+      },
+    },
+    contextCompression: {
+      async submit(sessionId, request, command) {
+        return requireContextCompressionOperation(
+          await client.compressContext(
+            {
+              ...request,
+              sessionId,
+              idempotencyKey: command.idempotencyKey,
+              requestId: managedRequestId(),
+            },
+            command.signal,
+          ),
+          sessionId,
+        );
+      },
+      async query(sessionId, operationId, request) {
+        const operation = requireContextCompressionOperation(
+          await client.queryOperation(
+            { sessionId, operationId },
+            request.signal,
+          ),
+          sessionId,
+        );
+        if (operation.operationId !== operationId)
+          throw new Error('Context compression operation identity mismatch');
+        return operation;
+      },
+    },
     actions: {
       async listPending(sessionId, request) {
         const actions: ManagedAgentPendingAction[] = [];
@@ -558,7 +665,10 @@ export function createJavaManagedAgentProvider(
           ).values(),
         ];
       },
-      async respond(action, optionId, command) {
+      async respond(action, response, command) {
+        if ((action.kind === 'question') !== (typeof response !== 'string')) {
+          throw new Error('Action response kind does not match the request');
+        }
         const accepted = await client.respondAction(
           {
             requestId: managedRequestId(),
@@ -566,10 +676,11 @@ export function createJavaManagedAgentProvider(
             sessionId: action.sessionId,
             actionId: action.actionId,
             response: {
-              kind: 'permission',
               inputRevision: action.inputRevision,
               policyRevision: action.policyRevision,
-              optionId,
+              ...(typeof response === 'string'
+                ? { kind: 'permission' as const, optionId: response }
+                : response),
             },
           },
           command.signal,
@@ -711,6 +822,8 @@ export function createJavaManagedAgentProvider(
                 approvalMode,
                 planMode,
                 skills,
+                extensionPins,
+                worktree,
               },
               command,
             ) =>
@@ -723,10 +836,33 @@ export function createJavaManagedAgentProvider(
                   approvalMode,
                   planMode,
                   skills,
+                  extensionPins,
+                  worktree,
                 },
                 command,
               ),
             createSession: createWorkspaceSession,
+          },
+          sessionWorktrees: {
+            options: (request, options) =>
+              client.worktreeOptions(request, options.signal),
+            list: (workspaceId, options) =>
+              client.listSessionWorktrees(workspaceId, options.signal),
+            inspect: (workspaceId, worktreeId, options) =>
+              client.inspectSessionWorktree(
+                workspaceId,
+                worktreeId,
+                options.signal,
+              ),
+            cleanup: (workspaceId, worktreeId, options) =>
+              client.cleanupSessionWorktree(
+                {
+                  workspaceId,
+                  worktreeId,
+                  idempotencyKey: options.idempotencyKey,
+                },
+                options.signal,
+              ),
           },
         }
       : {}),
@@ -759,6 +895,12 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
+      if (
+        !Number.isSafeInteger(transcript.coveredSequence) ||
+        transcript.coveredSequence < 0
+      ) {
+        throw new Error('Invalid message transcript coverage.');
+      }
       const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
@@ -769,7 +911,8 @@ export function createJavaManagedAgentProvider(
           (left, right) => left.id - right.id,
         ),
         olderCursor: transcript.olderCursor ?? undefined,
-        lastEventId: transcript.lastSequence,
+        lastEventId: transcript.coveredSequence,
+        history: 'items',
       };
     },
     async createSession(request, command) {
@@ -913,6 +1056,7 @@ function toSessionSummary(
     ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
+    ...(session.worktree ? { worktree: session.worktree } : {}),
     createdAt: session.createdAt,
     admittedAt: session.activeTurn?.submittedAt ?? session.createdAt,
     updatedAt: session.updatedAt,
@@ -934,6 +1078,9 @@ function toSessionSummary(
         : {}),
       ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
+      ...(session.capabilities?.diagnostics === true
+        ? { diagnostics: true }
+        : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
         sessionActive &&
@@ -952,7 +1099,6 @@ function toSessionSummary(
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
-      ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
         : {}),
@@ -1031,20 +1177,6 @@ function modelContext(value: unknown): ManagedModelContext | undefined {
   };
 }
 
-function requireCwdOperation(
-  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
-  sessionId: string,
-) {
-  if (
-    operation.type !== 'cwd_change' ||
-    operation.sessionId !== sessionId ||
-    !operation.operationId
-  ) {
-    throw new Error('Cwd operation identity mismatch');
-  }
-  return operation;
-}
-
 function requireContextCompressionOperation(
   operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
   sessionId: string,
@@ -1064,7 +1196,7 @@ function requireContextCompressionOperation(
 }
 
 function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
-  if (action.kind !== 'permission' || action.state !== 'requested') return [];
+  if (action.state !== 'requested') return [];
   return [
     {
       actionId: action.actionId,
@@ -1074,9 +1206,16 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       toolName: action.toolName,
       inputRevision: action.inputRevision,
       policyRevision: action.policyRevision,
+      createdAt: action.createdAt,
       expiresAt: action.expiresAt,
-      options: action.options.map(({ id, label }) => ({ id, label })),
-      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
+      ...(action.kind === 'question'
+        ? { kind: 'question' as const, questions: action.questions }
+        : {
+            options: action.options.map(({ id, label }) => ({ id, label })),
+            ...(action.inputPreview
+              ? { inputPreview: action.inputPreview }
+              : {}),
+          }),
     },
   ];
 }

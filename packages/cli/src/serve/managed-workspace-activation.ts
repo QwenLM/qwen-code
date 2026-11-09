@@ -15,6 +15,10 @@ import type {
   ManagedContextBoot,
   ManagedContextInstallations,
 } from './managed-context-envelope.js';
+import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
 import type { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 
@@ -86,7 +90,15 @@ export class WorkspaceActivations {
           (boot.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST
             ? boot.isolationClass !== 'workspace' ||
               request['profile'] !== RESIDENT_WORKSPACE_PROFILE
-            : boot.capabilityDigest !== WORKSPACE_CAPABILITY_DIGEST ||
+            : ![
+                WORKSPACE_CAPABILITY_DIGEST,
+                ...(boot.managedExtensions
+                  ? [
+                      MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+                      MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+                    ]
+                  : []),
+              ].includes(boot.capabilityDigest) ||
               request['profile'] !== WORKSPACE_EXECUTION_PROFILE) ||
           binding === undefined ||
           binding.contextConfigRef !== WORKSPACE_CONTEXT_CONFIG_REF ||

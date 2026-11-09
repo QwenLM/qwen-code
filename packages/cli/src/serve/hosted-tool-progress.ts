@@ -10,6 +10,7 @@ import {
   assertManagedSessionDurableRef,
   type ManagedSessionEvent,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
 
 export async function hostedToolProgress(
@@ -23,6 +24,7 @@ export async function hostedToolProgress(
         toolCallId: string;
         name: string;
         status: 'in_progress' | 'completed' | 'failed' | 'cancelled';
+        todoSnapshot?: string;
       };
     }
   | undefined
@@ -60,6 +62,13 @@ export async function hostedToolProgress(
       response.response?.['error'],
     );
     if (!status) return;
+    const todo =
+      response.name === 'todo_write' &&
+      response.response['executionStatus'] === 'success'
+        ? checkHostedTodoWriteInput({ todos: response.response['todos'] })
+        : undefined;
+    const todoSnapshot =
+      todo && !todo.error ? JSON.stringify(todo.input['todos']) : undefined;
     return {
       promptId: message.daemonPromptId,
       update: {
@@ -67,6 +76,7 @@ export async function hostedToolProgress(
         toolCallId: response.id,
         name: response.name,
         status,
+        ...(todoSnapshot !== undefined ? { todoSnapshot } : {}),
       },
     };
   }
