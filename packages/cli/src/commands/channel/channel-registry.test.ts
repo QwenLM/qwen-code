@@ -548,6 +548,7 @@ describe('channel registry', () => {
         type,
         displayName: type,
         manageable: false,
+        supportsQrLogin: false,
         fields: [],
       });
     },
@@ -585,6 +586,7 @@ describe('channel registry', () => {
       type: 'invalid-missing-fields-array',
       displayName: 'invalid-missing-fields-array',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -624,6 +626,7 @@ describe('channel registry', () => {
       type: 'invalid-validate-config',
       displayName: 'invalid-validate-config',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -663,6 +666,7 @@ describe('channel registry', () => {
       type: 'invalid-async-validate-config',
       displayName: 'invalid-async-validate-config',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -819,6 +823,7 @@ describe('channel registry', () => {
       'email',
       'wecom',
       'feishu',
+      'qq',
       'github',
       'gitlab',
     ]);

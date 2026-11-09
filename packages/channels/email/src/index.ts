@@ -66,14 +66,14 @@ export const plugin: ChannelPlugin = {
         key: 'imapSecure',
         label: 'IMAP Implicit TLS',
         kind: 'boolean',
-        default: 'true',
+        default: true,
         description: 'When disabled, STARTTLS is mandatory.',
       },
       {
         key: 'smtpSecure',
         label: 'SMTP Implicit TLS',
         kind: 'boolean',
-        default: 'true',
+        default: true,
         description: 'When disabled, STARTTLS is mandatory.',
       },
       {

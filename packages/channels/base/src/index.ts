@@ -144,6 +144,8 @@ export type {
   ChannelPlugin,
   ChannelPromptOwner,
   ChannelProactiveTarget,
+  ChannelQrLoginDescriptor,
+  ChannelQrLoginHandlers,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,

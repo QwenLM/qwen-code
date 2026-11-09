@@ -10,6 +10,7 @@ export interface ChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
+  supportsQrLogin: boolean;
   fields: readonly ChannelConfigFieldDescriptor[];
 }
 
@@ -210,8 +211,16 @@ function assertManagementField(
       `Channel field "${path}" must declare a string description.`,
     );
   }
-  if (field.default !== undefined && typeof field.default !== 'string') {
-    throw new Error(`Channel field "${path}" must declare a string default.`);
+  if (field.default !== undefined) {
+    if (field.kind === 'boolean') {
+      if (typeof field.default !== 'boolean') {
+        throw new Error(
+          `Channel field "${path}" must declare a boolean default.`,
+        );
+      }
+    } else if (typeof field.default !== 'string') {
+      throw new Error(`Channel field "${path}" must declare a string default.`);
+    }
   }
   const envResolvable = Boolean(field.envResolvable);
   const required = Boolean(field.required);
@@ -309,6 +318,15 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
   ) {
     throw new Error(
       'Channel management metadata must declare validateConfig as a synchronous function.',
+    );
+  }
+  if (
+    management.qrLogin !== undefined &&
+    (typeof management.qrLogin !== 'object' ||
+      typeof management.qrLogin.start !== 'function')
+  ) {
+    throw new Error(
+      'Channel management metadata must declare qrLogin.start as a function.',
     );
   }
   if (!Array.isArray(management.fields)) {
@@ -440,6 +458,7 @@ export async function supportedChannelCatalog(): Promise<
       type: channelType,
       displayName,
       manageable: management !== undefined,
+      supportsQrLogin: management?.qrLogin !== undefined,
       fields: management
         ? managementFieldsWithSharedControls(
             management.fields,
