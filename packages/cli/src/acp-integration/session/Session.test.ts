@@ -1616,19 +1616,28 @@ describe('Session', () => {
             timestamp: i,
           });
         }
+        // The synchronous exit burst coalesces into ONE queued roster item
+        // (#15659 R1-4), so the queue holds the reports plus that item,
+        // capped at the queue maximum; only the overflow beyond it lands
+        // early.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const queued = Math.min(
+          reportCount + 1,
+          MAX_BACKGROUND_NOTIFICATION_QUEUE,
+        );
         expect(
           session
             .collectActiveWorkHolds()
             .filter((hold) => hold.category === 'notification'),
-        ).toHaveLength(MAX_BACKGROUND_NOTIFICATION_QUEUE);
+        ).toHaveLength(queued);
         expect(
           mockChatRecordingService.recordNotification,
-        ).toHaveBeenCalledTimes(reportCount - 10);
+        ).toHaveBeenCalledTimes(reportCount + 1 - queued);
         session.flushPendingPeerNotifications();
         session.dispose();
         const landed = vi.mocked(mockChatRecordingService.recordNotification)
           .mock.calls;
-        expect(landed).toHaveLength(reportCount + 10);
+        expect(landed).toHaveLength(reportCount + 1);
         for (const report of reports) {
           expect(
             landed.filter(([parts]) =>
@@ -1818,6 +1827,106 @@ describe('Session', () => {
         .join('\n');
       expect(prompted).toContain('qa-0');
       expect(prompted).toContain('qa-9');
+      // The coalesced frame carries every departed member structurally, so
+      // a client reconstructing membership can retire all ten instead of
+      // parsing the prose (#15659 review, R1-3).
+      const frames = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter(
+          (update) =>
+            (
+              update._meta?.['backgroundTask'] as
+                | { kind?: string; status?: string }
+                | undefined
+            )?.kind === 'peer' &&
+            (update._meta?.['backgroundTask'] as { status?: string })
+              ?.status === 'exited',
+        );
+      // The same queued item is displayed at enqueue and again when the
+      // automatic turn consumes it; one TASK is the coalescing contract.
+      const exitedTaskIds = new Set(
+        frames.map(
+          (frame) =>
+            (frame._meta?.['backgroundTask'] as { taskId: string }).taskId,
+        ),
+      );
+      expect(exitedTaskIds.size).toBe(1);
+      expect(
+        (
+          frames[0]!._meta?.['backgroundTask'] as {
+            rosterMembers: Array<{ name: string; status?: string }>;
+          }
+        ).rosterMembers,
+      ).toEqual(
+        Array.from({ length: 10 }, (_, i) => ({
+          name: `qa-${i}`,
+          status: 'cancelled',
+        })),
+      );
+      session.dispose();
+    });
+
+    it('coalesces a join burst into one automatic leader turn', async () => {
+      // `team_create` spawns up to ten teammates inside one leader turn.
+      // Each queued peer item drains as its own full-context automatic
+      // turn, so an uncoalesced join burst wakes the leader ten times to
+      // announce a roster its own tool call just created (#15659 review,
+      // R1-4). The members still travel structurally on the single frame.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      sendMessageStream.mockClear();
+      sendMessageStream.mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      for (let i = 0; i < 5; i++) {
+        manager.emit('teammate_joined', {
+          agentId: `a${i}`,
+          name: `dev-${i}`,
+          timestamp: i,
+        });
+      }
+
+      await vi.waitFor(() =>
+        expect(sendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(sendMessageStream).toHaveBeenCalledTimes(1);
+      const frames = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter(
+          (update) =>
+            (
+              update._meta?.['backgroundTask'] as
+                | { kind?: string; status?: string }
+                | undefined
+            )?.kind === 'peer' &&
+            (update._meta?.['backgroundTask'] as { status?: string })
+              ?.status === 'joined',
+        );
+      const joinedTaskIds = new Set(
+        frames.map(
+          (frame) =>
+            (frame._meta?.['backgroundTask'] as { taskId: string }).taskId,
+        ),
+      );
+      expect(joinedTaskIds.size).toBe(1);
+      expect(
+        (
+          frames[0]!._meta?.['backgroundTask'] as {
+            rosterMembers: Array<{ name: string }>;
+          }
+        ).rosterMembers.map((member) => member.name),
+      ).toEqual(['dev-0', 'dev-1', 'dev-2', 'dev-3', 'dev-4']);
       session.dispose();
     });
 
@@ -2404,8 +2513,22 @@ describe('Session', () => {
         timestamp: 1,
       });
 
-      await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
-      const [peer] = sentPeerNotifications();
+      // The join travels through the burst buffer (a microtask); the
+      // automatic turn may consume and re-display the same queued item, so
+      // one TASK — not one frame — is the contract.
+      await vi.waitFor(() =>
+        expect(sentPeerNotifications().length).toBeGreaterThanOrEqual(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const joins = sentPeerNotifications();
+      const joinTaskIds = new Set(
+        joins.map(
+          (update) =>
+            (update._meta?.['backgroundTask'] as { taskId: string }).taskId,
+        ),
+      );
+      expect(joinTaskIds.size).toBe(1);
+      const [peer] = joins;
       expect(
         (peer!._meta?.['backgroundTask'] as { status: string }).status,
       ).toBe('joined');

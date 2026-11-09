@@ -2134,6 +2134,13 @@ export interface BackgroundNotificationQueueItem {
     toolName?: string;
     phase?: 'call' | 'result';
     success?: boolean;
+    /**
+     * Members of a coalesced roster burst (one queued item per synchronous
+     * join/teardown wave). A client reconstructing membership reads the
+     * names structurally instead of parsing the prose, so a deleted team
+     * really does end with an empty roster (#15659 review, R1-3/R1-4).
+     */
+    rosterMembers?: Array<{ name: string; status?: string }>;
   };
 }
 
@@ -13641,28 +13648,58 @@ export class Session implements SessionContext {
    * and idle pulses are deliberately not projected: they fire on every
    * transition and each would wake the leader into an automatic turn for noise.
    */
-  #pendingTeardownExits: Array<{ name: string; status?: string }> = [];
-  #teardownFlushScheduled = false;
+  #pendingRosterChanges: Array<{
+    type: 'joined' | 'exited';
+    name: string;
+    status?: string;
+  }> = [];
+  #rosterFlushScheduled = false;
 
-  #flushTeardownRosterExits(): void {
-    this.#teardownFlushScheduled = false;
-    const exits = this.#pendingTeardownExits.splice(0);
-    if (exits.length === 0 || this.disposed) return;
-    const names = exits.map((exit) => exit.name);
-    const head =
-      names.length === 1
-        ? `Teammate ${names[0]}`
-        : `Teammates ${names.join(', ')}`;
-    const tail = `left the team (${exits[0]?.status ?? 'cancelled'})`;
-    this.#enqueueBackgroundNotification({
-      kind: 'peer',
-      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
-      status: 'exited',
-      modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
-      displayText: `teammate ${names.join(', ')} ${tail}`,
-      label: names.length === 1 ? names[0] : 'team',
-      continuesTodoStopGuardWorkChain: false,
-    });
+  #flushRosterChanges(): void {
+    this.#rosterFlushScheduled = false;
+    const changes = this.#pendingRosterChanges.splice(0);
+    if (changes.length === 0 || this.disposed) return;
+    // One burst can carry both kinds (a re-created team); split so each
+    // queued item keeps a single status the client can switch on.
+    for (const type of ['joined', 'exited'] as const) {
+      const burst = changes.filter((change) => change.type === type);
+      if (burst.length === 0) continue;
+      const names = burst.map((change) => change.name);
+      const joined = type === 'joined';
+      const head =
+        names.length === 1
+          ? `Teammate ${names[0]}`
+          : `Teammates ${names.join(', ')}`;
+      const tail = joined
+        ? 'joined the team'
+        : `left the team (${burst[0]?.status ?? 'cancelled'})`;
+      const members = burst.map((change) => ({
+        name: change.name,
+        ...(change.status ? { status: change.status } : {}),
+      }));
+      this.#enqueueBackgroundNotification({
+        kind: 'peer',
+        taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+        status: type,
+        modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
+        displayText: `teammate ${names.join(', ')} ${tail}`,
+        // A single-member burst keeps that member's identity chip; a
+        // multi-member frame carries every member structurally instead
+        // (#15659 review, R1-3).
+        ...(burst.length === 1
+          ? {
+              agent: {
+                agentName: `${ROOT_AGENT_IDENTITY.agentName}/${names[0]}`,
+                depth: 1,
+                kind: 'teammate' as const,
+              },
+            }
+          : {}),
+        label: names.length === 1 ? names[0] : 'team',
+        structured: { rosterMembers: members },
+        continuesTodoStopGuardWorkChain: false,
+      });
+    }
   }
 
   #enqueueTeamRosterChange(change: {
@@ -13674,39 +13711,21 @@ export class Session implements SessionContext {
     // Same reasoning as `#enqueueTeammateMessage`: a reversible close must not
     // swallow the notice, since the queue is drained when the gate releases.
     if (this.disposed) return;
-    if (change.type === 'exited' && change.teardown) {
-      // One `cleanup()` publishes an exit per surviving teammate (up to ten),
-      // and every queued peer item drains as its own automatic leader turn.
-      // Collect the synchronous burst and enqueue a single item instead; the
-      // per-teammate events still reach the wire and the approval retirement.
-      this.#pendingTeardownExits.push({
-        name: change.name,
-        status: change.status,
-      });
-      if (!this.#teardownFlushScheduled) {
-        this.#teardownFlushScheduled = true;
-        queueMicrotask(() => this.#flushTeardownRosterExits());
-      }
-      return;
-    }
-    const joined = change.type === 'joined';
-    const tail = joined
-      ? 'joined the team'
-      : `left the team${change.status ? ` (${change.status})` : ''}`;
-    this.#enqueueBackgroundNotification({
-      kind: 'peer',
-      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
-      status: change.type,
-      modelText: `<peer-notification>\n${escapeXml(`Teammate ${change.name} ${tail}.`)}\n</peer-notification>`,
-      displayText: `teammate ${change.name} ${tail}`,
-      agent: {
-        agentName: `${ROOT_AGENT_IDENTITY.agentName}/${change.name}`,
-        depth: 1,
-        kind: 'teammate',
-      },
-      label: change.name,
-      continuesTodoStopGuardWorkChain: false,
+    // One `cleanup()` publishes an exit per surviving teammate and one
+    // `team_create` a join per spawned member (up to ten each), and every
+    // queued peer item drains as its own automatic leader turn. Collect the
+    // synchronous burst and enqueue a single item per kind instead; the
+    // per-teammate events still reach the wire and the approval retirement
+    // (#15659 review, R1-4).
+    this.#pendingRosterChanges.push({
+      type: change.type,
+      name: change.name,
+      status: change.status,
     });
+    if (!this.#rosterFlushScheduled) {
+      this.#rosterFlushScheduled = true;
+      queueMicrotask(() => this.#flushRosterChanges());
+    }
   }
 
   /**

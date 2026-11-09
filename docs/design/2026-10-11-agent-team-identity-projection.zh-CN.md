@@ -33,7 +33,7 @@ interface AgentIdentity {
 ### 队友链路
 
 - **报告与花名册变更**以 `kind: 'peer'` 后台通知入队，带 `agent`（生产者）与 `label`（发送方名字，渲染在 turn marker 上）。持久化保存在 `backgroundTask.agent` 内；重放提升到帧级 `_meta.agent`，live 与 reload 帧同形，SDK reducer 的 `block.agent` 路径两边一致。
-- **删除团队会为仍在花名册上的每个队友发出退出事件。** 从未上报终态的队友没有自己的 `TEAMMATE_EXITED`，而拆除流程是在事件桥解绑之后才终止它 —— 因此删除动作本身在监听者仍在时把剩余成员以 `cancelled` 收尾。靠加入/退出重建成员表的客户端最终拿到空名单，而不是陈旧名单。仍有一处缺口：该突发被合并为一个排队项，成员只以自然语言列出、不携带逐成员身份，因此按退出事件映射成员的客户端无法据此把它们从花名册上撤下——把成员作为结构化数据携带（或每个退出各发一个展示帧）留作后续。
+- **删除团队会为仍在花名册上的每个队友发出退出事件。** 从未上报终态的队友没有自己的 `TEAMMATE_EXITED`，而拆除流程是在事件桥解绑之后才终止它 —— 因此删除动作本身在监听者仍在时把剩余成员以 `cancelled` 收尾。靠加入/退出重建成员表的客户端最终拿到空名单，而不是陈旧名单。加入与退出突发都会按同步波次合并为每类一个排队项（否则每个排队 peer 项都会独占一次自动 leader 轮次），合并帧以 `backgroundTask.rosterMembers: [{ name, status? }]` 结构化携带全部成员并随记录持久化——客户端无需解析自然语言即可把该帧映射到离队（或入队）成员。单成员突发同时保留该成员的帧级 `agent` 身份 chip。
 - **活动与 agent 间消息**是独立的 display-only 投射（本 PR 新增）：
   - `TeamManager` 事件桥早已观察每个队友的工具调用/结果 —— 之前只当活跃度心跳用完即弃。新 `TEAMMATE_ACTIVITY` 事件转发 `{name, toolName, phase, description, success}`。
   - team sink 订阅发给队友的 `MESSAGE_SENT`（`{from, to, message}`），使用花名册里解析后的名字。发给 leader 的报告只走邮箱投射。

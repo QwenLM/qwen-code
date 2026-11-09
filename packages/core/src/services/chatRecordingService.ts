@@ -662,6 +662,12 @@ export interface NotificationRecordPayload {
     toolName?: string;
     phase?: 'call' | 'result';
     success?: boolean;
+    /**
+     * Members of a coalesced teammate roster burst: the structural names a
+     * client retires (or admits) without parsing the row's prose. Persisted
+     * so a reload keeps the same membership evidence as the live frame.
+     */
+    rosterMembers?: Array<{ name: string; status?: string }>;
   };
 }
 
