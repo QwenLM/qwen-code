@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.AgentDefinitionCompiler;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -35,6 +34,9 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 final class AgentSessionPolicies {
+    private static final Set<String> EXTENSION_APPLY_PROFILES = Set.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP,
+            WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ);
+
     private final AgentEventJournal eventJournal;
     private final AgentSessionQueries sessionQueries;
     private final AgentStoreRows storeRows;
@@ -269,8 +271,7 @@ final class AgentSessionPolicies {
                 && operationId.equals(current.path("operationId").asText());
         if (lineage != null && mutation && (!same || !childExtensionBootstrapCommand(session, lineage).equals(current.path("command")))
                 || !workspaceFilesEnabled
-                || !Set.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ)
-                        .contains(session.toolProfile())) {
+                || !EXTENSION_APPLY_PROFILES.contains(session.toolProfile())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
         if (mutation) {
@@ -283,6 +284,13 @@ final class AgentSessionPolicies {
             }
         }
         return session;
+    }
+
+    boolean canApplyExtensions(SessionRecord session) {
+        return workspaceFilesEnabled && "ACTIVE".equals(session.status())
+                && EXTENSION_APPLY_PROFILES.contains(session.toolProfile())
+                && sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) == null
+                && !hasActiveTurn(session.tenantId(), session.sessionId());
     }
 
     void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
@@ -574,12 +582,8 @@ final class AgentSessionPolicies {
                 storeRows.writeJson(Map.of("modelId", modelId, "revision", revision)),
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.receiptKey(
                         namespace, tenantId, scopeKind, scope, key));
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        String observation = ManagedExtensionProjection.recordKey(sessionId, "hosted_context_usage", "latest");
-        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
-                + " 'SESSION_RECORD' AND owner_key = ?", sessionScope, observation);
-        jdbc.update("DELETE FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?",
-                sessionScope, observation);
+        ManagedModelDiagnosticProjection.clearLegacyModelContext(jdbc, tenantId, sessionId);
+        ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null, "session.model.changed",
                 Map.of("modelId", modelId, "revision", revision), false, null, now);
         return new WebShellModelChangeResult(sessionId, new WebShellModelSelection(modelId, revision), false);
@@ -673,6 +677,7 @@ final class AgentSessionPolicies {
         if (changed != 1) {
             throw new ManagedAgentException(409, "approval_selection_conflict", "The approval revision changed");
         }
+        ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         Map<String, Object> result = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision, "planMode", planMode));
         if (rules != null) {
             result.put("permissionRules", rules);

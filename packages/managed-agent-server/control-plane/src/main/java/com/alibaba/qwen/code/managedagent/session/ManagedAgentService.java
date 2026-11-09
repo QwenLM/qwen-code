@@ -150,7 +150,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsClose(SessionRecord session) {
-        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
             return false;
         }
         return session.workspace() == null || RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
@@ -634,7 +634,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -1576,7 +1576,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
             return false;
         }
         return retention || session.workspace() != null
