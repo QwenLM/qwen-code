@@ -881,6 +881,46 @@ describe('ChatEditor add menu (+)', () => {
     expect(trigger(container)).toBeNull();
   });
 
+  it('yields the add entry to the host when the host owns it', () => {
+    const container = renderChatEditor({
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'approvalMode'],
+    });
+    expect(trigger(container)).toBeNull();
+  });
+
+  function touchComposer() {
+    composerCoreState.mobileComposer = {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      expandedTextareaRef: createRef<HTMLTextAreaElement>(),
+      value: '',
+      onChange: vi.fn(),
+      onBlur: vi.fn(),
+      placeholder: 'Ask anything',
+    } satisfies MobileComposerBackend;
+  }
+
+  it('yields the touch commands-only entry to the host too', () => {
+    touchComposer();
+    const container = renderChatEditor({
+      customization: {
+        hostOwnsAddMenu: true,
+        renderComposerToolbarStart: () => <button>Host add action</button>,
+      },
+      visibleToolbarActions: ['commands'],
+    });
+    expect(trigger(container)).toBeNull();
+    expect(container.textContent).toContain('Host add action');
+  });
+
+  it('keeps the touch commands-only entry when the host does not own it', () => {
+    touchComposer();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['commands'],
+    });
+    expect(trigger(container)).not.toBeNull();
+  });
+
   it('keeps session attachments available without workspace actions', async () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['addMenu'],
@@ -6987,6 +7027,10 @@ describe('ChatEditor Workflow mode', () => {
     workflowModeStatus: 'ready' as const,
     workflowMode: { requested: true, available: true, effective: true },
   };
+  const workflowSwitch = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>(
+      '[data-web-shell-workflow-switch] [role="switch"]',
+    );
 
   it('moves Workflow into the menu and keeps it usable during a running response', async () => {
     const onWorkflowModeChange = vi.fn();
@@ -7108,7 +7152,7 @@ describe('ChatEditor Workflow mode', () => {
     expect(composerCoreState.focus).toHaveBeenCalled();
   });
 
-  it('hides Workflow when the host excludes the add menu', () => {
+  it('keeps a Workflow switch when the host excludes the add menu', () => {
     const container = renderChatEditor({
       ...ready,
       visibleToolbarActions: ['workflowMode', 'model'],
@@ -7119,6 +7163,52 @@ describe('ChatEditor Workflow mode', () => {
     expect(
       container.querySelector('[data-web-shell-workflow-chip]'),
     ).toBeNull();
+    expect(workflowSwitch(container)).not.toBeNull();
+  });
+
+  it('keeps Workflow dismissible from the switch when the host owns the add menu', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    expect(
+      container.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workflow-chip]'),
+    ).toBeNull();
+    const control = workflowSwitch(container)!;
+    expect(control.getAttribute('aria-checked')).toBe('true');
+    expect(control.disabled).toBe(false);
+    act(() => control.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it('lets the host turn Workflow back on from the switch', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      workflowModeStatus: 'ready',
+      workflowMode: { requested: false, available: true, effective: false },
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const control = workflowSwitch(container)!;
+    expect(control.getAttribute('aria-checked')).toBe('false');
+    act(() => control.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it('keeps no switch while the add menu holds the Workflow entry', () => {
+    const container = renderChatEditor({
+      ...ready,
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange: vi.fn(),
+    });
+    expect(workflowSwitch(container)).toBeNull();
   });
 
   it.each([

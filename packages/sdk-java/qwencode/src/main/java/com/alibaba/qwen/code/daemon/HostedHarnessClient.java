@@ -167,6 +167,119 @@ public final class HostedHarnessClient implements AutoCloseable {
         return capabilities;
     }
 
+    public Map<String, Object> prepareManagedPackage(Map<String, Object> metadata, InputStream source) {
+        Map<String, Object> result = managedPackageRequest("prepare", metadata, source);
+        requireUuid(JsonSupport.requiredString(result, "preparationId", "Package preparation"), "preparationId");
+        String digest = JsonSupport.requiredString(result, "packageDigest", "Package preparation");
+        if (!digest.matches("[a-f0-9]{64}")) {
+            throw new DaemonProtocolException("Invalid prepared package digest");
+        }
+        long length = JsonSupport.requiredNonNegativeLong(result, "byteLength", "Package preparation");
+        if (length > 100L * 1024 * 1024) {
+            throw new DaemonProtocolException("Prepared package exceeds 100 MiB");
+        }
+        return result;
+    }
+
+    public Map<String, Object> inspectManagedPackage(Map<String, Object> metadata, InputStream source) {
+        return managedPackageRequest("inspect", metadata, source);
+    }
+
+    public Map<String, Object> previewManagedPackage(Map<String, Object> metadata, InputStream source) {
+        return managedPackageRequest("preview", metadata, source);
+    }
+
+    private Map<String, Object> managedPackageRequest(String action, Map<String, Object> metadata, InputStream source) {
+        ensureOpen();
+        if (!capabilities.getFeatures().contains("managed-package-preparation/1")) {
+            throw new DaemonProtocolException("Managed package preparation is unavailable");
+        }
+        String path = "/internal/hosted-harness/v1/managed-packages/" + action
+                + "?metadata=" + encodeQuery(JsonSupport.encode(metadata));
+        HttpRequest request = sessionRequestBuilder(path, (String) null)
+                .header("Content-Type", "application/octet-stream")
+                .header("Accept", "application/json")
+                .timeout(Duration.ofMinutes(10))
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new PackageInputStream(source))).build();
+        try {
+            var raw = httpClient.send(request, HttpSupport.bodyHandler(8 * 1024 * 1024));
+            validateGeneration(raw.headers(), raw.statusCode());
+            var response = HttpSupport.consume(raw, "Managed package " + action);
+            DaemonClient.requireStatus(response, "prepare".equals(action) ? 201 : 200, "Managed package " + action);
+            return JsonSupport.parseObject(response.getBody(), "Managed package " + action);
+        } catch (IOException error) {
+            throw new DaemonTransportException("Managed package preparation transport failed", error);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new DaemonTransportException("Managed package preparation was interrupted", error);
+        }
+    }
+
+    public InputStream managedPackageArchive(String preparationId, Map<String, Object> scope) {
+        ensureOpen();
+        String id = requireUuid(preparationId, "preparationId");
+        String path = "/internal/hosted-harness/v1/managed-packages/" + id + "/archive?scope="
+                + encodeQuery(JsonSupport.encode(scope));
+        try {
+            var response = httpClient.send(sessionRequestBuilder(path, (String) null)
+                    .header("Accept", "application/octet-stream").header("Accept-Encoding", "identity")
+                    .timeout(Duration.ofMinutes(10)).GET().build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            try {
+                validateGeneration(response.headers(), response.statusCode());
+                if (response.statusCode() != 200) {
+                    throw new DaemonHttpException("Prepared package archive", response.statusCode(),
+                            HttpSupport.readError(response.body(), "Prepared package archive"));
+                }
+                List<String> encodings = response.headers().allValues("Content-Encoding");
+                if (encodings.size() > 1 || encodings.size() == 1 && !"identity".equalsIgnoreCase(encodings.get(0))) {
+                    throw new DaemonProtocolException("Prepared package archive used an unsupported encoding");
+                }
+                long length = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+                if (length < 0 || length > 100L * 1024 * 1024) {
+                    throw new DaemonProtocolException("Invalid prepared package archive length");
+                }
+                PackageInputStream input = new PackageInputStream(response.body());
+                input.deadline = scheduler.schedule(() -> closeQuietly(input), 10, TimeUnit.MINUTES);
+                return input;
+            } catch (RuntimeException error) {
+                closeQuietly(response.body());
+                throw error;
+            }
+        } catch (IOException error) {
+            throw new DaemonTransportException("Prepared package archive transport failed", error);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new DaemonTransportException("Prepared package archive was interrupted", error);
+        }
+    }
+
+    private static final class PackageInputStream extends java.io.FilterInputStream {
+        private long remaining = 100L * 1024 * 1024;
+        private ScheduledFuture<?> deadline;
+        PackageInputStream(InputStream input) { super(java.util.Objects.requireNonNull(input)); }
+        @Override public int read() throws IOException {
+            int value = super.read();
+            if (value >= 0 && --remaining < 0) {
+                throw new IOException("Managed package exceeds 100 MiB");
+            }
+            return value;
+        }
+        @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+            int count = in.read(bytes, offset, length);
+            if (count > 0 && (remaining -= count) < 0) {
+                throw new IOException("Managed package exceeds 100 MiB");
+            }
+            return count;
+        }
+        @Override public void close() throws IOException {
+            if (deadline != null) {
+                deadline.cancel(false);
+            }
+            super.close();
+        }
+    }
+
     /** Observes process-global admission without attaching or acquiring a Session. */
     public Map<String, Object> readInstance() {
         ensurePoolLifecycle();
@@ -277,7 +390,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
-        requireModelConfigurationCapability(request.toJson());
+        requireSessionConfigurationCapabilities(request.toJson());
         HttpResponse<HttpSupport.Body> raw;
         try {
             raw = send("/session", "POST", request.toJson(), null);
@@ -325,7 +438,11 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
-    private void requireModelConfigurationCapability(Map<String, Object> request) {
+    private void requireSessionConfigurationCapabilities(Map<String, Object> request) {
+        if (request.containsKey("memoryStoreId")
+                && !capabilities.getFeatures().contains("session-memory/1")) {
+            throw new DaemonProtocolException("Hosted personal memory capability is required");
+        }
         if (request.containsKey("modelConfigDigest")
                 && !capabilities.getFeatures().contains("session-model-config/1")) {
             throw new DaemonProtocolException("Hosted Session model configuration capability is required");
@@ -345,7 +462,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
-        requireModelConfigurationCapability(request.toJson());
+        requireSessionConfigurationCapabilities(request.toJson());
         if (request.getRecoveryCleanupPromptId() != null
                 && !capabilities.getFeatures().contains("recovery-cleanup/1")) {
             throw new DaemonProtocolException("Hosted cleanup-only load capability is required");
@@ -418,7 +535,8 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     private void resolveActionResponse(HarnessSessionRef session, String actionId, Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
-        if (actionId == null || !actionId.matches("tool_approval_[0-9a-f]{32}")) {
+        if (actionId == null
+                || !actionId.matches("(?:tool_approval_[0-9a-f]{32}|command_approval_[0-9a-f]{48})")) {
             throw new IllegalArgumentException("Invalid actionId");
         }
         HttpSupport.Response response =

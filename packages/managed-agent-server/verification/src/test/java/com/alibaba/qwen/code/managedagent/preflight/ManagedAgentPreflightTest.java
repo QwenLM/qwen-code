@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 class ManagedAgentPreflightTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
@@ -93,29 +94,6 @@ class ManagedAgentPreflightTest {
             assertTrue(check.detail().contains(
                     "idle-reclamation=not measured"));
         }
-    }
-
-    @Test
-    void readsTheConfigLocationFromArgumentsBeforeTheEnvironment() {
-        MockEnvironment environment = new MockEnvironment();
-        environment.setProperty("SPRING_CONFIG_ADDITIONAL_LOCATION",
-                "file:/from-env.yml");
-        List<String> locations = ManagedAgentPreflight.configLocations(
-                new String[] {"--spring.config.additional-location="
-                        + "file:/from-arg.yml"}, environment);
-        assertEquals(List.of("file:/from-arg.yml"), locations);
-    }
-
-    @Test
-    void fallsBackToTheEnvironmentConfigLocation() {
-        MockEnvironment environment = new MockEnvironment();
-        environment.setProperty("SPRING_CONFIG_ADDITIONAL_LOCATION",
-                "file:/from-env.yml,optional:file:/optional.yml");
-        List<String> locations = ManagedAgentPreflight.configLocations(
-                new String[0], environment);
-        assertEquals(
-                List.of("file:/from-env.yml", "optional:file:/optional.yml"),
-                locations);
     }
 
     @Test
@@ -1306,22 +1284,6 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void treatsAMissingOptionalConfigAsAWarning() {
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                ManagedAgentPreflight.configFileCheck(
-                        List.of("optional:file:/does-not-exist/"
-                                + "application.yml")).status());
-    }
-
-    @Test
-    void treatsAMissingRequiredConfigAsAFailure() {
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
-                ManagedAgentPreflight.configFileCheck(
-                        List.of("file:/does-not-exist/application.yml"))
-                        .status());
-    }
-
-    @Test
     void reportsTheEffectiveSessionStoreWiring() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setEnabled(true);
@@ -1359,8 +1321,7 @@ class ManagedAgentPreflightTest {
                                 workspace.toString(),
                                 "server.port", "9090")));
         List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
-                checks);
+        ManagedAgentPreflight.loadDefaults(environment, checks);
         ManagedAgentProperties properties =
                 ManagedAgentPreflight.bind(environment, checks);
         assertTrue(checks.isEmpty(), checks.toString());
@@ -1388,8 +1349,7 @@ class ManagedAgentPreflightTest {
                                 workspace.toString(),
                                 "server.ssl.bundle", "web")));
         List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
-                checks);
+        ManagedAgentPreflight.loadDefaults(environment, checks);
         ManagedAgentProperties properties =
                 ManagedAgentPreflight.bind(environment, checks);
         ManagedAgentPreflight.startupValidationCheck(properties);
@@ -1450,13 +1410,13 @@ class ManagedAgentPreflightTest {
         Files.setPosixFilePermissions(file,
                 java.nio.file.attribute.PosixFilePermissions.fromString("rw-r-----"));
         ManagedAgentPreflight.Check shared = ManagedAgentPreflight
-                .configFileCheck(List.of("file:" + file));
+                .configFileCheck(file, null);
         assertEquals(ManagedAgentPreflight.Status.WARN, shared.status());
         assertEquals("chmod 600 " + file, shared.fix());
         Files.setPosixFilePermissions(file,
                 java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
-                .configFileCheck(List.of("file:" + file)).status());
+                .configFileCheck(file, null).status());
     }
 
     @Test
@@ -1852,7 +1812,8 @@ class ManagedAgentPreflightTest {
         assertNull(self.account());
         ManagedAgentPreflight.AccessCheck found =
                 ManagedAgentPreflight.serviceUserCheck("svc", "root", name ->
-                        Optional.of(new ServiceAccount(name, Set.of("svc", "adm"))));
+                        Optional.of(new ServiceAccount(name, ServiceAccountTest.OTHER_UID,
+                                Set.of("svc", "adm"))));
         assertEquals("svc (groups adm, svc)", found.check().detail());
         assertEquals("svc", found.account().name());
         ManagedAgentPreflight.AccessCheck missing =
@@ -1890,7 +1851,8 @@ class ManagedAgentPreflightTest {
         properties.getHarness().setCredentialsFile(harness.toString());
         String owner = Files.getOwner(harness).getName();
         ServiceAccount stranger =
-                new ServiceAccount("qwen-preflight-stranger", Set.of());
+                new ServiceAccount("qwen-preflight-stranger", ServiceAccountTest.OTHER_UID,
+                        Set.of());
         // This process owns both files, so it alone can read them.
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 ManagedAgentPreflight.credentialsFileCheck(properties).status());
@@ -1904,16 +1866,133 @@ class ManagedAgentPreflightTest {
                 + " directory on its path, following symbolic links",
                 credentials.fix());
         ManagedAgentPreflight.Check config = ManagedAgentPreflight.configFileCheck(
-                List.of("file:" + application), stranger);
+                application, stranger);
         assertEquals(ManagedAgentPreflight.Status.FAIL, config.status());
         assertEquals(application + " is not readable by qwen-preflight-stranger",
                 config.detail());
-        ServiceAccount ownerAccount = new ServiceAccount(owner, Set.of());
+        ServiceAccount ownerAccount =
+                new ServiceAccount(owner, ServiceAccountTest.OTHER_UID, Set.of());
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
                 .credentialsFileCheck(properties, ownerAccount).status());
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
-                .configFileCheck(List.of("file:" + application), ownerAccount)
+                .configFileCheck(application, ownerAccount)
                 .status());
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(
+            org.junit.jupiter.api.condition.OS.WINDOWS)
+    void takesALoopOfSymbolicLinksForOneTheAccountCannotFollow(@TempDir Path directory)
+            throws IOException {
+        // The kernel refuses the loop to the service account as to anyone, so
+        // running the check as another account would tell nothing more.
+        ServiceAccountTest.assumeOthersCanSearchAbove(directory);
+        ServiceAccountTest.mode(directory, "rwx--x--x");
+        Path loop = Files.createSymbolicLink(directory.resolve("loop"), Path.of("loop"));
+        ServiceAccount stranger = new ServiceAccount("qwen-preflight-stranger",
+                ServiceAccountTest.OTHER_UID, Set.of());
+        String runner = ManagedAgentPreflight.runner();
+        assertEquals(new ManagedAgentPreflight.Check("config", ManagedAgentPreflight.Status.FAIL,
+                loop + " is not readable by qwen-preflight-stranger",
+                ManagedAgentPreflight.unreadableFix("qwen-preflight-stranger", loop.toString())),
+                ManagedAgentPreflight.configFailureCheck(
+                        new ServerEnvironment.Failure("detail", "fix", loop), stranger, runner));
+        assertNull(ManagedAgentPreflight.hiddenCheck(
+                new ServerEnvironment.Hidden(loop, false), stranger, runner));
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(
+            org.junit.jupiter.api.condition.OS.WINDOWS)
+    void sendsTheCheckToTheServiceUserWhereThisProcessCannotLook(@TempDir Path directory)
+            throws IOException {
+        // The modes shut this process out where they let the service account
+        // in, so it cannot tell what the server reads, and says whom to run
+        // the check as instead of judging the file.
+        ServiceAccountTest.assumeOthersCanSearchAbove(directory);
+        Path locked = Files.createDirectory(directory.resolve("locked"));
+        Path searched = Files.createDirectory(directory.resolve("searched"));
+        Path open = Files.createDirectory(directory.resolve("open"));
+        Path behind = Files.writeString(searched.resolve("application.yml"), "x: y\n");
+        Path unread = Files.writeString(open.resolve("application.yml"), "x: y\n");
+        Path value = Files.writeString(searched.resolve("spring.datasource.password"), "x");
+        Path lockedValue = Files.writeString(locked.resolve("spring.datasource.password"), "x");
+        ServiceAccountTest.mode(behind, "rw-r--r--");
+        ServiceAccountTest.mode(value, "rw-r--r--");
+        ServiceAccountTest.mode(unread, "---r--r--");
+        ServiceAccountTest.mode(directory, "rwx--x--x");
+        ServiceAccountTest.mode(open, "rwx--x--x");
+        ServiceAccountTest.mode(searched, "-----x--x");
+        ServiceAccountTest.mode(locked, "---------");
+        try {
+            String runner = ManagedAgentPreflight.runner();
+            ServiceAccount root = new ServiceAccount("root", 0, Set.of("root"));
+            ServiceAccount stranger = new ServiceAccount("qwen-preflight-stranger",
+                    ServiceAccountTest.OTHER_UID, Set.of());
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getHarness().setEnabled(true);
+            // Where this process can look, it judges as the modes say.
+            Path absent = open.resolve("harness.env");
+            properties.getHarness().setCredentialsFile(absent.toString());
+            assertEquals(new ManagedAgentPreflight.Check("credentials",
+                    ManagedAgentPreflight.Status.FAIL, absent + " is not readable by root",
+                    ManagedAgentPreflight.unreadableFix("root", absent.toString())),
+                    ManagedAgentPreflight.credentialsFileCheck(properties, root));
+            assumeFalse(Files.isExecutable(locked), "root enters any directory");
+            // Root reads whatever the modes say, but a credentials file this
+            // process cannot reach may not be there at all.
+            Path missing = locked.resolve("harness.env");
+            properties.getHarness().setCredentialsFile(missing.toString());
+            assertEquals(new ManagedAgentPreflight.Check("credentials",
+                    ManagedAgentPreflight.Status.FAIL,
+                    missing + " is not readable by " + runner + ", which runs this check",
+                    "run --check as root"),
+                    ManagedAgentPreflight.credentialsFileCheck(properties, root));
+            // Nor that root reads a value file there whose property alone
+            // tells it holds a secret, so the check would not open it.
+            assertEquals(new ManagedAgentPreflight.Check("config",
+                    ManagedAgentPreflight.Status.FAIL,
+                    lockedValue + " is not readable by " + runner + ", which runs this check",
+                    "run --check as root"),
+                    ManagedAgentPreflight.configFileCheck(lockedValue, root, runner,
+                            "spring.datasource.password", Set.of()));
+            // Nor can it see past a directory the account alone may enter.
+            assertEquals(new ManagedAgentPreflight.Check("config",
+                    ManagedAgentPreflight.Status.FAIL,
+                    behind + " is not readable by " + runner + ", which runs this check",
+                    "run --check as qwen-preflight-stranger or as root"),
+                    ManagedAgentPreflight.configFileCheck(behind, stranger));
+            // Even for a config tree value file whose property alone tells it
+            // holds a secret, which it then need not read.
+            assertEquals(new ManagedAgentPreflight.Check("config",
+                    ManagedAgentPreflight.Status.FAIL,
+                    value + " is not readable by " + runner + ", which runs this check",
+                    "run --check as qwen-preflight-stranger or as root"),
+                    ManagedAgentPreflight.configFileCheck(value, stranger, runner,
+                            "spring.datasource.password", Set.of()));
+            // Nor read a file the account alone may, to judge what it holds.
+            assertEquals(new ManagedAgentPreflight.Check("config",
+                    ManagedAgentPreflight.Status.FAIL,
+                    unread + " is not readable by " + runner + ", which runs this check",
+                    "run --check as qwen-preflight-stranger or as root"),
+                    ManagedAgentPreflight.configFileCheck(unread, stranger));
+            // Nor a credentials file, which the startup validation reads as
+            // this process, whoever the account.
+            properties.getHarness().setCredentialsFile(unread.toString());
+            assertEquals(new ManagedAgentPreflight.Check("credentials",
+                    ManagedAgentPreflight.Status.FAIL,
+                    unread + " is not readable by " + runner + ", which runs this check",
+                    "run --check as qwen-preflight-stranger or as root"),
+                    ManagedAgentPreflight.credentialsFileCheck(properties, stranger));
+            assertEquals(new ManagedAgentPreflight.Check("credentials",
+                    ManagedAgentPreflight.Status.FAIL,
+                    unread + " is not readable by " + runner + ", which runs this check",
+                    "run --check as root"),
+                    ManagedAgentPreflight.credentialsFileCheck(properties, root));
+        } finally {
+            ServiceAccountTest.mode(locked, "rwx------");
+            ServiceAccountTest.mode(searched, "rwx------");
+        }
     }
 
     @Test
@@ -2009,31 +2088,6 @@ class ManagedAgentPreflightTest {
         properties.getRuntimeBroker().setIsolationClass("tenant");
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
-    }
-
-    @Test
-    void commandLineArgumentsOverrideTheEnvironment() {
-        var environment = ManagedAgentPreflight.baseEnvironment(new String[] {
-                "--server.address=0.0.0.0",
-                "--qwen.managed-agent.auth.mode=open"});
-        assertEquals("0.0.0.0", environment.getProperty("server.address"));
-        assertEquals("open",
-                environment.getProperty("qwen.managed-agent.auth.mode"));
-    }
-
-    @Test
-    void laterExternalYamlOverridesEarlierWithoutDroppingKeys(
-            @TempDir Path directory) throws IOException {
-        Path first = Files.writeString(directory.resolve("first.yml"),
-                "server:\n  address: 0.0.0.0\n");
-        Path second = Files.writeString(directory.resolve("second.yml"),
-                "server:\n  port: 0\n");
-        var environment = new StandardEnvironment();
-        ManagedAgentPreflight.loadConfiguration(environment,
-                List.of(first.toString(), second.toString()),
-                new ArrayList<>());
-        assertEquals("0.0.0.0", environment.getProperty("server.address"));
-        assertEquals("0", environment.getProperty("server.port"));
     }
 
     @Test

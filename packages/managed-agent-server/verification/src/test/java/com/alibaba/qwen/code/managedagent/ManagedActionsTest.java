@@ -167,6 +167,8 @@ class ManagedActionsTest {
         ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
                 .withQuestions(input);
         journal.change("requested", null);
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(2);
         for (JsonNode view : inputViews(tenant, session, journal.id)) {
             boolean web = view.has("actionId");
             assertThat(view.path("kind").asText()).isEqualTo("question");
@@ -249,8 +251,14 @@ class ManagedActionsTest {
         jdbc.update("UPDATE ma_session SET public_child_agents_version = 1, parent_session_id = ?, root_session_id = ?, parent_child_run_id = 'run-1', child_depth = 1 WHERE tenant_id = ? AND session_id = ?",
                 root, root, tenant, child);
         long now = System.currentTimeMillis();
-        ActionJournal own = action(tenant, root, now, 9_007_199_254_740_991L);
-        ActionJournal nested = action(tenant, child, now + 1, 9_007_199_254_740_991L);
+        ActionJournal own = new ActionJournal(journals, tenant, root, now, 9_007_199_254_740_991L);
+        own.id = "command_approval_" + "d".repeat(48);
+        own.options.put("requestId", own.id);
+        own.change("requested", null);
+        ActionJournal nested = new ActionJournal(journals, tenant, child, now + 1, 9_007_199_254_740_991L);
+        nested.id = "command_approval_" + "e".repeat(48);
+        nested.options.put("requestId", nested.id);
+        nested.change("requested", null);
         action(tenant, other, now + 2, 9_007_199_254_740_991L);
         JsonNode first = read(auth(get("/v1/agents/sessions/" + root + "/actions")
                 .param("include_children", "true").param("limit", "1"), tenant, "owner"));
@@ -276,7 +284,7 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-            "todo_write",
+            "todo_write", "context_search", "context_remember", "context_get", "context_forget",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
@@ -290,6 +298,10 @@ class ManagedActionsTest {
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
             // #15076: the task list is the only preview this profile adds.
             case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
+            case "context_search" -> "{ \"query\" : \"preferences\" }";
+            case "context_remember" -> "{ \"content\" : \"Prefer concise answers\" }";
+            case "context_get" -> "{ \"memoryId\" : \"memory-1\" }";
+            case "context_forget" -> "{ \"memoryId\" : \"memory-1\", \"expectedContent\" : \"Prefer concise answers\" }";
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";
@@ -666,6 +678,8 @@ class ManagedActionsTest {
         ActionJournal first = action(tenant, session, 100, 1000);
         first.change("expired", null);
         ActionJournal second = new ActionJournal(first, 200, 9007199254740991L);
+        second.id = "command_approval_" + "b".repeat(48);
+        second.options.put("requestId", second.id);
         second.change("requested", null);
         JsonNode publicView = read(auth(get(path(session, second.id)), tenant, "owner"));
         assertThat(OpenApiContract.load().validate("/components/schemas/PublicAction", publicView))
@@ -692,6 +706,8 @@ class ManagedActionsTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(1));
         ActionJournal third = new ActionJournal(second, 200, 9007199254740991L);
+        third.id = "command_approval_" + "c".repeat(48);
+        third.options.put("requestId", third.id);
         third.change("requested", null);
         String greatest = second.id.compareTo(third.id) > 0 ? second.id : third.id;
         String smallest = greatest.equals(second.id) ? third.id : second.id;

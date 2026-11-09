@@ -1768,10 +1768,10 @@ export default {
   'Signed in successfully · {{email}}': '登录成功 · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     '当前套餐：Qwen {{plan}}，已可使用 Qwen Code',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    '常用命令：/usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型，/effort 修改思考强度。',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    '常用命令：/usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     '已登录为 {{email}}（Qwen {{plan}}）',
   'Qwen {{plan}} is active · usage is included with your plan':
@@ -2055,6 +2055,7 @@ export default {
   'Model Usage': '模型使用情况',
   'Input Tokens': '输入 token 数',
   'Output Tokens': '输出 token 数',
+  'Output (incl. Reasoning)': '输出（含推理）',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
     '从缓存载入 token ，降低了成本',
