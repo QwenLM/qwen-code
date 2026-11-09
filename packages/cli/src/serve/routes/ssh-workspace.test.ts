@@ -91,6 +91,7 @@ describe.skipIf(process.platform === 'win32')(
       } as WorkspaceRuntime;
       registry = createWorkspaceRegistry([primary, runtime]);
       app = express();
+      app.use(express.json());
       registerSshWorkspaceBoundary(app, registry);
       app.get('/workspaces/registrations', (_req, res) =>
         res.json({ registrations: [] }),
@@ -179,6 +180,62 @@ describe.skipIf(process.platform === 'win32')(
       }
     }
     const url = (suffix: string) => `/workspaces/ssh-workspace${suffix}`;
+
+    it('checks ignores in the remote repository with literal pathnames', async () => {
+      init();
+      writeFileSync(join(remote, '.gitignore'), '*.log\n');
+      writeFileSync(join(remote, 'tracked.log'), 'tracked');
+      git('add', '-f', 'tracked.log');
+      const files = ['tracked.log', "quoted ' name\n.log", 'source.ts'];
+      const response = await supertest(app)
+        .post(url('/git/check-ignore'))
+        .send({ paths: files });
+      expect(response.status).toBe(200);
+      expect(response.body.ignoredPaths).toEqual([files[1]]);
+      expect(ssh.execute).toHaveBeenCalledTimes(2);
+      expect(
+        (
+          await supertest(app)
+            .post(url('/git/check-ignore'))
+            .send({ paths: ['../outside'] })
+        ).status,
+      ).toBe(400);
+    });
+
+    it('returns no ignored paths for a remote non-Git directory', async () => {
+      const response = await supertest(app)
+        .post(url('/git/check-ignore'))
+        .send({ paths: ['file.ts'] });
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ v: 1, ignoredPaths: [] });
+    });
+
+    it('splits remote queries at sixteen paths without dropping the remainder', async () => {
+      init();
+      writeFileSync(join(remote, '.gitignore'), '*.log\n');
+      const paths = Array.from(
+        { length: 17 },
+        (_, index) => `file-${index}.log`,
+      );
+      const response = await supertest(app)
+        .post(url('/git/check-ignore'))
+        .send({ paths });
+      expect(response.status).toBe(200);
+      expect(response.body.ignoredPaths).toEqual(paths);
+      expect(ssh.execute).toHaveBeenCalledTimes(3);
+    });
+
+    it('retains other ignore verdicts around a remote symlink-parent path', async () => {
+      init();
+      writeFileSync(join(remote, '.gitignore'), '*.log\n');
+      mkdirSync(join(remote, 'source'));
+      symlinkSync('source', join(remote, 'link'));
+      const response = await supertest(app)
+        .post(url('/git/check-ignore'))
+        .send({ paths: ['first.log', 'link/file.ts', 'last.log'] });
+      expect(response.status).toBe(200);
+      expect(response.body.ignoredPaths).toEqual(['first.log', 'last.log']);
+    });
 
     it('returns the local API non-repository shapes without reaching a local Git route', async () => {
       const status = await supertest(app).get(url('/git'));
@@ -584,6 +641,13 @@ describe.skipIf(process.platform === 'win32')(
       const mutable = runtime as { trusted: boolean };
       mutable.trusted = false;
       expect((await supertest(app).get(url('/git'))).status).toBe(403);
+      expect(
+        (
+          await supertest(app)
+            .post(url('/git/check-ignore'))
+            .send({ paths: ['file.ts'] })
+        ).status,
+      ).toBe(403);
       mutable.trusted = true;
       registry.beginDrain(runtime);
       expect((await supertest(app).get(url('/git'))).body.code).toBe(

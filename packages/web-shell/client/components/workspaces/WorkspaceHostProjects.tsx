@@ -24,6 +24,7 @@ import {
 import { useI18n } from '../../i18n';
 import { measureSessionTitleScroll } from '../sidebar/sessionTitleScroll';
 import { WorkspaceSection } from '../sidebar/WorkspaceSection';
+import { readSessionSort } from '../sidebar/SessionSortMenu';
 import sectionStyles from '../sidebar/WorkspaceSection.module.css';
 import sidebarStyles from '../sidebar/WebShellSidebar.module.css';
 import { HostLabel } from './HostLabel';
@@ -191,8 +192,13 @@ function FanoutHostGroup({
   order?: number;
 }) {
   const { t } = useI18n();
-  const { workspaces, status, generation, refresh } =
+  const { workspaces, features, status, generation, refresh } =
     useHostCapabilities(origin);
+  // The sidebar's preference is per host, so a group must read its own value
+  // and only ask for question ordering when that host advertises it.
+  const sortBy = features?.includes('session_last_user_prompt_sort')
+    ? readSessionSort(origin)
+    : undefined;
   const openHostWorkspace = useOpenHostedWorkspaceFlow();
   // Workspace removal runs over the host's own client: it is catalog
   // management with the user's own per-origin token, distinct from the
@@ -260,6 +266,7 @@ function FanoutHostGroup({
               origin={origin}
               workspace={workspace}
               generation={generation}
+              sortBy={sortBy}
               onOpenHostSession={onOpenHostSession}
               onRemoveWorkspace={removal.request}
             />
@@ -292,12 +299,14 @@ function LiveHostWorkspace({
   origin,
   workspace,
   generation,
+  sortBy,
   onOpenHostSession,
   onRemoveWorkspace,
 }: {
   origin: string;
   workspace: DaemonWorkspaceCapability;
   generation: number;
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   onOpenHostSession?: OpenHostSessionHandler;
   onRemoveWorkspace?: (workspace: DaemonWorkspaceCapability) => void;
 }) {
@@ -324,6 +333,7 @@ function LiveHostWorkspace({
       noSessionsLabel={t('sidebar.noSessions')}
       loadErrorLabel={t('sidebar.loadFailed')}
       untitledSessionLabel={t('sidebar.untitledSession')}
+      sortBy={sortBy}
       organizationEnabled={false}
       channelGroupingEnabled={false}
       ungroupedLabel={t('sidebar.groupUngrouped')}
