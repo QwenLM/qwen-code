@@ -11484,9 +11484,6 @@ export class Session implements SessionContext {
    */
   async #runManagedAutoSkillReview(): Promise<void> {
     const llmClient = this.config.getLlmClient();
-    if (typeof llmClient.runManagedAutoSkillReview !== 'function') {
-      return;
-    }
     llmClient.runManagedAutoSkillReview();
     for (const promise of llmClient.consumePendingMemoryTaskPromises()) {
       await promise;

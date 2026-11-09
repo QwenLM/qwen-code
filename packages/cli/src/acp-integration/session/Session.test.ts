@@ -6655,12 +6655,22 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
+      // A real promise, so the drain loop's body runs instead of awaiting an
+      // empty array.
+      let drained = false;
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
+        Promise.resolve(1).then(() => {
+          drained = true;
+          return 1;
+        }),
+      ]);
 
       await session.prompt({
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'hello' }],
       });
 
+      expect(drained).toBe(true);
       // The ACP-side branch owns the memory tasks, so it owns the skill
       // review too: nothing else in the legacy round would schedule it.
       expect(mockLlmClient.runManagedAutoSkillReview).toHaveBeenCalledOnce();
@@ -6670,6 +6680,14 @@ describe('Session', () => {
       // The queued promise belongs to this branch, so this branch has to take
       // it back; nothing on the ACP path would ever drain it otherwise.
       expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+      // Draining before the schedule would empty an array the review has not
+      // filled yet, leaving the real promise to pile up.
+      expect(
+        mockLlmClient.runManagedAutoSkillReview.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        mockLlmClient.consumePendingMemoryTaskPromises.mock
+          .invocationCallOrder[0]!,
+      );
     });
 
     it("schedules no extraction or Dream after a channel's turn", async () => {
@@ -6811,6 +6829,11 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // The skill review gate skips retries too: scheduling one here would
+      // dispatch a background agent for a turn the user did not author.
+      expect(
+        mockLlmClient.runManagedAutoSkillReview,
+      ).not.toHaveBeenCalled();
       // A retry skips managed auto-memory, but the turn still ends `end_turn`,
       // so the follow-up suggestion fires and reads the process-global
       // cache-safe slot. The turn boundary has to refresh it anyway, or the
