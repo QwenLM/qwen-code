@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Artifact;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
@@ -14,12 +15,12 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 @Component
-public class ManagedArtifactReader
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader {
+public class ToolPublicationArtifactReader
+        implements ManagedArtifactReader {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final ObjectProvider<ToolPublicationDataStore> publications;
 
-    public ManagedArtifactReader(ObjectProvider<ToolPublicationDataStore> publications) {
+    public ToolPublicationArtifactReader(ObjectProvider<ToolPublicationDataStore> publications) {
         this.publications = publications;
     }
 

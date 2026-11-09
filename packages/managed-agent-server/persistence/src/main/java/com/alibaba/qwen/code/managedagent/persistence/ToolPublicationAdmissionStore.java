@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -36,12 +37,12 @@ public final class ToolPublicationAdmissionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
-    private final ManagedSessionStore sessions;
+    private final JdbcManagedSessionStore sessions;
     private final ToolPublicationDataStore data;
     private final DataSource transactionSource;
 
     public ToolPublicationAdmissionStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            ManagedSessionStore sessions, ToolPublicationDataStore data) {
+            JdbcManagedSessionStore sessions, ToolPublicationDataStore data) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(Objects.requireNonNull(manager));
         this.sessions = Objects.requireNonNull(sessions);
@@ -215,7 +216,7 @@ public final class ToolPublicationAdmissionStore {
         var resources = result.putArray("resources");
         for (JsonNode ref : List.of(outcomeRef, manifest)) {
             String resourceId = text(ref, "resourceId");
-            String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
+            String sessionScope = ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
             var resource = jdbc.query("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                     + " byte_length, sha256, storage_kind, inline_bytes, object_key, object_version_id, encryption_key_id,"
                     + " publish_command_id, state FROM ma_resource"
@@ -490,7 +491,7 @@ public final class ToolPublicationAdmissionStore {
 
     private void referenceCapturedResource(JsonNode key, CommitTransactionRequest request,
             JsonNode ref, byte[] bytes, String objectKey, String kind) {
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
+        String scopeKey = ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
         String resourceId = text(ref, "resourceId");
         var rows = jdbc.query("SELECT state, kind, byte_length, sha256, capture_state, publish_command_id"
                         + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
@@ -557,8 +558,8 @@ public final class ToolPublicationAdmissionStore {
         // named-failure mapping (#13800). For a CSI-pinned Session,
         // lockCsiOriginal above already took the same row with the same
         // bound, and this re-lock returns at once.
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
-                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                text(key, "tenantId"), JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private static String scope(JsonNode key) {

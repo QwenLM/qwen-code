@@ -8,9 +8,9 @@ import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import org.junit.jupiter.api.AfterEach;
@@ -39,8 +39,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SessionWorktreeServiceTest {
-    private final SessionWorktreeStore store = mock(SessionWorktreeStore.class);
-    private final WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+    private final JdbcSessionWorktreeStore store = mock(JdbcSessionWorktreeStore.class);
+    private final JdbcWorkspaceExecutionStore execution = mock(JdbcWorkspaceExecutionStore.class);
     private final ManagedAgentStore sessions = mock(ManagedAgentStore.class);
     private final SessionWorktreeService service = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeService(store, execution, new ManagedAgentProperties(),
             sessions, mock(HarnessCoordinator.class)));
@@ -140,16 +140,16 @@ class SessionWorktreeServiceTest {
         verify(sessions).failWorktreeInitialTurns("tenant", "session", "worktree_git_failed");
     }
 
-    private SessionWorktreeStore.Row preparing() {
+    private JdbcSessionWorktreeStore.Row preparing() {
         return operation("PREPARING");
     }
 
-    private SessionWorktreeStore.Row operation(String state) {
+    private JdbcSessionWorktreeStore.Row operation(String state) {
         String id = "a".repeat(32);
-        var plan = new SessionWorktreeStore.Plan("tenant", "workspace", 1, "storage", "project", "config", 1,
+        var plan = new JdbcSessionWorktreeStore.Plan("tenant", "workspace", 1, "storage", "project", "config", 1,
                 "/storage", "root", "project", ".", "/storage/project/.git", "git", null, "a".repeat(40),
                 id, ".qwen-managed-worktrees/" + id, ".qwen-managed-worktrees/" + id, "worktree-managed-" + id);
-        var row = new SessionWorktreeStore.Row("tenant", "session", "workspace", id, state, plan, null, id,
+        var row = new JdbcSessionWorktreeStore.Row("tenant", "session", "workspace", id, state, plan, null, id,
                 null, 1, null, state, 0, 1, null, "actor");
         when(store.claim(eq(row), anyString(), anyLong())).thenReturn(row);
         when(store.active(row)).thenReturn(true);

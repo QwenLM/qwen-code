@@ -3,11 +3,12 @@ package com.alibaba.qwen.code.managedagent.maintenance;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceMigrationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
@@ -74,7 +75,7 @@ public final class WorkspaceMigrationMain {
                 case "retire" -> {
                     var sessions = new JdbcRuntimeSessionRepository(source);
                     var executions = new JdbcToolExecutionRepository(source);
-                    var ownership = new WorkspaceExecutionStore(jdbc, manager);
+                    var ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
                     var http = new HttpRuntimeTransport();
                     Path stateDirectory = Path.of(request.path("stateDirectory").asText());
                     if (!Files.isDirectory(stateDirectory, LinkOption.NOFOLLOW_LINKS)
@@ -89,7 +90,7 @@ public final class WorkspaceMigrationMain {
                                 (row, index) -> ManagedAgentStore.readBinding(row),
                                 request.path("tenantId").asText(), sessionId);
                         if (found.size() != 1 || found.getFirst() == null) {
-                            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                            throw WorkspaceExecutionStore.unavailable();
                         }
                         return found.getFirst();
                     });

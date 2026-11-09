@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -37,8 +38,8 @@ import java.util.function.Supplier;
 
 @Repository
 @Qualifier("managedAgentTransactionManager")
-public class ManagedSessionStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore {
+public class JdbcManagedSessionStore
+        implements ManagedSessionStore {
     private final JournalStoreRows storeRows;
     private final JournalFencing fencing;
     private final JournalHistoryQueries historyQueries;
@@ -49,30 +50,30 @@ public class ManagedSessionStore
     private final JournalCommit commits;
     private final org.springframework.transaction.support.TransactionTemplate writerTransactions;
 
-    public ManagedSessionStore(JdbcTemplate jdbc) {
-        this(jdbc, new ManagedExtensionRecordStore(jdbc));
+    public JdbcManagedSessionStore(JdbcTemplate jdbc) {
+        this(jdbc, new JdbcManagedExtensionRecordStore(jdbc));
     }
 
-    public ManagedSessionStore(JdbcTemplate jdbc, ManagedExtensionRecordStore extensionRecords) {
+    public JdbcManagedSessionStore(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore extensionRecords) {
         this(jdbc, extensionRecords, null);
     }
 
-    public ManagedSessionStore(JdbcTemplate jdbc, ManagedExtensionRecordStore extensionRecords,
-            ManagedActionStore actions) {
+    public JdbcManagedSessionStore(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore extensionRecords,
+            JdbcManagedActionStore actions) {
         this(jdbc, extensionRecords, actions, null,
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null, WriterCredentialPolicy.unbound(), null);
     }
 
     @Autowired
-    public ManagedSessionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            ManagedExtensionRecordStore extensionRecords, ManagedActionStore actions,
+    public JdbcManagedSessionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            JdbcManagedExtensionRecordStore extensionRecords, JdbcManagedActionStore actions,
             com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules,
             com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
-            @org.springframework.lang.Nullable WorkspaceExecutionStore lifecycleExecution,
+            @org.springframework.lang.Nullable JdbcWorkspaceExecutionStore lifecycleExecution,
             @org.springframework.lang.Nullable SessionQueryStore lifecycleSessions,
             @org.springframework.lang.Nullable ToolPublicationObjectStore publicationObjects,
-            @org.springframework.lang.Nullable ManagedToolResultStore toolResults,
+            @org.springframework.lang.Nullable JdbcManagedToolResultStore toolResults,
             @org.springframework.lang.Nullable JournalEventTransport journalEventTransport,
             WriterCredentialPolicy credentials,
             @org.springframework.lang.Nullable RuntimeBindingRepository bindings) {
