@@ -1746,9 +1746,7 @@ describe('Session', () => {
       );
       // The drain records the warm copy before prompting the leader, so the
       // property under test is "recorded", not "not yet recorded" (R2-18).
-      expect(
-        mockChatRecordingService.recordNotification,
-      ).toHaveBeenCalled();
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalled();
       session.dispose();
     });
 
