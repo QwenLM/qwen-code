@@ -1849,6 +1849,50 @@ describe('ModRuntime with the real QuickJS worker', () => {
       },
     );
 
+    it.each(['synchronous', 'resumed'])(
+      'keeps a %s sibling model hook running when another call expires',
+      async (mode) => {
+        const host = vi.fn<ModModelHost>(async ({ prompt }) => ({
+          isAnswered: true,
+          text: prompt,
+          usage,
+        }));
+        const runtime = await createModels(
+          [
+            `export function register(on) {
+              on('session.start', async ($, e, next) => {
+                await $.command.register({name:'hello', description:'Hello'});
+                return next(e);
+              });
+              on('command.run', async ($) => {
+                const answers = await Promise.all([
+                  $.model.complete({model:'m', prompt:'slow', timeoutMs:50}),
+                  $.model.complete({model:'m', prompt:'raw', timeoutMs:3000}),
+                ]);
+                return {text:JSON.stringify(answers)};
+              });
+              on('model.complete', async ($, e, next) => {
+                if (e.prompt === 'slow') await $.clock.sleep(300);
+                else {
+                  ${mode === 'resumed' ? 'await Promise.resolve();' : ''}
+                  const end = Date.now() + 150;
+                  while (Date.now() < end) {}
+                }
+                return next({...e, prompt:'sanitized'});
+              });
+            }`,
+          ],
+          host,
+        );
+        expect(
+          JSON.parse(await runtime.runCommand('hello', '', signal())),
+        ).toEqual([aborted, { isAnswered: true, text: 'sanitized', usage }]);
+        expect(host.mock.calls.map(([input]) => input.prompt)).toEqual([
+          'sanitized',
+        ]);
+      },
+    );
+
     it('does not forward a request after middleware exhausts its deadline', async () => {
       const host = vi.fn<ModModelHost>(async () => ({
         isAnswered: true,

@@ -48,6 +48,10 @@ class SubscriptionProvider extends DefaultOpenAICompatibleProvider {
     return new OpenAI({
       apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
       baseURL: QWEN_SUBSCRIPTION_BASE_URL,
+      ...(this.contentGeneratorConfig.isolatedRoute && {
+        organization: null,
+        project: null,
+      }),
       timeout: resolveRequestTimeout(this.contentGeneratorConfig.timeout),
       maxRetries: this.contentGeneratorConfig.maxRetries ?? DEFAULT_MAX_RETRIES,
       defaultHeaders: this.buildHeaders(),

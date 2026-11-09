@@ -359,6 +359,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
+      ...(this.contentGeneratorConfig.isolatedRoute && {
+        organization: null,
+        project: null,
+      }),
       timeout,
       maxRetries,
       defaultHeaders,

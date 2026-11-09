@@ -41,7 +41,7 @@ The worker sends `model-complete {id, input}` to the main thread and waits for `
 
 - Model names: `haiku` runs the configured fast model at its selected endpoint, or the session's model when none is set. `sonnet` and `opus` use the session's model. Explicit model ids keep their provider qualification and must name the session's model or a configured model that supports text. The selected endpoint uses its own credentials and headers. OAuth routes require cached credentials.
 - `maxTokens` defaults to 1024 and rejects above a curated output limit.
-- `BaseLlmClient.generateText` sends the prompt as the one user message and `system` as the system instruction. The client and the provider make a single attempt. Reasoning is off unless the request names an `effort`.
+- `BaseLlmClient.generateText` sends the prompt as the one user message and `system` as the system instruction. The client makes a single attempt and rejects HTTP redirects. Reasoning is off unless the request names an `effort`.
 - An empty reply is `empty-reply`. A failure is `api-error` with the HTTP status and a kind from the shared `classifyApiError`, plus `overloaded` and `model_not_found`. An abort or elapsed `timeoutMs` is `aborted`.
 - `usage` uses the same four-count conversion as `turn.complete`, now shared.
 - A reply over half a Mod payload keeps its head and tail around a marker.
@@ -49,6 +49,8 @@ The worker sends `model-complete {id, input}` to the main thread and waits for `
 ### 3. Signals and lifetime
 
 The guest relays its `signal` by token. On abort it sends an internal `model.abort`. The worker starts the caller's deadline before middleware runs. A signal or deadline cancels the model call, its middleware and any descendant model requests, and resolves `aborted`. An already aborted signal resolves `aborted` without a request.
+
+QuickJS executes pending promise jobs at the realm level. A model deadline takes effect for these jobs at the next hook or API boundary, with the VM execution budget still in effect.
 
 A call belongs to its dispatch. When the dispatch is abandoned or ends, the worker cancels the host operation, and the host aborts every call still running for that root.
 
@@ -78,7 +80,7 @@ Core runtime tests with the real QuickJS worker:
 - A request with blocks reaches the host joined, with the blocks beside it, and each result shape comes back.
 - Wrong shapes, limits and a host refusal reject; a host without model calls rejects, and `$.session.version()` lists `model.complete` only where the host runs it.
 - Another plugin rewrites, answers and denies `model.complete`.
-- Cancellation and deadlines cover model middleware and nested calls. A signal that already aborted skips the call.
+- Cancellation and deadlines cover model middleware and nested calls. A signal that already aborted skips the call. An expired model call leaves sibling hooks in the same realm running.
 - The dispatch clock pauses while the worker waits solely on a model call, including during a permission check.
 
 CLI and client tests cover alias and id resolution, endpoint credentials, single attempts, cached OAuth credentials, output limits, and the empty, API-error and timeout results.

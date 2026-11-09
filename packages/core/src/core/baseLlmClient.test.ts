@@ -1159,6 +1159,58 @@ describe('BaseLlmClient', () => {
       expect(mockGenerateContent).not.toHaveBeenCalled();
     });
 
+    describe('isolated Vertex route credentials', () => {
+      const selector = 'vertex-ai:vertex-model';
+      const target = {
+        id: 'vertex-model',
+        authType: AuthType.USE_VERTEX_AI,
+        generationConfig: {},
+      };
+
+      beforeEach(async () => {
+        vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'test-project');
+        vi.mocked(
+          crossProviderConfig.getContentGeneratorConfig,
+        ).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'main-model',
+          apiKey: 'primary-key',
+        });
+        registerOnly(target.authType, target.id, target);
+        const actual = await vi.importActual<
+          typeof import('../models/content-generator-config.js')
+        >('../models/content-generator-config.js');
+        mockBuildAgentContentGeneratorConfig.mockImplementation(
+          actual.buildAgentContentGeneratorConfig,
+        );
+      });
+
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('rejects an implicit primary key instead of switching to ADC', async () => {
+        vi.stubEnv('GOOGLE_API_KEY', 'primary-key');
+        await expect(
+          perModelClient().resolveForModel(selector, { isolatedRoute: true }),
+        ).rejects.toThrow('cannot use the primary model');
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it.each([undefined, 'target-key'])(
+        'allows an ADC route or its own implicit key (%s)',
+        async (apiKey) => {
+          vi.stubEnv('GOOGLE_API_KEY', apiKey);
+          await perModelClient().resolveForModel(selector, {
+            isolatedRoute: true,
+          });
+          expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+            expect.objectContaining({ isolatedRoute: true, apiKey }),
+            crossProviderConfig,
+            true,
+          );
+        },
+      );
+    });
+
     it('clearPerModelGeneratorCache forces a rebuild on the next call', async () => {
       getResolvedModel.mockReturnValue(anthropicKey());
       const c = perModelClient();

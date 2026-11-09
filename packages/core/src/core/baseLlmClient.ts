@@ -1077,6 +1077,9 @@ export class BaseLlmClient {
         const activeApiKey = isolatedRoute
           ? this.config.getContentGeneratorConfig()?.apiKey
           : undefined;
+        const defaultMatchesActive =
+          defaultApiKey !== undefined &&
+          defaultApiKey.trim() === activeApiKey?.trim();
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
           targetModel,
@@ -1084,15 +1087,23 @@ export class BaseLlmClient {
             authType: resolvedModel.authType,
             apiKey: resolvedModel.envKey
               ? (process.env[resolvedModel.envKey] ?? undefined)
-              : defaultApiKey?.trim() === activeApiKey?.trim()
+              : defaultMatchesActive
                 ? undefined
                 : defaultApiKey,
             baseUrl: resolvedModel.baseUrl,
             ...(isolatedRoute && {
+              isolatedRoute,
               registryBaseUrl: resolvedModel.registryBaseUrl ?? null,
             }),
           },
         );
+        // Suppressing a conflicting key is an auth error, not a request to
+        // switch a key-based route to Vertex Application Default Credentials.
+        if (defaultMatchesActive && !targetConfig.apiKey) {
+          throw new Error(
+            `Model '${targetModel}' cannot use the primary model's implicit API key. Configure an envKey for this model.`,
+          );
+        }
         if (resolvedModel.capabilities?.vision) {
           targetConfig.modalities = {
             ...targetConfig.modalities,

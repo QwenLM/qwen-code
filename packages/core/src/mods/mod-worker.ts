@@ -179,6 +179,7 @@ class Realm {
   readonly guest: QuickJSHandle;
   patterns: string[] = [];
   private sliceDeadline = Infinity;
+  private executingCall?: ModInvocation;
   private notifying = false;
   constructor(
     readonly plugin: ModPlugin,
@@ -186,18 +187,21 @@ class Realm {
   ) {
     this.runtime.setMemoryLimit(64 * 1024 * 1024);
     this.runtime.setMaxStackSize(1024 * 1024);
-    this.runtime.setInterruptHandler(
-      () =>
-        performance.now() >= this.sliceDeadline ||
-        (!this.notifying &&
-          (abandoned() ||
-            [...calls.values()].some(
-              (call) =>
-                call.plugin === index &&
-                call.live &&
-                (call.budget.expired || callAbandoned(call)),
-            ))),
-    );
+    this.runtime.setInterruptHandler(() => {
+      if (performance.now() >= this.sliceDeadline) return true;
+      if (this.notifying) return false;
+      if (abandoned()) return true;
+      const active = this.executingCall;
+      if (active) return active.budget.expired || callAbandoned(active);
+      // Pending promise jobs do not identify their invocation. Model scope
+      // cancellation is checked by the owner at its hook and API boundaries.
+      return [...calls.values()].some(
+        (call) =>
+          call.plugin === index &&
+          call.live &&
+          (call.budget.expired || (!call.modelScope && callAbandoned(call))),
+      );
+    });
     const bridge = this.vm.newFunction('modCall', (id, kind, data) => {
       const callId = this.vm.getNumber(id);
       const method = this.vm.getString(kind);
@@ -291,14 +295,16 @@ class Realm {
     status.dispose();
     identity.dispose();
   }
-  execute<T>(action: () => T): T {
+  execute<T>(action: () => T, call?: ModInvocation): T {
     executing++;
     updateActivity();
     this.sliceDeadline =
       performance.now() + (this.notifying ? 25 : MOD_TIMEOUT_MS);
+    this.executingCall = call;
     try {
       return action();
     } finally {
+      this.executingCall = undefined;
       this.sliceDeadline = Infinity;
       executing--;
       updateActivity();
@@ -324,12 +330,21 @@ class Realm {
       value.dispose();
     }
   }
-  async invoke(method: string, data: unknown): Promise<unknown> {
-    const input = this.vm.newString(JSON.stringify(data));
+  async invoke(
+    call: ModInvocation,
+    method: 'run' | 'recover',
+    data: ModInput,
+  ): Promise<unknown> {
+    assertLive(call);
+    const input = this.vm.newString(JSON.stringify({ ...data, id: call.id }));
     try {
       return await this.settle(
-        this.execute(() =>
-          this.vm.unwrapResult(this.vm.callMethod(this.guest, method, [input])),
+        this.execute(
+          () =>
+            this.vm.unwrapResult(
+              this.vm.callMethod(this.guest, method, [input]),
+            ),
+          call,
         ),
       );
     } finally {
@@ -534,8 +549,7 @@ async function dispatch(
   try {
     try {
       const value = await bounded(call, () =>
-        realm.invoke('run', {
-          id: call.id,
+        realm.invoke(call, 'run', {
           event,
           input: call.input,
           origin,
@@ -568,8 +582,7 @@ async function dispatch(
       calls.set(recovery.id, recovery);
       try {
         const value = await bounded(recovery, () =>
-          realm.invoke('recover', {
-            id: recovery!.id,
+          realm.invoke(recovery!, 'recover', {
             previous: call.id,
             called: call.last !== undefined,
             error: {

@@ -336,6 +336,58 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.enableRequestMetadata).toBeUndefined();
     });
 
+    it.each([
+      [
+        'endpoint',
+        'https://another.example/v1',
+        'PARENT_KEY_ENV',
+        'parent-key',
+      ],
+      [
+        'envKey',
+        'https://parent.example.com',
+        'REGISTRY_API_KEY',
+        'parent-key',
+      ],
+      [
+        'key value',
+        'https://parent.example.com',
+        'PARENT_KEY_ENV',
+        'target-key',
+      ],
+    ])(
+      'isolates generation settings across a different %s',
+      (_, baseUrl, envKey, apiKey) => {
+        const result = buildRegistry(
+          {
+            ...openaiResolved,
+            baseUrl,
+            registryBaseUrl: baseUrl,
+            envKey,
+            generationConfig: {
+              samplingParams: { temperature: 0.2 },
+              customHeaders: { 'x-target-header': 'configured' },
+            },
+          },
+          {
+            authType: 'openai',
+            registryBaseUrl: baseUrl,
+            isolatedRoute: true,
+            apiKey,
+          },
+        );
+        expect(result).toMatchObject({
+          isolatedRoute: true,
+          baseUrl,
+          apiKey,
+          samplingParams: { temperature: 0.2 },
+          customHeaders: { 'x-target-header': 'configured' },
+        });
+        expect(result.extra_body).toBeUndefined();
+        expect(result.reasoning).toBeUndefined();
+      },
+    );
+
     it.each(['image', 'voice'] as const)(
       'rejects %s-only models for agent content generation',
       (purpose) => {

@@ -42,6 +42,7 @@ const debugLogger = createDebugLogger('AGENT_CONTENT_GENERATOR');
 
 export interface AuthOverrides {
   registryBaseUrl?: string | null;
+  isolatedRoute?: boolean;
   authType: string;
   apiKey?: string;
   baseUrl?: string;
@@ -242,6 +243,7 @@ function buildInheritedAgentContentGeneratorConfig(
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,
+    ...(authOverrides.isolatedRoute && { isolatedRoute: true }),
     model: modelId ?? parentConfig.model,
     authType: authOverrides.authType as AuthType,
   };
@@ -376,14 +378,19 @@ function applyResolvedModelConfig(
       : undefined;
   }
 
-  // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
-  // Same-provider fields inherit unless the registry overrides them, except
+  // An isolated route must not send parent request fields (e.g. extra_body)
+  // across an endpoint or credential boundary, even on the same protocol.
+  const isolateGenerationConfig =
+    authOverrides.isolatedRoute &&
+    (!inheritCredentials || targetConfig.apiKey !== parentConfig.apiKey);
+  // Other same-provider fields inherit unless the registry overrides them, except
   // model capabilities such as thinkingMandatory, which must not leak, and
   // enableRequestMetadata, which is a per-model decision: an inherited true
   // would ship the DashScope tracing object to a vendor-forwarded side model.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
     if (
+      isolateGenerationConfig ||
       registryValue !== undefined ||
       field === 'thinkingMandatory' ||
       field === 'enableRequestMetadata'
