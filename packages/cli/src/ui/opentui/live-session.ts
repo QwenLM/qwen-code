@@ -37,6 +37,7 @@ import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
 import { writeToolCheckpoint } from './tool-checkpoint.js';
+import { sharedModelRound } from './shared-model-round.js';
 import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
@@ -97,6 +98,7 @@ import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/ima
 import type { OpenTuiInputSubmission } from './input-submission.js';
 
 const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
+const liveLogger = createDebugLogger('OPENTUI_LIVE');
 
 export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
   content: PartListUnion;
@@ -925,16 +927,27 @@ export async function* livePromptEvents(
       if (args) yield { type: 'tool-args', id: request.callId, args };
     }
     let streamFailed = false;
+    let sharedRound: ReturnType<typeof sharedModelRound> | undefined;
     if (!initialTool) {
       options?.onPreparedRequest?.(prepared);
       dualOutput?.startAssistantMessage();
       try {
-        const stream = client.sendMessageStream(
-          nextPrompt,
-          abort,
-          promptId,
-          sendOptions,
-        );
+        // On the shared agent loop (`experimental.unifiedAgentLoop`),
+        // `runModelRound` sends the round and collects its calls.
+        sharedRound = config.isUnifiedAgentLoopEnabled?.()
+          ? sharedModelRound(
+              client,
+              { parts: nextPrompt, promptId, options: sendOptions },
+              abort,
+            )
+          : undefined;
+        if (sharedRound)
+          liveLogger.debug(
+            `model round on the shared agent loop (prompt ${promptId})`,
+          );
+        const stream =
+          sharedRound?.events ??
+          client.sendMessageStream(nextPrompt, abort, promptId, sendOptions);
         for await (const ev of stream) {
           options?.onStreamEvent?.(ev);
           if (!current() || abort.aborted) return;
@@ -950,11 +963,13 @@ export async function* livePromptEvents(
               /* ignore */
             }
           }
-          if (ev.type === 'retry' || ev.type === 'model_fallback') {
-            pending.length = 0;
-          }
-          if ((ev as { type?: string }).type === 'tool_call_request') {
-            pending.push((ev as { value: ToolCallRequestInfo }).value);
+          if (!sharedRound) {
+            if (ev.type === 'retry' || ev.type === 'model_fallback') {
+              pending.length = 0;
+            }
+            if ((ev as { type?: string }).type === 'tool_call_request') {
+              pending.push((ev as { value: ToolCallRequestInfo }).value);
+            }
           }
           for (const neutral of map(ev)) {
             if (neutral.type === 'error') streamFailed = true;
@@ -972,6 +987,12 @@ export async function* livePromptEvents(
       }
       for (const event of acceptedSteerEvents.splice(0)) yield event;
       if (!streamFailed) options?.onPreparedRequest?.(undefined);
+      if (sharedRound) {
+        // Any stop reason, a detected loop included, keeps the round's calls
+        // from running.
+        const round = sharedRound.result();
+        if (round && !round.stop) pending.push(...round.calls);
+      }
     }
     if (pending.length === 0 || abort.aborted) return;
 

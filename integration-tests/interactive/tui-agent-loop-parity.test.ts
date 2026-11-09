@@ -5,7 +5,8 @@
  */
 
 /**
- * The Ink TUI runs each scripted scenario twice, with
+ * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
+ * scripted scenario twice, with
  * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
  * send the model the same requests and record the same session. The screen is
  * not compared: it repaints on timers, and what it shows comes from the same
@@ -334,12 +335,13 @@ const hooks = (event: string, script: string) => ({
   ],
 });
 
-const describeInk =
-  IS_CONTAINER_SANDBOX || pickE2eRenderer() !== 'ink'
-    ? describe.skip
-    : describe;
+const renderer = pickE2eRenderer();
+const describeTui = IS_CONTAINER_SANDBOX ? describe.skip : describe;
+const SUITE = `${renderer === 'ink' ? 'Ink' : 'OpenTUI'} TUI agent loop parity (experimental.unifiedAgentLoop)`;
+/** Ink runs its tool batches on the shared loop; OpenTUI does not yet. */
+const sharesToolBatches = renderer === 'ink';
 
-describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
+describeTui(SUITE, () => {
   let server: FakeOpenAIServer | undefined;
   let session: InteractiveSession | undefined;
   let scratch: string | undefined;
@@ -357,7 +359,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     await session?.close();
     await server?.close();
     if (scratch) rmSync(scratch, { recursive: true, force: true });
-    scratch = mkdtempSync(join(tmpdir(), 'qwen-ink-agent-loop-parity-'));
+    scratch = mkdtempSync(join(tmpdir(), 'qwen-tui-agent-loop-parity-'));
     const workspace = join(scratch, 'workspace');
     const home = join(scratch, 'home');
     const runtimeDir = join(scratch, 'runtime');
@@ -561,7 +563,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
   };
   let leaderWaiting = deferred();
 
-  const scenarios: Scenario[] = [
+  const allScenarios: Scenario[] = [
     {
       name: 'plain text',
       requests: 1,
@@ -1040,6 +1042,12 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
   ];
 
+  // OpenTUI does not start turns of its own yet: no Goal continuation,
+  // background notification, cron or teammate turn.
+  const scenarios = allScenarios.filter(
+    (scenario) => renderer === 'ink' || !scenario.laterTurns,
+  );
+
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
     const current = await run(scenario, false);
     const shared = await run(scenario, true);
@@ -1047,7 +1055,7 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
     expect(current.sharedBatches).toBe(0);
-    expect(shared.sharedBatches).toBe(scenario.batches);
+    expect(shared.sharedBatches).toBe(sharesToolBatches ? scenario.batches : 0);
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
