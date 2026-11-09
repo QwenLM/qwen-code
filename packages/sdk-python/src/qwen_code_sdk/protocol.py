@@ -139,6 +139,8 @@ class SDKResultMessageSuccess(TypedDict):
 class ResultErrorObject(TypedDict):
     message: str
     type: NotRequired[str]
+    # Provider HTTP status, when the failure came from an API response.
+    status: NotRequired[int]
 
 
 class SDKResultMessageError(TypedDict):
