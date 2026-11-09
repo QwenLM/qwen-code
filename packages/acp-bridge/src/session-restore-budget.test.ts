@@ -150,6 +150,7 @@ describe('session restore budget', () => {
       await vi.advanceTimersByTimeAsync(50);
       expect(settled).toHaveBeenCalledOnce();
       expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(await outcome).toMatchObject({ dispatched: false });
       expect(event).toHaveBeenCalledWith(
         'session.restore.public_result',
         expect.objectContaining({
@@ -163,11 +164,11 @@ describe('session restore budget', () => {
       expect(handle.agent.loadSessionCalls).toHaveLength(0);
       expect(handle.killed).toBe(false);
       await expect(
-        bridge.loadSession({ sessionId: 'next', workspaceCwd: WS_A }),
-      ).resolves.toMatchObject({ sessionId: 'next' });
+        bridge.loadSession({ sessionId: 'expired', workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'expired' });
       expect(
         handle.agent.loadSessionCalls.map((call) => call.sessionId),
-      ).toEqual(['next']);
+      ).toEqual(['expired']);
     } finally {
       releaseFactory(handle.channel);
       await bridge.shutdown();
@@ -222,4 +223,112 @@ describe('session restore budget', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(['load', 'resume'] as const)(
+    'does not dispatch session/%s after engine selection outlasts the deadline without timer delivery',
+    async (action) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        }),
+        resumeSessionImpl: () => ({
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        }),
+      });
+      let releaseSelection!: (engine: BridgeExecutionEngine) => void;
+      const selection = new Promise<BridgeExecutionEngine>((resolve) => {
+        releaseSelection = resolve;
+      });
+      const legacy = vi.fn(async () => makeChannel().channel);
+      const managed = vi.fn(async () => handle.channel);
+      const bridge = makeBridge({
+        sessionRestoreTimeoutMs: 50,
+        maxSessions: 1,
+        executionEngines: { legacy, managed, select: () => selection },
+      });
+      const request = { sessionId: 'stalled-selection', workspaceCwd: WS_A };
+      const restore = () =>
+        action === 'load'
+          ? bridge.loadSession(request)
+          : bridge.resumeSession(request);
+      try {
+        const outcome = restore().catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(0);
+        clock.mockReturnValue(51);
+        vi.setSystemTime(51);
+        releaseSelection('managed');
+        expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+        expect(legacy).not.toHaveBeenCalled();
+        expect(managed).not.toHaveBeenCalled();
+        await expect(restore()).resolves.toMatchObject({
+          sessionId: request.sessionId,
+        });
+        expect(managed).toHaveBeenCalledOnce();
+      } finally {
+        releaseSelection('managed');
+        await bridge.shutdown();
+        clock.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'keeps the session/%s deadline monotonic across wall-clock corrections',
+    async (action) => {
+      for (const shift of [-5_000, 5_000]) {
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
+        const delayedRestore = () =>
+          new Promise<Record<string, never>>((resolve) => {
+            setTimeout(() => resolve({}), shift < 0 ? 80 : 20);
+          });
+        const handle = makeChannel({
+          loadSessionImpl: delayedRestore,
+          resumeSessionImpl: delayedRestore,
+        });
+        let releaseFactory!: (channel: AcpChannel) => void;
+        const factory = new Promise<AcpChannel>((resolve) => {
+          releaseFactory = resolve;
+        });
+        const bridge = makeBridge({
+          initializeTimeoutMs: 200,
+          sessionRestoreTimeoutMs: 100,
+          channelFactory: () => factory,
+        });
+        const request = { sessionId: 'clock-correction', workspaceCwd: WS_A };
+        const settled = vi.fn();
+        const outcome = (
+          action === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request)
+        ).catch((error: unknown) => error);
+        void outcome.then(() => settled(performance.now()));
+        try {
+          await vi.advanceTimersByTimeAsync(40);
+          vi.setSystemTime(Date.now() + shift);
+          releaseFactory(handle.channel);
+          await vi.advanceTimersByTimeAsync(shift < 0 ? 59 : 19);
+          expect(settled).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(settled).toHaveBeenCalledWith(shift < 0 ? 100 : 60);
+          if (shift < 0) {
+            expect(await outcome).toBeInstanceOf(SessionRestoreTimeoutError);
+            expect(await outcome).toMatchObject({ timeoutMs: 100 });
+          } else {
+            expect(await outcome).toMatchObject({
+              sessionId: request.sessionId,
+            });
+          }
+        } finally {
+          releaseFactory(handle.channel);
+          await bridge.shutdown();
+          vi.useRealTimers();
+        }
+      }
+    },
+  );
 });

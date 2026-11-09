@@ -18352,6 +18352,37 @@ describe('createServeApp', () => {
       });
     });
 
+    it.each(['load', 'resume'] as const)(
+      'omits the abandoned-restore backoff when session/%s expires before dispatch',
+      async (action) => {
+        const restore = async () => {
+          throw new SessionRestoreTimeoutError(
+            'preparation-timeout',
+            action,
+            15_000,
+            false,
+          );
+        };
+        const bridge = fakeBridge({ loadImpl: restore, resumeImpl: restore });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post(`/session/preparation-timeout/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+        expect(res.status).toBe(504);
+        expect(res.headers['retry-after']).toBeUndefined();
+        expect(res.body).toMatchObject({
+          code: 'session_restore_timeout',
+          errorKind: 'restore_timeout',
+          retryable: true,
+          dispatched: false,
+          sessionId: 'preparation-timeout',
+          action,
+          timeoutMs: 15_000,
+        });
+      },
+    );
+
     it('carries the fence reason and backoff on a same-id retry', async () => {
       // The bridge-side hint has to survive the wire: without this, restoring
       // the old hardcoded 5s or dropping reason/retryable ships green.

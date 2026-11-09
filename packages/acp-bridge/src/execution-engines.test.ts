@@ -4446,6 +4446,61 @@ describe('paired per-engine operations', () => {
       },
     );
 
+    it.each(['load', 'resume'] as const)(
+      'does not dispatch session/%s after language delivery outlasts the deadline without timer delivery',
+      async (action) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
+        const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+        const language = deferred<Record<string, unknown>>();
+        const managed = engineChannel('managed', {
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.userLanguage) return {};
+            return await language.promise;
+          },
+        });
+        const p = paired(
+          {
+            initializeTimeoutMs: 1_000,
+            sessionRestoreTimeoutMs: 100,
+            maxSessions: 1,
+          },
+          engineChannel('legacy'),
+          managed,
+        );
+        await expect(p.bridge.setUserLanguage(request)).rejects.toBeInstanceOf(
+          SessionNotFoundError,
+        );
+        const restoreRequest = {
+          workspaceCwd: WS_A,
+          sessionId: 'stalled-language',
+        };
+        const restore = () =>
+          action === 'load'
+            ? p.bridge.loadSession(restoreRequest)
+            : p.bridge.resumeSession(restoreRequest);
+        try {
+          const outcome = restore().catch((error: unknown) => error);
+          await vi.advanceTimersByTimeAsync(0);
+          clock.mockReturnValue(101);
+          vi.setSystemTime(101);
+          language.resolve({ language: 'zh', sessions: 0, failed: 0 });
+          const error = await outcome;
+          expect(managed.agent.loadSessionCalls).toHaveLength(0);
+          expect(managed.agent.resumeSessionCalls).toHaveLength(0);
+          expect(error).toBeInstanceOf(SessionRestoreTimeoutError);
+          expect(error).toMatchObject({ dispatched: false });
+          expect(managed.killed).toBe(false);
+          await expect(restore()).resolves.toMatchObject({
+            sessionId: restoreRequest.sessionId,
+          });
+        } finally {
+          language.resolve({ language: 'zh', sessions: 0, failed: 0 });
+          clock.mockRestore();
+        }
+      },
+    );
+
     it('expires during language delivery without a late restore or lost admission', async () => {
       vi.useFakeTimers();
       const language = deferred<Record<string, unknown>>();

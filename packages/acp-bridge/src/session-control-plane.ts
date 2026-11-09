@@ -9142,18 +9142,19 @@ export function createSessionControlPlane(
       }
     };
     const promise = (async (): Promise<BridgeRestoredSession> => {
-      const restoreDeadlineAt = Date.now() + sessionRestoreTimeoutMs;
+      const restoreDeadlineAt = performance.now() + sessionRestoreTimeoutMs;
       async function withinRestoreBudget<T>(
         operation: () => Promise<T>,
       ): Promise<T> {
         const remainingMs = Math.min(
           sessionRestoreTimeoutMs,
-          restoreDeadlineAt - Date.now(),
+          restoreDeadlineAt - performance.now(),
         );
         const error = new SessionRestoreTimeoutError(
           req.sessionId,
           action,
           sessionRestoreTimeoutMs,
+          false,
         );
         if (remainingMs <= 0) throw error;
         let timer: NodeJS.Timeout | undefined;
@@ -9210,13 +9211,14 @@ export function createSessionControlPlane(
       try {
         const remainingRestoreMs = Math.min(
           sessionRestoreTimeoutMs,
-          restoreDeadlineAt - Date.now(),
+          restoreDeadlineAt - performance.now(),
         );
         if (remainingRestoreMs <= 0) {
           throw new SessionRestoreTimeoutError(
             req.sessionId,
             action,
             sessionRestoreTimeoutMs,
+            false,
           );
         }
         const rawRestore = telemetry.withSpan(
@@ -9827,6 +9829,14 @@ export function createSessionControlPlane(
       },
       (error: unknown) => {
         if (restoreLifecycle.phase === 'active') {
+          if (
+            error instanceof SessionRestoreTimeoutError &&
+            !error.dispatched
+          ) {
+            writeStderrLine(
+              `qwen serve: session/${action} timed out after ${sessionRestoreTimeoutMs}ms for ${JSON.stringify(req.sessionId)}; phase=preparation; decision=release_admission`,
+            );
+          }
           telemetry.event('session.restore.public_result', {
             'qwen-code.daemon.session_restore.action': action,
             'qwen-code.daemon.session_restore.result':

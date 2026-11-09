@@ -317,8 +317,9 @@ export interface BridgeOptions {
   /**
    * How long to wait for channel readiness and `session/load` or
    * `session/resume`, including engine selection and user-language delivery.
-   * Defaults to 60 seconds; an explicitly configured `initializeTimeoutMs`
-   * can raise it, but never lower it.
+   * One monotonic deadline covers preparation and the ACP request, which uses
+   * only the remaining budget. Defaults to 60 seconds; an explicitly configured
+   * `initializeTimeoutMs` can raise it, but never lower it.
    */
   sessionRestoreTimeoutMs?: number;
   /**
