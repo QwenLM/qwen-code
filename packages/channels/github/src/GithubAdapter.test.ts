@@ -18136,6 +18136,103 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         mockNotificationsOnce([]);
       }
 
+      /**
+       * Every other case stubs `paginate`, so none can show that the real
+       * plugin issues fewer requests. This drives the production reducer
+       * through a REAL Octokit and the REAL pagination plugin, replacing
+       * only the HTTP transport, and counts what actually goes on the wire.
+       */
+      async function observeWithRealPaginator(
+        pages: Array<Array<{ name: string; conclusion: string }>>,
+      ) {
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        const urls: string[] = [];
+        const client = new Octokit({
+          auth: 'test-token',
+          request: {
+            fetch: async (url: string) => {
+              urls.push(String(url));
+              const parsed = new URL(String(url));
+              const json = (body: unknown, headers: Record<string, string>) =>
+                new Response(JSON.stringify(body), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json', ...headers },
+                });
+              if (parsed.pathname.endsWith('/status')) {
+                return json({ state: 'pending', total_count: 0 }, {});
+              }
+              const page = Number(parsed.searchParams.get('page') ?? '1');
+              const link: Record<string, string> = {};
+              if (page < pages.length) {
+                const next = new URL(parsed);
+                next.searchParams.set('page', String(page + 1));
+                link['link'] = `<${next}>; rel="next"`;
+              }
+              return json(
+                {
+                  total_count: pages.length,
+                  check_runs: pages[page - 1]!.map((run) => ({
+                    ...run,
+                    status: 'completed',
+                  })),
+                },
+                link,
+              );
+            },
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        (channel as unknown as { octokit: unknown }).octokit = client;
+        const observation = await (
+          channel as unknown as {
+            fetchCiAggregate: (
+              owner: string,
+              repo: string,
+              sha: string,
+            ) => Promise<{
+              aggregate: string;
+              failedChecks: string[];
+              namesIncomplete: boolean;
+            }>;
+          }
+        ).fetchCiAggregate('owner', 'repo', 'sha-1');
+        return { observation, urls };
+      }
+
+      it('issues one real request for a red multi-page head', async () => {
+        const { observation, urls } = await observeWithRealPaginator([
+          [{ name: 'lint', conclusion: 'failure' }],
+          [{ name: 'build', conclusion: 'failure' }],
+          [{ name: 'test', conclusion: 'success' }],
+        ]);
+
+        // Before the short-circuit this same fixture cost 3 check-list pages
+        // plus 1 combined status. Counted on the transport, not on a stub.
+        expect(urls).toHaveLength(1);
+        expect(urls[0]).toContain('/check-runs');
+        expect(observation.aggregate).toBe('failure');
+        expect(observation.failedChecks).toEqual(['lint']);
+        expect(observation.namesIncomplete).toBe(true);
+      });
+
+      it('reads every real page and the status while nothing has failed', async () => {
+        const { observation, urls } = await observeWithRealPaginator([
+          [{ name: 'lint', conclusion: 'success' }],
+          [{ name: 'build', conclusion: 'success' }],
+        ]);
+
+        expect(urls).toHaveLength(3);
+        expect(urls.filter((url) => url.includes('/check-runs'))).toHaveLength(
+          2,
+        );
+        expect(urls.filter((url) => url.endsWith('/status'))).toHaveLength(1);
+        expect(observation.aggregate).toBe('success');
+        expect(observation.namesIncomplete).toBe(false);
+      });
+
       it('stops paging check runs once a page reports a failure', async () => {
         await baselineThenRecheck();
         mockCheckPages([
