@@ -92,6 +92,37 @@ public final class ManagedSessionPrincipal {
     }
 
     /**
+     * The action-surface authority over an unbound Session. A caller
+     * claiming the row's user id must match the whole principal — the
+     * ownership column only compares raw user ids, so without this a
+     * same-id caller with a different verified subject would answer the
+     * Action (R5-7). A revoked principal-created Session (row deleted,
+     * structured creation receipt) stays invisible. A foreign user id and
+     * a genuine legacy Session keep travelling to the action gate's own
+     * 403 action_forbidden.
+     */
+    public static void requireActionAuthority(JdbcTemplate jdbc,
+            String tenantId, String sessionId, SessionPrincipal principal) {
+        if (principal != null && !principal.tenantId().equals(tenantId)) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+        Row row = find(jdbc, tenantId, sessionId);
+        if (row != null) {
+            if (principal != null && row.userId().equals(principal.userId())
+                    && !matches(row, principal)) {
+                throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                        404, "session_not_found", "The Session was not found.");
+            }
+            return;
+        }
+        if (!legacyCreation(jdbc, tenantId, sessionId)) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+    }
+
+    /**
      * Whether the Session was created without a principal (legacy). The
      * CREATE_SESSION receipt is an exclusion mark, not a required one: a
      * principal-created Session stamps the structured principal key, which is

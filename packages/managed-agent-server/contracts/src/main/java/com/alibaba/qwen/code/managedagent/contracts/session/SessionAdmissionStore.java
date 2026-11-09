@@ -74,6 +74,18 @@ public interface SessionAdmissionStore {
     }
 
     /**
+     * The action-surface authority over an unbound Session: a same-user-id
+     * caller must match the whole ownership row, and a revoked
+     * principal-created Session stays invisible; foreign user ids and
+     * genuine legacy Sessions keep reaching the action gate (R5-7).
+     */
+    public default void requireActionRowAuthority(String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
+    }
+
+    /**
      * The unified read authority over an unbound Session: a present
      * ownership row is the sole authority; a legacy Session without a row
      * stays tenant-wide readable.

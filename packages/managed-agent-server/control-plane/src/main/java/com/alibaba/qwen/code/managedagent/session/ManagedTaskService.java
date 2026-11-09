@@ -59,6 +59,48 @@ public class ManagedTaskService {
                 page.hasMore(), nextCursor(page));
     }
 
+    // The tenant stays explicit so an anonymous read keeps its legacy
+    // tenant-scoped path while a verified subject is never downgraded
+    // to the raw user id (R5-3).
+    public PublicList<PublicTask> listPublicTasksAs(String tenantId,
+            SessionPrincipal principal, String sessionId, String cursor,
+            int limit) {
+        SessionRecord session = sessions.requireReadableSession(tenantId,
+                principal, sessionId);
+        TaskPage page = pageOf(session.tenantId(), sessionId, cursor, limit);
+        return new PublicList<>("list", page.tasks().stream()
+                .map(task -> publicTask(session.tenantId(), sessionId, task,
+                        "ACTIVE".equals(session.status()))).toList(),
+                page.hasMore(), nextCursor(page));
+    }
+
+    public PublicTask getPublicTaskAs(String tenantId,
+            SessionPrincipal principal, String sessionId, String taskId) {
+        SessionRecord session = sessions.requireReadableSession(tenantId,
+                principal, sessionId);
+        TaskRow row = records.findTask(session.tenantId(), sessionId, taskId)
+                .orElseThrow(() -> new ManagedAgentException(404,
+                        "task_not_found", "The task was not found."));
+        return publicTask(session.tenantId(), sessionId, row,
+                "ACTIVE".equals(session.status()));
+    }
+
+    public PublicList<PublicTaskEvent> listPublicTaskEventsAs(String tenantId,
+            SessionPrincipal principal, String sessionId, String taskId,
+            String after, int limit) {
+        SessionRecord session = sessions.requireReadableSession(tenantId,
+                principal, sessionId);
+        records.findTask(session.tenantId(), sessionId, taskId)
+                .orElseThrow(() -> new ManagedAgentException(404,
+                        "task_not_found", "The task was not found."));
+        ResolvedPage page = resolvedEventPage(session.tenantId(), sessionId,
+                taskId, after, limit);
+        return new PublicList<>("list", page.page().events().stream()
+                .map(event -> publicEvent(page.tenantId(), sessionId,
+                        taskId, event)).toList(),
+                page.page().hasMore(), page.nextCursor());
+    }
+
     public PublicList<PublicTask> listPublicTasks(
             SessionPrincipal principal, String sessionId, String cursor,
             int limit) {

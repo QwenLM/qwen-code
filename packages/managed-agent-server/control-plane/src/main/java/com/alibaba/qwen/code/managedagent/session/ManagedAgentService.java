@@ -784,6 +784,37 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 idempotencyKey, sessionId, blocks);
     }
 
+    // The tenant stays explicit so an anonymous caller keeps its legacy
+    // tenant-wide path while a subject-carrying principal is never
+    // downgraded to the raw user id (R5-3).
+    public CommandAdmission submitTurnAs(String tenantId,
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, List<InputBlock> blocks) {
+        return submitTurn(principal, tenantId, idempotencyKey, sessionId, blocks);
+    }
+
+    public CommandAdmission cancelTurnAs(String tenantId,
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, String turnId) {
+        return cancelTurn(principal, tenantId, idempotencyKey, sessionId, turnId);
+    }
+
+    public SessionMutationResult<PublicSession> renameSessionAs(
+            String tenantId, SessionPrincipal principal,
+            String idempotencyKey, String sessionId, String title) {
+        return renameSession(principal, tenantId, idempotencyKey, sessionId, title);
+    }
+
+    public SessionMutationResult<PublicSession> unarchiveSessionAs(
+            String tenantId, SessionPrincipal principal,
+            String idempotencyKey, String sessionId) {
+        var result = unarchive(principal, tenantId, idempotencyKey, sessionId);
+        SessionRecord session = result.replayed()
+                ? asLastVisible(result.session()) : result.session();
+        return new SessionMutationResult<>(publicSession(session),
+                result.replayed());
+    }
+
     public CommandAdmission submitTurn(SessionPrincipal principal,
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
@@ -1253,18 +1284,18 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public PublicSession getPublicSession(String tenantId, String actorId,
             String sessionId) {
-        return getPublicSession(tenantId, principalOf(tenantId, actorId, true),
+        return getPublicSessionAs(tenantId, principalOf(tenantId, actorId, true),
                 sessionId);
     }
 
     public PublicSession getPublicSession(SessionPrincipal principal,
             String sessionId) {
-        return getPublicSession(
+        return getPublicSessionAs(
                 principal == null ? null : principal.tenantId(), principal,
                 sessionId);
     }
 
-    private PublicSession getPublicSession(String tenantId,
+    public PublicSession getPublicSessionAs(String tenantId,
             SessionPrincipal principal, String sessionId) {
         SessionRecord session = requireReadableSession(tenantId, principal,
                 sessionId);
@@ -1315,6 +1346,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return listPublicSessions(principal == null ? null : principal.tenantId(),
                 principal, cursor, requestedLimit, requestedArchiveState,
                 requestedTitleQuery);
+    }
+
+    public PublicList<PublicSession> listPublicSessionsAs(
+            String tenantId, SessionPrincipal principal, String cursor, int requestedLimit,
+            String requestedArchiveState, String requestedTitleQuery) {
+        return listPublicSessions(tenantId, principal, cursor, requestedLimit,
+                requestedArchiveState, requestedTitleQuery);
+    }
+
+    public PublicList<PublicTurn> listPublicTurnsAs(
+            String tenantId, SessionPrincipal principal, String sessionId,
+            String cursor, int requestedLimit) {
+        return listPublicTurns(tenantId, principal, sessionId, cursor, requestedLimit);
     }
 
     public PublicList<PublicSession> listPublicSessions(
@@ -1467,17 +1511,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public PublicTurn getPublicTurn(String tenantId, String actorId,
             String sessionId, String turnId) {
-        return getPublicTurn(tenantId, principalOf(tenantId, actorId, true),
+        return getPublicTurnAs(tenantId, principalOf(tenantId, actorId, true),
                 sessionId, turnId);
     }
 
     public PublicTurn getPublicTurn(SessionPrincipal principal,
             String sessionId, String turnId) {
-        return getPublicTurn(principal == null ? null : principal.tenantId(),
+        return getPublicTurnAs(principal == null ? null : principal.tenantId(),
                 principal, sessionId, turnId);
     }
 
-    private PublicTurn getPublicTurn(String tenantId,
+    public PublicTurn getPublicTurnAs(String tenantId,
             SessionPrincipal principal, String sessionId, String turnId) {
         // The path schema counts characters, not UTF-16 units.
         if (turnId.codePointCount(0, turnId.length()) > TURN_ID_MAX_LENGTH) {
@@ -1496,17 +1540,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public PublicList<PublicEvent> publicEvents(String tenantId,
             String actorId, String sessionId, long afterSequence,
             int requestedLimit) {
-        return publicEvents(tenantId, principalOf(tenantId, actorId, true),
+        return publicEventsAs(tenantId, principalOf(tenantId, actorId, true),
                 sessionId, afterSequence, requestedLimit);
     }
 
     public PublicList<PublicEvent> publicEvents(SessionPrincipal principal,
             String sessionId, long afterSequence, int requestedLimit) {
-        return publicEvents(principal == null ? null : principal.tenantId(),
+        return publicEventsAs(principal == null ? null : principal.tenantId(),
                 principal, sessionId, afterSequence, requestedLimit);
     }
 
-    private PublicList<PublicEvent> publicEvents(String tenantId,
+    public PublicList<PublicEvent> publicEventsAs(String tenantId,
             SessionPrincipal principal, String sessionId, long afterSequence,
             int requestedLimit) {
         requireEventCursor(afterSequence);
@@ -1530,19 +1574,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public PublicItemList listPublicItems(String tenantId, String actorId, String sessionId,
             String cursor, long afterSequence, int requestedLimit) {
-        return listPublicItems(tenantId, principalOf(tenantId, actorId, true),
+        return listPublicItemsAs(tenantId, principalOf(tenantId, actorId, true),
                 sessionId, cursor, afterSequence, requestedLimit);
     }
 
     public PublicItemList listPublicItems(SessionPrincipal principal,
             String sessionId, String cursor, long afterSequence,
             int requestedLimit) {
-        return listPublicItems(
+        return listPublicItemsAs(
                 principal == null ? null : principal.tenantId(), principal,
                 sessionId, cursor, afterSequence, requestedLimit);
     }
 
-    private PublicItemList listPublicItems(String tenantId,
+    public PublicItemList listPublicItemsAs(String tenantId,
             SessionPrincipal principal, String sessionId, String cursor,
             long afterSequence, int requestedLimit) {
         if (afterSequence < 0) {
@@ -2367,18 +2411,24 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     /**
      * The action surface read: visibility plus the Workspace read grant, but
-     * tenant-wide for an unbound Session. The action gate enforces creator
-     * authority itself (403 action_forbidden), so a foreign actor must reach
-     * it rather than collapse to a 404 at the read.
+     * the ownership-row authority for an unbound Session with a present
+     * row. Both foreign arms (Workspace and unbound) still reach the action
+     * gate's own 403 action_forbidden; only a mismatching or revoked
+     * ownership row collapses the read to 404, so a same-user-id caller
+     * with a different verified subject (or one whose row was deleted)
+     * can no longer answer through the raw-id owner column (R5-7).
      */
     public SessionRecord requireActionReadableSession(String tenantId,
             SessionPrincipal principal, String sessionId) {
         SessionRecord session = inputPolicy.requireVisibleSession(tenantId,
                 sessionId);
-        if (session.workspace() != null && !workspaces.canRead(
-                session.tenantId(),
-                principal == null ? null : principal.userId(),
-                session.workspace().getWorkspaceId())) {
+        if (session.workspace() == null) {
+            store.requireActionRowAuthority(session.tenantId(),
+                    session.sessionId(), principal);
+        } else if (!workspaces.canRead(
+                    session.tenantId(),
+                    principal == null ? null : principal.userId(),
+                    session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }

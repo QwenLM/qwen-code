@@ -145,7 +145,7 @@ final class HostedSseGapProbe implements AutoCloseable {
                 tenant, storage, session, execution.get("binding_id"), execution.get("runtime_generation"), promptId);
         assertThat(member.get("physical_key")).isNotNull();
         assertThat(member.get("execution_storage_key")).isEqualTo(finished ? null : member.get("physical_key"));
-        assertThat(member.get("is_execution_exclusive")).isEqualTo(false);
+        assertThat(((Number) member.get("is_execution_exclusive")).intValue()).isEqualTo(0);
         assertThat(execution.get("turn_id")).isEqualTo(promptId);
         assertThat(execution.get("runtime_session_id")).isEqualTo(promptId);
         assertThat(execution.get("execution_state")).isEqualTo(finished ? "SETTLED" : "EXECUTING");

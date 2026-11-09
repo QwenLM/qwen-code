@@ -692,7 +692,7 @@ class HostedWorkspaceToolTurnIT {
         boolean retained = !storeFaults && fault.equals("prepare-twice");
         assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
-        assertThat(member.get("is_execution_exclusive")).isEqualTo(false);
+        assertThat(((Number) member.get("is_execution_exclusive")).intValue()).isEqualTo(0);
         if (retained) {
             assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
             assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));

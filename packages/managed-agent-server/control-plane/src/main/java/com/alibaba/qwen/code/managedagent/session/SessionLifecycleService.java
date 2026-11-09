@@ -88,6 +88,16 @@ public class SessionLifecycleService {
                 admission.replayed());
     }
 
+    // The tenant stays explicit so an anonymous caller keeps its legacy
+    // path while a verified subject is never downgraded (R5-3).
+    public PublicCommandOperation admitPublicAs(String tenantId,
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, OperationKind kind) {
+        OperationAdmission admission = admit(tenantId, principal,
+                idempotencyKey, sessionId, kind);
+        return publicOperation(admission.operation(), admission.replayed());
+    }
+
     public PublicCommandOperation admitPublic(SessionPrincipal principal,
             String idempotencyKey, String sessionId, OperationKind kind) {
         OperationAdmission admission = admit(
@@ -110,19 +120,19 @@ public class SessionLifecycleService {
     // own contract, every other kind with the command operation.
     public Object getPublicOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        return getPublicOperation(tenantId, principal(tenantId, actorId),
+        return getPublicOperationAs(tenantId, principal(tenantId, actorId),
                 sessionId, operationId);
     }
 
     public Object getPublicOperation(SessionPrincipal principal,
             String sessionId, String operationId) {
-        return getPublicOperation(principal == null ? null : principal.tenantId(),
+        return getPublicOperationAs(principal == null ? null : principal.tenantId(),
                 principal, sessionId, operationId);
     }
 
     // The tenant stays explicit so an anonymous caller still reads inside its
     // own tenant; the read grant admits a legacy no-row Session tenant-wide.
-    private Object getPublicOperation(String tenantId, SessionPrincipal principal,
+    public Object getPublicOperationAs(String tenantId, SessionPrincipal principal,
             String sessionId, String operationId) {
         OperationRecord operation = operation(tenantId, principal,
                 sessionId, operationId);

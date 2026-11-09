@@ -466,6 +466,13 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    public void requireActionRowAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireActionAuthority(jdbc, tenantId,
+                sessionId, principal);
+    }
+
+    @Override
     @Transactional
     public Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
         String tenantId = command.tenantId();

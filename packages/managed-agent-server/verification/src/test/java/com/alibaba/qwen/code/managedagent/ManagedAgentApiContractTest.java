@@ -394,6 +394,62 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void subjectBearingCreatorReadsRenamesAndSubmitsToItsOwnSession() throws Exception {
+        String tenant = "contract-subject-" + UUID.randomUUID();
+        var subject = "business-actor-A";
+        var creator = new AuthenticatedTenantActor() {
+            @Override
+            public String tenantId() {
+                return tenant;
+            }
+
+            @Override
+            public String actorId() {
+                return "actor-a";
+            }
+
+            @Override
+            public String actorSubjectId() {
+                return subject;
+            }
+
+            @Override
+            public String getName() {
+                return "actor-a";
+            }
+        };
+        String created = mvc.perform(post("/v1/agents/sessions")
+                        .header(TENANT, tenant).principal(creator)
+                        .header(IDEMPOTENCY_KEY, "subject-create")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString();
+        String id = json(created).path("id").asText();
+        mvc.perform(get("/v1/agents/sessions/" + id)
+                        .header(TENANT, tenant).principal(creator))
+                .andExpect(status().isOk());
+        mvc.perform(get("/v1/agents/sessions")
+                        .header(TENANT, tenant).principal(creator))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .jsonPath("$.data[0].id").value(id));
+        mvc.perform(patch("/v1/agents/sessions/" + id)
+                        .header(TENANT, tenant).principal(creator)
+                        .header(IDEMPOTENCY_KEY, "subject-rename")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"subject-title\"}"))
+                .andExpect(status().isOk());
+        mvc.perform(post("/v1/agents/sessions/" + id + "/events")
+                        .header(TENANT, tenant).principal(creator)
+                        .header(IDEMPOTENCY_KEY, "subject-submit")
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"agent.session.input.message\","
+                                + "\"input\":[{\"type\":\"text\",\"text\":\"hi\"}]}"))
+                .andExpect(status().isAccepted());
+    }
+
+    @Test
     void migrationRefusalsDeclareTheActualErrorCodeAndRetryability() throws Exception {
         String tenant = "contract-migration-" + UUID.randomUUID();
         var actor = actor(tenant);
@@ -3801,5 +3857,4 @@ class ManagedAgentApiContractTest {
         jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id = ? AND session_id = ?"
                 + " AND namespace = 'SESSION_COMMAND' AND operation = 'CREATE_SESSION'", tenant, sessionId);
     }
-
 }

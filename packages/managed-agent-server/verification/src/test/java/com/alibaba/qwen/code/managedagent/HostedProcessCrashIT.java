@@ -676,7 +676,8 @@ class HostedProcessCrashIT {
                         .containsEntry("runtime_session_id", execution.get("runtime_session_id"))
                         .containsEntry("binding_id", execution.get("binding_id"))
                         .containsEntry("runtime_generation", execution.get("runtime_generation"))
-                        .containsEntry("session_state", "READY").containsEntry("is_execution_exclusive", false);
+                        .containsEntry("session_state", "READY");
+                assertThat(((Number) member.get("is_execution_exclusive")).intValue()).isEqualTo(0);
                 assertThat(((Number) member.get("runtime_generation")).longValue()).isEqualTo(1);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding b"
                         + " JOIN ma_runtime_session rs ON rs.binding_id=b.binding_id AND rs.runtime_generation=b.runtime_generation"

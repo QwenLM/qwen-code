@@ -1489,7 +1489,11 @@ public class ManagedSessionStore
                 });
     }
 
-    @Transactional(readOnly = true)
+    // Not readOnly: the retirement check is a locking current read
+    // (requireLive FOR UPDATE, R4-2), and MySQL refuses locking reads inside
+    // a READ ONLY transaction (error 1792) once Connector/J propagates the
+    // Spring read-only hint to the server.
+    @Transactional
     public RestoreHead restore(String tenantId, String workspaceId,
             String sessionId, String writerToken) {
         validateScope(tenantId, workspaceId, sessionId);
@@ -1564,7 +1568,8 @@ public class ManagedSessionStore
         return rows.getFirst();
     }
 
-    @Transactional(readOnly = true)
+    // Not readOnly: same locking current read as restore().
+    @Transactional
     public TransactionPage transactions(String tenantId, String workspaceId,
             String sessionId, String writerToken, long afterRevision,
             int limit) {
@@ -1648,7 +1653,8 @@ public class ManagedSessionStore
         return new TransactionPage(transactions, nextRevision, hasMore);
     }
 
-    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    // Not readOnly: historyRevision delegates to restore()'s locking read.
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public ManagedSessionStoreModels.RecentTransactionPage recentTransactions(String tenantId, String workspaceId,
             String sessionId, String writerToken, Long throughRevision, Long beforeRevision, int limit) {
         long through = historyRevision(tenantId, workspaceId, sessionId, writerToken, throughRevision);
@@ -1704,7 +1710,8 @@ public class ManagedSessionStore
         return new ManagedSessionStoreModels.RecentTransactionPage(List.copyOf(transactions), through, next, more);
     }
 
-    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    // Not readOnly: historyRevision delegates to restore()'s locking read.
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public ManagedSessionStoreModels.CommandTransaction commandTransaction(String tenantId, String workspaceId,
             String sessionId, String writerToken, Long throughRevision, String operation, String commandId) {
         long through = historyRevision(tenantId, workspaceId, sessionId, writerToken, throughRevision);

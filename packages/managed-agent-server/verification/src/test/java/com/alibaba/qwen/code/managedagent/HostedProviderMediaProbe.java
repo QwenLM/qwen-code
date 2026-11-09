@@ -254,7 +254,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
         assertThat(member.get("runtime_generation")).as("original runtime generation").isEqualTo(row.get("runtime_generation"));
         assertThat(member.get("execution_storage_key")).as("physical execution membership")
                 .isEqualTo(released ? null : physical);
-        assertThat(member.get("is_execution_exclusive")).as("shared execution membership").isEqualTo(false);
+        assertThat(((Number) member.get("is_execution_exclusive")).intValue()).as("shared execution membership").isEqualTo(0);
         assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
         if (phase.equals("restarted")) {
             assertThat(restarted).isNotNull();

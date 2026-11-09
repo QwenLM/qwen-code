@@ -66,6 +66,17 @@ public class ManagedTaskCancelService {
                 admission.replayed());
     }
 
+    // The tenant stays explicit so an anonymous caller keeps its legacy
+    // path while a verified subject is never downgraded (R5-3).
+    public PublicCommandOperation cancelPublicAs(String tenantId,
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, String taskId) {
+        OperationAdmission admission = admit(tenantId, principal,
+                idempotencyKey, sessionId, taskId);
+        return operations.publicOperation(admission.operation(),
+                admission.replayed());
+    }
+
     public PublicCommandOperation cancelPublic(SessionPrincipal principal,
             String idempotencyKey, String sessionId, String taskId) {
         OperationAdmission admission = admit(

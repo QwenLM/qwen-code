@@ -43,6 +43,14 @@ public class ContextCompressionService {
                 revision);
     }
 
+    // The tenant stays explicit so an anonymous caller keeps its legacy
+    // path while a verified subject is never downgraded (R5-3).
+    public PublicContextCompressionOperation admitPublicAs(String tenantId,
+            SessionPrincipal principal, String sessionId, String key,
+            Long revision) {
+        return admitPublic(principal, sessionId, key, revision);
+    }
+
     public PublicContextCompressionOperation admitPublic(
             SessionPrincipal principal, String sessionId, String key,
             Long revision) {

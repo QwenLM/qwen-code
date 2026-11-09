@@ -377,6 +377,41 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void actionRespondConsultsTheOwnershipRowNotTheRawOwnerColumn() {
+        var f = new Fixture();
+        var actionStore =
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore(
+                        f.jdbc, f.store);
+        var records =
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(
+                        f.jdbc);
+        var actions =
+                new com.alibaba.qwen.code.managedagent.session.ManagedActionService(
+                        f.service, actionStore, records,
+                        mock(ActionResponseCoordinator.class),
+                        new RequestDigests(), Clock.systemUTC(), new ObjectMapper());
+        var actorless = SessionPrincipal.ofUser("tenant", "user");
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(actorless, "create");
+            String actionId = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
+            // The read gate must refuse before admission touches the Action,
+            // so the witness needs no journaled Action row: the raw owner
+            // column would admit both callers below (same tenant + user id).
+            var crossSubject = SessionPrincipal.of("tenant", "user", "actor-A");
+            denied(() -> actions.respond(crossSubject, id, actionId,
+                    "cross-subject", "permission",
+                    new ObjectMapper().getNodeFactory().numberNode(1),
+                    "hosted-tool-approval/1", "allow"));
+            f.jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id=? AND session_id=?",
+                    "tenant", id);
+            denied(() -> actions.respond(actorless, id, actionId,
+                    "deleted-row", "permission",
+                    new ObjectMapper().getNodeFactory().numberNode(1),
+                    "hosted-tool-approval/1", "allow"));
+        });
+    }
+
+    @Test
     void ownerPaginationFiltersForeignActorsBeforeApplyingTheLimit() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {
