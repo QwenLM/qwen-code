@@ -105,7 +105,7 @@ Polling adapters use `chat_thread` scope: routing key = `channel:chatId:threadId
 
 ## Error Handling
 
-Delivery is **best-effort**. On `handleInbound` failure, one error comment is posted per thread per poll cycle (then `break` exits the comment loop — prevents N identical error comments); the user re-mentions to retry. Per-notification API errors use `continue` — one failed notification does not block the rest of the batch. Notifications without a `subject.url` (Discussion, SecurityAlert types) are skipped silently.
+Delivery is **best-effort**. Each public dispatch is a persisted task: on a `handleInbound` failure the task is run again on later polls, up to three attempts in all (each crash during the last runs it once more), and one error comment is posted when the last attempt fails; the user re-mentions to retry. A failure after which the task runs again posts no error comment, since that comment asks the user to mention the bot again. A failed publication of the final reply is the exception when the reply may already be on GitHub, or waits as a pending delivery: that task is not run again and posts no error comment. A reply that GitHub refused and that could not be queued for retry counts as an ordinary failure. Per-notification API errors use `continue` — one failed notification does not block the rest of the batch. Notifications without a `subject.url` (Discussion, SecurityAlert types) are skipped silently.
 
 If the process crashes mid-processing, the cursor is not saved (it is persisted only after `pollOnce()` completes), so the next startup re-fetches the same notifications — but the cursor-based comment window excludes already-processed comments, preventing duplicates.
 
