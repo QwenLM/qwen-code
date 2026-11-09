@@ -66,20 +66,19 @@ async function resolveGhPrCreateDirectory(
 
 节点处理：
 
-| 节点                                                                                       | 处理                                                                                                                                                                                                   |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `program`                                                                                  | 按顺序折叠 named children。                                                                                                                                                                            |
-| `list`，操作符 `&&` 或 `;`                                                                 | 目录从左向右传递。                                                                                                                                                                                     |
-| `list`，操作符 `\|\|`                                                                      | 左侧从未移动目录时沿用左侧目录继续（`false \|\| gh pr create` 仍在启动目录里跑）；只有左侧确实移动过目录才判 `opaque`，因为右侧此时取决于左侧走到了哪一步。左侧已找到的 create 不受影响。              |
-| `pipeline`                                                                                 | 每个元素都用同一个传入目录访问；pipeline 之后的目录仍是传入目录（bash 在子 shell 里跑 pipeline 元素，内部 `cd` 不外泄）。                                                                              |
-| `redirected_statement`                                                                     | 走 body，忽略 `*_redirect` 子节点。                                                                                                                                                                    |
-| 被 `commandRunsGhPrCreate(node.text)` 识别的 `command`                                     | 记录当前目录并停止。带 cwd 迁移的 wrapper flag（`env -C/--chdir`、`sudo -D/--chdir`，经既有 `isShiftCwdFlag` 表判定）则记为 `opaque`。                                                                 |
-| 名为 `cd` / `pushd` 的 `command`                                                           | 把字面量目标相对当前目录解析；否则 `opaque`。`pushd +N` / `-N` 是栈轮转，判 `opaque`，不是名为 `+1` 的路径。命令在任何位置赋值了 `CDPATH` 时，相对目标判 `opaque`（CDPATH 会改道），绝对目标仍可解析。 |
-| 名为 `popd`、`eval`、`source`、`.` 的 `command`                                            | `opaque` —— `popd` 轮转的是未建模的目录栈；其余三个在当前 shell 里执行代码，能在命令文本里不出现任何目标的情况下移动目录。执行脚本（`./move.sh`）不在此集合：它跑在子进程里，动不了我们。              |
-| 其它命令                                                                                   | 目录不变。                                                                                                                                                                                             |
-| 其它任何节点（`subshell`、`compound_statement`、`if_statement`、循环、`case`、函数定义……） | 子树里含 `cd`/`pushd`/`popd`/`eval`/`source`/`.` 命令则 `opaque`，否则目录不变。子 shell 的 `cd` 不得泄漏到外层作用域。                                                                                |
+| 节点                                                                                       | 处理                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `program` / `list`，分隔符 `&&`                                                            | 目录从左向右承接。`&&` 是唯一能证明前一条语句成功的分隔符，因此也是唯一可以承接 `cd` 的分隔符。                                                                                                                                                                                                     |
+| `program` / `list`，分隔符 `;`、换行、`&` 或 `\|\|`                                        | 一旦左侧移动过目录就判 `opaque`。下一条语句无论前一条成败都会执行（`\|\|` 则只在前一条失败时执行），所以被跳过（`false && cd w`）、失败（`cd /missing`）或后台化（`cd w &`）的 `cd` 从未移动我们。左侧已找到的 create 不受影响，左侧从未移动则不付代价。                                            |
+| `pipeline`                                                                                 | 每个元素都用同一个传入目录访问；pipeline 之后的目录仍是传入目录（bash 在子 shell 里跑 pipeline 元素，内部 `cd` 不外泄）。                                                                                                                                                                           |
+| `redirected_statement`                                                                     | 走 body，忽略 `*_redirect` 子节点。                                                                                                                                                                                                                                                                 |
+| 被 `commandRunsGhPrCreate(createCandidateText(node))` 识别的 `command`                     | 记录当前目录并停止。闸门跑在由 AST 自身 token 重建的文本上，任何携带分隔符或展开式的参数被替换为占位符，因此 `printf 'example; gh pr create'` 这类引号内的提及无法伪造出 create。带 cwd 迁移的 wrapper flag（`env -C/--chdir`、`sudo -D/--chdir`，经既有 `isShiftCwdFlag` 表判定）则记为 `opaque`。 |
+| 名为 `cd` / `pushd` 的 `command`                                                           | 把字面量目标相对当前目录解析；否则 `opaque`。`pushd +N` / `-N` 是栈轮转，判 `opaque`，不是名为 `+1` 的路径。命令在任何位置赋值了 `CDPATH` 时，相对目标判 `opaque`（CDPATH 会改道），绝对目标仍可解析。                                                                                              |
+| 名为 `popd`、`eval`、`source`、`.` 的 `command`                                            | `opaque` —— `popd` 轮转的是未建模的目录栈；其余三个在当前 shell 里执行代码，能在命令文本里不出现任何目标的情况下移动目录。执行脚本（`./move.sh`）不在此集合：它跑在子进程里，动不了我们。                                                                                                           |
+| 其它命令                                                                                   | 目录不变。                                                                                                                                                                                                                                                                                          |
+| 其它任何节点（`subshell`、`compound_statement`、`if_statement`、循环、`case`、函数定义……） | 子树里含 `cd`/`pushd`/`popd`/`eval`/`source`/`.` 命令则 `opaque`，否则目录不变。子 shell 的 `cd` 不得泄漏到外层作用域。                                                                                                                                                                             |
 
-`cd` 目标只有在下列条件全部满足时才算字面量：是普通 word 或 string，无展开、无命令替换、无前导 `~`、无 `$`、无反引号、无反斜杠、无 glob 或花括号字符，且不是 `-`（上一个目录）也不缺省（裸 `cd` 去 `$HOME`）。目标之前的 flag 被跳过。解析方式是 `path.resolve(currentDirectory, target)`。
+`cd` 目标只有在下列条件全部满足时才算字面量：是普通 word、单引号 `raw_string`（在 bash 里完全字面，因此去掉引号后即为路径），或 body 为纯内容的双引号 `string`——无展开、无命令替换、无前导 `~`、无 `$`、无反引号、无反斜杠、无 glob 或花括号字符，且不是 `-`（上一个目录）也不缺省（裸 `cd` 去 `$HOME`）。目标之前的 flag 被跳过。解析方式是 `path.resolve(currentDirectory, target)`，它是平台原生的：测试用同样方式推导期望值，而不是硬编码 POSIX 字符串，因为 Windows workspace lane 会跑这些用例。
 
 解析失败或根节点 `hasError` 返回 `{kind: 'launch'}` —— 解析器什么都没证明，因此行为与今天完全一致，也不发 notice。
 
@@ -143,7 +142,7 @@ const attributionDir =
 
 - `npm run build && npm run typecheck`：**exit 0**，在最后一次源码改动之后重跑；已核对 `dist/src/tools/shell.js` 比源码新、且含解析器与全部守卫，因此构建证据针对的是最终树。
 - 三个改动 TS 文件上的 ESLint：**干净**。五个改动文件都跑过 Prettier。
-- `src/tools/shell.test.ts` + `src/tools/shell.pr-binding-directory.test.ts` 合跑：**411 passed** —— 既有文件 407 条（22 条既有绑定用例 + 33 条新增目录解析用例），真实文件系统 4 条。
+- `src/tools/shell.test.ts` + `src/tools/shell.pr-binding-directory.test.ts` 合跑：**429 passed** —— 既有文件 422 条（22 条既有绑定用例 + 43 条新增目录解析用例），真实文件系统 7 条。
 - 真实文件系统套件跑在真实 `git init` 仓库、真实 `git worktree add` 出的 linked worktree、以及一个真实 `gh` 子进程桩上（该桩只在某分支里跑过 `pr create` 之后才为该分支报告 PR）。归因链路没有任何 helper 被 mock。套件用 `describe.skipIf(process.platform === 'win32')` 守卫，与 `autofix-pr.test.ts` 里既有的可执行入口守卫一致——因为 Windows workspace lane 会跑 `test:ci:workspaces`，而该桩是 bash 脚本。
 - **对抗探针。** 一个临时的无 mock 夹具把 38 个敌意命令形状灌进真实工具，跑在真实仓库加真实 linked worktree 上，由 `gh` 桩记录每次调用的 cwd 与 argv。只有归因调用（`pr view` / `repo view`）能反映解析出的目录——命令自身的 `pr create` 跑在 shell 实际 cd 到的地方，证明不了任何事。worktree 对这个 oracle 是必需的：`findGitRoot` 会把普通子目录收敛到仓库根，因此同仓库内的 `cd` 在日志里无法区分。探针抓到了下面两个静默漏绑缺陷；修完后 38 个形状全部落在预期分桶——12 个解析到 worktree，17 个退回并发 notice，9 个留在启动仓库且不发 notice（6 个因为什么都没移动，3 个因为 create 自身失败、按设计在非零退出时抑制 notice）。夹具在提交前已删除；它的发现以由此催生的八条永久用例的形式留存。
 - 变异 A —— 去掉 `attributionDir` 赋值、保留 resolver 调用：**13 failed / 398 passed**。红的是两条真实文件系统绑定用例与全部断言解析目录的单测；`directory` 参数与 notice 两条对照存活，因此红的是目录传递本身，不是夹具坏了。
@@ -154,6 +153,30 @@ const attributionDir =
 - 变异 F —— 只去掉 CDPATH 守卫：**2 failed / 31 passed**，恰好是两条 CDPATH 形状；绝对目标对照存活。
 - 每次变异都从字节级备份还原；还原后的 `shell.ts` 与变异前的 SHA-256 一致（`4d9cbf2b389b69f1567254f6080e1d784fdfd75eccb8d2f7b361759bce9ce676`）。
 - 实现、自审与对抗探针过程中共发现并修掉七个缺陷：`cd -` 被当成名为 `-` 的字面路径；外层 `||` 在走查到达左子树里的 create 之前就把整条链判为 opaque；解析器不调用 `tree.delete()`，在长驻 daemon 里泄漏 WASM 内存；`pushd +N` 被当成名为 `+1` 的路径；`||` 臂为 `false || gh pr create` 发出 notice，而那是一次从未发生的目录变更；`eval`/`source`/`.` 隐形移动目录，导致 create 实际跑在 worktree 而归因留在启动仓库、且不发 notice；`CDPATH` 改道相对 `cd`，而走查把它当成可证明。最后两个只有对抗探针抓到——读 diff 当时已连续两遍干净。
+
+### 第二轮评审（2026-11-09，独立 Codex 评审 `e12e88be94`）
+
+评审报了一个绑定回归、两个解析器缺口和一个测试可移植性问题。四条都先对 head 复现再修：分隔符与引号事实由 dump tree-sitter AST 确认，Windows 那条由求值 `path.win32.resolve` 确认（产出 `\test\dir\nested`，而非测试原先断言的 POSIX 字面量）。
+
+1. **回归——未执行的目录变更被承接了下去。** 折叠把每个分隔符都当成保证顺序执行，于是 `false && cd w; gh pr create`、`cd /missing; gh pr create`、`cd w & wait; gh pr create` 全都归因到 `w`，而 create 实际跑在启动仓库。父提交能绑这些形状，本 head 不能，且不发 notice。修法是只在 `&&` 上承接目录——它是唯一能证明前一条语句成功的分隔符。`;`、换行、`&`、`||` 现在一旦左侧移动过就退回。这也取代了此前专门针对 `||` 的规则，那只是同一原则的特例。
+2. **缺口——单引号目标被拒。** tree-sitter 把它拼作 `raw_string` 而非 `string`，于是本设计要修的那条命令，其最普通的单引号写法仍然绑不上，而双引号写法可以。现在接受 `raw_string` 并去掉引号；单引号在 bash 里完全字面，内部无需展开检查。
+3. **缺口——引号参数能伪造 create。** 执行闸门按分隔符切分而不跟踪引号，于是 `printf 'example; gh pr create'` 产出一个以 `gh pr create` 开头的段；走查在那里就停在启动目录，永远到不了真正的 create。现在闸门跑在由 AST 自身 token 重建的文本上，任何携带分隔符或展开式的参数被替换为占位符。闸门语法仍是权威，只是它的输入被净化了。
+4. **可移植性——解析目录的期望值是 POSIX 字面量。** 解析器用平台原生的 `path.resolve` 拼接，而 Windows workspace lane 会跑这个套件（只有独立的真实文件系统套件被跳过）。解析目录的期望值现在用 `path.resolve` 推导；启动目录的期望值保持字面量，因为那个值是原样透传、从不 resolve 的。
+
+第二轮验证：**429 passed**（既有文件 422 条，含 43 条目录解析用例；真实文件系统 7 条），core typecheck exit 0，ESLint 与 Prettier 干净。四次新变异见证，每次都从字节级备份还原并核对校验和（`68bf56c06236ce5e5826e6316e5bc0d3e79a13d032aba61ae2ef693452acacc0`）：
+
+| 变异                        | 结果                                                                                            |
+| --------------------------- | ----------------------------------------------------------------------------------------------- |
+| G —— 恢复无条件折叠         | 7 failed / 420 passed：五个新分隔符形状、既有的 `\|\|` 用例、以及新的真实文件系统跳过-`cd` 回归 |
+| H —— 去掉 `raw_string` 处理 | 4 failed / 423 passed：两条单引号单测，以及两条对 worktree 路径加引号的真实文件系统用例         |
+| I —— 把节点原始文本喂给闸门 | 2 failed / 425 passed：恰好是引号参数的单测与真实文件系统用例                                   |
+| J —— 赋值原样透传不净化     | 点名的引号赋值用例在目录断言上变红                                                              |
+
+真实文件系统套件新增三条：含空格的单引号 worktree 路径、只是在引号里提及 `gh pr create` 的参数、以及一个被跳过的 `cd`——它必须仍绑定启动分支的 PR，同时 worktree 的 marker 保持未写入。
+
+审计第二轮 diff 时，在第三条意见的修复里发现了第十二个缺陷：只净化参数、却把 `variable_assignment` 节点原样透传，于是同一种伪造仍能经赋值自身的引号值成立（`X='; gh pr create' printf hi`）。现在赋值按同一规则净化，并用两条用例钉住两个方向——伪造被拒，而普通的内联凭据（`GH_TOKEN=abc gh pr create`）仍能解析、且凭据仍送达验证腿。写这条对照时还抓出测试自身的一个错误：带内联凭据时 env 参数是一个 overlay，而不是共享 helper 所断言的 `undefined`。
+
+至此跨实现、自审、对抗探针与本轮评审共发现并修掉十二个缺陷。其中回归最值得记：它由本设计自己的第一版实现引入，躲过了两遍干净的读 diff 和一个 38 形状探针，只有评审者把绑定结果与父提交对比才抓到。探针的形状全都用 `&&`，因此没有一个覆盖到非保证成功的分隔符。
 
 ## 验收标准
 

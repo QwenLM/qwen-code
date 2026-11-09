@@ -98,24 +98,27 @@ the first create node.
 
 Node handling:
 
-| Node                                                                                                      | Handling                                                                                                                                                                                                                                                                                |
-| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `program`                                                                                                 | Fold named children in order.                                                                                                                                                                                                                                                           |
-| `list` with `&&` or `;`                                                                                   | Thread the directory left to right.                                                                                                                                                                                                                                                     |
-| `list` with `\|\|`                                                                                        | Continue with the left's directory when the left never moved it (`false \|\| gh pr create` still runs in the launch directory); `opaque` only when the left did move it, since the right side then depends on how far the left got. A create already found in the left is unaffected.   |
-| `pipeline`                                                                                                | Visit every element with the same incoming directory; the directory after the pipeline is the incoming one (bash runs pipeline elements in subshells, so a `cd` inside does not leak).                                                                                                  |
-| `redirected_statement`                                                                                    | Walk the body, ignoring `*_redirect` children.                                                                                                                                                                                                                                          |
-| `command` recognised by `commandRunsGhPrCreate(node.text)`                                                | Record the current directory and stop. A cwd-shifting wrapper flag (`env -C/--chdir`, `sudo -D/--chdir`, via the existing `isShiftCwdFlag` tables) makes it `opaque`.                                                                                                                   |
-| `command` named `cd` / `pushd`                                                                            | Resolve a literal target against the current directory; otherwise `opaque`. A `pushd +N` / `-N` stack rotation is `opaque`, not a path named `+1`. When the command assigns `CDPATH` anywhere, a relative target is `opaque` (CDPATH reroutes it) while an absolute one still resolves. |
-| `command` named `popd`, `eval`, `source`, `.`                                                             | `opaque` — `popd` rotates a stack that is not modelled; the other three run code in the current shell that can move it without naming a target in the command text. Executing a script (`./move.sh`) is not in this set: it runs in a child and cannot move us.                         |
-| any other command                                                                                         | Directory unchanged.                                                                                                                                                                                                                                                                    |
-| any other node (`subshell`, `compound_statement`, `if_statement`, loops, `case`, function definitions, …) | `opaque` if the subtree contains a `cd`/`pushd`/`popd`/`eval`/`source`/`.` command, otherwise directory unchanged. A subshell's `cd` must not leak into the enclosing scope.                                                                                                            |
+| Node                                                                                                      | Handling                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `program` / `list`, separator `&&`                                                                        | Carry the directory left to right. `&&` is the only separator that proves the preceding statement succeeded, so it is the only one across which a `cd` may be carried.                                                                                                                                                                                                                              |
+| `program` / `list`, separator `;`, newline, `&` or `\|\|`                                                 | `opaque` once the left has moved the directory. The next statement runs regardless of the previous one's success (or, for `\|\|`, only on its failure), so a skipped (`false && cd w`), failed (`cd /missing`) or backgrounded (`cd w &`) `cd` never moved us. A create already found in the left is unaffected, and a left that never moved costs nothing.                                         |
+| `pipeline`                                                                                                | Visit every element with the same incoming directory; the directory after the pipeline is the incoming one (bash runs pipeline elements in subshells, so a `cd` inside does not leak).                                                                                                                                                                                                              |
+| `redirected_statement`                                                                                    | Walk the body, ignoring `*_redirect` children.                                                                                                                                                                                                                                                                                                                                                      |
+| `command` recognised by `commandRunsGhPrCreate(createCandidateText(node))`                                | Record the current directory and stop. The gate runs over text rebuilt from the AST's own tokens, with any argument carrying a separator or expansion replaced by a placeholder, so a quoted mention such as `printf 'example; gh pr create'` cannot forge a create. A cwd-shifting wrapper flag (`env -C/--chdir`, `sudo -D/--chdir`, via the existing `isShiftCwdFlag` tables) makes it `opaque`. |
+| `command` named `cd` / `pushd`                                                                            | Resolve a literal target against the current directory; otherwise `opaque`. A `pushd +N` / `-N` stack rotation is `opaque`, not a path named `+1`. When the command assigns `CDPATH` anywhere, a relative target is `opaque` (CDPATH reroutes it) while an absolute one still resolves.                                                                                                             |
+| `command` named `popd`, `eval`, `source`, `.`                                                             | `opaque` — `popd` rotates a stack that is not modelled; the other three run code in the current shell that can move it without naming a target in the command text. Executing a script (`./move.sh`) is not in this set: it runs in a child and cannot move us.                                                                                                                                     |
+| any other command                                                                                         | Directory unchanged.                                                                                                                                                                                                                                                                                                                                                                                |
+| any other node (`subshell`, `compound_statement`, `if_statement`, loops, `case`, function definitions, …) | `opaque` if the subtree contains a `cd`/`pushd`/`popd`/`eval`/`source`/`.` command, otherwise directory unchanged. A subshell's `cd` must not leak into the enclosing scope.                                                                                                                                                                                                                        |
 
-A `cd` target is literal only when it is a plain word or string with no
+A `cd` target is literal only when it is a plain word, a single-quoted
+`raw_string` (wholly literal in bash, so the body is the path with the quotes
+removed), or a double-quoted `string` whose body is plain content — with no
 expansion, no command substitution, no leading `~`, no `$`, no backtick, no
-backslash, no glob or brace character, and is not `-` (previous directory) or
+backslash, no glob or brace character, and not `-` (previous directory) or
 absent (`cd` alone goes to `$HOME`). Flags before the target are skipped.
-Resolution is `path.resolve(currentDirectory, target)`.
+Resolution is `path.resolve(currentDirectory, target)`, which is
+platform-native: the tests derive their expectations the same way rather than
+hard-coding POSIX strings, because the Windows workspace lane runs them.
 
 Parse failure or a root node with `hasError` returns `{kind: 'launch'}` — the
 parser proved nothing, so behaviour is exactly today's and no notice is emitted.
@@ -227,8 +230,8 @@ fire-and-forget binding hook completing. `launch` and `resolved` emit nothing.
 - ESLint on the three changed TypeScript files: **clean**. Prettier applied to
   all five changed files.
 - `src/tools/shell.test.ts` + `src/tools/shell.pr-binding-directory.test.ts`
-  together: **411 passed** — 407 in the existing file (22 pre-existing binding
-  tests plus 33 new directory-resolution tests) and 4 real-filesystem tests.
+  together: **429 passed** — 422 in the existing file (22 pre-existing binding
+  tests plus 43 new directory-resolution tests) and 7 real-filesystem tests.
 - The real-filesystem suite runs against a real `git init` repository, a real
   `git worktree add` linked worktree, and a real `gh` subprocess stub that
   reports a PR for a branch only after `pr create` ran in it. No attribution
@@ -284,6 +287,77 @@ fire-and-forget binding hook completing. `launch` and `resolved` emit nothing.
   no notice; and `CDPATH` rerouting a relative `cd` while the walk treated it
   as provable. The last two were found only by the adversarial probe — reading
   the diff had already passed clean twice.
+
+### Review round 2 (2026-11-09, independent Codex review of `e12e88be94`)
+
+The review reported one binding regression, two resolver gaps and one test
+portability problem. All four were reproduced against the head before fixing:
+the separator and quoting facts were confirmed by dumping the tree-sitter AST,
+and the Windows claim by evaluating `path.win32.resolve` (which yields
+`\test\dir\nested`, not the POSIX literal the tests asserted).
+
+1. **Regression — an unexecuted directory change was carried forward.** The
+   fold treated every separator as guaranteed-sequential, so
+   `false && cd w; gh pr create`, `cd /missing; gh pr create` and
+   `cd w & wait; gh pr create` all attributed in `w` while the create ran in
+   the launch repository. The parent commit bound these; the head did not, and
+   emitted no notice. Fixed by carrying a directory only across `&&`, the one
+   separator that proves the preceding statement succeeded. `;`, newline, `&`
+   and `||` now fall back once the left has moved. This also supersedes the
+   earlier `||`-specific rule, which was a special case of the same principle.
+2. **Gap — single-quoted targets were rejected.** tree-sitter spells them
+   `raw_string`, not `string`, so the ordinary single-quoted spelling of the
+   very command this design fixes stayed unbound while the double-quoted one
+   worked. `raw_string` is now accepted with its quotes removed; single quotes
+   are wholly literal in bash, so no expansion check is needed inside them.
+3. **Gap — a quoted argument could forge a create.** The execution gate splits
+   on separators without tracking quotes, so `printf 'example; gh pr create'`
+   produced a segment starting `gh pr create`; the walk stopped there at the
+   launch directory and never reached the real create. The gate now runs over
+   text rebuilt from the AST's own tokens, with any argument carrying a
+   separator or expansion replaced by a placeholder. The gate's grammar stays
+   authoritative; only its input is sanitised.
+4. **Portability — resolved-directory expectations were POSIX literals.** The
+   resolver joins with the platform-native `path.resolve`, and the Windows
+   workspace lane runs this suite (only the separate real-filesystem suite is
+   skipped). Expectations for resolved directories are now derived with
+   `path.resolve`; expectations for the launch directory stay literal, because
+   that value is passed through untouched.
+
+Round-2 verification: **429 passed** (422 in the existing file, including 43
+directory-resolution tests, plus 7 real-filesystem tests), core typecheck
+exit 0, ESLint and Prettier clean. Four new mutation witnesses, each reverted
+from a byte-level backup with the checksum verified
+(`68bf56c06236ce5e5826e6316e5bc0d3e79a13d032aba61ae2ef693452acacc0`):
+
+| Mutation                                 | Result                                                                                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| G — restore the unconditional fold       | 7 failed / 420 passed: the five new separator shapes, the pre-existing `\|\|` case, and the new real-filesystem skipped-`cd` regression |
+| H — drop `raw_string` handling           | 4 failed / 423 passed: both single-quote unit cases and both real-filesystem cases that quote the worktree path                         |
+| I — feed the gate the node's raw text    | 2 failed / 425 passed: exactly the quoted-argument unit and real-filesystem cases                                                       |
+| J — pass assignments through unsanitised | the named quoted-assignment case goes red on the directory assertion                                                                    |
+
+The real-filesystem suite gained three cases: a single-quoted worktree path
+containing a space, a quoted argument that merely mentions `gh pr create`, and
+a skipped `cd` that must still bind the launch branch's PR while leaving the
+worktree's marker unwritten.
+
+Auditing the round-2 diff found a twelfth defect in the fix for the third
+finding: sanitising arguments but passing `variable_assignment` nodes through
+raw left the same forgery open through an assignment's own quoted value
+(`X='; gh pr create' printf hi`). Assignments are now sanitised by the same
+rule, with two cases pinning both directions — the forgery is rejected, and an
+ordinary inline credential (`GH_TOKEN=abc gh pr create`) still resolves and
+still reaches the verification legs. Writing that control also caught a mistake
+in the test itself: with an inline credential the env argument is an overlay,
+not the `undefined` the shared helper asserts.
+
+Twelve defects have now been found and fixed across implementation, self-audit,
+the adversarial probe and this review. The regression is the notable one: it
+was introduced by this design's own first implementation, survived two clean
+diff-reading passes and a 38-shape probe, and was caught only by a reviewer
+comparing binding outcomes against the parent commit. The probe's shapes all
+used `&&`, so none of them exercised a non-guaranteed separator.
 
 ## Acceptance criteria
 

@@ -230,6 +230,52 @@ describe.skipIf(process.platform === 'win32')(
       expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
     });
 
+    it('binds a single-quoted worktree path containing a space', async () => {
+      // A space is the ordinary reason to quote a path at all, and
+      // tree-sitter spells single quotes as `raw_string` rather than
+      // `string`. Rejecting that node left this spelling unbound while the
+      // double-quoted one worked.
+      const spaced = path.join(repo, '.qwen', 'worktrees', 'with space');
+      git(repo, 'worktree', 'add', spaced, '-b', 'fix/spaced');
+      const result = await run(`cd '${spaced}' && gh pr create --fill`);
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
+    it('binds when a quoted argument merely mentions gh pr create', async () => {
+      // The gate splits on separators without tracking quotes, so the
+      // printf's text carries a segment that starts `gh pr create`. Taking
+      // it for the create stopped the walk before the real one.
+      const result = await run(
+        `printf 'example; gh pr create' >/dev/null; cd '${worktree}' && gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
+    it('does not bind a worktree the create never ran in', async () => {
+      // The cd is skipped, so the create runs on the launch branch, which
+      // has no PR. Carrying the skipped directory would query the worktree
+      // before and after and bind nothing — the parent commit bound this.
+      const result = await run(
+        `false && cd '${worktree}'; gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      // The launch branch created its own PR; the worktree never ran one.
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+      expect(
+        fs.existsSync(
+          path.join(tmp, 'gh-state', WORKTREE_BRANCH.replace(/\//g, '_')),
+        ),
+      ).toBe(false);
+    });
+
     it('falls back with a notice when the cd target is an expansion', async () => {
       // The create really runs and really creates the worktree's PR; only the
       // attribution is unprovable, because the resolver refuses to guess what

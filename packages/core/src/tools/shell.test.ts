@@ -1039,6 +1039,16 @@ describe('ShellTool', () => {
     // `directory` param otherwise snapshots the launch branch — which has no
     // PR — and declines silently (live incidents: sessions d0911852 / 195215bf).
     describe('attribution directory resolution', () => {
+      /**
+       * The resolver joins with the platform-native `path.resolve`, so an
+       * expectation for a RESOLVED directory must be derived the same way —
+       * a POSIX literal would not match on the Windows workspace lane, and
+       * mocking `os.platform()` does not change Node's `path` implementation.
+       * Expectations for the LAUNCH directory stay literal: that value is
+       * passed through untouched, never resolved.
+       */
+      const resolved = (...segments: string[]) => path.resolve(...segments);
+
       /** Asserts both gh legs ran in `dir` and the create bound. */
       const expectAttributedIn = async (dir: string) => {
         expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
@@ -1068,13 +1078,13 @@ describe('ShellTool', () => {
       it('attributes a single literal cd in the directory it names', async () => {
         mockCreatedPr(77);
         await runShell('cd /test/dir/nested && gh pr create --fill', PR_77);
-        await expectAttributedIn('/test/dir/nested');
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
       });
 
       it('resolves a relative cd against the launch directory', async () => {
         mockCreatedPr(77);
         await runShell('cd nested && gh pr create --fill', PR_77);
-        await expectAttributedIn('/test/dir/nested');
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
       });
 
       it('resolves a relative cd against the directory param', async () => {
@@ -1082,7 +1092,7 @@ describe('ShellTool', () => {
         await runShell('cd nested && gh pr create --fill', PR_77, 0, {
           directory: '/test/dir/param',
         });
-        await expectAttributedIn('/test/dir/param/nested');
+        await expectAttributedIn(resolved('/test/dir/param', 'nested'));
       });
 
       it('threads a chained cd through intervening commands, a redirect and a trailing pipe', async () => {
@@ -1094,7 +1104,9 @@ describe('ShellTool', () => {
           'cd /test/dir && tail -n +3 draft.md > /tmp/body.md && head -3 /tmp/body.md && wc -l /tmp/body.md && cd .qwen/worktrees/deflake && gh pr create --title "test(web-shell): let a retry outlast an abort storm" --body-file /tmp/body.md 2>&1 | tail -5',
           PR_77,
         );
-        await expectAttributedIn('/test/dir/.qwen/worktrees/deflake');
+        await expectAttributedIn(
+          resolved('/test/dir', '.qwen/worktrees/deflake'),
+        );
       });
 
       it('keeps a quoted title containing parentheses from blocking resolution', async () => {
@@ -1104,7 +1116,9 @@ describe('ShellTool', () => {
           'cd /test/dir/.qwen/worktrees/fix-16712 && gh pr create --repo o/r --base main --head fix/x --title "fix(managed-agent): dedupe the probe case labels" --body-file /tmp/body.md 2>&1 | tail -5',
           PR_77,
         );
-        await expectAttributedIn('/test/dir/.qwen/worktrees/fix-16712');
+        await expectAttributedIn(
+          resolved('/test/dir', '.qwen/worktrees/fix-16712'),
+        );
       });
 
       it('resolves a double-quoted literal path', async () => {
@@ -1113,13 +1127,72 @@ describe('ShellTool', () => {
           'cd "/test/dir/with space" && gh pr create --fill',
           PR_77,
         );
-        await expectAttributedIn('/test/dir/with space');
+        await expectAttributedIn(resolved('/test/dir', 'with space'));
+      });
+
+      it('resolves a single-quoted literal path', async () => {
+        // tree-sitter spells single quotes as `raw_string`, not `string`.
+        // Rejecting it left the ordinary single-quoted spelling of the very
+        // command this PR fixes unbound while the double-quoted one worked.
+        mockCreatedPr(77);
+        await runShell("cd '/test/dir/nested' && gh pr create --fill", PR_77);
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('resolves a single-quoted literal path containing a space', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd '/test/dir/with space' && gh pr create --fill",
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'with space'));
+      });
+
+      it('ignores a create mentioned inside a quoted argument', async () => {
+        // The execution gate splits on separators without tracking quotes, so
+        // the printf's raw text contains a segment starting `gh pr create`.
+        // Accepting it stopped the walk at the launch directory while the
+        // real create ran in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          "printf 'example; gh pr create' >/dev/null; cd /test/dir/nested && gh pr create --fill",
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('ignores a create mentioned inside a quoted assignment value', async () => {
+        // Same forgery through the assignment's own value rather than an
+        // argument: sanitising arguments alone left this path open.
+        mockCreatedPr(77);
+        await runShell(
+          "X='; gh pr create' printf hi >/dev/null; cd /test/dir/nested && gh pr create --fill",
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('still recognises a create carrying an inline credential', async () => {
+        // Sanitising must not cost the ordinary inline-token spelling: the
+        // assignment has no separator, so it survives as a gate prefix. The
+        // credential also has to reach the verification legs, so the env
+        // argument is an overlay here rather than the usual undefined.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && GH_TOKEN=abc gh pr create --fill',
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir', 'nested'),
+          expect.objectContaining({ GH_TOKEN: 'abc' }),
+        );
+        expectBound(77);
       });
 
       it('resolves pushd like cd', async () => {
         mockCreatedPr(77);
         await runShell('pushd /test/dir/nested && gh pr create --fill', PR_77);
-        await expectAttributedIn('/test/dir/nested');
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
       });
 
       it('ignores a cd after the create', async () => {
@@ -1128,13 +1201,13 @@ describe('ShellTool', () => {
           'cd /test/dir/nested && gh pr create --fill && cd /elsewhere',
           PR_77,
         );
-        await expectAttributedIn('/test/dir/nested');
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
       });
 
       it('stops at the first create before a || retry tail', async () => {
         mockCreatedPr(77);
         await runShell(`cd /test/dir/nested && ${CREATE_OR_VIEW}`, PR_77);
-        await expectAttributedIn('/test/dir/nested');
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
       });
 
       it('emits no notice when the command never changes directory', async () => {
@@ -1210,6 +1283,28 @@ describe('ShellTool', () => {
           'a CDPATH export',
           'export CDPATH=/elsewhere; cd sub && gh pr create --fill',
         ],
+        // A directory may only be carried across `&&`, which proves the cd
+        // succeeded. These separators all let the create run while the cd
+        // was skipped, failed, or confined to a background subshell — the
+        // parent commit bound them and an unconditional fold stopped doing
+        // so, which is a regression rather than a coverage gap.
+        [
+          'a skipped cd before a semicolon',
+          'false && cd /test/dir/nested; gh pr create --fill',
+        ],
+        [
+          'a cd that may have failed',
+          'cd /test/dir/missing; gh pr create --fill',
+        ],
+        [
+          'a backgrounded cd',
+          'cd /test/dir/nested & wait; gh pr create --fill',
+        ],
+        [
+          'a semicolon-separated cd',
+          'cd /test/dir/nested; gh pr create --fill',
+        ],
+        ['a newline-separated cd', 'cd /test/dir/nested\ngh pr create --fill'],
       ])('falls back with a notice for %s', async (_label, command) => {
         mockCreatedPr(77);
         const result = await runShell(command, PR_77);
@@ -1224,7 +1319,7 @@ describe('ShellTool', () => {
           'CDPATH=/elsewhere cd /test/dir/nested && gh pr create --fill',
           PR_77,
         );
-        await expectAttributedIn('/test/dir/nested');
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
         expect(result.llmContent).not.toContain(
           SHELL_PR_BINDING_DIRECTORY_NOTICE,
         );
@@ -1239,7 +1334,7 @@ describe('ShellTool', () => {
           'cd /test/dir/nested && ./move.sh && gh pr create --fill',
           PR_77,
         );
-        await expectAttributedIn('/test/dir/nested');
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
         expect(result.llmContent).not.toContain(
           SHELL_PR_BINDING_DIRECTORY_NOTICE,
         );

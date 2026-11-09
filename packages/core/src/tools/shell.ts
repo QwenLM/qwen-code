@@ -977,6 +977,33 @@ function commandNodeProgram(node: ShellSyntaxNode): string {
   return programBasename(node.childForFieldName('name')?.text ?? '');
 }
 
+/**
+ * The text to run the execution gate over for one AST command node.
+ *
+ * The gate splits on shell separators without tracking quotes, so feeding it
+ * a node's raw text lets a quoted argument forge a create:
+ * `printf 'example; gh pr create'` splits into a segment that starts with
+ * `gh pr create`, and the walk would stop on the printf at the launch
+ * directory while the real create runs elsewhere. Rebuilding the segment
+ * from the AST's own tokens and replacing any argument that carries a
+ * separator or expansion with a placeholder keeps the gate's grammar
+ * authoritative while making that forgery impossible: the executable still
+ * has to be gh (or a recognised wrapper) in argument position.
+ */
+function createCandidateText(node: ShellSyntaxNode): string {
+  const parts: string[] = [];
+  for (const child of node.namedChildren) {
+    if (child.type === 'command_name') {
+      parts.push(child.text);
+      continue;
+    }
+    // Assignments are sanitised too: `X='; gh pr create' printf hi` would
+    // otherwise forge a segment through the assignment's own quoted value.
+    parts.push(/[;&|`$\n]/.test(child.text) ? 'X' : child.text);
+  }
+  return parts.join(' ');
+}
+
 /** Whether a subtree the walk does not model may move the directory. */
 function subtreeMayChangeDirectory(node: ShellSyntaxNode): boolean {
   const stack: ShellSyntaxNode[] = [node];
@@ -1043,6 +1070,10 @@ function literalCdTarget(node: ShellSyntaxNode): string | undefined {
   let text: string;
   if (target.type === 'word') {
     text = target.text;
+  } else if (target.type === 'raw_string') {
+    // Single quotes are wholly literal in bash — no expansion is possible
+    // inside them — so the body is the path with the quotes removed.
+    text = target.text.slice(1, -1);
   } else if (target.type === 'string') {
     // A double-quoted path is literal only when its body is plain content;
     // `"$HOME/x"` and `"$(pwd)/x"` carry expansion children instead.
@@ -1067,19 +1098,27 @@ function literalCdTarget(node: ShellSyntaxNode): string | undefined {
  * param otherwise resolves the launch directory's branch — which has no PR
  * — and the binding declines silently.
  *
- * The walk is static and fails closed: it never runs the command, never
- * guesses an expansion, and returns `opaque` for every directory change it
- * cannot prove (`cd $VAR`, `cd ~`, `cd -`, `popd`, a `pushd +N` stack
- * rotation, a `||` branch, a subshell or control-flow body that moves the
- * directory, an `env -C`/`sudo -D` wrapper). `opaque` keeps the launch
- * directory, so this can only add bindings, never remove one. A parse
- * failure or an error node returns `launch`: the parser proved nothing, so
- * behaviour is unchanged.
+ * A directory is carried forward only across `&&`, the one separator that
+ * proves the preceding `cd` succeeded. Across `;`, a newline, `&` or `||`
+ * the next statement runs regardless of (or only on failure of) the previous
+ * one, so a skipped, failed or backgrounded `cd` never moved us; carrying it
+ * would query a directory the create never ran in and lose a binding the
+ * launch directory would have made.
  *
- * Create recognition reuses `commandRunsGhPrCreate` verbatim rather than
- * restating its closed grammar, and the walk stops at the first create —
- * the gate binds one PR, so a later `cd` or a `|| gh pr view` retry tail
- * cannot change the answer.
+ * The walk is otherwise static and fails closed: it never runs the command,
+ * never guesses an expansion, and returns `opaque` for every directory
+ * change it cannot prove (`cd $VAR`, `cd ~`, `cd -`, `popd`, a `pushd +N`
+ * stack rotation, a subshell or control-flow body that moves the directory,
+ * an `env -C`/`sudo -D` wrapper, `eval`/`source`/`.`, a `CDPATH` that
+ * reroutes a relative target). `opaque` keeps the launch directory, so this
+ * can only add bindings, never remove one. A parse failure or an error node
+ * returns `launch`: the parser proved nothing, so behaviour is unchanged.
+ *
+ * Create recognition reuses `commandRunsGhPrCreate` rather than restating
+ * its closed grammar, but over text rebuilt from the AST's own tokens (see
+ * `createCandidateText`) so a quoted argument cannot forge a create. The
+ * walk stops at the first create — the gate binds one PR, so a later `cd`
+ * or a `|| gh pr view` retry tail cannot change the answer.
  */
 async function resolveGhPrCreateDirectory(
   command: string,
@@ -1104,25 +1143,30 @@ async function resolveGhPrCreateDirectory(
       switch (node.type) {
         case 'program':
         case 'list': {
-          const isOrBranch =
-            node.type === 'list' &&
-            node.children.some((c) => !c.isNamed && c.text === '||');
+          // A directory may only be carried into a statement whose execution
+          // is gated on the previous one SUCCEEDING. `&&` is the only
+          // separator that proves it: with `;`, a newline, or `&` the next
+          // statement runs regardless, so a `cd` that failed (missing
+          // target), was skipped (`false && cd w`), or ran in a background
+          // subshell (`cd w &`) never moved us — and carrying it anyway
+          // would query a directory the create never ran in. `||` is the
+          // mirror image: the right side runs only when the left FAILED.
+          // A create already found is unaffected, so
+          // `cd w && gh pr create || gh pr view` still attributes in `w`.
           let current = dir;
-          const children = node.namedChildren;
-          for (let i = 0; i < children.length; i++) {
-            // The right side of `||` runs only when the left failed, so its
-            // directory depends on how far the left got. A create already
-            // found in the left is unaffected — `cd w && gh pr create || gh
-            // pr view` attributes in `w`. Only a left that actually moved
-            // the directory makes what follows unprovable: `false || gh pr
-            // create` still runs in the launch directory, and calling that
-            // opaque would emit a notice about a directory change that never
-            // happened.
-            if (isOrBranch && i > 0 && found === undefined && current !== dir) {
+          let separator: string | undefined;
+          for (const child of node.children) {
+            if (!child.isNamed) {
+              separator = child.text;
+              continue;
+            }
+            if (found !== undefined || opaque) return current;
+            if (separator !== '&&' && current !== dir) {
               opaque = true;
               return current;
             }
-            current = visit(children[i]!, current);
+            current = visit(child, current);
+            separator = undefined;
           }
           return current;
         }
@@ -1141,7 +1185,7 @@ async function resolveGhPrCreateDirectory(
           return current;
         }
         case 'command': {
-          if (commandRunsGhPrCreate(node.text)) {
+          if (commandRunsGhPrCreate(createCandidateText(node))) {
             const program = commandNodeProgram(node);
             const shiftSet =
               program === 'env'
