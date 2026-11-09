@@ -626,7 +626,7 @@ describe('no-AK integration CI wiring', () => {
       gateJob,
       'Run required no-AK integration gate',
     );
-    const integrationTypecheckCommand = `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
+    const integrationTypecheckCommand = `NODE_OPTIONS='--max-old-space-size=3072' npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
     expect(gateStep).toContain(integrationTypecheckCommand);
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(

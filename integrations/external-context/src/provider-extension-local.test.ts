@@ -535,7 +535,9 @@ describe('local provider extension example', () => {
               ALL_PROXY: '',
               NO_PROXY: '',
             },
-            timeout: 5000,
+            timeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+              ? 15_000
+              : 5_000,
           }),
         ).rejects.toMatchObject({ stderr, code: 1, killed: false });
       }
@@ -562,6 +564,6 @@ describe('local provider extension example', () => {
         manifest.mcpServers['provider-context-local-example']?.args,
       ).toEqual(['${extensionPath}${/}dist${/}main.js']);
     },
-    30_000,
+    process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ? 60_000 : 30_000,
   );
 });

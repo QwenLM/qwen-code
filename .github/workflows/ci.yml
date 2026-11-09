@@ -3262,7 +3262,7 @@ jobs:
         run: |-
           mkdir -p "${QWEN_HOME}"
           if [ "${{ matrix.shard }}" = 1 ]; then
-            npm run typecheck:integration
+            NODE_OPTIONS='--max-old-space-size=3072' npm run typecheck:integration
           fi
           npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/3
 

@@ -816,7 +816,9 @@ describe('prettier lane', () => {
   );
 
   it('checks formatting rather than rewriting it', () => {
-    expect(lintSource).toContain('prettier --experimental-cli --check .');
+    expect(lintSource).toContain(
+      'prettier --experimental-cli --check . --parallel-workers 4',
+    );
     expect(lintSource).not.toMatch(/prettier[^\n'"]*--write/);
   });
 

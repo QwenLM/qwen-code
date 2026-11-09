@@ -738,7 +738,9 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(
       'tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
     );
-    expect(result.stdout).toContain('isolation  SANDBOX=docker');
+    expect(
+      result.stdout.match(/^ {2}isolation {2}(.+)$/m)?.[1].split(', '),
+    ).toContain('SANDBOX=docker');
     expect(result.stdout).toContain('--require-isolation');
 
     const root = realpathSync(dir);

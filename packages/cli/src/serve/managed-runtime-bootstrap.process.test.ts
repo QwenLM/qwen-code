@@ -54,6 +54,8 @@ const source = new URL('./managed-runtime-bootstrap.ts', import.meta.url).href;
 const workerSource = new URL('./managed-runtime-ssh-worker.ts', import.meta.url)
   .href;
 const tsconfig = fileURLToPath(new URL('../../tsconfig.json', import.meta.url));
+const machineId = 'd493e3da33bd4dd18c17cf78ee6c9828';
+const machineIdPrelude = `import {promises as fs} from 'node:fs';\nconst readFile = fs.readFile;\nfs.readFile = async (...args) => args[0] === '/etc/machine-id' ? ${JSON.stringify(machineId)} : readFile(...args);\n`;
 
 describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
   'SSH bootstrap real processes',
@@ -68,6 +70,12 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
     const pids = new Set<number>();
 
     beforeEach(async () => {
+      // Minimal CI containers omit machine-id. Keep the same host identity in
+      // the parent and real child processes without changing the host's /etc.
+      const originalReadFile = fs.readFile;
+      vi.spyOn(fs, 'readFile').mockImplementation(async (...args) =>
+        args[0] === '/etc/machine-id' ? machineId : originalReadFile(...args),
+      );
       root = await mkdtemp(path.join(tmpdir(), 'qwen-ssh-bootstrap-'));
       // macOS's temporary directory may itself be a symlink.
       root = await (await import('node:fs/promises')).realpath(root);
@@ -80,7 +88,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
       entry = path.join(root, 'entry.mjs');
       await writeFile(
         entry,
-        `import {register} from ${JSON.stringify(api)};\nregister({tsconfig:${JSON.stringify(tsconfig)}});\nif(process.argv[2]==='managed-runtime-bootstrap-worker'){await (await import(${JSON.stringify(workerSource)})).runManagedRuntimeBootstrapWorker(process.argv[3]);}else{await (await import(${JSON.stringify(source)})).runManagedRuntimeBootstrap();}\n`,
+        `${machineIdPrelude}import {register} from ${JSON.stringify(api)};\nregister({tsconfig:${JSON.stringify(tsconfig)}});\nif(process.argv[2]==='managed-runtime-bootstrap-worker'){await (await import(${JSON.stringify(workerSource)})).runManagedRuntimeBootstrapWorker(process.argv[3]);}else{await (await import(${JSON.stringify(source)})).runManagedRuntimeBootstrap();}\n`,
       );
       const probed = await executeSshBootstrap({
         protocolVersion: 1,
@@ -774,7 +782,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
       const gate = path.join(root, 'continue');
       await writeFile(
         entry,
-        `import {register} from ${JSON.stringify(api)};\nimport {access,writeFile} from 'node:fs/promises';\nregister({tsconfig:${JSON.stringify(tsconfig)}});\nif(process.argv[2]==='managed-runtime-bootstrap-worker'){await writeFile(${JSON.stringify(entered)},String(process.pid));while(!(await access(${JSON.stringify(gate)}).then(()=>true,()=>false))){await new Promise(r=>setTimeout(r,10));}await (await import(${JSON.stringify(workerSource)})).runManagedRuntimeBootstrapWorker(process.argv[3]);}else{await (await import(${JSON.stringify(source)})).runManagedRuntimeBootstrap();}\n`,
+        `${machineIdPrelude}import {register} from ${JSON.stringify(api)};\nimport {access,writeFile} from 'node:fs/promises';\nregister({tsconfig:${JSON.stringify(tsconfig)}});\nif(process.argv[2]==='managed-runtime-bootstrap-worker'){await writeFile(${JSON.stringify(entered)},String(process.pid));while(!(await access(${JSON.stringify(gate)}).then(()=>true,()=>false))){await new Promise(r=>setTimeout(r,10));}await (await import(${JSON.stringify(workerSource)})).runManagedRuntimeBootstrapWorker(process.argv[3]);}else{await (await import(${JSON.stringify(source)})).runManagedRuntimeBootstrap();}\n`,
       );
       const launching = bootstrap(request);
       const retirementId = randomUUID();
