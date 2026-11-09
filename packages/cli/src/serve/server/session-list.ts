@@ -55,6 +55,7 @@ const persistedSessionListCache = new PersistedSessionListCache(
 );
 
 export interface ListWorkspaceSessionsOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   cursor?: string;
   size?: number;
   archiveState?: SessionArchiveState;
@@ -197,6 +198,7 @@ function parseSessionCursor(cursor: string): number | string | undefined {
 }
 
 interface OrganizedCursor {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   catalogKind?: 'organized';
   paginateMerged?: boolean;
   group: string;
@@ -240,6 +242,7 @@ function parseOrganizedCursor(
     group: string;
     archiveState: SessionArchiveState;
     paginateMerged: boolean;
+    sortBy?: 'updatedAt' | 'lastUserPromptAt';
     sourceType?: string;
     sourceId?: string;
     conversationKind?: 'standalone-top-level';
@@ -267,6 +270,8 @@ function parseOrganizedCursor(
       ((parsed as OrganizedCursor).paginateMerged !== undefined &&
         (parsed as OrganizedCursor).paginateMerged !==
           expected.paginateMerged) ||
+      ((parsed as OrganizedCursor).sortBy ?? 'updatedAt') !==
+        (expected.sortBy ?? 'updatedAt') ||
       (parsed as OrganizedCursor).group !== expected.group ||
       (parsed as OrganizedCursor).archiveState !== expected.archiveState ||
       (parsed as OrganizedCursor).sourceType !== expected.sourceType ||
@@ -294,10 +299,12 @@ function encodeOrganizedCursor(
   sourceId?: string,
   conversationKind?: 'standalone-top-level',
   emitted: readonly string[] = [],
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): string {
   return Buffer.from(
     JSON.stringify({
       catalogKind: 'organized',
+      sortBy,
       paginateMerged,
       group,
       archiveState,
@@ -342,6 +349,7 @@ function encodeLiveSessionCursor(last: LiveSessionCursorKey): string {
 
 /** Binds an opaque cursor to the metadata filter that produced it. */
 interface SessionMetadataFilter {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
@@ -403,6 +411,8 @@ function parseMetadataSessionCursor(
       ((parsed as { paginateMerged?: unknown }).paginateMerged !== undefined &&
         (parsed as { paginateMerged?: unknown }).paginateMerged !==
           expected.paginateMerged) ||
+      ((parsed as { sortBy?: unknown }).sortBy ?? 'updatedAt') !==
+        (expected.sortBy ?? 'updatedAt') ||
       (parsed as { parentSessionId?: unknown }).parentSessionId !==
         expected.parentSessionId ||
       (parsed as { sourceType?: unknown }).sourceType !== expected.sourceType ||
@@ -861,16 +871,24 @@ async function listAllPersistedSummaries(
   return snapshot;
 }
 
-function getSummaryActivityTime(session: BridgeSessionSummary): number {
+function getSummaryActivityTime(
+  session: BridgeSessionSummary,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
+): number {
+  if (sortBy === 'lastUserPromptAt') {
+    const time = Date.parse(session.lastUserPromptAt ?? '');
+    return Number.isFinite(time) ? time : Number.MIN_SAFE_INTEGER;
+  }
   const time = Date.parse(session.updatedAt ?? session.createdAt);
   return Number.isFinite(time) ? time : 0;
 }
 
 function getLiveSessionCursorKey(
   session: BridgeSessionSummary,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): LiveSessionCursorKey {
   return {
-    activityTime: getSummaryActivityTime(session),
+    activityTime: getSummaryActivityTime(session, sortBy),
     sessionId: session.sessionId,
   };
 }
@@ -1033,6 +1051,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       ? parseOrganizedCursor(options.cursor, {
           paginateMerged: readOptions.paginateMerged === true,
           group,
+          sortBy: options.sortBy,
           archiveState,
           sourceType: options.sourceType,
           sourceId: options.sourceId,
@@ -1093,8 +1112,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
           );
         } else if (
           // Preserve legacy first-page-only insertion unless the caller
-          // requests pagination across the complete merged catalog.
-          (isFirstPage || readOptions.paginateMerged) &&
+          // requests pagination across the complete merged catalog. Question
+          // sorting also needs later pages: a live-only row has no question
+          // time yet, so it sorts last and would otherwise be unreachable.
+          (isFirstPage ||
+            readOptions.paginateMerged ||
+            options.sortBy === 'lastUserPromptAt') &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
@@ -1144,10 +1167,24 @@ async function listOrganizedWorkspaceSessionsForResponse(
     return session.color == null && session.groupId === group;
   });
   readOptions.signal?.throwIfAborted();
+  if (options.sortBy === 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      filtered,
+      sessionService,
+      archiveState,
+      readOptions,
+      true,
+    );
+    for (const session of filtered)
+      persistedTimeById.set(
+        session.sessionId,
+        getSummaryActivityTime(session, options.sortBy),
+      );
+  }
   const activityTimeById = new Map(
     filtered.map((session) => [
       session.sessionId,
-      getSummaryActivityTime(session),
+      getSummaryActivityTime(session, options.sortBy),
     ]),
   );
   filtered.sort((a, b) => compareOrganizedSessions(activityTimeById, a, b));
@@ -1204,6 +1241,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       options.sourceId,
       options.conversationKind,
       emitted,
+      options.sortBy,
     );
   }
   return {
@@ -1330,21 +1368,15 @@ async function listWorkspaceSessionsByMetadataForResponse(
     }
   }
 
-  const matches = [...bySessionId.values()]
-    .filter(
-      (session) =>
-        !isHiddenCatalogSource(session.sourceType) &&
-        (filter.parentSessionId === undefined ||
-          session.parentSessionId === filter.parentSessionId) &&
-        matchesSessionMetadataSource(session, filter),
-    )
-    .sort((a, b) =>
-      compareLiveSessionCursorKeys(
-        getLiveSessionCursorKey(a),
-        getLiveSessionCursorKey(b),
-      ),
-    );
+  const matches = [...bySessionId.values()].filter(
+    (session) =>
+      !isHiddenCatalogSource(session.sourceType) &&
+      (filter.parentSessionId === undefined ||
+        session.parentSessionId === filter.parentSessionId) &&
+      matchesSessionMetadataSource(session, filter),
+  );
   readOptions.signal?.throwIfAborted();
+  // Reject a cross-sort cursor before paying for any transcript read.
   const cursor =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
@@ -1353,6 +1385,26 @@ async function listWorkspaceSessionsByMetadataForResponse(
           archiveState,
         })
       : undefined;
+  if (options.sortBy === 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      matches,
+      sessionService,
+      archiveState,
+      readOptions,
+      true,
+    );
+    for (const session of matches)
+      persistedTimeById.set(
+        session.sessionId,
+        getSummaryActivityTime(session, options.sortBy),
+      );
+  }
+  matches.sort((a, b) =>
+    compareLiveSessionCursorKeys(
+      getLiveSessionCursorKey(a, options.sortBy),
+      getLiveSessionCursorKey(b, options.sortBy),
+    ),
+  );
   const cursorKey = cursor?.last;
   const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const afterCursor =
@@ -1365,13 +1417,16 @@ async function listWorkspaceSessionsByMetadataForResponse(
             !emittedBeforePage.has(session.sessionId) &&
             compareLiveSessionCursorKeys(
               cursorKey,
-              getLiveSessionCursorKey(session),
+              getLiveSessionCursorKey(session, options.sortBy),
             ) < 0,
         );
   const page = afterCursor.slice(0, pageSize);
   let nextCursor: string | undefined;
   if (page.length < afterCursor.length) {
-    const boundary = getLiveSessionCursorKey(page[page.length - 1]!);
+    const boundary = getLiveSessionCursorKey(
+      page[page.length - 1]!,
+      options.sortBy,
+    );
     const emitted = nextEmittedSessionIds({
       carried: emittedBeforePage,
       page,
@@ -1400,6 +1455,31 @@ async function listWorkspaceSessionsByMetadataForResponse(
     ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
     ...(persisted.truncated ? { truncated: true } : {}),
   };
+}
+
+function waitForQuestionTime(
+  promise: Promise<string | undefined>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    void promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 export async function listWorkspaceSessionsForResponse(
@@ -1433,7 +1513,48 @@ export async function listWorkspaceSessionsForResponse(
       }),
   );
   readOptions.signal?.throwIfAborted();
+  if (options?.sortBy !== 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      result.sessions,
+      new SessionService(workspaceCwd, { runtimeBaseDir }),
+      options?.archiveState ?? 'active',
+      readOptions,
+    );
+  }
   return result;
+}
+
+async function enrichPromptTimes(
+  sessions: BridgeSessionSummary[],
+  service: SessionService,
+  archiveState: SessionArchiveState,
+  readOptions: Pick<ListWorkspaceSessionsReadOptions, 'signal'>,
+  preferCache = false,
+): Promise<void> {
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(2, sessions.length) }, async () => {
+      while (nextIndex < sessions.length) {
+        readOptions.signal?.throwIfAborted();
+        const session = sessions[nextIndex++]!;
+        try {
+          session.lastUserPromptAt = await waitForQuestionTime(
+            preferCache
+              ? service.getLastUserPromptAt(session.sessionId, archiveState, {
+                  preferCache: true,
+                })
+              : service.getLastUserPromptAt(session.sessionId, archiveState),
+            readOptions.signal,
+          );
+        } catch {
+          // One unreadable transcript must not fail the page; abort still wins.
+          readOptions.signal?.throwIfAborted();
+          session.lastUserPromptAt = undefined;
+        }
+      }
+    }),
+  );
+  readOptions.signal?.throwIfAborted();
 }
 
 async function listWorkspaceSessionsForResponseInRuntime(
@@ -1462,6 +1583,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
 
   if (
     readOptions.paginateMerged ||
+    options?.sortBy === 'lastUserPromptAt' ||
     options?.parentSessionId !== undefined ||
     options?.sourceType !== undefined ||
     options?.conversationKind !== undefined
@@ -1472,6 +1594,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
       options ?? {},
       pageSize,
       {
+        ...(options?.sortBy !== undefined ? { sortBy: options.sortBy } : {}),
         ...(options?.parentSessionId !== undefined
           ? { parentSessionId: options.parentSessionId }
           : {}),

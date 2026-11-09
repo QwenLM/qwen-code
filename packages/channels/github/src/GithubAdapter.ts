@@ -27,6 +27,7 @@ import type {
 } from '@qwen-code/channel-base';
 import {
   boundActionTemplateEntries,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
   BoundSessionGoneError,
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
@@ -59,7 +60,9 @@ interface GithubConfig extends ChannelConfig, RepoFilterConfigFields {
   deliverToBoundSessions?: boolean;
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
+  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
+  prCommentWatch?: unknown;
 }
 
 const GH_AUTH_TIMEOUT_MS = 10_000;
@@ -289,6 +292,20 @@ interface GithubComment {
   created_at?: string | null;
   updated_at?: string | null;
   user?: { login?: string } | null;
+}
+
+/** An inline pull-request review comment (pulls.listReviewComments). */
+interface GithubReviewComment {
+  id: number;
+  node_id?: string;
+  body?: string;
+  created_at?: string | null;
+  user?: { login?: string } | null;
+  path?: string;
+  line?: number | null;
+  original_line?: number | null;
+  side?: string | null;
+  html_url?: string;
 }
 
 interface GithubIssueEvent {
@@ -545,6 +562,19 @@ export const DEFAULT_PR_WATCH_LIMIT = 30;
 export const MAX_PR_WATCH_LIMIT = 500;
 
 /**
+ * Requests held back for the interactive notification lane. When the last
+ * known REST budget is at or below this, the watch pass is skipped for the
+ * poll so a human mention is not starved by background PR polling. ~4% of a
+ * 5,000/hour classic-PAT budget: enough for several polls of mention traffic
+ * while barely trimming a healthy watch. Operators on other scales (GitHub
+ * Enterprise, finer-grained tokens) set prWatchBudgetReserve explicitly.
+ */
+export const DEFAULT_PR_WATCH_BUDGET_RESERVE = 200;
+
+/** Hard ceiling for the configurable watch budget reserve. */
+export const MAX_PR_WATCH_BUDGET_RESERVE = 5000;
+
+/**
  * After a head change, checks register asynchronously (queued or self-hosted
  * runners can take minutes). Within this window an empty CI aggregate
  * ('none') is treated as unsettled and re-checked every poll.
@@ -572,6 +602,25 @@ const CI_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
  * pending still settles within one period of the real transition.
  */
 const CI_PENDING_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Bound PR comment watch re-check period. Comments are fetched when the PR's
+ * updated_at advances OR this interval elapses, so a settled PR still hears
+ * new comments without one listComments + one listReviewComments per poll per
+ * bound PR. Above the 60s poll interval to bound the fan-out at the watch cap.
+ */
+const COMMENT_RECHECK_INTERVAL_MS = 2 * 60 * 1000;
+
+/**
+ * Pass-wide budget on watched comments, shared by every watched PR in a single
+ * watch pass (not a per-PR cap): commentSince survives a restart, so after a
+ * long outage every comment in the gap would otherwise become eligible at once,
+ * each as its own durable task and prompt — a per-PR cap would still claim up to
+ * this many × watched-PR tasks in one poll. A PR that finds the budget spent
+ * keeps its cursor and resumes next pass; a capped PR resumes before its last
+ * processed comment so the tail drains over subsequent passes, never dropped.
+ */
+const MAX_WATCH_COMMENTS_PER_PASS = 20;
 
 /**
  * Backpressure horizon for bound-session delivery: queue-full and
@@ -631,6 +680,14 @@ interface CiObservation {
   aggregate: CiAggregate;
   /** Names of failed checks (capped), for actionable event summaries. */
   failedChecks: string[];
+  /**
+   * The walk stopped on a failing page that still had a next page, so any
+   * failures beyond it went unread. Whether there ARE more is unknown — that
+   * is what skipping the page means — so the summary says "may be incomplete".
+   * It has to say something: ci_failure fires once per head, so this is the
+   * only notice those later failures would ever get.
+   */
+  namesIncomplete: boolean;
 }
 
 const MAX_REPORTED_FAILED_CHECKS = 5;
@@ -641,6 +698,8 @@ interface PrWatchEntry {
   ci?: CiAggregate;
   mergeableState?: string;
   prState?: string;
+  /** Last observed PR title, so comment-watch prompts can render %title%. */
+  title?: string;
   /**
    * Last observed PR updated_at. An advance re-checks a settled head, but
    * it is NOT a reliable re-run signal: GitHub does not bump updated_at on
@@ -685,6 +744,17 @@ interface PrWatchEntry {
    * Reset when the head changes.
    */
   ciFiredSha?: string;
+  /**
+   * Bound PR comment watch cursor. `commentBaseline` is the first-observation
+   * cutoff (no backlog delivery): only comments created strictly after it are
+   * eligible. `commentSince` is the listComments/listReviewComments `since`
+   * watermark advanced to each fetch's start. `commentLastFetchAt` drives the
+   * periodic re-check so a settled PR still hears new comments even when
+   * updated_at does not advance.
+   */
+  commentBaseline?: string;
+  commentSince?: string;
+  commentLastFetchAt?: number;
 }
 
 interface PendingWatchEvent {
@@ -738,11 +808,15 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     stringOrUndef(entry.ci) &&
     stringOrUndef(entry.mergeableState) &&
     stringOrUndef(entry.prState) &&
+    stringOrUndef(entry.title) &&
     stringOrUndef(entry.prUpdatedAt) &&
     numberOrUndef(entry.headObservedAt) &&
     numberOrUndef(entry.lastCiFetchAt) &&
     numberOrUndef(entry.seq) &&
     stringOrUndef(entry.ciFiredSha) &&
+    stringOrUndef(entry.commentBaseline) &&
+    stringOrUndef(entry.commentSince) &&
+    numberOrUndef(entry.commentLastFetchAt) &&
     (entry.pending === undefined ||
       (Array.isArray(entry.pending) && entry.pending.every(isPending))) &&
     (entry.fired === undefined ||
@@ -755,7 +829,9 @@ interface BoundSessionConfigFields {
   deliverToBoundSessions?: unknown;
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
+  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
+  prCommentWatch?: unknown;
 }
 
 /**
@@ -840,6 +916,37 @@ export function validateBoundSessionConfig(
     config.deliverToBoundSessions !== true
   ) {
     return `prWatchLimit for channel ${channelName} requires deliverToBoundSessions: true.`;
+  }
+  if (
+    config.prCommentWatch !== undefined &&
+    typeof config.prCommentWatch !== 'boolean'
+  ) {
+    return `[Channel:${channelName}] prCommentWatch must be a boolean.`;
+  }
+  // No deliverToBoundSessions dependency: prCommentWatch is default-on, so the
+  // editor emits it even for channels without bound delivery. It is inert there
+  // (the watch is gated on deliverToBoundSessions at runtime), not an error.
+  if (
+    config.prWatchBudgetReserve !== undefined &&
+    config.deliverToBoundSessions !== true
+  ) {
+    return `prWatchBudgetReserve for channel ${channelName} requires deliverToBoundSessions: true.`;
+  }
+  // The descriptor's only lower bound is exclusiveMinimum: -1 (so 0 can
+  // disable the gate), which also admits values in (-1, 0). The getter would
+  // silently fall back to the default for a negative, so reject it here
+  // instead of letting a saved value mean something other than it says.
+  // Positive fractions stay legal: the getter rounds them UP, which is the
+  // documented behaviour, not a silent fallback.
+  if (config.prWatchBudgetReserve !== undefined) {
+    const reserve = config.prWatchBudgetReserve;
+    if (
+      typeof reserve !== 'number' ||
+      !Number.isFinite(reserve) ||
+      reserve < 0
+    ) {
+      return `prWatchBudgetReserve for channel ${channelName} must be a non-negative number.`;
+    }
   }
   try {
     normalizePrWatchEvents(config, channelName);
@@ -1010,6 +1117,14 @@ interface InboundTaskRecord {
    */
   privateOnly?: boolean;
   /**
+   * Sessions that authored this same-account comment and must never receive
+   * it (comment-watch authorship exclusion). Persisted so the delivery-time
+   * Gone fallback skips them too: the fallback re-resolves over the followers
+   * and would otherwise hand the comment back to its author when the primary
+   * target is Gone. Absent outside the comment watch.
+   */
+  authorExclude?: string[];
+  /**
    * The bound session this event was routed to and lost, kept after the
    * delivery is cleared so every later row — the re-entered deferrals and the
    * dead-letter at the horizon — can still name it. Attribution only: the
@@ -1156,6 +1271,7 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
       typeof record.backpressure === 'boolean') &&
     (record.privateOnly === undefined ||
       typeof record.privateOnly === 'boolean') &&
+    isOptionalStringArray(record.authorExclude) &&
     (record.lostSessionId === undefined ||
       typeof record.lostSessionId === 'string')
   );
@@ -1190,17 +1306,25 @@ type GithubRequestError = {
   response?: { headers?: Record<string, string | number> };
 };
 
-/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
-function rateLimitRemaining(err: unknown): number | undefined {
-  const value = (err as GithubRequestError).response?.headers?.[
-    'x-ratelimit-remaining'
-  ];
+/**
+ * A rate-limit header value (remaining count or reset epoch) as a
+ * non-negative integer; absent or malformed is undefined. GitHub sends
+ * these as decimal strings; a number is accepted for tests and proxies.
+ */
+function parseRateLimitCount(value: unknown): number | undefined {
   if (typeof value === 'number') {
     return Number.isInteger(value) && value >= 0 ? value : undefined;
   }
   return typeof value === 'string' && /^\d+$/.test(value)
     ? Number(value)
     : undefined;
+}
+
+/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
+function rateLimitRemaining(err: unknown): number | undefined {
+  return parseRateLimitCount(
+    (err as GithubRequestError).response?.headers?.['x-ratelimit-remaining'],
+  );
 }
 
 /**
@@ -1361,6 +1485,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private reasonFilter: Set<string> | null = null;
   private repoFilter: RepoFilter | null = null;
   private deliverToBoundSessions = false;
+  /**
+   * Bound PR comment watch: poll conversation + inline review comments and
+   * deliver each to every bound session that did not post it. Default-on
+   * with deliverToBoundSessions; `prCommentWatch: false` disables it.
+   */
+  private prCommentWatchEnabled = true;
   private prWatchEvents = new Set<PrWatchEventType>();
   /**
    * Operator instruction templates keyed by the closed bound-action
@@ -1455,6 +1585,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     | 'read_error'
     | 'pending'
     | undefined;
+  /**
+   * Last REST budget seen on a SUCCESSFUL response, recorded by the request
+   * hook regardless of the call's return shape. Undefined until the first
+   * response carries the header. Gates the watch pass so background polling
+   * cannot starve the interactive notification lane.
+   */
+  private lastRateLimitRemaining: number | undefined;
+  /**
+   * Reset time (epoch ms) of the window lastRateLimitRemaining belongs to.
+   * Once passed, the reading is stale and must not gate the watch: a low
+   * count from a window that has already reset would otherwise starve the
+   * watch until the next successful response overwrites it.
+   */
+  private lastRateLimitResetAt: number | undefined;
+  /**
+   * Whether the watch pass is currently skipped for low budget. Edge-triggered
+   * journaling (the watchReconcileBlockedCause pattern): a permanent low-budget
+   * condition journalled once on the edge, not every poll, so it cannot rotate
+   * the useful rows out of the timeline. Cleared on the recovery edge.
+   */
+  private watchBudgetLow = false;
+  /**
+   * A `watch_budget_low` row has been journaled and its episode has not been
+   * closed by a recovery row yet. Tracked apart from watchBudgetLow because
+   * the two answer different questions: the skip latch is released when the
+   * watch stops being eligible (so a later starvation journals a fresh skip),
+   * but the episode stays open until the BUDGET recovers — otherwise a budget
+   * that recovers during an ineligible window would never get its recovery
+   * row. In-memory by design: a restart mid-episode leaves no recovery row,
+   * which the user guide states.
+   */
+  private watchBudgetEpisodeOpen = false;
   /**
    * Consecutive binding-refresh failures since the last success. While no
    * snapshot has ever succeeded, the cold-start gate defers the comment lane,
@@ -1662,6 +1824,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.prWatchEvents = normalizePrWatchEvents(cfg, this.name);
     this.boundSessionActions = normalizeBoundSessionActions(cfg, this.name);
     this.deliverToBoundSessions = cfg.deliverToBoundSessions === true;
+    this.prCommentWatchEnabled = cfg.prCommentWatch !== false;
     if (this.deliverToBoundSessions) {
       this.loadBoundDeliveredRing();
     }
@@ -1699,6 +1862,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(this.proxy
         ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
         : {}),
+    });
+    // One choke point for the success-path budget: the wrap sees the response
+    // headers on every request, including each page of a paginate call,
+    // independent of what fn() returns (array vs {data,headers}). It records
+    // the last known remaining budget so the watch gate can protect the
+    // notification lane before a request is ever rejected.
+    this.octokit.hook.wrap('request', async (request, options) => {
+      const response = await request(options);
+      this.recordRateLimitBudget(response.headers);
+      return response;
     });
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
@@ -2506,14 +2679,46 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     // The watch pass runs before generic recovery so detection cannot race
     // recovery over the same task; pending events were already reconciled.
-    if (this.prWatchEvents.size > 0 && !this.boundRefreshFailed) {
-      try {
-        await this.runPrStateWatch();
-      } catch (err) {
-        process.stderr.write(
-          `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-        );
+    // The comment watch is independent of the state-event subscription, so an
+    // empty prWatchEvents still runs the pass while comment watching is on.
+    const commentWatchActive =
+      this.deliverToBoundSessions && this.prCommentWatchEnabled;
+    if (
+      (this.prWatchEvents.size > 0 || commentWatchActive) &&
+      !this.boundRefreshFailed
+    ) {
+      // Protect the interactive notification lane: the watch runs first and
+      // is best-effort edge-triggered detection, so when the last known REST
+      // budget is at or below the reserve, skip the pass this poll rather
+      // than spend the budget a human mention needs. Skipping delays
+      // detection of a state that persists (baselines and pending queues are
+      // durable); a transition that appears and reverts between passes is
+      // not observed. The reactive isWatchFailFastError backstop still
+      // covers a wrong estimate. The gate covers the comment fetches too:
+      // they run inside the same pass and spend the same budget.
+      if (this.watchBudgetExhausted()) {
+        this.noteWatchBudgetLow();
+      } else {
+        this.watchBudgetLow = false;
+        this.closeWatchBudgetEpisode();
+        try {
+          await this.runPrStateWatch();
+        } catch (err) {
+          process.stderr.write(
+            `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+          );
+        }
+        // The pass itself may have spent down to the reserve and yielded
+        // mid-way; close nothing here, the next poll's gate sees the reading.
       }
+    } else {
+      // The watch stopped being eligible (subscriptions off, binding refresh
+      // failing). Release the skip latch so a later starvation journals a
+      // fresh skip rather than being suppressed as a repeat, but keep the
+      // EPISODE open until the budget itself recovers — a budget that
+      // recovers during this window still owes its recovery row.
+      this.watchBudgetLow = false;
+      this.closeWatchBudgetEpisode();
     }
 
     if (this.inboundRecoveryPending) {
@@ -3659,6 +3864,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
     dedupe: InboundTaskDedupe = {},
     privateOnly = false,
+    excludeSessionIds?: ReadonlySet<string>,
   ): Promise<boolean> {
     // The publication audit is the durable consumption record for the
     // public path: a reply can land (audit `posted`), the task be removed,
@@ -3700,12 +3906,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // template also catches a comment delivered under another reason.
     const laneClass =
       dedupe.dispatchedComments !== undefined ? 'comment' : undefined;
-    const { targets, followed } = this.resolveBoundTargets(
+    const resolved = this.resolveBoundTargets(
       envelope.chatId,
       issueNumber,
       eventClass,
       laneClass,
     );
+    // The bound PR comment watch withholds a comment from the session that
+    // posted it (authorship attribution), keeping every other bound target.
+    const targets =
+      excludeSessionIds && excludeSessionIds.size > 0
+        ? resolved.targets.filter(
+            (target) => !excludeSessionIds.has(target.sessionId),
+          )
+        : resolved.targets;
+    const followed = resolved.followed;
     if (targets.length > 0) {
       // Fan-out: one durable task per (event, target). Each settles
       // independently — a queue-full role defers without head-of-line
@@ -3736,6 +3951,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             },
             first && targets.length > 1 ? targets : undefined,
             privateOnly,
+            excludeSessionIds,
           ),
         );
         first = false;
@@ -3810,6 +4026,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     delivery?: InboundTaskRecord['delivery'],
     fanout?: InboundTaskRecord['fanout'],
     privateOnly = false,
+    authorExclude?: ReadonlySet<string>,
   ): InboundTaskRecord {
     const existing = this.readInboundTasks().find(
       (record) =>
@@ -3863,6 +4080,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(delivery ? { delivery } : {}),
       ...(fanout ? { fanout } : {}),
       ...(privateOnly ? { privateOnly: true } : {}),
+      ...(authorExclude && authorExclude.size > 0
+        ? { authorExclude: [...authorExclude] }
+        : {}),
     };
     this.updateInboundTasks((records) => [...records, task]);
     this.applyTaskDedupe(task.dedupe);
@@ -4138,7 +4358,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         let posted = task.errorCommentPosted === true;
         // Bound-session delivery is private: a failure must not post a public
         // error comment. The fallback path clears delivery before retrying.
-        if (!posted && !stillBound && task.privateOnly !== true) {
+        // A failed public attempt is run again on a later poll until the
+        // budget is spent (see isRecoverableInboundTask), so the comment,
+        // which asks the user to mention the bot again, waits for the last.
+        if (
+          !posted &&
+          !stillBound &&
+          task.privateOnly !== true &&
+          attempts >= MAX_INBOUND_TASK_ATTEMPTS
+        ) {
           posted = await this.postErrorComment(
             envelope.chatId,
             task.issueNumber,
@@ -4318,6 +4546,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           },
           undefined,
           task.privateOnly === true,
+          // The reconstructed sibling must inherit the authorship exclusion:
+          // it is the same event, so the same sessions authored it. Without
+          // this the reselection filter receives an empty set and can route
+          // the comment to its author once that session becomes the newest.
+          task.authorExclude ? new Set(task.authorExclude) : undefined,
         );
       }
     }
@@ -4963,6 +5196,79 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Record the REST budget from a successful response's headers. Called by
+   * the request hook on every response. A missing or malformed remaining
+   * header leaves the last known value untouched (a proxy that strips the
+   * header must not erase a real reading). The reset time is refreshed from
+   * the same response; if that header is absent the reset is cleared, so the
+   * gate falls back to protecting on the count alone rather than trusting a
+   * reset time from a different window.
+   */
+  private recordRateLimitBudget(
+    headers: Record<string, unknown> | undefined,
+  ): void {
+    const remaining = parseRateLimitCount(headers?.['x-ratelimit-remaining']);
+    if (remaining === undefined) return;
+    this.lastRateLimitRemaining = remaining;
+    const reset = parseRateLimitCount(headers?.['x-ratelimit-reset']);
+    this.lastRateLimitResetAt = reset === undefined ? undefined : reset * 1000;
+  }
+
+  /**
+   * Whether the watch pass must yield this poll to protect the notification
+   * lane. True only when a usable remaining reading is at or below the
+   * reserve AND its window has not already reset (a stale low count from a
+   * rolled-over window must not starve the watch). With no reading yet the
+   * watch runs normally; the reactive isWatchFailFastError backstop still
+   * covers a wrong estimate or a secondary limit.
+   */
+  private watchBudgetExhausted(): boolean {
+    const reserve = this.prWatchBudgetReserve;
+    // A reserve of 0 disables the gate outright. Without this, a remaining
+    // of 0 would still satisfy `0 <= 0` and skip the watch the operator
+    // explicitly opted out of protecting.
+    if (reserve === 0) return false;
+    if (this.lastRateLimitRemaining === undefined) return false;
+    if (
+      this.lastRateLimitResetAt !== undefined &&
+      Date.now() >= this.lastRateLimitResetAt
+    ) {
+      return false;
+    }
+    return this.lastRateLimitRemaining <= reserve;
+  }
+
+  /**
+   * Open a low-budget episode: latch the skip and journal its edge once.
+   * Shared by the poll-boundary gate and the in-pass yield so a mid-pass stop
+   * records the same row rather than a second vocabulary.
+   */
+  private noteWatchBudgetLow(): void {
+    this.watchBudgetEpisodeOpen = true;
+    if (this.watchBudgetLow) return;
+    this.watchBudgetLow = true;
+    this.recordPollDegraded('watch_budget_low', {
+      remaining: this.lastRateLimitRemaining ?? 0,
+      reserve: this.prWatchBudgetReserve,
+    });
+    process.stderr.write(
+      `[Channel:${this.name}] PR state watch skipped: REST budget ${this.lastRateLimitRemaining} at or below reserve ${this.prWatchBudgetReserve}; preserving budget for the notification lane\n`,
+    );
+  }
+
+  /**
+   * Close the episode once the budget is no longer exhausted. A still-low
+   * budget keeps it open: the watch being ineligible says nothing about the
+   * budget, and claiming recovery there would be a false report.
+   */
+  private closeWatchBudgetEpisode(): void {
+    if (!this.watchBudgetEpisodeOpen) return;
+    if (this.watchBudgetExhausted()) return;
+    this.watchBudgetEpisodeOpen = false;
+    this.recordPollDegraded('watch_budget_recovered');
+  }
+
+  /**
    * Journals a degraded dependency the poll loop itself survived: the poll
    * still reports `ok`, so without this row a binding scan that stalls every
    * notification is invisible in the timeline. Emitted only where the
@@ -5008,7 +5314,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const parsed = JSON.parse(readFileSync(this.inboundTasksPath(), 'utf-8'));
       if (!Array.isArray(parsed) || !parsed.every(isInboundTaskRecord)) {
-        throw new Error('invalid GitHub inbound task state');
+        // Name the offender: one bad record blocks every healthy task in the
+        // file, so an operator repairing it by hand needs the index and id
+        // rather than bisecting the JSON by eye.
+        const badIndex = Array.isArray(parsed)
+          ? parsed.findIndex((item) => !isInboundTaskRecord(item))
+          : -1;
+        const badId =
+          badIndex === -1
+            ? undefined
+            : (parsed[badIndex] as { id?: unknown } | undefined)?.id;
+        throw new Error(
+          `invalid GitHub inbound task state${
+            badIndex === -1 ? '' : ` at record ${badIndex}`
+          }${typeof badId === 'string' ? ` (${badId})` : ''}`,
+        );
       }
       this.inboundTaskSnapshot = parsed;
       return parsed;
@@ -5980,12 +6300,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
     eventClass: string | undefined,
     laneClass?: string,
+    excludeSessionIds?: ReadonlySet<string>,
   ): InboundTaskRecord['delivery'] {
     if (!this.boundRoleAware) {
-      return this.resolveBoundDelivery(chatId, issueNumber);
+      const legacy = this.resolveBoundDelivery(chatId, issueNumber);
+      if (legacy && excludeSessionIds?.has(legacy.sessionId)) return undefined;
+      return legacy;
     }
     const winner = this.boundFollowersOf(chatId, issueNumber)
       .filter((follower) => follower.role === delivery.role)
+      .filter((follower) => !excludeSessionIds?.has(follower.summary.sessionId))
       .reduce<{ summary: PrBindingSummary; role?: PrBindingRole } | undefined>(
         (best, follower) =>
           !best ||
@@ -6211,6 +6535,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         task.issueNumber,
         this.boundEventClass(envelope),
         this.boundLaneClass(task.dedupe),
+        task.authorExclude ? new Set(task.authorExclude) : undefined,
       );
       // The ROLE is part of the target, not just the session: a deferred
       // legacy delivery whose binding was re-roled in the meantime must not
@@ -6257,6 +6582,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         waiveGroupMention:
           !envelope.messageId?.startsWith('issue-body-') &&
           this.waivesBoundMention(envelope.chatId, envelope.senderId),
+        // The comment watch delivers the channel account's own comments (the
+        // notification lanes filter that login out, so this can only be the
+        // watch). The sender allowlist guidance excludes that account, which
+        // would otherwise retire every watched comment as preflight_rejected.
+        waiveGroupSender:
+          this.botUsername != null &&
+          envelope.senderId === this.botUsername.toLowerCase(),
       });
       const admitted =
         typeof preflight === 'boolean' ? preflight : await preflight;
@@ -6318,6 +6650,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // loop by the finite follower count even if a stale snapshot keeps
       // re-listing dead sessions.
       const goneSessions = new Set<string>([delivery.sessionId]);
+      // The comment watch withholds the comment from its author; the fallback
+      // re-resolves over the followers and must honor that exclusion too, or a
+      // Gone primary target would hand the comment back to its author. When no
+      // non-author follower remains the loop retires privately below.
+      for (const sessionId of task.authorExclude ?? []) {
+        goneSessions.add(sessionId);
+      }
       // The local `delivery` is the FIRST follower; the loop walks past it.
       // The terminal row must name the last one tried, or the operator opens
       // the workspace of a session evicted a step earlier.
@@ -6647,12 +6986,42 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Requests reserved for the notification lane: at or below this remaining
+   * budget the watch pass yields. Clamped like prWatchLimit; a configured 0
+   * is honoured (disables the gate) so an operator can opt out, while unset
+   * or invalid keeps the default. Rounds up so the reserve is never silently
+   * smaller than requested.
+   */
+  private get prWatchBudgetReserve(): number {
+    const configured: unknown = (this.config as GithubConfig)
+      .prWatchBudgetReserve;
+    if (
+      typeof configured === 'number' &&
+      Number.isFinite(configured) &&
+      configured >= 0
+    ) {
+      return Math.min(Math.ceil(configured), MAX_PR_WATCH_BUDGET_RESERVE);
+    }
+    return DEFAULT_PR_WATCH_BUDGET_RESERVE;
+  }
+
+  /**
    * Edge-triggered state watch over the PRs bound to live sessions. Runs
    * inside the existing poll loop; detection is API-level and costs no model
    * tokens until a real transition fires.
    */
   private async runPrStateWatch(): Promise<void> {
-    if (!this.boundSessions || this.prWatchEvents.size === 0) return;
+    // The comment watch is default-on with deliverToBoundSessions and is
+    // independent of the state-event subscription, so an empty prWatchEvents
+    // must not skip the pass while comment watching is enabled.
+    const commentWatchActive =
+      this.deliverToBoundSessions && this.prCommentWatchEnabled;
+    if (
+      !this.boundSessions ||
+      (this.prWatchEvents.size === 0 && !commentWatchActive)
+    ) {
+      return;
+    }
     this.loadPrWatchState();
     const candidates = new Map<
       string,
@@ -6685,10 +7054,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // the PR: pruning it here would re-add the closed PR as a first
         // observation on the next poll (query oscillation) and lose the
         // terminal record. Binding retention and active polling are
-        // separate concerns.
+        // separate concerns. A comment-only channel subscribes no state
+        // event, so there is no state_change to observe and watchOnePr (the
+        // only prState writer) never runs: drain on the binding's terminal
+        // state alone, else merged/closed bindings would be comment-fetched
+        // forever. A reopened binding flips back to open and resumes.
         if (
           (pr.state === 'merged' || pr.state === 'closed') &&
-          this.prWatchState.entries[key]?.prState === 'closed'
+          (this.prWatchState.entries[key]?.prState === 'closed' ||
+            this.prWatchEvents.size === 0)
         ) {
           continue;
         }
@@ -6818,9 +7192,36 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] PR watch cap exceeded: watching ${watched.length}/${active.size} bound PRs (open first, most recent; open limit ${limit}); not watched: ${excluded.join(', ')}\n`,
       );
     }
+    // One burst budget for the whole pass: after an outage every watched PR
+    // can be due at once, and a per-PR cap would claim up to cap × watched-PR
+    // durable tasks in a single poll. PRs that find it spent keep their cursor
+    // and resume next pass.
+    const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
     for (const [key, candidate] of watched) {
+      // Yield at the spend site, not only at the poll boundary: one pass can
+      // issue several requests per watched PR, so a pass entered just above
+      // the reserve would otherwise spend the whole reserve before the
+      // notification lane runs. Break (not return) so the baseline observed
+      // so far still reaches savePrWatchState below.
+      if (this.watchBudgetExhausted()) {
+        this.noteWatchBudgetLow();
+        break;
+      }
       try {
-        await this.watchOnePr(key, candidate.chatId, candidate.number);
+        // The state observation costs a pulls.get per watched PR per poll; skip
+        // it when no state event is subscribed so a comment-only channel does
+        // not pay for transitions it never emits.
+        if (this.prWatchEvents.size > 0) {
+          await this.watchOnePr(key, candidate.chatId, candidate.number);
+        }
+        // Additive comment watch: isolates its own failures so a comment
+        // fetch problem never skips the state transitions above.
+        await this.watchPrComments(
+          key,
+          candidate.chatId,
+          candidate.number,
+          commentBudget,
+        );
       } catch (err) {
         if (isWatchPassAbortError(err)) {
           // Shared credential/rate-limit failure: abort the rest of the
@@ -6943,7 +7344,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       const failedChecks =
         ciResult && ciResult.failedChecks.length > 0
-          ? ` Failed checks: ${ciResult.failedChecks.join(', ')}.`
+          ? ` Failed checks: ${ciResult.failedChecks.join(', ')}${
+              ciResult.namesIncomplete
+                ? ' (list may be incomplete: later check pages were not read)'
+                : ''
+            }.`
           : '';
       events.push({
         type: 'ci_failure',
@@ -6999,6 +7404,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? { mergeableState: entry.mergeableState }
           : {}),
       ...(prState !== undefined ? { prState } : {}),
+      ...(pr.title !== undefined
+        ? { title: pr.title }
+        : entry.title !== undefined
+          ? { title: entry.title }
+          : {}),
       ...(prUpdatedAt !== undefined ? { prUpdatedAt } : {}),
       ...(firstObservation || headChanged
         ? { headObservedAt: Date.now() }
@@ -7015,6 +7425,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(entry.fired !== undefined ? { fired: entry.fired } : {}),
       ...(!headChanged && entry.ciFiredSha !== undefined
         ? { ciFiredSha: entry.ciFiredSha }
+        : {}),
+      // The comment watch cursor is independent of head/CI transitions; carry
+      // it through so the state baseline write does not drop it.
+      ...(entry.commentBaseline !== undefined
+        ? { commentBaseline: entry.commentBaseline }
+        : {}),
+      ...(entry.commentSince !== undefined
+        ? { commentSince: entry.commentSince }
+        : {}),
+      ...(entry.commentLastFetchAt !== undefined
+        ? { commentLastFetchAt: entry.commentLastFetchAt }
         : {}),
     };
 
@@ -7164,6 +7585,381 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.recordWatchOverflowSkip(retired);
     }
     await this.drainPendingWatch(key, next);
+  }
+
+  /**
+   * Bound PR comment watch (docs/design/2026-11-08-bound-pr-comment-watch.md).
+   * Poll conversation + inline review comments on a bound PR and deliver each
+   * new one to every bound session that did NOT post it. Unlike the
+   * notification lanes this does not filter the channel's own account: a
+   * comment by the same GitHub login used by a DIFFERENT session/agent must
+   * reach the follower. Authorship attribution (the daemon's posted-comment
+   * lookup) withholds a comment only from the session that wrote it, which is
+   * what prevents a fix session's own reply from re-triggering it.
+   *
+   * Default-on with deliverToBoundSessions; `prCommentWatch: false` disables
+   * it. Failures are isolated here so they never skip the state transitions.
+   */
+  private async watchPrComments(
+    key: string,
+    chatId: string,
+    number: number,
+    budget: { remaining: number },
+  ): Promise<void> {
+    if (
+      !this.deliverToBoundSessions ||
+      !this.prCommentWatchEnabled ||
+      !this.boundSessions
+    ) {
+      return;
+    }
+    const entry = this.prWatchState.entries[key] ?? {};
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    // First observation baselines silently (no backlog delivery), matching
+    // the state-watch convention; only comments created after it are eligible.
+    if (entry.commentBaseline === undefined) {
+      this.prWatchState.entries[key] = {
+        ...entry,
+        commentBaseline: nowIso,
+        commentSince: nowIso,
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      return;
+    }
+    if (
+      entry.commentLastFetchAt !== undefined &&
+      now - entry.commentLastFetchAt < COMMENT_RECHECK_INTERVAL_MS
+    ) {
+      return;
+    }
+    // The burst budget is shared by every watched PR in this pass. A PR that
+    // arrives after it is spent fetches nothing and keeps its cursor untouched,
+    // so its tail resumes on the next pass instead of being skipped past.
+    if (budget.remaining <= 0) {
+      return;
+    }
+    const [owner, repo] = chatId.split('/');
+    const since = entry.commentSince ?? entry.commentBaseline;
+    let conversation: GithubComment[] = [];
+    let review: GithubReviewComment[] = [];
+    try {
+      // Same fail-fast rule as the state watch: a rate-limited or credential
+      // answer must not sleep-retry inside the watch pass (it runs before task
+      // recovery and notification intake), and a shared error aborts the pass.
+      conversation = (await this.githubApi(
+        () =>
+          this.octokit.paginate(this.octokit.rest.issues.listComments, {
+            owner,
+            repo,
+            issue_number: number,
+            since,
+            per_page: 100,
+          }),
+        `listComments(comment watch ${key})`,
+        3,
+        (err) => !isWatchFailFastError(err),
+      )) as GithubComment[];
+      review = (await this.githubApi(
+        () =>
+          this.octokit.paginate(this.octokit.rest.pulls.listReviewComments, {
+            owner,
+            repo,
+            pull_number: number,
+            since,
+            per_page: 100,
+          }),
+        `listReviewComments(comment watch ${key})`,
+        3,
+        (err) => !isWatchFailFastError(err),
+      )) as GithubReviewComment[];
+    } catch (err) {
+      // A shared credential/rate-limit error condemns the whole pass: hand it
+      // to the outer watch loop's abort logic instead of swallowing it here.
+      if (isWatchPassAbortError(err)) throw err;
+      // Per-PR failure: advance the fetch clock so a persistent endpoint
+      // problem retries on the interval, not every poll, but keep commentSince
+      // so no comment is skipped past without a delivery attempt.
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      process.stderr.write(
+        `[Channel:${this.name}] comment watch fetch failed for ${key}, continuing without comments this pass: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+      );
+      return;
+    }
+
+    // Record created_at per fetched comment exactly as the notification lanes'
+    // fetch does, so the watch's dispatchedComments keys carry a time and stay
+    // evictable once older than the cursor. Without a time a key is treated as
+    // protected and the ring would grow monotonically for the daemon's life.
+    const commentTimes = (this.cursor.dispatchedCommentTimes ??= {});
+    for (const comment of [...conversation, ...review]) {
+      if (comment.created_at) {
+        commentTimes[comment.node_id || String(comment.id)] =
+          comment.created_at;
+      }
+    }
+
+    const { targets } = this.resolveBoundTargets(
+      chatId,
+      number,
+      'comment',
+      'comment',
+    );
+    // A partial/untrusted snapshot may omit bound sessions, so the target list
+    // is not a complete enumeration: retiring a comment as "no target" (or
+    // delivering to the visible subset and advancing past it) would skip it
+    // past a session in the unscanned workspace, and no other lane can deliver
+    // a same-account comment. Defer rather than consume (fail-closed, as the
+    // state watch): keep commentSince, advance only the fetch clock, and let a
+    // trustworthy pass re-evaluate.
+    if (
+      !this.boundSnapshotTrusted ||
+      this.lastBindingsPartial ||
+      this.boundRefreshFailed
+    ) {
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      return;
+    }
+    const baseline = entry.commentBaseline;
+    const alreadyDispatched = (commentKey: string): boolean =>
+      this.cursor.dispatchedComments?.includes(commentKey) === true;
+    const candidates: Array<{
+      key: string;
+      attrKey: string;
+      createdAt: string;
+      envelope: Envelope;
+    }> = [];
+    const threadId = `pr:${number}`;
+    const metadata = `${this.buildMetadata(chatId, threadId, entry.title ?? '')}\nTrigger: comment.`;
+    const renderBody = (body: string | undefined): string => {
+      const display = sanitizeDisplayText((body ?? '').trim());
+      const total = Array.from(display).length;
+      // A watch delivery carries ONE comment, so it uses the bound prompt's
+      // body ceiling, not the aggregate lane's per-comment batch budget (400):
+      // cutting a single finding at 400 code points drops the actionable steps
+      // past the cut. The bound prompt caps the final body at the same value.
+      return total > BOUND_PROMPT_BODY_MAX_CODE_POINTS
+        ? `${truncateCodePoints(display, BOUND_PROMPT_BODY_MAX_CODE_POINTS)}… [comment truncated: ${total - BOUND_PROMPT_BODY_MAX_CODE_POINTS} more characters]`
+        : display;
+    };
+    // The watch closes the SAME-account gap: GitHub sends the channel account no
+    // notification for its own comments, so the notification lanes never see
+    // them. Comments by any OTHER account do produce notifications and are
+    // delivered by the notification lanes under the thread's own reason and
+    // role templates. Watching them here too would pre-empt those lanes: the
+    // watch resolves the narrower `comment` class, and consuming the shared
+    // dedupe key after reaching only a subset of roles would starve the rest
+    // (e.g. fix:comment delivered, verify:mention lost). Leave other-account
+    // comments to the lanes.
+    const botLogin = this.botUsername?.toLowerCase();
+    const sameAccount = (login: string | undefined): boolean =>
+      botLogin !== undefined && login?.toLowerCase() === botLogin;
+    for (const comment of conversation) {
+      const commentKey = comment.node_id || String(comment.id);
+      if (
+        !sameAccount(comment.user?.login) ||
+        !comment.created_at ||
+        comment.created_at <= baseline ||
+        alreadyDispatched(commentKey)
+      ) {
+        continue;
+      }
+      const author = comment.user?.login || 'unknown';
+      const url = `${this.webOrigin}/${chatId}/pull/${number}#issuecomment-${comment.id}`;
+      candidates.push({
+        key: commentKey,
+        attrKey: `ic:${comment.id}`,
+        createdAt: comment.created_at,
+        envelope: {
+          channelName: this.name,
+          senderId: author.toLowerCase(),
+          senderName: author,
+          chatId,
+          threadId,
+          messageId: commentKey,
+          text: `New comment by @${author}:\n${renderBody(comment.body)}\nComment: ${url}`,
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        },
+      });
+    }
+    for (const comment of review) {
+      const commentKey = comment.node_id || String(comment.id);
+      if (
+        !sameAccount(comment.user?.login) ||
+        !comment.created_at ||
+        comment.created_at <= baseline ||
+        alreadyDispatched(commentKey)
+      ) {
+        continue;
+      }
+      const author = comment.user?.login || 'unknown';
+      const url =
+        comment.html_url ||
+        `${this.webOrigin}/${chatId}/pull/${number}#discussion_r${comment.id}`;
+      const line = comment.line ?? comment.original_line;
+      const location = `File: ${comment.path ?? '?'}${line != null ? ` (line ${line}${comment.side ? `, ${comment.side}` : ''})` : ''}`;
+      candidates.push({
+        key: commentKey,
+        attrKey: `rc:${comment.id}`,
+        createdAt: comment.created_at,
+        envelope: {
+          channelName: this.name,
+          senderId: author.toLowerCase(),
+          senderName: author,
+          chatId,
+          threadId,
+          messageId: commentKey,
+          text: `New inline review comment by @${author}:\n${location}\n${renderBody(comment.body)}\nComment: ${url}`,
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        },
+      });
+    }
+    candidates.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    const commitCursor = (newSince: string): void => {
+      // GitHub compares `since` at whole-second granularity while nowIso carries
+      // milliseconds: a comment created later in the same second as the fetch
+      // snapshot would be excluded from every later fetch. Floor the cursor to
+      // the second so that whole second is re-listed next pass (anything already
+      // delivered is deduped), never skipped past.
+      const floored = new Date(
+        Math.floor(Date.parse(newSince) / 1000) * 1000,
+      ).toISOString();
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentSince: floored,
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+    };
+
+    // No new comments: advance the cursor without any attribution round-trip.
+    if (candidates.length === 0) {
+      commitCursor(nowIso);
+      return;
+    }
+
+    // Look up posted comments only now that there is something to deliver, so a
+    // quiet pass costs no serve round-trips. A comment is withheld only from the
+    // session that wrote it. Query EVERY bound follower, not just the resolved
+    // targets: the delivery-time Gone fallback re-resolves over the followers,
+    // so the exclusion must also cover a same-role author that is not the
+    // primary target, or the fallback would hand the comment back to it.
+    const followerIds = new Set<string>(
+      targets.map((target) => target.sessionId),
+    );
+    for (const follower of this.boundFollowersOf(chatId, number)) {
+      followerIds.add(follower.summary.sessionId);
+    }
+    const postedBySession = new Map<string, ReadonlySet<string>>();
+    for (const sessionId of followerIds) {
+      const lookup = this.boundSessions.postedCommentIds;
+      const ids = lookup
+        ? await lookup
+            .call(this.boundSessions, sessionId)
+            .catch(() => new Set<string>())
+        : new Set<string>();
+      postedBySession.set(sessionId, ids);
+    }
+    const excludeFor = (
+      candidate: (typeof candidates)[number],
+    ): Set<string> => {
+      const exclude = new Set<string>();
+      for (const sessionId of followerIds) {
+        if (postedBySession.get(sessionId)?.has(candidate.attrKey)) {
+          exclude.add(sessionId);
+        }
+      }
+      return exclude;
+    };
+
+    // Exclude author-owned comments BEFORE the batch cap. They record no dedupe
+    // key, so if they occupied batch slots a run of same-second self-authored
+    // comments would re-fill every batch and the capped cursor would never reach
+    // the tail. Filtering them out keeps the cap and the cursor progressing over
+    // deliverable comments; the excluded ones are simply advanced past.
+    const deliverable: typeof candidates = [];
+    for (const candidate of candidates) {
+      const exclude = excludeFor(candidate);
+      if (targets.some((target) => !exclude.has(target.sessionId))) {
+        deliverable.push(candidate);
+        continue;
+      }
+      // Every bound target authored this same-account comment itself, so no
+      // session is left to receive it. The notification lanes cannot see it
+      // either (same account => no notification), so this skip row is the
+      // comment's only journal trace — record it instead of consuming silently.
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'comment_watch_no_target',
+        repository: chatId,
+        thread: threadId,
+        number,
+        messageId: candidate.key,
+      });
+    }
+    if (deliverable.length === 0) {
+      commitCursor(nowIso);
+      return;
+    }
+
+    // Cap the burst against the pass-wide budget shared by all watched PRs;
+    // the cursor resumes before the last processed comment when capped so the
+    // tail drains over subsequent passes.
+    const batch = deliverable.slice(
+      0,
+      Math.min(MAX_WATCH_COMMENTS_PER_PASS, budget.remaining),
+    );
+    budget.remaining -= batch.length;
+    const capped = deliverable.length > batch.length;
+
+    let allSettled = true;
+    for (const candidate of batch) {
+      // Private-only: never answered in public. The stable comment id dedupes
+      // across polls. Only same-account comments reach this loop (see the
+      // candidate filter), and those generate no GitHub notification, so
+      // recording the shared key cannot pre-empt a notification lane.
+      const settled = await this.dispatchEnvelope(
+        candidate.envelope,
+        number,
+        { dispatchedComments: [candidate.key] },
+        true,
+        excludeFor(candidate),
+      );
+      if (!settled) allSettled = false;
+    }
+
+    if (!allSettled) {
+      // A dispatch returned false without a durable claim (e.g. the publication
+      // audit is unreadable, which freezes the notification cursor but not this
+      // independent one). Keep commentSince so the next pass re-fetches and
+      // retries; dispatchedComments dedupes anything already claimed. Advancing
+      // here would skip the comment past with no task and no re-delivery chance.
+      commitCursor(since);
+    } else if (capped) {
+      // Resume just before the last processed comment so the unprocessed tail is
+      // re-fetched next pass (a second of overlap is deduped, never lost).
+      const last = batch[batch.length - 1]!;
+      commitCursor(new Date(Date.parse(last.createdAt) - 1000).toISOString());
+    } else {
+      commitCursor(nowIso);
+    }
   }
 
   /**
@@ -7488,76 +8284,119 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     repo: string,
     sha: string,
   ): Promise<CiObservation> {
-    const checkRuns = (await this.githubApi(
-      () =>
-        this.octokit.paginate(this.octokit.rest.checks.listForRef, {
-          owner,
-          repo,
-          ref: sha,
-          per_page: 100,
-        }),
+    // The observation is accumulated per ATTEMPT, inside the retried
+    // closure: githubApi retries the whole pagination, and state carried
+    // over from an attempt that died on a later page would let its partial
+    // pending/success readings decide the retry's aggregate.
+    const checks = await this.githubApi(
+      async () => {
+        let sawFailure = false;
+        let sawPending = false;
+        let sawSuccess = false;
+        let namesIncomplete = false;
+        const failedChecks: string[] = [];
+        await this.octokit.paginate(
+          this.octokit.rest.checks.listForRef,
+          {
+            owner,
+            repo,
+            ref: sha,
+            per_page: 100,
+          },
+          (response, done) => {
+            // Octokit's conclusion union omits 'startup_failure', which the
+            // API does return and this aggregate must count as a failure.
+            const runs = response.data as Array<{
+              name?: string | null;
+              status?: string | null;
+              conclusion?: string | null;
+            }>;
+            for (const run of runs) {
+              if (run.status !== 'completed') {
+                sawPending = true;
+                continue;
+              }
+              if (
+                run.conclusion === 'failure' ||
+                run.conclusion === 'timed_out' ||
+                run.conclusion === 'action_required' ||
+                // A workflow that fails at startup (e.g. a broken workflow
+                // file) never runs a single job; missing it would certify a
+                // broken CI as 'none' or even 'success'. A deliberate SUBSET
+                // of core's FAILING_CHECK_RUN_CONCLUSIONS: core also counts
+                // cancelled/stale, which the design excludes as
+                // concurrency-cancel noise (a superseded run's cancellation
+                // is not a CI failure of this head).
+                run.conclusion === 'startup_failure'
+              ) {
+                sawFailure = true;
+                if (
+                  typeof run.name === 'string' &&
+                  run.name.length > 0 &&
+                  failedChecks.length < MAX_REPORTED_FAILED_CHECKS
+                ) {
+                  failedChecks.push(run.name);
+                }
+              } else if (run.conclusion === 'success') {
+                sawSuccess = true;
+              }
+            }
+            // A failure decides the aggregate: no later page can overturn
+            // it, so stop paging instead of spending one request per page
+            // of a head that carries hundreds of check runs. Whole pages are
+            // still read, so a head whose failures all fit in the pages read
+            // reports the same names as before.
+            if (sawFailure) {
+              // Only unread pages make the list partial: stopping on the
+              // LAST page read everything. The iterator follows this same
+              // header, so its presence is exactly "a page went unread".
+              namesIncomplete = /<[^<>]+>;\s*rel="next"/.test(
+                response.headers?.link ?? '',
+              );
+              done();
+            }
+            return [];
+          },
+        );
+        return {
+          sawFailure,
+          sawPending,
+          sawSuccess,
+          failedChecks,
+          namesIncomplete,
+        };
+      },
       `checks.listForRef(${sha})`,
       3,
       (err) => !isWatchFailFastError(err),
-    )) as Array<{
-      name?: string | null;
-      status?: string | null;
-      conclusion?: string | null;
-    }>;
-    let sawFailure = false;
-    let sawPending = false;
-    let sawSuccess = false;
-    const failedChecks: string[] = [];
-    for (const run of checkRuns) {
-      if (run.status !== 'completed') {
-        sawPending = true;
-        continue;
-      }
-      if (
-        run.conclusion === 'failure' ||
-        run.conclusion === 'timed_out' ||
-        run.conclusion === 'action_required' ||
-        // A workflow that fails at startup (e.g. a broken workflow file)
-        // never runs a single job; missing it would certify a broken CI as
-        // 'none' or even 'success'. A deliberate SUBSET of core's
-        // FAILING_CHECK_RUN_CONCLUSIONS: core also counts cancelled/stale,
-        // which the design excludes as concurrency-cancel noise (a
-        // superseded run's cancellation is not a CI failure of this head).
-        run.conclusion === 'startup_failure'
-      ) {
-        sawFailure = true;
-        if (
-          typeof run.name === 'string' &&
-          run.name.length > 0 &&
-          failedChecks.length < MAX_REPORTED_FAILED_CHECKS
-        ) {
-          failedChecks.push(run.name);
-        }
-      } else if (run.conclusion === 'success') {
-        sawSuccess = true;
-      }
-    }
-    const { data: combined } = await this.githubApi(
-      () =>
-        this.octokit.rest.repos.getCombinedStatusForRef({
-          owner,
-          repo,
-          ref: sha,
-        }),
-      `combinedStatus(${sha})`,
-      3,
-      (err) => !isWatchFailFastError(err),
     );
-    // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
-    // SHA with no legacy commit statuses; an empty combined status must not
-    // count as active CI (it would keep every poll re-fetching forever).
-    if (combined.total_count > 0) {
-      if (combined.state === 'failure' || combined.state === 'error') {
-        sawFailure = true;
-      } else if (combined.state === 'pending') {
-        sawPending = true;
-      } else {
-        sawSuccess = true;
+    let { sawFailure, sawPending, sawSuccess } = checks;
+    const { failedChecks, namesIncomplete } = checks;
+    // A check run already failed, so the combined status could only confirm
+    // 'failure' — skip the request rather than pay for a decided aggregate.
+    if (!sawFailure) {
+      const { data: combined } = await this.githubApi(
+        () =>
+          this.octokit.rest.repos.getCombinedStatusForRef({
+            owner,
+            repo,
+            ref: sha,
+          }),
+        `combinedStatus(${sha})`,
+        3,
+        (err) => !isWatchFailFastError(err),
+      );
+      // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
+      // SHA with no legacy commit statuses; an empty combined status must not
+      // count as active CI (it would keep every poll re-fetching forever).
+      if (combined.total_count > 0) {
+        if (combined.state === 'failure' || combined.state === 'error') {
+          sawFailure = true;
+        } else if (combined.state === 'pending') {
+          sawPending = true;
+        } else {
+          sawSuccess = true;
+        }
       }
     }
     const aggregate: CiAggregate = sawFailure
@@ -7567,7 +8406,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : sawSuccess
           ? 'success'
           : 'none';
-    return { aggregate, failedChecks };
+    return { aggregate, failedChecks, namesIncomplete };
   }
 
   private async markNotificationsAsRead(lastReadAt: string): Promise<void> {

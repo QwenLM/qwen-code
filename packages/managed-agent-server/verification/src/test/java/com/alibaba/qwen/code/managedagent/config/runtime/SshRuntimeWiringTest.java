@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
@@ -174,7 +174,7 @@ class SshRuntimeWiringTest {
         when(remoteSession.tenantId()).thenReturn("tenant");
         when(remoteSession.workspace()).thenReturn(remote);
         when(sessions.findSessionById("ssh-session")).thenReturn(Optional.of(remoteSession));
-        var authority = mock(WorkspaceExecutionStore.class);
+        var authority = mock(JdbcWorkspaceExecutionStore.class);
         when(authority.createdStorageRoot("tenant", "local-storage")).thenReturn(temporary);
         when(storage.verify(remote)).thenReturn(true);
         when(storage.runtimeStorage("tenant", "ssh-storage")).thenReturn(new SshRuntimeStorage("worker", "ssh-storage",
