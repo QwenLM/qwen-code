@@ -4,17 +4,21 @@
 
 ## Status
 
-Partially implemented. Layers 1 and 2 (the `channels/base` contract and the QQ
-management descriptor plus `qrLogin` wiring) are implemented and covered by unit
-tests; `channel-base`, `channel-qqbot` and `channel-email` build, and the
-`channel-registry` and `qqbot` suites pass.
+Layers 1-4 implemented. The `channels/base` capability contract, the QQ management
+descriptor and `qrLogin` wiring, the daemon's workspace-scoped login-session
+resource with its three routes, and the SDK types plus client methods on both
+client classes are in place. The `qrcode` dependency is added for daemon-side
+rendering.
 
-**Not implemented:** Layer 3 (daemon login-session resource and routes), Layer 4
-(SDK plumbing), Layer 5 (Web Shell UI, allowlist, i18n), the shared
-`requireMention` control. QQ is
-therefore still invisible in Web Shell, and no browser scan works yet. The
-`qrcode` dependency was not added. No end-to-end or manual scan verification has
-been performed.
+**Not implemented:** Layer 5 (Web Shell allowlist, i18n, QR panel, and the shared
+`requireMention` control). QQ is therefore still invisible in Web Shell and no
+browser scan works yet, even though the daemon can now serve one.
+
+Verification so far is unit and type level only: 13 session-lifecycle tests, the
+channel registry and QQ adapter suites, SDK typecheck at zero errors, and build /
+ESLint / Prettier clean on changed files. **No route-level test, no end-to-end run
+against a live daemon, and no manual scan has been performed.** The QR rendering
+path and the credential write have not been exercised through HTTP.
 
 The investigation findings below were read from the working tree on 2026-11-09
 and carry citations.

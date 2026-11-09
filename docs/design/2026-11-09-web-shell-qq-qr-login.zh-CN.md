@@ -4,14 +4,17 @@
 
 ## 状态
 
-部分实现。第 1、2 层(`channels/base` 契约,以及 QQ 管理描述符与 `qrLogin` 接线)
-已实现并有单元测试覆盖;`channel-base`、`channel-qqbot`、`channel-email` 均可构建,
-`channel-registry` 与 `qqbot` 测试套件通过。
+第 1–4 层已实现。`channels/base` 的能力契约、QQ 管理描述符与 `qrLogin` 接线、
+daemon 侧按 workspace 隔离的登录会话资源及其三条路由,以及 SDK 类型与两个客户端类上的
+客户端方法均已就位。已添加 `qrcode` 依赖用于 daemon 侧渲染。
 
-**尚未实现:** 第 3 层(daemon 登录会话资源与路由)、第 4 层(SDK 接线)、
-第 5 层(Web Shell UI、白名单、i18n)、共享 `requireMention` 控件。因此 QQ 目前在
-Web Shell 中仍不可见,浏览器扫码尚不可用。
-`qrcode` 依赖未添加。未执行任何端到端或人工扫码验证。
+**尚未实现:** 第 5 层(Web Shell 白名单、i18n、扫码面板,以及共享 `requireMention`
+控件)。因此尽管 daemon 现在已能提供扫码会话,QQ 在 Web Shell 中仍不可见,浏览器扫码
+也尚不可用。
+
+目前的验证仅到单元与类型层:13 条会话生命周期测试、channel registry 与 QQ 适配器套件、
+SDK 类型检查零错误,以及改动文件的构建 / ESLint / Prettier 全绿。**未做路由级测试、
+未对真实 daemon 做端到端运行、也未做人工扫码。** 二维码渲染路径与凭据写入尚未经 HTTP 实测。
 
 下文的调研结论于 2026-11-09 从工作树中读取得到并附带引用出处。
 
