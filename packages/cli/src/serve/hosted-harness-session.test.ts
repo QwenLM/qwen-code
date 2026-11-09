@@ -3136,6 +3136,10 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('v2 MCP effects retain the owner until resources settle', async () => {
+    const closeResources = vi.spyOn(
+      HostedMcpSession.prototype,
+      'closeResources',
+    );
     const { server, authorize, requests } = await mcpApp();
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
@@ -3164,8 +3168,8 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(0);
-    // R14-1: kind:'close' is a detach — the owner hands its mount back through
-    // releaseMount but stays re-acquirable; only a delete terminally releases.
+    // A close ends the Session, which nothing reopens, so the MCP owner is
+    // released for good as on a delete, not handed back for a later load.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
       'v2-close-claim',
     );
@@ -3182,8 +3186,22 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(1);
-    expect(releaseMount).toHaveBeenCalledWith('v2-close-claim');
-    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+    // The MCP session's own owner is the one released, and every row it
+    // configured ends released, as the release fault gates require.
+    const mcp = closeResources.mock.contexts[0] as HostedMcpSession;
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+    ).toContain(mcp.broker);
+    expect(releaseMount).not.toHaveBeenCalled();
+    const rows = (
+      Reflect.get(mcp, 'session') as ManagedSession
+    ).authority.extensionRecordsInDomain('mcp_configuration');
+    expect(rows).not.toHaveLength(0);
+    expect(
+      rows.map(
+        (entry) => (entry.record as { releaseState?: string }).releaseState,
+      ),
+    ).toEqual(rows.map(() => 'released'));
     expect(state.model).not.toHaveBeenCalled();
     await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .send({ authority: operation.authority })

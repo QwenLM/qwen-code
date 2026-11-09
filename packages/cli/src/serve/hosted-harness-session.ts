@@ -8552,7 +8552,14 @@ export function registerHostedHarnessSessionRoutes(
             await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources({ terminal: kind === 'delete' });
+          // The MCP owner is released for good on a close as on a delete, and
+          // its rows end released, as the release fault gates require. The
+          // R13-1 tombstone only hurts a later acquire, and none follows: no
+          // operation reopens a closed Session, a lifecycle load sets
+          // mcpClosing, and a retried close only releases, which the Broker
+          // answers for a released owner too. Spring releases the Harness
+          // Session's Runtime Sessions after this phase in any case.
+          await session.mcp?.closeResources({ terminal: true });
         }
         res.json({
           protocolVersion: 2,
