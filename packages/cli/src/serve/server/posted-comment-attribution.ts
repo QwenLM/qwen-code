@@ -532,26 +532,37 @@ const NO_STDOUT_FIRST_WORDS = new Set([
 ]);
 
 /**
- * An operand word after the shell's quote removal. `glob` records an UNQUOTED
- * pathname-expansion character: under `nullglob` such a word can disappear
- * entirely when nothing matches, which turns `set *` into a bare, printing
- * `set`. A quoted `*` is literal and carries no such risk.
+ * Characters that cannot take part in ANY shell expansion when unquoted, so a
+ * word built only from them is provably literal. This is a whitelist on
+ * purpose: enumerating dangerous characters kept missing one (`*?[`, then
+ * extglob `@(…)`, `+(…)`, `!(…)`), and each miss let `nullglob` delete the word
+ * and turn `set <pattern>` into a bare, printing `set`. `@` and `+` are safe
+ * alone — extglob needs the `(`, which is not in the set.
+ */
+const LITERAL_WORD_CHAR = /[A-Za-z0-9_=./:@%+,-]/;
+
+/**
+ * An operand word after the shell's quote removal. `expandable` records that
+ * the word contains an UNQUOTED character outside the literal set, so the shell
+ * may still expand it, split it, or delete it. Characters taken from inside
+ * quotes or after a backslash are literal and never set the flag — `set "$E"`
+ * keeps one empty positional parameter, while `set $E` can vanish entirely.
  */
 interface ShellWord {
   text: string;
-  glob: boolean;
+  expandable: boolean;
 }
 
 /**
  * Split operand text into words and remove the quoting the shell removes:
  * quote delimiters, `\x` escapes and the `$` of an ANSI-C `$'…'`. Expansions are
- * NOT performed, so a word that still holds `$` or a backtick stays unresolved
- * and the caller refuses to prove anything about it.
+ * NOT performed; a word that could still be expanded is flagged so the caller
+ * refuses to prove anything about it.
  */
 function shellWords(text: string): ShellWord[] {
   const words: ShellWord[] = [];
   let current = '';
-  let glob = false;
+  let expandable = false;
   let started = false;
   let quote: string | null = null;
   for (let i = 0; i < text.length; i++) {
@@ -584,37 +595,19 @@ function shellWords(text: string): ShellWord[] {
     }
     if (/\s/.test(ch)) {
       if (started) {
-        words.push({ text: current, glob });
+        words.push({ text: current, expandable });
         current = '';
-        glob = false;
+        expandable = false;
         started = false;
       }
       continue;
     }
-    if (ch === '*' || ch === '?' || ch === '[') glob = true;
+    if (!LITERAL_WORD_CHAR.test(ch)) expandable = true;
     current += ch;
     started = true;
   }
-  if (started) words.push({ text: current, glob });
+  if (started) words.push({ text: current, expandable });
   return words;
-}
-
-/**
- * A word the shell can neither expand away nor reshape: no parameter/command
- * expansion, no unquoted pathname expansion, and no brace list (which can
- * produce an option the builtin then acts on, as in `set {,-o}`).
- */
-function isLiteralWord(word: ShellWord): boolean {
-  if (word.glob || word.text.includes('$') || word.text.includes('`')) {
-    return false;
-  }
-  // Substring checks, not a brace-matching regex: a transcript command can be
-  // long, and `\{[^}]*,…[^}]*\}` backtracks quadratically when no `}` is present.
-  const braceList =
-    word.text.includes('{') &&
-    word.text.includes('}') &&
-    (word.text.includes(',') || word.text.includes('..'));
-  return !braceList;
 }
 
 /**
@@ -635,7 +628,7 @@ function setOperandsAreSilent(words: ShellWord[]): boolean {
       if (word.text.endsWith('o') && i === words.length - 1) return false;
       continue;
     }
-    if (!isLiteralWord(word)) return false;
+    if (word.expandable) return false;
   }
   return true;
 }
@@ -647,14 +640,17 @@ function writesNoStdout(command: string): boolean {
   if (NO_STDOUT_FIRST_WORDS.has(first)) return true;
   const operands = words.slice(1);
   if (first === 'export') {
-    // A literal `NAME` / `NAME=value` word can never be read as an option, even
-    // when its value expands. It must still survive the shell: an unquoted glob
-    // can delete the whole word under `nullglob`, leaving a bare `export`.
+    // A literal `NAME` / `NAME=value` word can never be read as an option. It
+    // must also survive the shell: any expandable operand could be deleted by
+    // `nullglob`, leaving a bare `export`. That refuses `export PATH=$PATH:/x`,
+    // which bash itself keeps, because the expanded word cannot be proven to
+    // survive in every shell — a lost attribution, never a wrong one.
     return (
       operands.length > 0 &&
       operands.every(
         (word) =>
-          !word.glob && /^[A-Za-z_][A-Za-z0-9_]*(?:=[\s\S]*)?$/.test(word.text),
+          !word.expandable &&
+          /^[A-Za-z_][A-Za-z0-9_]*(?:=[\s\S]*)?$/.test(word.text),
       )
     );
   }
@@ -697,9 +693,10 @@ function passesStdinThrough(rawStage: string): boolean {
  * the argument TEXT with the shell's own quote removal, never from
  * quote-stripped spans — `export '-p'`, `export \-p` and `export $'-p'` all print
  * just like `export -p`, and only literal `NAME`/`NAME=value` operands (or a
- * provably silent `set` option list) are exempt. An operand the shell could
- * still delete or reshape — an expansion, an unquoted glob (`nullglob` turns
- * `set *` into a bare, printing `set`), or a brace list — is never provable.
+ * provably silent `set` option list) are exempt, where "literal" is a whitelist
+ * of characters that cannot expand (see LITERAL_WORD_CHAR) rather than a list
+ * of dangerous ones: `nullglob` deletes `set *` and extglob `set @(zzz)` alike,
+ * leaving a bare, printing `set`. Quoted characters are literal and stay exempt.
  * A shell conditional/loop is ambiguous (static analysis cannot prove which
  * branch executed). When the source cannot be proven, attribute nothing
  * (fail-open: the author may self-echo once, but a mere reader is never

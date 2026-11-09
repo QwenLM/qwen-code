@@ -685,17 +685,58 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
-  it('still attributes when an export VALUE expands (never an option)', () => {
+  it('refuses an export VALUE that expands (the word may not survive)', () => {
+    // Bash keeps an assignment word, but the expanded text is unknown, so it
+    // cannot be proven to survive `nullglob` in every shell. Refusing costs an
+    // attribution; accepting could credit a reader as the author.
     const entry = shellResult(
       'X="a -p"\nexport FOO=$X\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('refuses export PATH=$PATH:/x for the same unprovable-survival reason', () => {
+    const entry = shellResult(
+      'export PATH=$PATH:/x\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes when the export value is QUOTED (cannot expand)', () => {
+    const entry = shellResult(
+      'export PATH="$PATH:/x"\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
-  it('still attributes after export PATH=$PATH:/x', () => {
+  it('does not exempt an EXTGLOB operand that nullglob can delete', () => {
+    // `@(…)` carries none of `*?[`, yet under extglob+nullglob it vanishes and
+    // leaves a bare `set`. `shopt` sits on its own line so the option is active
+    // before the next command is parsed, and is redirected so it is not itself
+    // the second producer that would make this vacuous.
     const entry = shellResult(
-      'export PATH=$PATH:/x\ngh pr comment 42 --body hi',
+      'shopt -s extglob nullglob >/dev/null\nU=issuecomment; export REVIEW_URL=https://github.com/o/r/pull/42#$U-111; false && gh pr comment 42 --body hi; set @(zzz-no-match)',
+      'REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a QUOTED extglob operand (never a pattern)', () => {
+    const entry = shellResult(
+      'set "@(zzz-no-match)"\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('still attributes a quoted expansion that keeps one positional word', () => {
+    // `set "$E"` with an empty E keeps ONE empty parameter, unlike `set $E`,
+    // which vanishes into the bare printing form.
+    const entry = shellResult(
+      'E=\nset "$E"\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
