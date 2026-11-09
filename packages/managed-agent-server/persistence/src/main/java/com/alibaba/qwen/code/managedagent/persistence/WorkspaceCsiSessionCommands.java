@@ -25,7 +25,7 @@ public final class WorkspaceCsiSessionCommands {
         transaction.setTimeout(10);
         var reservations = new WorkspaceCsiReservationStore(jdbc, manager, json);
         var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, harnessRules);
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, harnessRules);
         String digest = new RequestDigests().digest(Map.of("profile", CsiFilesRetirementProfile.PROFILE,
                 "request", request));
         return transaction.execute(status -> {

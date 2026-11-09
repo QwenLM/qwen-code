@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -76,16 +77,16 @@ class WorkspaceSchemaConsolidationTest {
     @Test
     void childWorkspaceIdentityOutlivesClaimsAndRejectsTheExpiredWorker() {
         root("root");
-        var store = new ChildWorkspaceStore(jdbc, manager);
+        var store = new JdbcChildWorkspaceStore(jdbc, manager);
         var parent = new ContextBinding("tenant", "root", 1, "storage", ".", "config", 1);
         long now = System.currentTimeMillis();
         var admitted = store.admit("tenant", "parent-session", "run", parent, now);
         var first = store.claim(admitted, "old-worker", now, 100);
         var second = store.claim(admitted, "new-worker", now + 101, 1000);
         assertThat(second.claimGeneration()).isEqualTo(first.claimGeneration() + 1);
-        assertThat(store.transition(first, "old-worker", ChildWorkspaceStore.READY, Map.of(), now + 102)).isFalse();
+        assertThat(store.transition(first, "old-worker", JdbcChildWorkspaceStore.READY, Map.of(), now + 102)).isFalse();
         assertThat(store.renew(first, "old-worker", now + 2000, now + 102)).isFalse();
-        assertThat(store.transition(second, "new-worker", ChildWorkspaceStore.READY,
+        assertThat(store.transition(second, "new-worker", JdbcChildWorkspaceStore.READY,
                 Map.of("base_commit", "base", "child_cwd_relative", "children/run"), now + 102)).isTrue();
         store.release(first, "old-worker", now + 103);
         assertThat(store.find("tenant", "parent-session", "run").claimedBy()).isEqualTo("new-worker");
@@ -100,10 +101,10 @@ class WorkspaceSchemaConsolidationTest {
         root("root");
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
                 "tenant", "root", "actor".getBytes(StandardCharsets.UTF_8));
-        var store = new ChildWorkspaceStore(jdbc, manager);
+        var store = new JdbcChildWorkspaceStore(jdbc, manager);
         var child = store.admit("tenant", "parent", "run",
                 new ContextBinding("tenant", "root", 1, "storage", ".", "config", 1), System.currentTimeMillis());
-        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var registry = new JdbcManagedWorkspaceRegistry(jdbc);
         assertThat(registry.accessOf("tenant", "actor", child.childWorkspaceId()).name()).isEqualTo("OWNER");
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", "tenant", "root");
         assertThat(registry.accessOf("tenant", "actor", child.childWorkspaceId()).canRead()).isFalse();
@@ -127,7 +128,7 @@ class WorkspaceSchemaConsolidationTest {
         var binding = new ContextBinding("tenant", "root", 1, "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         var child = new StoreModels.SessionRecord("tenant", "child", "qwen-code", "1", "Child", "ACTIVE", null,
                 null, 0, 0, 0, now, now, null, 0, binding, "yolo", "hosted-workspace-files/1");
-        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
         authority.authorize(child);
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", "tenant", "root");
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'root', ?, 'OWNER')",
@@ -138,8 +139,8 @@ class WorkspaceSchemaConsolidationTest {
     @Test
     void expiredMaintenanceClaimCannotReleaseOrReplaceTheOriginalPhysicalHolder() {
         root("root");
-        var store = new ChildWorkspaceStore(jdbc, manager);
-        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+        var store = new JdbcChildWorkspaceStore(jdbc, manager);
+        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
         var storage = new ContextBinding("tenant", "root", 1, "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         long now = System.currentTimeMillis();
         var admitted = store.admit("tenant", "parent", "run", storage, now);
@@ -168,8 +169,8 @@ class WorkspaceSchemaConsolidationTest {
     @Test
     void eachPhysicalStepKeepsItsOwnIdentityEvenWithinOneClaim() {
         root("root");
-        var children = new ChildWorkspaceStore(jdbc, manager);
-        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+        var children = new JdbcChildWorkspaceStore(jdbc, manager);
+        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
         var binding = new ContextBinding("tenant", "root", 1, "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         long now = System.currentTimeMillis();
         var admitted = children.admit("tenant", "parent", "run", binding, now);
@@ -197,7 +198,7 @@ class WorkspaceSchemaConsolidationTest {
 
     @Test
     void privateRecoveryInventoryExcludesPublicOnlyBodiesAtScale() throws Exception {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
         java.util.List<Object[]> resources = new java.util.ArrayList<>();
         java.util.List<Object[]> roots = new java.util.ArrayList<>();

@@ -14,9 +14,9 @@ class AutomationCommandTimestampTest {
             JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(fixture.source());
             jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
                     + " gmt_create, gmt_modified) VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1000, 1000)");
-            AutomationLedgerStore ledger = new AutomationLedgerStore(jdbc);
-            AutomationLedgerStore.CommandRow command =
-                    new AutomationLedgerStore.CommandRow("tenant", "command", "actor",
+            JdbcAutomationLedgerStore ledger = new JdbcAutomationLedgerStore(jdbc);
+            JdbcAutomationLedgerStore.CommandRow command =
+                    new JdbcAutomationLedgerStore.CommandRow("tenant", "command", "actor",
                             "request", "schedule", "");
             assertThat(ledger.claimCommand("session", command, 1000L)).isTrue();
             assertThat(ledger.settleCommand("tenant", "command", "request", "another-actor",
