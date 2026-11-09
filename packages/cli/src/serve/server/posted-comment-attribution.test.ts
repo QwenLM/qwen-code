@@ -511,6 +511,42 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('attributes a creation after a <<- heredoc with a tab-indented delimiter', () => {
+    const entry = shellResult(
+      "cat > note.md <<-'EOF'\n\tit's quoted\n\tEOF\ngh pr comment 42 --body-file note.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('attributes a creation after a heredoc with a double-quoted delimiter', () => {
+    const entry = shellResult(
+      'cat > note.md <<"EOF"\nit\'s quoted\nEOF\ngh pr comment 42 --body-file note.md',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not re-read a herestring as a heredoc when its word matches a later line', () => {
+    // Without the <<< branch the trailing << pair starts a heredoc whose
+    // delimiter is the later `x` line, swallowing the creation in between.
+    const entry = shellResult(
+      'cat <<< x >/dev/null\ngh pr comment 42 --body hi\nx',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('treats a # at the very start of the command as a comment', () => {
+    // The i===0 word boundary: without it the leading comment's <<'EOF' starts
+    // heredoc consumption that swallows the creation before the EOF line.
+    const entry = shellResult(
+      "# Use <<'EOF' note\ngh pr comment 42 --body hi\nEOF",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments -X POST -f body='--method GET' --jq '.id'",
