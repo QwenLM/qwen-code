@@ -57,16 +57,20 @@ export function getMCPServerLastError(serverName: string): string | undefined {
  * deliberate teardown and abort damage both write `CONNECTED -> DISCONNECTED`,
  * so the transition alone cannot tell them apart; the owner records the
  * intent here BEFORE it starts closing the transport, and abort recovery
- * reads it back to stay out of the way. Cleared when the server next reaches
- * `CONNECTED` (or leaves the registry) so the marker never outlives the
- * teardown it describes.
+ * reads it back to stay out of the way. Cleared by `updateMCPServerStatus`
+ * when the server next reaches `CONNECTED`, and by `removeMCPServerStatus`
+ * when it leaves the registry, so the marker never outlives the teardown it
+ * describes.
  */
 const deliberateTeardownServers: Set<string> = new Set();
 
 /**
  * Record that `serverName` is being torn down on purpose. Call this before
  * the transport actually closes: an abort repair that runs inside the status
- * notification otherwise sees the transition as unrequested damage.
+ * notification otherwise sees the transition as unrequested damage. The
+ * marker is dropped inside `updateMCPServerStatus` once the server reaches
+ * `CONNECTED` again, and in `removeMCPServerStatus` when it leaves the
+ * registry, so it never outlives the teardown it describes.
  */
 export function markMCPServerTeardownIntent(serverName: string): void {
   deliberateTeardownServers.add(serverName);
@@ -75,11 +79,6 @@ export function markMCPServerTeardownIntent(serverName: string): void {
 /** Whether `serverName` is currently being torn down on purpose. */
 export function isMCPServerTeardownIntent(serverName: string): boolean {
   return deliberateTeardownServers.has(serverName);
-}
-
-/** Drop the teardown marker; used by owners once the server is live again. */
-export function clearMCPServerTeardownIntent(serverName: string): void {
-  deliberateTeardownServers.delete(serverName);
 }
 
 /**
