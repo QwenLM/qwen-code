@@ -4159,6 +4159,19 @@ describe('ChannelEditorDialog WeChat login', () => {
     ).toBeNull();
   });
 
+  it('renders exactly one credentials heading for WeChat', async () => {
+    // The panel brings its own "Credentials" section. The field loop must not
+    // add a second one: groupPolicy/privatePolicy/allowedUsers are shared
+    // access fields and baseUrl is a connection field, so the loop's
+    // credentials section has no fields and does not render.
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: loginApi() });
+
+    const headings = Array.from(document.querySelectorAll('h3')).filter(
+      (heading) => heading.textContent?.trim() === 'Credentials',
+    );
+    expect(headings).toHaveLength(1);
+  });
+
   it('omits the panel when the host supplies no login API', async () => {
     await renderDialog({ descriptor: WEIXIN });
 

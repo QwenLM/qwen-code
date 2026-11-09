@@ -76,16 +76,26 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
     [],
   );
 
+  // Account reads race each other: the `ready` poll fires one without awaiting
+  // it, so a GET that read the credential before a logout can resolve after
+  // the logout's own refresh and paint "Logged in" over a revoked account.
+  // Only the newest read may write.
+  const accountReadRef = useRef(0);
   const reloadAccount = useCallback(async () => {
+    const generation = ++accountReadRef.current;
     try {
       const status = await apiRef.current.status();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || generation !== accountReadRef.current) return;
       setUnsupported(status === undefined);
       setAccount(status);
     } catch (failure) {
-      if (mountedRef.current) setError(extractErrorDetail(failure));
+      if (mountedRef.current && generation === accountReadRef.current) {
+        setError(extractErrorDetail(failure));
+      }
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (mountedRef.current && generation === accountReadRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 

@@ -871,6 +871,20 @@ describe('channel registry', () => {
         )
         .map((entry) => entry.type),
     ).toEqual(['dingtalk']);
+    // WeChat's iLink Bot only produces direct messages, so its group policy
+    // must offer nothing else. Without this the shared four-option descriptor
+    // would silently come back and let an operator enable a mode the adapter
+    // can never reach.
+    expect(
+      builtinCatalog
+        .find((entry) => entry.type === 'weixin')
+        ?.fields.find((field) => field.key === 'groupPolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [{ value: 'disabled', label: 'Disabled' }],
+    });
     // The registry skips the shared `instructions` injection for any channel
     // that declares its own, so pin the render invariants the editor depends on
     // for every manageable built-in: exactly one field, plus the multiline hint

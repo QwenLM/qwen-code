@@ -274,6 +274,51 @@ describe('weixin login cancellation', () => {
     vi.useRealTimers();
   });
 
+  it('keeps cancellation armed until the response body is consumed', async () => {
+    // `fetch` resolves at the headers. If the abort listener is detached
+    // there, an upstream that sends headers and then stalls is uncancellable:
+    // cancel, revoke and shutdown all return while the request stays open.
+    vi.useFakeTimers();
+    let bodyAborted = false;
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((_url: string, init: { signal?: AbortSignal }) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          // The body never completes on its own — only an abort ends it.
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener('abort', () => {
+                bodyAborted = true;
+                reject(
+                  Object.assign(new Error('aborted'), { name: 'AbortError' }),
+                );
+              });
+            }),
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      signal: controller.signal,
+    });
+    // Headers land and the body read starts.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1100);
+
+    await expect(pending).resolves.toMatchObject({
+      connected: false,
+      reason: 'cancelled',
+    });
+    expect(bodyAborted).toBe(true);
+  });
+
   it('settles as cancelled when the signal aborts mid-poll', async () => {
     vi.useFakeTimers();
     const fetchMock = stubFetch({ status: 'waiting' });

@@ -264,6 +264,48 @@ describe('WeixinLoginPanel', () => {
     expect(buttonByText('Log in with QR code')).toBeDefined();
   });
 
+  it('ignores an account read that a logout superseded', async () => {
+    // The `ready` poll fires an account refresh without awaiting it. If that
+    // GET read the credential before the logout, it can resolve afterwards
+    // and paint "Logged in" over an account that has just been revoked.
+    let resolveStale: (value: DaemonWeixinAccountStatus) => void = () =>
+      undefined;
+    const stale = new Promise<DaemonWeixinAccountStatus>((resolve) => {
+      resolveStale = resolve;
+    });
+    const status = vi
+      .fn()
+      .mockResolvedValueOnce(LOGGED_IN) // mount
+      .mockReturnValueOnce(stale) // the ready-triggered refresh, held open
+      .mockResolvedValue(LOGGED_OUT); // the logout's own refresh
+    await renderPanel({
+      status,
+      poll: vi.fn().mockResolvedValue({ id: 'flow-1', status: 'ready' }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in again')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    await act(async () => {
+      buttonByText('Log out')?.click();
+    });
+    expect(container.textContent).toContain('Not logged in');
+
+    // The superseded read lands last. It must not resurrect the account.
+    await act(async () => {
+      resolveStale(LOGGED_IN);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Not logged in');
+    expect(container.textContent).not.toContain('wx-user-1');
+    expect(buttonByText('Log in with QR code')).toBeDefined();
+  });
+
   it('surfaces a start failure without leaving the panel wedged', async () => {
     await renderPanel({
       start: vi.fn().mockRejectedValue(new Error('upstream unavailable')),

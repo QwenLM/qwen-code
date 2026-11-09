@@ -11,6 +11,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -301,6 +302,42 @@ describe('weixin auth routes', () => {
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({ code: 'flow_not_found' });
+  });
+
+  it('serves the flow view with no-store', async () => {
+    const started = await auth(request(app).post('/auth/weixin/flows')).send(
+      {},
+    );
+    const view = await auth(
+      request(app).get(`/auth/weixin/flows/${started.body['id'] as string}`),
+    );
+
+    expect(view.status).toBe(200);
+    expect(view.headers['cache-control']).toBe('no-store');
+  });
+
+  it('reports credentials_error when the account cannot be written', async () => {
+    // A regular file where the state directory should be makes the credential
+    // write throw. The login succeeded upstream, so reporting `ready` here
+    // would claim an account that was never stored.
+    rmSync(stateDir, { recursive: true, force: true });
+    writeFileSync(stateDir, 'not a directory');
+    fake.statusResponses = [{ status: 'confirmed', bot_token: BOT_TOKEN }];
+
+    const started = await auth(request(app).post('/auth/weixin/flows')).send(
+      {},
+    );
+    const view = await waitForStatus(
+      app,
+      started.body['id'] as string,
+      'error',
+    );
+
+    expect(view).toMatchObject({
+      status: 'error',
+      errorCode: 'credentials_error',
+    });
+    expect(JSON.stringify(view)).not.toContain(BOT_TOKEN);
   });
 
   it('requires the mutation gate on start, cancel and revoke', async () => {

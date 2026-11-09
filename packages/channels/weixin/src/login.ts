@@ -98,29 +98,32 @@ export async function waitForLogin(params: {
       const onAbort = () => controller.abort();
       signal?.addEventListener('abort', onAbort, { once: true });
 
-      let resp: Response;
-      try {
-        resp = await fetch(
-          `${apiBaseUrl}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(currentQrcodeId)}`,
-          {
-            headers: buildHeaders(),
-            signal: controller.signal,
-          },
-        );
-      } finally {
-        clearTimeout(timeout);
-        signal?.removeEventListener('abort', onAbort);
-      }
-
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-      const data = (await resp.json()) as {
+      // `fetch` resolves when the headers arrive, so the listener and the
+      // timeout must stay armed through the body read too. Detaching them
+      // here would leave an upstream that sends headers and then stalls both
+      // uncancellable and unbounded — cancel, revoke and shutdown would all
+      // return while the request stayed open.
+      let data: {
         status?: string;
         bot_token?: string;
         ilink_bot_id?: string;
         baseurl?: string;
         ilink_user_id?: string;
       };
+      try {
+        const resp = await fetch(
+          `${apiBaseUrl}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(currentQrcodeId)}`,
+          {
+            headers: buildHeaders(),
+            signal: controller.signal,
+          },
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        data = (await resp.json()) as typeof data;
+      } finally {
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+      }
 
       switch (data.status) {
         case 'confirmed':
