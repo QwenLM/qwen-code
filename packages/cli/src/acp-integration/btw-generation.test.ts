@@ -40,6 +40,7 @@ vi.mock(
   },
 );
 
+import { setLanguageAsync } from '../i18n/index.js';
 import { executeBtwGeneration } from './btw-generation.js';
 
 let config: Config;
@@ -228,6 +229,29 @@ describe('executeBtwGeneration', () => {
         text: 'No conversation context available for /btw',
       },
     ]);
+  });
+
+  it('localizes the no-context notice', async () => {
+    await setLanguageAsync('zh');
+    try {
+      runner.mockResolvedValue(null);
+      const emit = vi.fn().mockResolvedValue(undefined);
+
+      await executeBtwGeneration(
+        config,
+        'Why?',
+        new AbortController().signal,
+        emit,
+      );
+
+      expect(emit).toHaveBeenLastCalledWith({
+        type: 'delta',
+        seq: 0,
+        text: '没有可供 /btw 使用的对话上下文',
+      });
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 
   it('rethrows a model failure', async () => {

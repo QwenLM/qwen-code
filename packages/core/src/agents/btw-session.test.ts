@@ -7,7 +7,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
-  BTW_HISTORY_LIMIT,
   BtwSession,
   getBtwSession,
   runBtwQuery,
@@ -97,12 +96,13 @@ describe('BtwSession', () => {
     );
     const session = new BtwSession(config, runner);
 
-    for (let index = 0; index < BTW_HISTORY_LIMIT + 2; index += 1) {
+    // Literals rather than BTW_HISTORY_LIMIT so a changed cap fails here.
+    for (let index = 0; index < 22; index += 1) {
       await session.ask(`q${index}`).done;
     }
 
     const { exchanges } = session.getSnapshot();
-    expect(exchanges).toHaveLength(BTW_HISTORY_LIMIT);
+    expect(exchanges).toHaveLength(20);
     expect(exchanges[0].question).toBe('q2');
   });
 

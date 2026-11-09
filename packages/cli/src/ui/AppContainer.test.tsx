@@ -8518,6 +8518,54 @@ describe('AppContainer State Management', () => {
       expect(cancelBtw).toHaveBeenCalledTimes(1);
     });
 
+    it('cancels a btw request shown behind a browsed answer on Ctrl+D', () => {
+      // The draft is the point: without the Ctrl+D branch the buffer check
+      // returns before handleExit can cancel the request.
+      mockedUseTextBuffer.mockReturnValue({ text: 'draft', setText: vi.fn() });
+      const cancelBtw = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand: vi.fn(),
+        slashCommands: [],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+        btwItem: {
+          id: 1,
+          type: MessageType.BTW,
+          btw: {
+            question: 'older question',
+            answer: 'older answer',
+            isPending: false,
+            ownRequestPending: true,
+          },
+        },
+        cancelBtw,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+      handleKeypress!({
+        name: 'd',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x04',
+      });
+
+      expect(cancelBtw).toHaveBeenCalledTimes(1);
+    });
+
     it('should reset Ctrl+C state after timeout', () => {
       vi.useFakeTimers();
 
