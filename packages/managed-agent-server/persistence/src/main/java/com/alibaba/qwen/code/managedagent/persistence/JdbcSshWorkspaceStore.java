@@ -3,6 +3,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -24,8 +27,8 @@ import java.util.Map;
 import java.util.UUID;
 
 @Repository
-public class SshWorkspaceStore
-        implements com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore {
+public class JdbcSshWorkspaceStore
+        implements SshWorkspaceStore {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /**
@@ -38,7 +41,7 @@ public class SshWorkspaceStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
 
-    public SshWorkspaceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager) {
+    public JdbcSshWorkspaceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
     }
@@ -74,7 +77,7 @@ public class SshWorkspaceStore
                             + " VALUES (?, ?, ?, ?, ?, 'WORKSPACE', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'PENDING', "
                             + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                     operationKey(tenant, id), ManagedSchemaKeys.key(tenant), OPERATION, bytes(id), bytes(tenant),
-                    ManagedSchemaKeys.key(workspace), bytes(workspace), com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor),
+                    ManagedSchemaKeys.key(workspace), bytes(workspace), ManagedWorkspaceRegistry.actorKey(tenant, actor),
                     bytes(actor), bytes(key), ManagedSchemaKeys.key(key), digest, encode(request));
             return new Operation(id, "workspace_create", "pending", null, null, false);
         });
@@ -131,24 +134,24 @@ public class SshWorkspaceStore
     private static Intent intent(String id, String tenant, Map<String, Object> row) {
         Map<String, Object> value = decode((String) row.get("request_json"));
         Map<String, Object> registration = decode((String) row.get("result_json"));
-        return new Intent(id, tenant, com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(value, "actorId"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(value, "nodeId"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(value, "path"),
-                com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(value, "displayName"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(value, "workspaceId"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(value, "storageId"),
-                com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(value, "registrationId"), registration);
+        return new Intent(id, tenant, SshWorkspaceStore.string(value, "actorId"), SshWorkspaceStore.string(value, "nodeId"), SshWorkspaceStore.string(value, "path"),
+                SshWorkspaceStore.string(value, "displayName"), SshWorkspaceStore.string(value, "workspaceId"), SshWorkspaceStore.string(value, "storageId"),
+                SshWorkspaceStore.string(value, "registrationId"), registration);
     }
 
     public void reserve(Intent intent, String owner, Map<String, Object> registration) {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, intent.tenantId());
             requireClaim(intent, owner);
-            Map<String, Object> identity = com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(registration, "identity");
+            Map<String, Object> identity = SshWorkspaceStore.object(registration, "identity");
             LocalStorageOwners.requireNonOverlapping(jdbc, physicalIdentity(identity));
             String physical = physicalKey(identity);
-            String root = com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "root");
+            String root = SshWorkspaceStore.string(identity, "root");
             jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id,"
                             + " mount_root, mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id)"
                             + " VALUES (?, ?, 'SSH_LOCAL', ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE storage_key = storage_key",
-                    physical, physical, intent.tenantId(), intent.storageId(), root, com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "hostId"),
-                    com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "device"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "inode"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "birthTime"), intent.registrationId());
+                    physical, physical, intent.tenantId(), intent.storageId(), root, SshWorkspaceStore.string(identity, "hostId"),
+                    SshWorkspaceStore.string(identity, "device"), SshWorkspaceStore.string(identity, "inode"), SshWorkspaceStore.string(identity, "birthTime"), intent.registrationId());
             var rows = jdbc.queryForList("SELECT storage_kind, mount_registration_id FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
             if (rows.size() != 1 || !KIND.equals(rows.getFirst().get("storage_kind"))
                     || !intent.registrationId().equals(rows.getFirst().get("mount_registration_id"))) {
@@ -181,20 +184,20 @@ public class SshWorkspaceStore
         String alias = JdbcRuntimeBindingRepository.storageAliasKey(intent.tenantId(), intent.storageId());
         var rows = jdbc.queryForList("SELECT physical_key FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL' FOR UPDATE", alias);
         if (rows.size() != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         jdbc.update("UPDATE ma_storage SET registration_state = 'REGISTERED', mount_revision = 1 WHERE alias_key = ?", alias);
         if (jdbc.update("UPDATE ma_storage_owner SET mount_state = 'READY', mount_revision = 1,"
                         + " mount_completed_operation_id = ?, mount_operation_id = NULL WHERE storage_key = ?"
                         + " AND mount_registration_id = ? AND storage_kind = 'SSH_LOCAL'",
                 intent.registrationId(), rows.getFirst().get("physical_key"), intent.registrationId()) != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')", intent.tenantId(), intent.workspaceId(), intent.storageId(),
                 intent.displayName(), WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
-                intent.tenantId(), intent.workspaceId(), com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(intent.tenantId(), intent.actorId()));
+                intent.tenantId(), intent.workspaceId(), ManagedWorkspaceRegistry.actorKey(intent.tenantId(), intent.actorId()));
     }
 
     /**
@@ -274,7 +277,7 @@ public class SshWorkspaceStore
                         JdbcRuntimeBindingRepository.storageAliasKey(tenant, intent.storageId()));
                 jdbc.update("DELETE FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'SSH_LOCAL'"
                                 + " AND mount_registration_id = ? AND mount_state = 'UNVERIFIED'",
-                        physicalKey(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(intent.registration(), "identity")), intent.registrationId());
+                        physicalKey(SshWorkspaceStore.object(intent.registration(), "identity")), intent.registrationId());
             }
             return settleParked(tenant, operationId, "FAILED", code) == 1;
         }));
@@ -314,7 +317,7 @@ public class SshWorkspaceStore
         }
         var storage = runtimeStorage(scope.getTenantId(), text(rows.getFirst().get("storage_id")));
         if (storage != null && !scope.getWorkspaceGeneration().equals(rows.getFirst().get("workspace_generation").toString())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return storage;
     }
@@ -326,11 +329,11 @@ public class SshWorkspaceStore
             return null;
         }
         if (!"REGISTERED".equals(rows.getFirst().get("registration_state"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Map<String, Object> registration = decode((String) rows.getFirst().get("registration_json"));
-        return new SshRuntimeStorage(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(registration, "nodeId"), storage,
-                com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(registration, "identity"), "root"), registration);
+        return new SshRuntimeStorage(SshWorkspaceStore.string(registration, "nodeId"), storage,
+                SshWorkspaceStore.string(SshWorkspaceStore.object(registration, "identity"), "root"), registration);
     }
 
     public boolean verify(ContextBinding binding) {
@@ -340,14 +343,14 @@ public class SshWorkspaceStore
         }
         if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND fence_operation_id IS NULL",
                 Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
-        Map<String, Object> identity = com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(storage.registration(), "identity");
+        Map<String, Object> identity = SshWorkspaceStore.object(storage.registration(), "identity");
         var rows = jdbc.queryForList("SELECT mount_state, mount_registration_id FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'SSH_LOCAL'",
                 physicalKey(identity));
         if (rows.size() != 1 || !"READY".equals(rows.getFirst().get("mount_state"))
-                || !com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.object(storage.registration(), "marker"), "registrationId").equals(rows.getFirst().get("mount_registration_id"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                || !SshWorkspaceStore.string(SshWorkspaceStore.object(storage.registration(), "marker"), "registrationId").equals(rows.getFirst().get("mount_registration_id"))) {
+            throw WorkspaceExecutionStore.unavailable();
         }
         return true;
     }
@@ -372,14 +375,14 @@ public class SshWorkspaceStore
     private List<Map<String, Object>> operationRows(String tenant, String actor, String id, boolean lock) {
         return WorkspaceOperations.rows(jdbc, "SELECT * FROM ma_operation WHERE operation_key = ? AND operation_kind = 'WORKSPACE_CREATE'"
                         + " AND tenant_id = ? AND actor_key = ?" + (lock ? " FOR UPDATE" : ""),
-                operationKey(tenant, id), tenant, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor));
+                operationKey(tenant, id), tenant, ManagedWorkspaceRegistry.actorKey(tenant, actor));
     }
 
     private static Operation operation(Map<String, Object> row, boolean replayed) {
         var request = decode((String) row.get("request_json"));
         String state = (String) row.get("state");
         return new Operation((String) row.get("operation_id"), "workspace_create", state.toLowerCase(java.util.Locale.ROOT),
-                "COMPLETED".equals(state) ? com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(request, "workspaceId") : null, (String) row.get("failure_code"), replayed);
+                "COMPLETED".equals(state) ? SshWorkspaceStore.string(request, "workspaceId") : null, (String) row.get("failure_code"), replayed);
     }
 
     public static String physicalKey(Map<String, Object> identity) {
@@ -387,8 +390,8 @@ public class SshWorkspaceStore
     }
 
     private static StorageIdentityReader.Identity physicalIdentity(Map<String, Object> identity) {
-        return new StorageIdentityReader.Identity(com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "root"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "hostId"),
-                com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "device"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "inode"), com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.string(identity, "birthTime"));
+        return new StorageIdentityReader.Identity(SshWorkspaceStore.string(identity, "root"), SshWorkspaceStore.string(identity, "hostId"),
+                SshWorkspaceStore.string(identity, "device"), SshWorkspaceStore.string(identity, "inode"), SshWorkspaceStore.string(identity, "birthTime"));
     }
 
     static String physicalKey(JdbcTemplate jdbc, String tenant, String storage) {
@@ -409,14 +412,14 @@ public class SshWorkspaceStore
         if (!tenant.equals(text(row.get("tenant_id"))) || !storage.equals(text(row.get("storage_id")))
                 || !"REGISTERED".equals(row.get("registration_state")) || row.get("fence_operation_id") != null
                 || !(row.get("physical_key") instanceof String key)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         var owners = jdbc.queryForList("SELECT mount_state, tenant_id, storage_id FROM ma_storage_owner WHERE storage_key = ?"
                 + " AND storage_kind = 'SSH_LOCAL'" + lock, key);
         if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
                 || !tenant.equals(text(owners.getFirst().get("tenant_id")))
                 || !storage.equals(text(owners.getFirst().get("storage_id")))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return owners.getFirst();
     }

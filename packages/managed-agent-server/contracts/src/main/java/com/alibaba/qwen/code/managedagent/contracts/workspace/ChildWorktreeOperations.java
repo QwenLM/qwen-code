@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
-public interface ChildWorktreeGit {
+public interface ChildWorktreeOperations {
     public static final String CONTAINER = ".qwen-child-workspaces";
 
     public static final String PIN_PREFIX = "refs/qwen/child-workspaces/";
