@@ -589,6 +589,25 @@ describe('getCommandRoots', () => {
   });
 });
 
+// The `-c` script is the word the shell resolves, not its spelling: an
+// ANSI-C, locale or continuation-split payload carries the commands that run,
+// so the guard hands the resolved word to op extraction and the self-kill scan
+// instead of a quoted token neither of them would see.
+const RESOLVED_PAYLOADS: Array<[string, string]> = [
+  ['an ANSI-C payload', String.raw`sh -c $'cat > /etc/motd'`],
+  ['a locale payload', 'sh -c $"cat > /etc/motd"'],
+  [
+    'a continuation-split payload',
+    String.raw`sh -c $\
+'cat > /etc/motd'`,
+  ],
+  [
+    'a terminator after a continuation',
+    String.raw`sh -c $\
+'--' 'cat > /etc/motd'`,
+  ],
+];
+
 describe('stripShellWrapper', () => {
   it('should strip sh -c with quotes', async () => {
     expect(stripShellWrapper('sh -c "ls -l"')).toEqual('ls -l');
@@ -692,8 +711,11 @@ describe('stripShellWrapper', () => {
   });
 
   it('does not treat a locale word as an option terminator', async () => {
+    // The locale word is the payload (bash runs a program named `x2dx2d`), so
+    // the word after it is positional argv. Like every other static payload it
+    // comes back as the resolved word, not its `$"…"` spelling.
     expect(stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'')).toEqual(
-      '$"\\x2d\\x2d"',
+      '\\x2d\\x2d',
     );
   });
 
@@ -726,6 +748,13 @@ describe('stripShellWrapper', () => {
   it('does not read a lone terminator as a payload', () => {
     expect(stripShellWrapper('sh -c --')).toEqual('sh -c --');
   });
+
+  it.each(RESOLVED_PAYLOADS)(
+    'unwraps %s to the resolved script',
+    (_what, command) => {
+      expect(stripShellWrapper(command)).toBe('cat > /etc/motd');
+    },
+  );
 });
 
 describe('stripTrailingBackgroundAmp', () => {
@@ -981,6 +1010,45 @@ describe('normalizeMonitorCommand', () => {
       'echo ok',
       'FOO=$(cat secret.txt) echo ok',
     );
+  });
+
+  // The monitor analyses the resolved script but still spawns exactly what
+  // the user wrote: such a payload cannot be re-quoted faithfully, so the
+  // spawn keeps the original text.
+  it.each(RESOLVED_PAYLOADS)(
+    'analyzes %s as the resolved script',
+    (_what, command) => {
+      expect(normalizeMonitorCommand(command)).toEqual({
+        analysisCommand: 'cat > /etc/motd',
+        safetyCommand: 'cat > /etc/motd',
+        spawnCommand: command,
+        strippedTrailingAmp: false,
+      });
+    },
+  );
+
+  it('hands an unresolvable -c payload back whole and flags it', () => {
+    // `$X` may be the terminator or the script; reading it as the script is a
+    // guess the rules cannot make, so the whole command comes back and the
+    // cron gate refuses it instead of analysing `$X`.
+    expect(normalizeMonitorCommand('bash -c $X')).toEqual({
+      analysisCommand: 'bash -c $X',
+      safetyCommand: 'bash -c $X',
+      spawnCommand: 'bash -c $X',
+      strippedTrailingAmp: false,
+      wrapperPayloadUnresolved: true,
+    });
+  });
+
+  it('keeps the base reading for a fully quoted dynamic payload', () => {
+    // R13-1: the word is quoted, so the script it carries is still readable
+    // and stays the analysis command, with no unresolved flag.
+    expect(normalizeMonitorCommand('bash -c "$(cat secret.txt)"')).toEqual({
+      analysisCommand: '$(cat secret.txt)',
+      safetyCommand: '$(cat secret.txt)',
+      spawnCommand: 'bash -c "$(cat secret.txt)"',
+      strippedTrailingAmp: false,
+    });
   });
 
   it('reads `--` as the -c option terminator', () => {

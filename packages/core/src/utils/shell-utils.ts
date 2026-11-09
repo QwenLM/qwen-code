@@ -717,8 +717,12 @@ function shellWordQuoteRemoval(
       i += 2;
       continue;
     }
-    if (ch === '$' && i + 1 < n && token[i + 1] === "'") {
-      let j = i + 2;
+    // `\`+newline is removed before the shell lexes, so `$\<newline>'…'` is
+    // still an ANSI-C word (`sh -c $\<newline>'cat > /etc/motd'` runs it).
+    let dollarAt = i + 1;
+    while (ch === '$' && token.startsWith('\\\n', dollarAt)) dollarAt += 2;
+    if (ch === '$' && dollarAt < n && token[dollarAt] === "'") {
+      let j = dollarAt + 1;
       let body = '';
       while (j < n) {
         if (token[j] === '\\' && j + 1 < n) {
@@ -862,9 +866,13 @@ export function stripShellWrapper(command: string): string {
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
-      const { value: innerCommand, quote } = stripSymmetricQuotes(
-        commandToken.token,
-      );
+      const { value, quote } = stripSymmetricQuotes(commandToken.token);
+      // The resolved word, not its spelling: an ANSI-C or locale payload
+      // (`$'cat > /etc/motd'`, `$"…"`) is the script bash runs, so the
+      // operators and paths inside it stay visible to the callers.
+      const removed = shellWordQuoteRemoval(commandToken.token);
+      const innerCommand =
+        removed !== null && !removed.hasExpansion ? removed.text : value;
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return markerRest.trimStart() || trimmed;
       }
@@ -1531,6 +1539,10 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
+  /** The `-c` payload word carries an expansion that cannot be resolved. */
+  wrapperPayloadUnresolved?: boolean;
+  /** Spawn this text; the analysis reads the decoded payload instead. */
+  spawnOverride?: string;
 }
 
 export interface NormalizedMonitorCommand {
@@ -1538,6 +1550,8 @@ export interface NormalizedMonitorCommand {
   safetyCommand: string;
   spawnCommand: string;
   strippedTrailingAmp: boolean;
+  /** See {@link ParsedMonitorShellWrapper.wrapperPayloadUnresolved}. */
+  wrapperPayloadUnresolved?: boolean;
 }
 
 function takeLeadingToken(
@@ -1815,16 +1829,44 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerQuote: '',
         };
       }
-      const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
+      const { value: stripped, quote } = stripSymmetricQuotes(
         commandToken.token,
       );
+      const removed = shellWordQuoteRemoval(commandToken.token);
+      const innerArgsSuffix = commandToken.rest.replace(/^[ \t]+/, '');
+      if (removed?.hasExpansion && quote === '') {
+        // The payload word cannot be resolved (`bash -c $X`): the shell runs a
+        // script the rules would have to guess, so hand the whole command back
+        // and let the cron gate refuse it instead of reading `$X` as the script.
+        return {
+          innerCommand: trimmed,
+          innerQuote: '',
+          wrapperPayloadUnresolved: true,
+        };
+      }
+      // Project the resolved word so an ANSI-C or locale payload reaches op
+      // extraction; it cannot be re-quoted for the spawn, so the command is
+      // passed through exactly as written.
+      if (
+        removed !== null &&
+        !removed.hasExpansion &&
+        removed.text !== stripped
+      ) {
+        return {
+          wrapperTokens,
+          innerCommand: removed.text,
+          innerQuote: '',
+          innerArgsSuffix,
+          spawnOverride: trimmed,
+        };
+      }
       return {
         wrapperTokens,
-        innerCommand,
-        innerQuote,
+        innerCommand: stripped,
+        innerQuote: quote,
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
-        innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
+        innerArgsSuffix,
       };
     }
 
@@ -1855,8 +1897,14 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    innerArgsSuffix,
+    wrapperPayloadUnresolved,
+    spawnOverride,
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -1879,7 +1927,7 @@ export function normalizeMonitorCommand(
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
-  const spawnCommand = wrapperTokens
+  const rebuiltSpawn = wrapperTokens
     ? [
         wrapperTokens.join(' '),
         innerQuote
@@ -1890,12 +1938,14 @@ export function normalizeMonitorCommand(
         .filter(Boolean)
         .join(' ')
     : analysisCommand;
+  const spawnCommand = spawnOverride ?? rebuiltSpawn;
 
   return {
     analysisCommand,
     safetyCommand,
     spawnCommand,
     strippedTrailingAmp,
+    ...(wrapperPayloadUnresolved ? { wrapperPayloadUnresolved: true } : {}),
   };
 }
 

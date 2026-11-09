@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import os from 'node:os';
 import {
   extractShellOperations,
   extractShellOperationsAcrossCommand,
@@ -871,5 +872,73 @@ describe('ANSI-C astral escape keeps bare aligned with current', () => {
     expect(
       extractShellOperationsAcrossCommand("(cat > $'\\x41')", '/repo'),
     ).toEqual([write('/repo/A')]);
+  });
+});
+
+describe('ANSI-C wrapper payloads', () => {
+  // The script word is the word the shell resolves: an ANSI-C, locale or
+  // continuation-split payload carries the operations that run, so the write
+  // inside it must reach the permission scan.
+  it.each([
+    ['an ANSI-C payload', "bash -c $'cat > /etc/motd'"],
+    ['a locale payload', 'sh -c $"cat > /etc/motd"'],
+    [
+      'a continuation-split payload',
+      String.raw`sh -c $\
+'cat > /etc/motd'`,
+    ],
+    [
+      'a terminator after a continuation',
+      String.raw`sh -c $\
+'--' 'cat > /etc/motd'`,
+    ],
+  ])('extracts the write inside %s', (_what, command) => {
+    expect(across(command)).toEqual([write('/etc/motd')]);
+  });
+
+  it('treats a decoded operator as data, not a redirect', () => {
+    // `$'\x3e'` decodes to `>` and is a `>` argument to `cat`: the read of
+    // the file named `>` plus the real write, not a phantom write to `>`.
+    expect(sorted(across(String.raw`cat $'\x3e' > /tmp/t`))).toEqual([
+      read('/repo/>'),
+      write('/tmp/t'),
+    ]);
+  });
+});
+
+describe('quoted and decoded tilde targets', () => {
+  // bash expands `~` only when it was typed unquoted. `cat > "~/x"` and
+  // `cat > $'\x7e/x'` both decode to `~/x` and write under a literal directory
+  // named `~`, so expanding them invented a path under $HOME that no rule can
+  // match (#16075 review, R2-8).
+  it.each([
+    ['a quoted tilde', 'cat > "~/x"'],
+    ['a single-quoted tilde', "cat > '~/x'"],
+    ['a backslash-escaped tilde', String.raw`cat > \~/x`],
+  ])('does not expand %s in a redirect target', (_what, command) => {
+    expect(across(command)).toEqual([write('/repo/~/x')]);
+  });
+
+  it('does not expand a decoded tilde', () => {
+    expect(across(String.raw`cat > $'\x7e/x'`)).toEqual([write('/repo/~/x')]);
+  });
+
+  it('still expands an unquoted tilde', () => {
+    const home = os.homedir().replace(/\\/g, '/');
+    expect(across('cat > ~/x')).toEqual([write(`${home}/x`)]);
+  });
+
+  it('keeps a decoded cd target uncertain', () => {
+    // `cd $'\x7e'` is the literal `~` directory and may not exist at all, so
+    // the rest of the segment runs in a cwd the analysis cannot know.
+    expect(across(String.raw`cd $'\x7e' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  it('keeps a quoted cd target uncertain', () => {
+    expect(across('cd "~/x" ; cat > y')).toEqual([
+      uncertainWrite('/repo/~/x/y'),
+    ]);
   });
 });
