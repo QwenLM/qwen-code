@@ -11,8 +11,11 @@ import {
 } from '../ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { McpDetailField, McpResourceDetail } from '../mcp/McpDetails';
+import { formatDuration } from '../messages/StatsMessage';
 import type {
+  ManagedDiagnosticContextUsage,
   ManagedDiagnosticResources,
+  ManagedDiagnosticStats,
   ManagedDiagnosticsProvider,
 } from './managed-agent-provider';
 import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
@@ -20,6 +23,11 @@ import {
   useManagedDiagnostics,
   type ManagedDiagnosticsTab,
 } from './use-managed-diagnostics';
+
+type ModelBucket = NonNullable<ManagedDiagnosticStats['statistics']>['totals'];
+type ContextCategory = keyof NonNullable<
+  ManagedDiagnosticContextUsage['context']
+>['breakdown'];
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -33,6 +41,16 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function CoverageReasons({ reasons }: { reasons: string[] }) {
   const t = useManagedDiagnosticsText();
   const labels = {
+    legacy_history: 'legacyHistory',
+    unclosed_turn: 'unclosedTurn',
+    unclosed_model_attempt: 'unclosedModel',
+    unclosed_maintenance: 'unclosedMaintenance',
+    observation_error: 'observationError',
+    missing_usage: 'missingUsage',
+    interrupted_observation: 'interruptedObservation',
+    counter_overflow: 'counterOverflow',
+    attribution_incomplete: 'attributionIncomplete',
+    details_truncated: 'detailsTruncated',
     resource_read_limit: 'resourceReadLimit',
     configuration_history_limit: 'configurationHistoryLimit',
     mcp_history_limit: 'mcpHistoryLimit',
@@ -53,6 +71,179 @@ function CoverageReasons({ reasons }: { reasons: string[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function ContextSnapshot({ value }: { value: ManagedDiagnosticContextUsage }) {
+  const t = useManagedDiagnosticsText();
+  const context = value.context;
+  if (!context) return <p>{t('not_recorded')}</p>;
+  return (
+    <div className="space-y-4">
+      {value.stale && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {t('stale')}
+        </p>
+      )}
+      <p className="text-sm text-muted-foreground">{t('estimated')}</p>
+      <div>
+        <Field label={t('model')}>{context.model}</Field>
+        <Field label={t('observedAt')}>
+          {context.observedAt > 0
+            ? new Date(context.observedAt).toLocaleString()
+            : t('unknown')}
+        </Field>
+        <Field label={t('input')}>
+          {context.inputTokens?.toLocaleString() ?? t('unknown')}
+        </Field>
+        <Field label={t('cached')}>
+          {context.cachedTokens?.toLocaleString() ?? t('unknown')}
+        </Field>
+        <Field label={t('window')}>
+          {context.contextWindowSize?.toLocaleString() ?? t('unknown')}
+        </Field>
+      </div>
+      <div>
+        {Object.entries(context.breakdown).map(([category, tokens]) => (
+          <Field key={category} label={t(category as ContextCategory)}>
+            {tokens.toLocaleString()}
+          </Field>
+        ))}
+      </div>
+      {context.details.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-sm font-medium">
+            {t('details')}
+          </summary>
+          {context.details.map((entry, index) => (
+            <Field
+              key={`${entry.category}:${entry.name}:${index}`}
+              label={`${t(entry.category)} · ${entry.name}`}
+            >
+              {entry.tokens.toLocaleString()}
+            </Field>
+          ))}
+        </details>
+      )}
+      {context.detailsTruncated && (
+        <p className="text-sm text-muted-foreground">{t('truncated')}</p>
+      )}
+    </div>
+  );
+}
+
+function ModelMetrics({ metrics }: { metrics: ModelBucket }) {
+  const t = useManagedDiagnosticsText();
+  const token = (key: keyof ModelBucket['tokens']) => {
+    const known = metrics.usageKnown[key];
+    if (metrics.requests.total > 0 && known === 0) return t('unknown');
+    const value = metrics.tokens[key].toLocaleString();
+    return known < metrics.requests.total
+      ? `${value} (${t('knownUsage')}: ${known}/${metrics.requests.total})`
+      : value;
+  };
+  return (
+    <div>
+      <Field label={t('requests')}>
+        {metrics.requests.total.toLocaleString()}
+      </Field>
+      {(['success', 'error', 'cancelled', 'interrupted'] as const).map(
+        (outcome) => (
+          <Field key={outcome} label={t(outcome)}>
+            {metrics.requests[outcome].toLocaleString()}
+          </Field>
+        ),
+      )}
+      <Field label={t('input')}>{token('prompt')}</Field>
+      <Field label={t('output')}>{token('candidates')}</Field>
+      <Field label={t('cached')}>{token('cached')}</Field>
+      <Field label={t('thoughts')}>{token('thoughts')}</Field>
+      <Field label={t('totalTokens')}>{token('total')}</Field>
+      <Field label={t('latency')}>{formatDuration(metrics.latencyMs)}</Field>
+      <Field label={t('ttft')}>
+        {metrics.timing.ttftCount
+          ? formatDuration(
+              metrics.timing.totalTtftMs / metrics.timing.ttftCount,
+            )
+          : t('unknown')}
+      </Field>
+      <Field label={t('speed')}>
+        {metrics.timing.totalGenerationMs > 0
+          ? (
+              (metrics.timing.throughputOutputTokens * 1000) /
+              metrics.timing.totalGenerationMs
+            ).toFixed(1)
+          : t('unknown')}
+      </Field>
+      <Field label={t('retries')}>
+        {metrics.backoffRetries.toLocaleString()}
+      </Field>
+      {(['http', 'transport', 'timeout', 'other'] as const).map((kind) => (
+        <Field key={kind} label={t(kind)}>
+          {metrics.failures[kind].toLocaleString()}
+        </Field>
+      ))}
+    </div>
+  );
+}
+
+function StatisticsSnapshot({ value }: { value: ManagedDiagnosticStats }) {
+  const t = useManagedDiagnosticsText();
+  const statistics = value.statistics;
+  if (!statistics) return <p>{t('not_recorded')}</p>;
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">{t('ownOnly')}</p>
+      <Field label={t('observedAt')}>
+        {statistics.observedAt > 0
+          ? new Date(statistics.observedAt).toLocaleString()
+          : t('unknown')}
+      </Field>
+      <ModelMetrics metrics={statistics.totals} />
+      {(['main', 'hook', 'compression'] as const).map((source) => (
+        <details key={source}>
+          <summary className="cursor-pointer font-medium">
+            {t(source)} · {statistics.sources[source].requests.total}
+          </summary>
+          <ModelMetrics metrics={statistics.sources[source]} />
+        </details>
+      ))}
+      {statistics.models.map((model) => (
+        <details key={model.key}>
+          <summary className="cursor-pointer font-medium">
+            {model.name ?? model.key.slice(0, 12)}
+            {model.nameTruncated ? '…' : ''}
+          </summary>
+          <ModelMetrics metrics={model.metrics} />
+        </details>
+      ))}
+      {statistics.overflow.requests.total > 0 && (
+        <details>
+          <summary className="cursor-pointer font-medium">
+            {t('otherModels')}
+          </summary>
+          <ModelMetrics metrics={statistics.overflow} />
+        </details>
+      )}
+      {statistics.recent.length > 0 && (
+        <details>
+          <summary className="cursor-pointer font-medium">
+            {t('recent')}
+          </summary>
+          {statistics.recent.map((call) => (
+            <Field
+              key={call.executionId}
+              label={`${t(call.source)} · ${t(call.outcome)} · ${new Date(call.at).toLocaleTimeString()}`}
+            >
+              {formatDuration(call.durationMs)}
+            </Field>
+          ))}
+        </details>
+      )}
+      {(statistics.modelBreakdownOmitted || statistics.samplesTruncated) && (
+        <p className="text-sm text-muted-foreground">{t('truncated')}</p>
+      )}
+    </div>
   );
 }
 
@@ -214,7 +405,7 @@ export function ManagedDiagnosticsPanel({
   onOpenChild?(sessionId: string): void;
 }) {
   const t = useManagedDiagnosticsText();
-  const [tab, setTab] = useState<ManagedDiagnosticsTab>('resources');
+  const [tab, setTab] = useState<ManagedDiagnosticsTab>('context');
   const read = useManagedDiagnostics({
     provider,
     sessionId,
@@ -249,11 +440,13 @@ export function ManagedDiagnosticsPanel({
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <TabsList className="max-w-full flex-wrap group-data-horizontal/tabs:h-auto">
-              {(['resources', 'agents'] as const).map((kind) => (
-                <TabsTrigger key={kind} value={kind} className="h-8">
-                  {t(kind)}
-                </TabsTrigger>
-              ))}
+              {(['context', 'statistics', 'resources', 'agents'] as const).map(
+                (kind) => (
+                  <TabsTrigger key={kind} value={kind} className="h-8">
+                    {t(kind)}
+                  </TabsTrigger>
+                ),
+              )}
             </TabsList>
             <Button
               variant="outline"
@@ -277,12 +470,27 @@ export function ManagedDiagnosticsPanel({
               </p>
             )}
             {snapshot && (
-              <CoverageReasons reasons={snapshot.value.coverageReasons} />
+              <CoverageReasons
+                reasons={[
+                  ...snapshot.value.coverageReasons,
+                  ...(snapshot.kind === 'statistics'
+                    ? (snapshot.value.statistics?.coverage.gaps ?? [])
+                    : []),
+                  ...(snapshot.kind === 'context' &&
+                  snapshot.value.context?.attributionComplete === false
+                    ? ['attribution_incomplete']
+                    : []),
+                ]}
+              />
             )}
             {snapshot?.value.availability === 'unsupported' ? (
               <p>{t('unsupported')}</p>
             ) : snapshot?.value.availability === 'not_recorded' ? (
               <p>{t('not_recorded')}</p>
+            ) : snapshot?.kind === 'context' ? (
+              <ContextSnapshot value={snapshot.value} />
+            ) : snapshot?.kind === 'statistics' ? (
+              <StatisticsSnapshot value={snapshot.value} />
             ) : snapshot?.kind === 'resources' ? (
               <ResourcesSnapshot value={snapshot.value} />
             ) : snapshot?.kind === 'agents' ? (

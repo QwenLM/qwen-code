@@ -41,15 +41,24 @@ class ManagedSessionReaderVersionTest {
         request.removeHeader(ManagedSessionReaderVersion.HEADER);
         request.addHeader(ManagedSessionReaderVersion.HEADER, "2");
         assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(2));
+        assertEquals(409, assertThrows(ManagedAgentException.class,
+                () -> new ManagedSessionReaderVersion().requireReadable(3)).getStatus());
+        request.removeHeader(ManagedSessionReaderVersion.HEADER);
+        request.addHeader(ManagedSessionReaderVersion.HEADER, "3");
+        assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(3));
+        request.removeHeader(ManagedSessionReaderVersion.HEADER);
+        request.addHeader(ManagedSessionReaderVersion.HEADER, "4");
+        assertEquals(400, assertThrows(ManagedAgentException.class,
+                () -> new ManagedSessionReaderVersion().requireReadable(3)).getStatus());
     }
 
     @Test
-    void publicAndInProcessReadersRetainBothFormats() {
-        assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(2));
+    void publicAndInProcessReadersSupportTheCurrentStorageFloor() {
+        assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(3));
         var request = new MockHttpServletRequest();
         request.setRequestURI("/v1/agents/agent/sessions/session");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
-        assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(2));
+        assertDoesNotThrow(() -> new ManagedSessionReaderVersion().requireReadable(3));
     }
 
     private static void assertUnsupported() {

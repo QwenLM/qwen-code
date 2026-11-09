@@ -398,7 +398,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
                     "isolationClass", scope.getIsolationClass(),
                     "capabilityDigest", scope.getCapabilityDigest()));
-            if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+            if (CsiFilesRetirementProfile.isProfile(scope)) {
                 savedScope.put("canonicalCwd", scope.getCanonicalCwd());
             }
             response.put("scope", savedScope);
