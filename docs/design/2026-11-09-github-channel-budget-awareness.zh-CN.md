@@ -54,7 +54,9 @@ watch 现有的 `isWatchFailFastError` 行为（在 403/429 处中止回合）�
 
 ### 3. 边沿触发记日志
 
-仿照 `watchReconcileBlockedCause`：一个 `watchBudgetCause: 'low' | undefined` 字段。在第一个低预算轮次（且仅在边沿）发出 `recordPollDegraded('watch_budget_low', { remaining, reserve })` 与一行节流的 stderr。当预算恢复到阈值之上（或窗口重置）时，发一次 `recordPollDegraded('watch_budget_recovered')` 并清除 cause。这让永久低预算条件不会灌满日志。
+仿照 `watchReconcileBlockedCause`：一个 `watchBudgetLow` 布尔闩。在第一个低预算轮次（且仅在边沿）发出 `recordPollDegraded('watch_budget_low', { remaining, reserve })` 与一行 stderr。当预算恢复到阈值之上（或窗口重置）时，发一次 `recordPollDegraded('watch_budget_recovered')` 并清除该闩。这让永久低预算条件不会灌满日志。
+
+当监视失去资格（订阅关闭、绑定刷新失败）时也要释放该闩，因为那条路径会整块跳过 watch。不释放的话，之后一次真实的饿死会被当作「已结束回合的重复」而抑制，时间线上关于预算的最后一句仍指着一个不再生效的跳过。该路径上只有在预算确实恢复时才声明 recovered：监视失去资格并不说明预算的任何情况，因此仍然低预算时静默释放该闩，由下一次合格且低预算的轮次记一条新的跳过。
 
 ## 关键设计决策
 

@@ -54,7 +54,9 @@ The watch's existing `isWatchFailFastError` behavior (abort the pass on a 403/42
 
 ### 3. Edge-triggered journaling
 
-Mirror `watchReconcileBlockedCause`: a `watchBudgetCause: 'low' | undefined` field. On the first low-budget poll (and only on the edge), emit `recordPollDegraded('watch_budget_low', { remaining, reserve })` and a throttled stderr line. When budget recovers above the threshold (or the window resets), emit `recordPollDegraded('watch_budget_recovered')` once and clear the cause. This keeps a permanent low-budget condition from flooding the journal.
+Mirror `watchReconcileBlockedCause`: a `watchBudgetLow` boolean latch. On the first low-budget poll (and only on the edge), emit `recordPollDegraded('watch_budget_low', { remaining, reserve })` and a stderr line. When budget recovers above the threshold (or the window resets), emit `recordPollDegraded('watch_budget_recovered')` once and clear the latch. This keeps a permanent low-budget condition from flooding the journal.
+
+The latch is also released when the watch stops being eligible (subscriptions off, binding refresh failing), because that path skips the whole watch block. Without the release, a later genuine starvation is suppressed as a repeat of an episode that already ended, and the timeline's last budget word names a skip no longer in effect. Recovery is claimed on that path only when the budget really recovered: the watch being ineligible says nothing about the budget, so a still-low budget releases the latch silently and the next eligible low poll journals a fresh skip.
 
 ## Key design decisions
 

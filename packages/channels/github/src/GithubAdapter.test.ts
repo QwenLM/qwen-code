@@ -18675,6 +18675,64 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(degradedRows('watch_budget_low')).toHaveLength(0);
       });
 
+      it('closes the low-budget episode when the watch loses eligibility', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          // Binding refresh starts failing, so the watch block is skipped
+          // wholesale; the budget recovers during that window.
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+      });
+
+      it('journals a fresh skip after an ineligible window, not a suppressed repeat', async () => {
+        // The latch must not survive the watch losing eligibility: otherwise
+        // the second genuine starvation is silently unjournalled and the
+        // timeline's last budget word stays on an episode that already ended.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode 1: skipped for low budget
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          // Still low while ineligible: no false recovery claim.
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+          expect(degradedRows('watch_budget_recovered')).toHaveLength(0);
+
+          // Watch returns, budget still low: a NEW skip must be journalled.
+          boundSessions.listPrBindings.mockResolvedValue({
+            bindings: [makeBinding()],
+            partial: false,
+          });
+          mockPull({ updated_at: '2026-07-02T12:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // episode 2
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(2);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
       it('uses a configured reserve other than the default', async () => {
         await initChannel(
           { ...watchConfig, prWatchBudgetReserve: 1000 },

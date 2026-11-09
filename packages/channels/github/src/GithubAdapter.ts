@@ -2605,6 +2605,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           );
         }
       }
+    } else if (this.watchBudgetLow) {
+      // The watch stopped being eligible (subscriptions off, binding refresh
+      // failing) while a low-budget skip was latched. Release the latch, or
+      // the next genuine starvation after the watch returns is suppressed as
+      // a repeat of an episode that already ended. Only claim recovery when
+      // the budget really recovered: the watch being ineligible says nothing
+      // about the budget, and a still-low budget must not be reported as
+      // recovered — the next eligible low poll journals a fresh skip instead.
+      this.watchBudgetLow = false;
+      if (!this.watchBudgetExhausted()) {
+        this.recordPollDegraded('watch_budget_recovered');
+      }
     }
 
     if (this.inboundRecoveryPending) {
