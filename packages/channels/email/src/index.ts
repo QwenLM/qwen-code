@@ -1,6 +1,13 @@
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 import { EmailChannel } from './email-channel.js';
-import { emailSettings } from './config.js';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_MAILBOX_PORT,
+  MAX_MESSAGE_BYTES,
+  MAX_POLL_INTERVAL_MS,
+  MAX_TEXT_LENGTH,
+  emailSettings,
+} from './config.js';
 
 export { EmailChannel };
 export { ManagedEmailAdapter } from './managed-email-adapter.js';
@@ -68,12 +75,14 @@ export const plugin: ChannelPlugin = {
         label: 'IMAP Port',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: MAX_MAILBOX_PORT,
       },
       {
         key: 'smtpPort',
         label: 'SMTP Port',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: MAX_MAILBOX_PORT,
       },
       {
         key: 'imapSecure',
@@ -112,6 +121,7 @@ export const plugin: ChannelPlugin = {
         label: 'Poll Interval (ms)',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: MAX_POLL_INTERVAL_MS,
         default: '60000',
       },
       {
@@ -119,6 +129,7 @@ export const plugin: ChannelPlugin = {
         label: 'Message Size Limit (bytes)',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: MAX_MESSAGE_BYTES,
         default: '10485760',
       },
       {
@@ -126,6 +137,7 @@ export const plugin: ChannelPlugin = {
         label: 'Attachment Size Limit (bytes)',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: MAX_ATTACHMENT_BYTES,
         default: '5242880',
       },
       {
@@ -133,6 +145,7 @@ export const plugin: ChannelPlugin = {
         label: 'Text Character Limit',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: MAX_TEXT_LENGTH,
         default: '32000',
       },
     ],

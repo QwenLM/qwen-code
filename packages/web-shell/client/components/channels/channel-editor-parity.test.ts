@@ -435,6 +435,37 @@ describe('Email parity (real plugin vs editor projection)', () => {
     expect(config['address']).toBe('renamed@example.com');
   });
 
+  it('declares upper bounds the editor enforces inline', () => {
+    // The runtime (email config.ts) rejects above these maxima; without a
+    // declared `maximum` the editor let them through and the save failed with
+    // only a banner. The literals pin the descriptor against the runtime so
+    // the two cannot drift apart.
+    const expected: Record<string, number> = {
+      imapPort: 65535,
+      smtpPort: 65535,
+      pollInterval: 86_400_000,
+      maxMessageBytes: 52_428_800,
+      maxAttachmentBytes: 52_428_800,
+      maxTextLength: 100_000,
+    };
+    for (const [key, max] of Object.entries(expected)) {
+      const field = emailManagement.fields.find((f) => f.key === key);
+      expect(field?.maximum).toBe(max);
+
+      const over = emailDraft();
+      over.values[key] = String(max + 1);
+      expect(validateChannelEditorDraft(emailDescriptor, over, [])[key]).toBe(
+        'outOfRange',
+      );
+
+      const at = emailDraft();
+      at.values[key] = String(max);
+      expect(
+        validateChannelEditorDraft(emailDescriptor, at, [])[key],
+      ).toBeUndefined();
+    }
+  });
+
   it.each(emailRequiredFields)(
     'agrees with the authority when %s is missing',
     (key) => {
