@@ -778,6 +778,7 @@ public class ManagedAgentProperties
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
         private boolean enabled;
         private boolean selfServiceEnabled;
+        private boolean runtimeSkillImportEnabled;
         private String artifactDirectory = "";
         private List<String> allowedActors = List.of();
 

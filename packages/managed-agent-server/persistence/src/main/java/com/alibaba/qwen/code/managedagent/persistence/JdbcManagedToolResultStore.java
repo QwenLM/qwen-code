@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.session.EventProjectionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -29,15 +30,15 @@ import java.util.Objects;
 import java.util.Optional;
 
 @Repository
-public class ManagedToolResultStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore {
+public class JdbcManagedToolResultStore
+        implements ManagedToolResultStore {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final EventProjectionStore sessions;
 
-    public ManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
+    public JdbcManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             EventProjectionStore sessions) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
@@ -76,7 +77,7 @@ public class ManagedToolResultStore
             List<Object[]> rows = new ArrayList<>();
             for (Source source : sources.values()) {
                 String executionKey =
-                        com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity(
+                        ManagedToolResultStore.identity(
                                         "execution",
                                         source.executionCallId().isEmpty()
                                                 ? "sequence:" + source.receiptSequence()
@@ -579,7 +580,7 @@ public class ManagedToolResultStore
     }
 
     static String scope(String tenant, String session) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity("s", tenant, session).substring(2);
+        return ManagedToolResultStore.identity("s", tenant, session).substring(2);
     }
 
     private static Source source(String tenant, String workspace, String session, long revision, JsonNode event) {
@@ -597,9 +598,9 @@ public class ManagedToolResultStore
         JsonNode resources = canonical(payload.path("resources"));
         String identityKey =
                 execution.isEmpty() ? "sequence:" + event.path("sequence").asText() : execution;
-        String id = com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity("result", "1", tenant, workspace, session, identityKey);
+        String id = ManagedToolResultStore.identity("result", "1", tenant, workspace, session, identityKey);
         String digest =
-                com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity(
+                ManagedToolResultStore.identity(
                                 "source",
                                 tenant,
                                 workspace,

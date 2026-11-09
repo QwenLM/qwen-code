@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -26,13 +27,13 @@ import java.util.Optional;
  */
 @Repository
 @Qualifier("managedAgentTransactionManager")
-public class ManagedAgentDefinitionStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore {
+public class JdbcManagedAgentDefinitionStore
+        implements ManagedAgentDefinitionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final RequestDigests digests;
 
-    public ManagedAgentDefinitionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, RequestDigests digests) {
+    public JdbcManagedAgentDefinitionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, RequestDigests digests) {
         this.jdbc = jdbc;
         this.digests = digests;
     }
@@ -72,7 +73,7 @@ public class ManagedAgentDefinitionStore
             return replay.get();
         }
         DefinitionRevision latest = latest(tenantId, agentId)
-                .orElseThrow(com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore::notFound);
+                .orElseThrow(ManagedAgentDefinitionStore::notFound);
         DefinitionRevision result = latest;
         if (!latest.digest().equals(digest)) {
             result = new DefinitionRevision(agentId, latest.revision() + 1,
@@ -93,7 +94,7 @@ public class ManagedAgentDefinitionStore
     public Map<String, Object> pinnedContent(SessionRecord session) {
         DefinitionRevision revision = find(session.tenantId(),
                 session.agentId(), Long.parseLong(session.agentRevision()))
-                .orElseThrow(com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore::notFound);
+                .orElseThrow(ManagedAgentDefinitionStore::notFound);
         Map<String, Object> content;
         try {
             content = JSON.readValue(revision.definitionJson(),
@@ -117,7 +118,7 @@ public class ManagedAgentDefinitionStore
                 + " definition_json, gmt_create FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ?"
                 + " ORDER BY revision DESC LIMIT 1",
-                ManagedAgentDefinitionStore::row, tenantId, agentId));
+                JdbcManagedAgentDefinitionStore::row, tenantId, agentId));
     }
 
     /**
@@ -132,7 +133,7 @@ public class ManagedAgentDefinitionStore
                 + " definition_json, gmt_create FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ?"
                 + " ORDER BY revision DESC LIMIT 1 FOR UPDATE",
-                ManagedAgentDefinitionStore::row, tenantId, agentId));
+                JdbcManagedAgentDefinitionStore::row, tenantId, agentId));
     }
 
     public Optional<DefinitionRevision> find(String tenantId, String agentId,
@@ -140,7 +141,7 @@ public class ManagedAgentDefinitionStore
         return first(jdbc.query("SELECT agent_id, revision, digest,"
                 + " definition_json, gmt_create FROM ma_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ? AND revision = ?",
-                ManagedAgentDefinitionStore::row, tenantId, agentId,
+                JdbcManagedAgentDefinitionStore::row, tenantId, agentId,
                 revision));
     }
 

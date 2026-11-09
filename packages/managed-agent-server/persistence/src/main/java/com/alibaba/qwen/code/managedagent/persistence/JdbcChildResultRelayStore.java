@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
@@ -33,8 +35,8 @@ import java.util.Set;
  * authorize re-execution, surviving worker restarts by construction.
  */
 @Repository
-public class ChildResultRelayStore
-        implements com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore {
+public class JdbcChildResultRelayStore
+        implements ChildResultRelayStore {
     /** One child run the delivery-pending index surfaced. */
 
     /** One relay ledger row. */
@@ -96,7 +98,7 @@ public class ChildResultRelayStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
-    public ChildResultRelayStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcChildResultRelayStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
     }
@@ -130,7 +132,7 @@ public class ChildResultRelayStore
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND record_id = ?",
                 (result, row) -> result.getString("delivery_state"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
+                ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -149,7 +151,7 @@ public class ChildResultRelayStore
                         + " AND tenant_id = ? AND domain = 'child_run' AND record_id = ?"
                         + " FOR UPDATE",
                 (result, row) -> result.getString("delivery_state"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId),
                 ManagedExtensionProjection.recordKey(parentSessionId, "child_run", childRunId),
                 tenantId, childRunId);
         return rows.isEmpty() ? null : rows.getFirst();
@@ -171,7 +173,7 @@ public class ChildResultRelayStore
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND record_id = ?",
                 (result, row) -> result.getString("record_resource_id"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
+                ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
         if (rows.isEmpty()) {
             return null;
         }
@@ -206,7 +208,7 @@ public class ChildResultRelayStore
                         + " AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND record_id = ?",
                 (result, row) -> result.getString("record_resource_id"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId,
+                ManagedSessionStore.sessionScopeKey(tenantId,
                         parentSessionId),
                 ManagedExtensionProjection.recordKey(parentSessionId,
                         "child_run", childRunId),
@@ -255,7 +257,7 @@ public class ChildResultRelayStore
     }
 
     public byte[] readResourceBytes(String tenantId, String sessionId, String resourceId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         return jdbc.query("SELECT inline_bytes FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
                         + " AND tenant_id = ? AND session_id = ? AND resource_id = ? AND storage_kind = 'MYSQL_INLINE'"
                         + " AND state = 'REFERENCED' AND deletion_operation_key IS NULL",
@@ -315,7 +317,7 @@ public class ChildResultRelayStore
                     + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
                     + " AND r.domain = 'session_message'"
                     + " AND r.delivery_state IN ('planned', 'accepting')"
-                    + " AND " + SessionMessageRelayStore.LEDGER_OWES_WORK;
+                    + " AND " + JdbcSessionMessageRelayStore.LEDGER_OWES_WORK;
 
     /**
      * H4d-b: the messages on one parent–child edge. `undelivered` counts
@@ -333,7 +335,7 @@ public class ChildResultRelayStore
         int toChild = 0;
         List<String> received = new ArrayList<>();
         for (Map<String, Object> row : jdbc.query(MESSAGES_SQL, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId)) {
+                ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId)) {
             JsonNode body = body(tenantId, parentSessionId, row);
             if (!"outbound".equals(body.path("direction").asText())
                     || !"to_child".equals(body.path("route").asText())
@@ -364,7 +366,7 @@ public class ChildResultRelayStore
             return 0;
         }
         Integer owed = jdbc.queryForObject(CHILD_OUTBOX_OWED_SQL,
-                Integer.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, childSessionId), tenantId, childSessionId);
+                Integer.class, ManagedSessionStore.sessionScopeKey(tenantId, childSessionId), tenantId, childSessionId);
         return owed == null ? 0 : owed;
     }
 
@@ -390,7 +392,7 @@ public class ChildResultRelayStore
                         + " ma_session_record"
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'session_message' LIMIT 1",
-                (result, row) -> result.getString("record_key"), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId,
+                (result, row) -> result.getString("record_key"), ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId,
                 sessionId).isEmpty();
     }
 
@@ -493,7 +495,7 @@ public class ChildResultRelayStore
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND record_id = ?",
                 (result, row) -> result.getString("record_resource_id"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
+                ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
         return rows.isEmpty() ? null
                 : readTree(readResource(tenantId, parentSessionId, rows.getFirst()));
     }
@@ -587,7 +589,7 @@ public class ChildResultRelayStore
                 (result, row) -> new LiveScope(
                         result.getString("record_id"),
                         result.getString("record_resource_id")),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId);
+                ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId);
     }
 
     /** Whether a Session currently holds the acceptance of one child run. */
@@ -598,7 +600,7 @@ public class ChildResultRelayStore
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_acceptance'"
                         + " AND record_id = ?",
-                (result, row) -> result.getString("record_key"), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId,
+                (result, row) -> result.getString("record_key"), ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId,
                 sessionId, childRunId).isEmpty();
     }
 
@@ -668,7 +670,7 @@ public class ChildResultRelayStore
                         throw new IllegalStateException("Child message body resource is unavailable or corrupt");
                     }
                     return new String(bytes, StandardCharsets.UTF_8);
-                }, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, turnId);
+                }, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, turnId);
         if (messages.isEmpty()) {
             return null;
         }
@@ -693,7 +695,7 @@ public class ChildResultRelayStore
     }
 
     private static String scope(String tenant, String parent) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, parent);
+        return ManagedSessionStore.sessionScopeKey(tenant, parent);
     }
 
     private static String operationKey(String kind, String tenant, String parent, String run) {
@@ -736,7 +738,7 @@ public class ChildResultRelayStore
     }
 
     private static JsonNode readBody(String value) {
-        return value == null ? MAPPER.createObjectNode() : ManagedToolResultStore.parse(value);
+        return value == null ? MAPPER.createObjectNode() : JdbcManagedToolResultStore.parse(value);
     }
 
     private static String resultBody(String child, String error) {

@@ -116,6 +116,20 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("Managed package preview is unavailable");
     }
 
+    public default boolean supportsRuntimeSkillImport() { return false; }
+
+    public default Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
     public default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         throw new UnsupportedOperationException("Extension management is unavailable");
     }
