@@ -477,19 +477,67 @@ describe('useSlashCommandProcessor', () => {
     },
   );
 
+  // Columns: label, name, kind, supplies an owning submission, that
+  // submission is still current, idle the action reads.
   it.each([
-    ['direct builtin restore', 'restore', CommandKind.BUILT_IN, false, false],
-    ['owned builtin restore', 'restore', CommandKind.BUILT_IN, true, true],
-    ['direct builtin logout', 'logout', CommandKind.BUILT_IN, false, false],
-    ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true],
-    ['same-name logout file command', 'logout', CommandKind.FILE, true, false],
-    ['same-name file command', 'restore', CommandKind.FILE, true, false],
-    ['unrelated builtin', 'other', CommandKind.BUILT_IN, true, false],
+    [
+      'direct builtin restore',
+      'restore',
+      CommandKind.BUILT_IN,
+      false,
+      true,
+      false,
+    ],
+    [
+      'owned builtin restore',
+      'restore',
+      CommandKind.BUILT_IN,
+      true,
+      true,
+      true,
+    ],
+    [
+      'direct builtin logout',
+      'logout',
+      CommandKind.BUILT_IN,
+      false,
+      true,
+      false,
+    ],
+    ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true, true],
+    [
+      'direct builtin branch',
+      'branch',
+      CommandKind.BUILT_IN,
+      false,
+      true,
+      false,
+    ],
+    ['owned builtin branch', 'branch', CommandKind.BUILT_IN, true, true, true],
+    ['owned builtin cd', 'cd', CommandKind.BUILT_IN, true, true, true],
+    ['owned builtin fork', 'fork', CommandKind.BUILT_IN, true, true, true],
+    [
+      'owned builtin, submission no longer current',
+      'branch',
+      CommandKind.BUILT_IN,
+      true,
+      false,
+      false,
+    ],
+    [
+      'same-name logout file command',
+      'logout',
+      CommandKind.FILE,
+      true,
+      true,
+      false,
+    ],
+    ['same-name file command', 'restore', CommandKind.FILE, true, true, false],
   ] as const)(
-    'scopes the restore/logout submission idle exception: %s',
-    async (_label, name, kind, suppliesOwner, expectedIdle) => {
+    'gives built-ins the idle state of their own submission: %s',
+    async (_label, name, kind, suppliesOwner, current, expectedIdle) => {
       const observedIdle = vi.fn();
-      const isCurrentSubmission = vi.fn(() => true);
+      const isCurrentSubmission = vi.fn(() => current);
       const command = createTestCommand(
         {
           name,
@@ -529,8 +577,11 @@ describe('useSlashCommandProcessor', () => {
         }
       });
       expect(observedIdle).toHaveBeenCalledExactlyOnceWith(expectedIdle);
-      if (expectedIdle) expect(isCurrentSubmission).toHaveBeenCalled();
-      else expect(isCurrentSubmission).not.toHaveBeenCalled();
+      if (suppliesOwner && kind === CommandKind.BUILT_IN) {
+        expect(isCurrentSubmission).toHaveBeenCalled();
+      } else {
+        expect(isCurrentSubmission).not.toHaveBeenCalled();
+      }
     },
   );
 

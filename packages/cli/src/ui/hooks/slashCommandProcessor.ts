@@ -1134,10 +1134,13 @@ export const useSlashCommandProcessor = (
                   return commandContext.ui.history;
                 },
                 addItem: addItemWithRecording,
+                // A typed command's own submission marks the session busy
+                // before its action runs, so the app-wide ref would refuse
+                // idle-only commands (/branch, /cd, /fork, ...) every time.
+                // A built-in dispatched by a submission that started idle
+                // reads idle while that submission stays current.
                 isIdleRef:
                   commandToExecute.kind === CommandKind.BUILT_IN &&
-                  (commandToExecute.name === 'restore' ||
-                    commandToExecute.name === 'logout') &&
                   isCurrentSubmission
                     ? {
                         get current() {

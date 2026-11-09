@@ -1632,6 +1632,73 @@ describe('useLlmStream', () => {
     },
   );
 
+  it('hands an idle-started slash dispatch a current submission while the app reads busy', async () => {
+    let releaseLog!: () => void;
+    const heldLog = new Promise<void>((resolve) => {
+      releaseLog = resolve;
+    });
+    const logMessage = vi.fn().mockReturnValue(heldLog);
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    const observed: Array<[StreamingState, boolean | undefined]> = [];
+    mockHandleSlashCommand.mockImplementation(async (...args: unknown[]) => {
+      const isCurrentSubmission = args[5] as (() => boolean) | undefined;
+      observed.push([result.current.streamingState, isCurrentSubmission?.()]);
+      return { type: 'handled' };
+    });
+    let request!: Promise<void>;
+    await act(async () => {
+      request = result.current.submitQuery('/branch');
+    });
+    // The submission has rendered as busy before the command runs.
+    await waitFor(() => expect(logMessage).toHaveBeenCalledOnce());
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+    await act(async () => {
+      releaseLog();
+      await request;
+    });
+    expect(observed).toEqual([[StreamingState.Responding, true]]);
+  });
+
+  it('stops treating a cancelled slash dispatch as current', async () => {
+    let releaseLog!: () => void;
+    const heldLog = new Promise<void>((resolve) => {
+      releaseLog = resolve;
+    });
+    const logMessage = vi.fn().mockReturnValue(heldLog);
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    let isCurrentSubmission: (() => boolean) | undefined;
+    let releaseCommand!: () => void;
+    const heldCommand = new Promise<void>((resolve) => {
+      releaseCommand = resolve;
+    });
+    mockHandleSlashCommand.mockImplementation(async (...args: unknown[]) => {
+      isCurrentSubmission = args[5] as () => boolean;
+      await heldCommand;
+      return { type: 'handled' };
+    });
+    let request!: Promise<void>;
+    await act(async () => {
+      request = result.current.submitQuery('/branch');
+    });
+    await act(async () => {
+      releaseLog();
+    });
+    await waitFor(() => expect(isCurrentSubmission).toBeDefined());
+    expect(isCurrentSubmission!()).toBe(true);
+    await act(async () => {
+      result.current.cancelOngoingRequest();
+    });
+    expect(isCurrentSubmission!()).toBe(false);
+    await act(async () => {
+      releaseCommand();
+      await request;
+    });
+  });
+
   it('rejects slash rewind admission while a model response is held', async () => {
     let releaseStream!: () => void;
     const heldStream = new Promise<void>((resolve) => {
