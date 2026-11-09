@@ -4077,3 +4077,338 @@ describe('GitHub repository event filter', () => {
     expect(request.config['repoFilter']).toEqual(['Owner/Parked']);
   });
 });
+
+/**
+ * Email's access shape as the daemon ships it: the plugin declares
+ * `privatePolicy` without `pairing`, and the registry injects `groupPolicy`
+ * because the plugin does not declare it. The adapter builds every envelope
+ * with `isGroup: false`, so the injected group controls must not reach the
+ * operator.
+ *
+ * The credential labels are deliberately the raw config keys and the
+ * descriptions are deliberately not the final copy. `fieldLabel` and
+ * `fieldDescription` fall back to the descriptor, so a fixture carrying the
+ * finished English text would pass with the whole i18n layer deleted. The real
+ * plugin's own labels are pinned at the producer, by
+ * `packages/cli/src/commands/channel/email-baseline.test.ts`.
+ */
+const EMAIL: DaemonChannelTypeDescriptor = {
+  type: 'email',
+  displayName: 'Email',
+  manageable: true,
+  fields: [
+    { key: 'address', label: 'address', kind: 'string', required: true },
+    { key: 'imapHost', label: 'imapHost', kind: 'string', required: true },
+    {
+      key: 'imapPassword',
+      label: 'imapPassword',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'smtpPassword',
+      label: 'smtpPassword',
+      kind: 'secret',
+      required: true,
+    },
+    {
+      key: 'imapSecure',
+      label: 'IMAP Implicit TLS',
+      kind: 'boolean',
+      default: 'true',
+      description: 'Descriptor description',
+    },
+    {
+      key: 'proactiveRecipients',
+      label: 'Proactive Recipients',
+      kind: 'string-list',
+      description: 'Descriptor description',
+    },
+    // The rest of the plugin's field table, so the locale sweep below renders
+    // every key FIELD_LABEL_KEYS.email maps rather than only the six the
+    // targeted assertions name.
+    { key: 'imapUser', label: 'imapUser', kind: 'string', required: true },
+    { key: 'smtpHost', label: 'smtpHost', kind: 'string', required: true },
+    { key: 'smtpUser', label: 'smtpUser', kind: 'string', required: true },
+    { key: 'folder', label: 'IMAP Folder', kind: 'string', default: 'INBOX' },
+    {
+      key: 'imapPort',
+      label: 'IMAP Port',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'smtpPort',
+      label: 'SMTP Port',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'smtpSecure',
+      label: 'SMTP Implicit TLS',
+      kind: 'boolean',
+      default: 'true',
+      description: 'Descriptor description',
+    },
+    {
+      key: 'pollInterval',
+      label: 'Poll Interval (ms)',
+      kind: 'number',
+      exclusiveMinimum: 0,
+      default: '60000',
+    },
+    {
+      key: 'maxMessageBytes',
+      label: 'Message Size Limit (bytes)',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'maxAttachmentBytes',
+      label: 'Attachment Size Limit (bytes)',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'maxTextLength',
+      label: 'Text Character Limit',
+      kind: 'number',
+      exclusiveMinimum: 0,
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    { key: 'allowedUsers', label: 'Allowed Users', kind: 'string-list' },
+    { key: 'operators', label: 'Session Operators', kind: 'string-list' },
+  ],
+};
+
+const EMAIL_INSTANCE: DaemonChannelInstanceSnapshot = {
+  name: 'agent-mail',
+  config: {
+    type: 'email',
+    address: 'agent@example.com',
+    imapHost: 'imap.example.com',
+    imapUser: 'agent@example.com',
+    smtpHost: 'smtp.example.com',
+    smtpUser: 'agent@example.com',
+    privatePolicy: 'allowlist',
+  },
+  secrets: {
+    imapPassword: { present: true, source: 'environment' },
+    smtpPassword: { present: true, source: 'environment' },
+  },
+  startsWithServe: false,
+  runtime: { state: 'stopped' },
+};
+
+describe('Email channel editor', () => {
+  function labelTexts(): string[] {
+    return Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+  }
+
+  it('renders readable English labels instead of raw config keys', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Mailbox Address'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP Host'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP Password'))).toBe(true);
+    expect(labels.some((t) => t.includes('SMTP Password'))).toBe(true);
+    // The descriptor used to carry `label: key` for all seven required fields.
+    for (const raw of ['imapHost', 'imapPassword', 'smtpPassword']) {
+      expect(labels.some((t) => t.includes(raw))).toBe(false);
+    }
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(descriptionOf(fieldByLabel('IMAP Implicit TLS'))).toContain(
+      'STARTTLS is mandatory',
+    );
+    expect(descriptionOf(fieldByLabel('Proactive Recipients'))).toContain(
+      'Empty disables proactive email',
+    );
+  });
+
+  it('renders readable zh-CN labels instead of raw config keys', async () => {
+    await renderDialog({
+      descriptor: EMAIL,
+      instance: EMAIL_INSTANCE,
+      language: 'zh-CN',
+    });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('邮箱地址'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP 服务器'))).toBe(true);
+    expect(labels.some((t) => t.includes('IMAP 密码'))).toBe(true);
+    expect(labels.some((t) => t.includes('SMTP 密码'))).toBe(true);
+    for (const raw of ['imapHost', 'imapPassword', 'smtpPassword']) {
+      expect(labels.some((t) => t.includes(raw))).toBe(false);
+    }
+    // A key present in only one locale map falls through to the descriptor, so
+    // pin the translated description as well as the label.
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(descriptionOf(fieldByLabel('IMAP 隐式 TLS'))).toContain(
+      '关闭后必须使用 STARTTLS',
+    );
+    expect(descriptionOf(fieldByLabel('主动投递收件人'))).toContain(
+      '留空则禁用主动投递邮件',
+    );
+  });
+
+  it('renders every mapped Email label from the catalog in both locales', async () => {
+    // A missing catalog entry makes fieldLabel return the raw i18n key, which
+    // the operator would then see as the field's label. The targeted
+    // assertions above name only six fields; this sweeps the whole map.
+    for (const [language, advancedLabel] of [
+      ['en', 'Advanced settings'],
+      ['zh-CN', '高级设置'],
+    ] as const) {
+      await renderDialog({
+        descriptor: EMAIL,
+        instance: EMAIL_INSTANCE,
+        language,
+      });
+      await expandAdvancedSettings(advancedLabel);
+
+      const labels = labelTexts();
+      expect(
+        labels.filter((text) => text.includes('channels.editor.field.')),
+      ).toEqual([]);
+      // Guard against a vacuous sweep: the fields must actually have rendered.
+      expect(labels.length).toBeGreaterThan(15);
+    }
+  });
+
+  it('files the mailbox endpoints under Connection, not Credentials', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    expect(sectionHeadingOf(fieldByLabel('IMAP Host'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('SMTP Host'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('IMAP Implicit TLS'))).toBe(
+      'Connection',
+    );
+    expect(sectionHeadingOf(fieldByLabel('Mailbox Address'))).toBe(
+      'Credentials',
+    );
+  });
+
+  it('offers no group control for a private-only channel', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Group policy'))).toBe(false);
+    expect(labels.some((t) => t.includes('Allowed group IDs'))).toBe(false);
+    expect(labels.some((t) => t.includes('Who can talk in groups'))).toBe(
+      false,
+    );
+    // Direct-message access is still editable: only the group axis is inert.
+    expect(labels.some((t) => t.includes('Direct message policy'))).toBe(true);
+    expect(labels.some((t) => t.includes('Allowed user IDs'))).toBe(true);
+    expect(labels.some((t) => t.includes('Session operators'))).toBe(true);
+  });
+
+  it('does not resurrect group controls from a stored pairing policy', async () => {
+    await renderDialog({
+      descriptor: EMAIL,
+      instance: {
+        ...EMAIL_INSTANCE,
+        config: {
+          ...EMAIL_INSTANCE.config,
+          groupPolicy: 'pairing',
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        },
+      },
+    });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Group policy'))).toBe(false);
+    expect(labels.some((t) => t.includes('Allowed group IDs'))).toBe(false);
+    expect(document.body.textContent ?? '').not.toContain('Pairing requests');
+  });
+
+  it('offers exactly the three private policies the adapter supports', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const trigger = fieldByLabel('Direct message policy');
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const options = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).map((option) => option.textContent?.trim());
+    expect(options).toEqual(['Disabled', 'Allowlist', 'Open']);
+  });
+
+  it('renders proactive recipients as a comma-separated text input', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+
+    const input = inputByLabel('Proactive Recipients');
+    expect(input).not.toBeNull();
+    expect(input!.type).toBe('text');
+    expect(
+      document.querySelectorAll(
+        '[role="group"][aria-label="Proactive Recipients"]',
+      ).length,
+    ).toBe(0);
+  });
+
+  it('saves without writing a group policy', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: EMAIL,
+      instance: EMAIL_INSTANCE,
+      onSave,
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0]![1] as {
+      config: Record<string, unknown>;
+      secrets: Record<string, { operation: string }>;
+    };
+    expect(request.config).not.toHaveProperty('groupPolicy');
+    expect(request.config).not.toHaveProperty('groups');
+    expect(request.config['privatePolicy']).toBe('allowlist');
+    expect(request.secrets['imapPassword']).toEqual({ operation: 'preserve' });
+    expect(request.secrets['smtpPassword']).toEqual({ operation: 'preserve' });
+  });
+
+  it('leaves the group controls on a group-capable sibling', async () => {
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS });
+
+    const labels = labelTexts();
+    expect(labels.some((t) => t.includes('Group policy'))).toBe(true);
+  });
+});

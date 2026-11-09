@@ -24,19 +24,32 @@ const required = [
   'smtpHost',
   'smtpUser',
   'smtpPassword',
-];
+] as const;
+
+// Keyed by the tuple so adding a required field without a readable label is a
+// compile error: the descriptor is public, and a raw key would reach any client
+// that renders `label` without its own translation table.
+const requiredLabels: Record<(typeof required)[number], string> = {
+  address: 'Mailbox Address',
+  imapHost: 'IMAP Host',
+  imapUser: 'IMAP Username',
+  imapPassword: 'IMAP Password',
+  smtpHost: 'SMTP Host',
+  smtpUser: 'SMTP Username',
+  smtpPassword: 'SMTP Password',
+};
 
 export const plugin: ChannelPlugin = {
   channelType: 'email',
   displayName: 'Email',
   defaultSessionScope: 'chat_thread',
-  requiredConfigFields: required,
+  requiredConfigFields: [...required],
   envResolvableConfigFields: [...required, 'folder'],
   management: {
     fields: [
       ...required.map((key) => ({
         key,
-        label: key,
+        label: requiredLabels[key],
         kind: key.endsWith('Password')
           ? ('secret' as const)
           : ('string' as const),

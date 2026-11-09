@@ -74,6 +74,7 @@ import {
   hasDescriptorGroupPolicy,
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
+  GROUP_ONLY_FIELD_KEYS,
   PRIVATE_ONLY_FIELD_KEYS,
   invalidRepositoryGroupEntries,
   isRepoFilterActive,
@@ -90,6 +91,7 @@ import {
   type ChannelGroupSenders,
 } from './channel-editor-state';
 import {
+  isPrivateOnlyChannelType,
   isRepositoryOnlyChannelType,
   PLATFORM_MARKS,
 } from './channel-platform';
@@ -135,6 +137,25 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     action_prompt_template:
       'channels.editor.field.gitlab.action_prompt_template',
   },
+  email: {
+    address: 'channels.editor.field.email.address',
+    imapHost: 'channels.editor.field.email.imapHost',
+    imapUser: 'channels.editor.field.email.imapUser',
+    imapPassword: 'channels.editor.field.email.imapPassword',
+    smtpHost: 'channels.editor.field.email.smtpHost',
+    smtpUser: 'channels.editor.field.email.smtpUser',
+    smtpPassword: 'channels.editor.field.email.smtpPassword',
+    folder: 'channels.editor.field.email.folder',
+    imapPort: 'channels.editor.field.email.imapPort',
+    smtpPort: 'channels.editor.field.email.smtpPort',
+    imapSecure: 'channels.editor.field.email.imapSecure',
+    smtpSecure: 'channels.editor.field.email.smtpSecure',
+    proactiveRecipients: 'channels.editor.field.email.proactiveRecipients',
+    pollInterval: 'channels.editor.field.email.pollInterval',
+    maxMessageBytes: 'channels.editor.field.email.maxMessageBytes',
+    maxAttachmentBytes: 'channels.editor.field.email.maxAttachmentBytes',
+    maxTextLength: 'channels.editor.field.email.maxTextLength',
+  },
 };
 
 const SHARED_ACCESS_FIELD_KEYS = new Set([
@@ -178,7 +199,20 @@ const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.repoFilter': 'owner/repo, owner/repo',
 };
 
-const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl', 'pollInterval']);
+// Email's endpoint and TLS keys are declared by no other channel, so listing
+// them here moves only Email's fields: they decide where the mailbox
+// credentials are sent, which is Connection rather than Credentials.
+const CONNECTION_FIELD_KEYS = new Set([
+  'baseUrl',
+  'wsUrl',
+  'pollInterval',
+  'imapHost',
+  'imapPort',
+  'imapSecure',
+  'smtpHost',
+  'smtpPort',
+  'smtpSecure',
+]);
 /**
  * Rarely changed tuning, collapsed into one disclosure panel. Primary
  * endpoints stay out: `wsUrl` (WeCom) and `baseUrl` (GitHub Enterprise /
@@ -1675,6 +1709,7 @@ export function ChannelEditorDialog({
               const repositoryOnly = isRepositoryOnlyChannelType(
                 descriptor.type,
               );
+              const privateOnly = isPrivateOnlyChannelType(descriptor.type);
               const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = repositoryOnly
                 ? ''
@@ -1684,9 +1719,15 @@ export function ChannelEditorDialog({
               const showRadioGroup = !descriptorPolicy && !repositoryOnly;
               const descriptorGroupPolicy =
                 hasDescriptorGroupPolicy(descriptor);
-              const effectiveGroupPolicy = descriptorGroupPolicy
-                ? String(draft.values['groupPolicy'] ?? '')
-                : String(instance?.config.groupPolicy ?? '');
+              // Mirror of the repository-only branch above. This is the single
+              // carrier for the private-only rule: it covers the descriptor and
+              // the stored config alike, so a stored group policy cannot
+              // resurrect controls this channel cannot use.
+              const effectiveGroupPolicy = privateOnly
+                ? ''
+                : descriptorGroupPolicy
+                  ? String(draft.values['groupPolicy'] ?? '')
+                  : String(instance?.config.groupPolicy ?? '');
               const showPairing =
                 effectivePolicy === 'pairing' ||
                 effectiveGroupPolicy === 'pairing';
@@ -1694,6 +1735,7 @@ export function ChannelEditorDialog({
                 (field) =>
                   field.key !== 'operators' &&
                   !(repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) &&
+                  !(privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) &&
                   (field.key !== 'allowedUsers' ||
                     effectivePolicy === 'allowlist' ||
                     effectivePolicy === 'pairing'),
