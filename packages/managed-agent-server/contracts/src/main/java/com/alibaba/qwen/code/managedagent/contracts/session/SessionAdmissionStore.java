@@ -117,6 +117,17 @@ public interface SessionAdmissionStore {
     }
 
     /**
+     * The raw-actor twin of {@link #requireSessionReadAuthority}: the caller is
+     * the filter-admitted actor string, so no byte-bounded principal is built
+     * for a legacy Session that has no ownership row to match (R7-1).
+     */
+    public default void requireSessionReadAuthority(String tenantId,
+            String sessionId, String actorId) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
+    }
+
+    /**
      * H4b: creates a child Session under its parent's exact binding,
      * stamping the lineage in the same transaction. The idempotency key
      * derives from the parent's committed launch, so a replay returns the

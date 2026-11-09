@@ -365,7 +365,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public WebShellSessionModels queryWebShellSessionModels(
             SessionPrincipal principal, String sessionId) {
-        requireModelActor(principal == null ? null : principal.userId());
+        if (principal == null) {
+            // Explicit rejection: SpotBugs cannot model that the tolerant
+            // argument below throws, and every later line dereferences it.
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required");
+        }
+        requireModelActor(principal.userId());
         SessionRecord session = requireReadableSession(principal, sessionId);
         return webShellSessionModels(principal.tenantId(), session);
     }
@@ -394,7 +400,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public WebShellModelChangeResult changeWebShellSessionModel(
             SessionPrincipal principal, String sessionId, String key,
             String modelId, long expectedRevision) {
-        requireModelActor(principal == null ? null : principal.userId());
+        if (principal == null) {
+            // Explicit rejection: SpotBugs cannot model that the tolerant
+            // argument below throws, and every later line dereferences it.
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required");
+        }
+        requireModelActor(principal.userId());
         // The store enforces the read grant immediately before its receipt
         // replay; a visibility pre-read here would tombstone-fence retries of
         // an already-recorded change and answer 404 instead of replaying.
@@ -414,7 +426,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public WebShellSessionApproval queryWebShellSessionApproval(
             SessionPrincipal principal, String sessionId) {
-        requireModelActor(principal == null ? null : principal.userId());
+        if (principal == null) {
+            // Explicit rejection: SpotBugs cannot model that the tolerant
+            // argument below throws, and every later line dereferences it.
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required");
+        }
+        requireModelActor(principal.userId());
         var summary = getWebShellSession(principal, sessionId);
         return webShellSessionApproval(principal.tenantId(), summary);
     }
@@ -487,7 +505,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             SessionPrincipal principal, String sessionId, String key, String mode,
             long expectedRevision, Boolean planMode,
             Map<?, ?> requestedRules) {
-        requireModelActor(principal == null ? null : principal.userId());
+        if (principal == null) {
+            // Explicit rejection: SpotBugs cannot model that the tolerant
+            // argument below throws, and every later line dereferences it.
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required");
+        }
+        requireModelActor(principal.userId());
         // The store enforces the read grant immediately before its receipt
         // replay; a visibility pre-read here would tombstone-fence retries of
         // an already-recorded change and answer 404 instead of replaying.
@@ -2670,10 +2694,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     void requireReadGrant(SessionRecord session, String actorId) {
-        // The bound arm checks the raw actor: the filter bounds it in code
-        // points while a principal bounds bytes, so constructing one here
-        // would 400 a long non-ASCII actor this Workspace path served
-        // before. Only the unbound ownership arm needs a principal.
+        // Both arms compare the raw actor: the filter bounds it in code points
+        // while a principal bounds bytes, so constructing one here would 400 a
+        // long non-ASCII actor these paths served before (R7-1). The store
+        // defers construction until a row actually has to be matched.
         if (session.workspace() != null) {
             if (!workspaces.canRead(session.tenantId(), actorId,
                     session.workspace().getWorkspaceId())) {
@@ -2682,8 +2706,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             }
             return;
         }
-        requireReadGrant(session,
-                principalOf(session.tenantId(), actorId));
+        store.requireSessionReadAuthority(session.tenantId(),
+                session.sessionId(), actorId);
     }
 
     void requireReadGrant(SessionRecord session,
@@ -2894,6 +2918,15 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             // gating on the recorded Session's ownership. A caller that cannot
             // read the recorded Session gets 404; the owner's own collision
             // falls through to idempotency_conflict.
+            // Mirror the in-store rule for a recorded Session bound to a
+            // Workspace: requireSessionAuthority passes for it, so without this
+            // arm the answer would be 409 here and 404 once the receipt lands.
+            if (store.findSession(requested.tenantId(), command.sessionId())
+                    .map(recorded -> recorded.workspace() != null)
+                    .orElse(false)) {
+                throw new ManagedAgentException(404,
+                        "session_not_found", "The Session was not found.");
+            }
             store.requireSessionAuthority(requested.tenantId(),
                     command.sessionId(), principal == null
                             ? principalOf(requested.tenantId(), rawActorId)

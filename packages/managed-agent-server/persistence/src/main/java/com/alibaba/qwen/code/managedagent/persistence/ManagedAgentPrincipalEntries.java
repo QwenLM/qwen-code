@@ -69,6 +69,11 @@ class ManagedAgentPrincipalEntries {
         sessionAdmissions.requireSessionReadAuthority(tenantId, sessionId, principal);
     }
 
+    public void requireSessionReadAuthority(String tenantId, String sessionId,
+            String actorId) {
+        sessionAdmissions.requireSessionReadAuthority(tenantId, sessionId, actorId);
+    }
+
     public boolean ownsSession(String tenantId, String sessionId,
             SessionPrincipal principal) {
         return sessionAdmissions.ownsSession(tenantId, sessionId, principal);

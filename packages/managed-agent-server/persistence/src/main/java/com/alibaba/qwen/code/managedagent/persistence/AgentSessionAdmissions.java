@@ -199,6 +199,13 @@ final class AgentSessionAdmissions {
                 principal);
     }
 
+    /** The raw-actor twin: no byte-bounded principal is constructed (R7-1). */
+    void requireSessionReadAuthority(String tenantId, String sessionId,
+            String actorId) {
+        ManagedSessionPrincipal.requireReadAuthority(jdbc, tenantId, sessionId,
+                actorId);
+    }
+
     Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
         String tenantId = command.tenantId();
         String actorId = command.actorId();

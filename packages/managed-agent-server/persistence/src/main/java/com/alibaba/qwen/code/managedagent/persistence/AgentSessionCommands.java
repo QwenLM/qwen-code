@@ -558,6 +558,11 @@ final class AgentSessionCommands {
                 throw new ManagedAgentException(409, "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
+            // The pre-read arm answers a foreign live key with 404; the race
+            // winner must reach the same gate, or the answer would depend on
+            // whether the receipt was visible before this snapshot (R9-2).
+            requireMutationReceiptGrant(tenantId, session, winner, actorId,
+                    principal);
             requireSameMutation(winner, requestDigest, sessionId);
             return new SessionMutationCommand(sessionId, winner.status(), true);
         }

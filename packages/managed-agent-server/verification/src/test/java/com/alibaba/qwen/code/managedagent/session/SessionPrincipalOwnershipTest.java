@@ -90,6 +90,49 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void legacyActorlessSessionStaysReadableByAnActorThePrincipalBoundCannotRepresent() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            // `TenantContextFilter` admits up to 512 code points, while a
+            // principal caps each component at 512 bytes: 512 CJK characters
+            // cannot be represented as one (R7-1). A legacy Session with no
+            // ownership row must stay readable for that actor.
+            String legacy = f.service.createSession("tenant", null,
+                    "legacy", "qwen-code", null, "shared", Map.of(), List.of())
+                    .sessionId();
+            String longActor = "界".repeat(512);
+            assertThat(f.service.getPublicSession("tenant", longActor, legacy).id())
+                    .isEqualTo(legacy);
+            // The bound side keeps its existing behaviour: the same actor
+            // cannot borrow a row-bearing Session.
+            String owned = f.create(OWNER, "owned");
+            denied(() -> f.service.getPublicSession("tenant", longActor, owned));
+            assertThat(f.service.getPublicSession(OWNER, owned).id())
+                    .isEqualTo(owned);
+        });
+    }
+
+    @Test
+    void modelAndApprovalOverloadsRejectANullPrincipalExplicitly() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String owned = f.create(OWNER, "owned");
+            for (var call : List.<org.junit.jupiter.api.function.Executable>of(
+                    () -> f.service.queryWebShellSessionModels(null, owned),
+                    () -> f.service.queryWebShellSessionApproval(null, owned),
+                    () -> f.service.changeWebShellSessionModel(null, owned,
+                            "null-model", "model-a", 1L),
+                    () -> f.service.changeWebShellSessionApproval(null, owned,
+                            "null-approval", "default", 1L, null, Map.of()))) {
+                assertThatThrownBy(call::execute)
+                        .isInstanceOfSatisfying(ManagedAgentException.class,
+                                error -> assertThat(error.getCode())
+                                        .isEqualTo("actor_required"));
+            }
+        });
+    }
+
+    @Test
     void storeRejectsPrincipalFromAnotherTenantBeforeReadingOrCreatingOwnership() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {

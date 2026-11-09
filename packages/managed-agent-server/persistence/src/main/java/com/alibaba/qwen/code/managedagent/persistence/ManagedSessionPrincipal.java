@@ -159,6 +159,39 @@ public final class ManagedSessionPrincipal {
                     principal);
             return;
         }
+        AuthorityRow authority = fetchAuthority(jdbc, tenantId, sessionId);
+        if (authority == null) {
+            return;
+        }
+        requireFetched(tenantId, authority.row(), authority.principalCreated(),
+                principal);
+    }
+
+    /**
+     * The raw-actor twin of {@link #requireReadAuthority} (R7-1): the caller is
+     * the filter-admitted actor string, bounded in code points rather than by
+     * the principal's byte budget. Construction of a principal is deferred
+     * until a row actually has to be matched, and only a row recorded without
+     * an actor present can name a raw actor.
+     */
+    public static void requireReadAuthority(JdbcTemplate jdbc, String tenantId,
+            String sessionId, String actorId) {
+        ReadAuthority stashed = takeReadAuthority(tenantId, sessionId);
+        if (stashed != null) {
+            requireFetchedRawActor(stashed.row(), stashed.principalCreated(),
+                    actorId);
+            return;
+        }
+        AuthorityRow authority = fetchAuthority(jdbc, tenantId, sessionId);
+        if (authority == null) {
+            return;
+        }
+        requireFetchedRawActor(authority.row(), authority.principalCreated(),
+                actorId);
+    }
+
+    private static AuthorityRow fetchAuthority(JdbcTemplate jdbc,
+            String tenantId, String sessionId) {
         // One statement for the whole authority question (R6-6): the row
         // left-joined with the legacy-creation mark. A present row is the
         // sole authority; only a row-less Session consults the mark, so the
@@ -188,12 +221,25 @@ public final class ManagedSessionPrincipal {
                                         result.getString(4)),
                         result.getInt(5)),
                 tenantId, sessionId, tenantId, sessionId);
-        if (rows.isEmpty()) {
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    private static void requireFetchedRawActor(Row row, int principalCreated,
+            String actorId) {
+        if (row != null) {
+            // A raw actor carries no encoded subject, so it can only name a row
+            // written without an actor present.
+            if (row.version() != VERSION || row.actorPresent()
+                    || !Objects.equals(row.userId(), actorId)) {
+                throw new ManagedAgentException(404,
+                        "session_not_found", "The Session was not found.");
+            }
             return;
         }
-        AuthorityRow authority = rows.getFirst();
-        requireFetched(tenantId, authority.row(), authority.principalCreated(),
-                principal);
+        if (principalCreated != 0) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
     }
 
     private static void requireFetched(String tenantId, Row row,
