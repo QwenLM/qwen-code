@@ -754,6 +754,13 @@ export interface WebShellCustomization {
   compactThinking?: boolean;
   hostOwnsEditDiffPreview?: boolean;
   /**
+   * The embedding host claims right-panel open requests and may render artifact
+   * previews itself. Managed-storage artifacts have no content in the default
+   * panel (metadata only), so the card only promises Preview for them when this
+   * is set; otherwise it keeps the generic Open.
+   */
+  hostOwnsArtifactPreview?: boolean;
+  /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving
    * just the prompt and the final answer. The active turn always stays

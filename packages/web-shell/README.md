@@ -18,7 +18,8 @@ New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建
 非 React 宿主可使用本地 ESM 入口：
 
 ```ts
-import { renderManagedAgentWebShell } from './managed-host/index.js';
+// 相对于产物目录根（dist-managed-host/）；该目录已整体提供给宿主。
+import { renderManagedAgentWebShell } from './index.js';
 
 const shell = renderManagedAgentWebShell(container, {
   managedAgentProvider: provider,
@@ -30,11 +31,16 @@ const shell = renderManagedAgentWebShell(container, {
 // update 接受完整的新 props；宿主销毁时调用 shell.unmount()。
 ```
 
-在包内执行 `npx vite build --config vite.lib.config.ts --mode managed-host`，输出
-`dist/managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
+在包内执行 `npm run build:managed-host`，输出
+`dist-managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
 复用原有 scoped CSS 注入，无需单独 CSS 或 import map。需提供整个输出目录。
-该入口仅随源码提供：没有接入 `build`、`exports` 和 `files`，不随 npm 包发布（
-`dist/types/managed-host.d.ts` 也在发布产物之外），需要时按上述命令自行构建。
+该模式**不在**包的 `build` 里，避免给每次本地构建和全新克隆的 `prepare` 增加一次完整
+打包；防腐坏由独立 CI 任务 `Web Shell Managed Host Build` 承担，只在入口、构建配置或
+锁文件变化时触发。产物目录在 `dist/` 之外，普通应用构建清空 `dist/` 不会删掉它。
+入口仍未接入 `exports` 和 `files`，不随 npm 包发布（`dist/types/managed-host.d.ts`
+也在发布产物之外）。
+`navigationTarget` / `archivedNavigationTarget` 指向 shell 容器之外的宿主插槽时，
+入口会把列表包进带作用域标记的容器并同步主题变量，宿主无需自行引入 CSS。
 自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与
 storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
 [宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。
@@ -177,6 +183,9 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 `true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
 未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
 该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+提供该回调时，managed 存储产物（仅有 managedId、无 workspace 路径或 URL）的
+卡片动作会标为 Preview，因为宿主可能自行渲染其内容；未提供回调时，这类产物
+在默认面板只有元信息，卡片保持 Open。
 
 `filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
 产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。

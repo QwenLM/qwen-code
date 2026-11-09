@@ -5414,6 +5414,9 @@ export class Session implements SessionContext {
         .clearStatusChangeCallback(this.#workflowStatusChangeCallback);
       this.#workflowStatusChangeCallback = undefined;
     }
+    this.config
+      .getChatRecordingService()
+      ?.setLastUserPromptRecordedCallback?.(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.config.getSessionService().setSessionPrBoundCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
@@ -13569,6 +13572,18 @@ export class Session implements SessionContext {
         todoWorkChainId: meta.todoWorkChainId,
       });
     });
+
+    this.config
+      .getChatRecordingService()
+      ?.setLastUserPromptRecordedCallback?.((timestamp, sessionId) => {
+        void this.client
+          .extNotification('qwen/notify/session/last-user-prompt', {
+            v: 1,
+            sessionId,
+            timestamp: timestamp ?? null,
+          })
+          .catch(() => undefined);
+      });
 
     // Session title recorded (auto-generated after a turn, or an in-process
     // /rename) → notify attached clients. Keep the Qwen notification for the

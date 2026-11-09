@@ -1,5 +1,7 @@
 # Channel Named Sessions: Part 4B
 
+[English](channel-named-sessions-part4b.md) | [简体中文](channel-named-sessions-part4b.zh-CN.md)
+
 ## Status
 
 Proposed. Parts 1, 2, 3A, 3B, and 4A are merged. This design is the final
@@ -256,9 +258,13 @@ cleanup turned out. The `!spawnCompleted` "no session exists" rationale
 belongs to the spawn-failed outer catch, a different block this PR does not
 change.
 
-Issue #11024 (the follow-up for the last two rows) also carries the
-reap-cleanup requirements gathered during this design's review, so they
-survive contact with implementation there rather than being re-derived:
+Issue #11024 (the follow-up for the last two rows) also carries the reap-cleanup
+requirements gathered during this design's review, so they survive contact with
+implementation there rather than being re-derived. They are the review's inputs,
+not the rules as built: `channel-worktree-orphan-reap.md` records the
+implemented cleanup, which departs from them in places — for example, of the two
+links only `supersededBy` refuses there, because refusing on `supersedes` as
+well left every post-reset worktree uncleanable. The requirements as gathered:
 
 - Place the deletion at the reap call site, as the create route does, never
   inside the shared `deleteDaemonSessionIfOrphan` primitive — the primitive's
@@ -464,12 +470,18 @@ sidecars naming the same worktree, and per-session locks would not mutually
 exclude their resets. The existing restore serialization (per bridge instance)
 is widened the same way and renamed `acquireWorktreeOwnershipOp`: every
 route-owned Part 4A worktree restore takes the worktree-keyed lock after its
-sidecar pre-read, and this route holds it for the whole operation. A restore
-of `S_old` can therefore never pass marker validation concurrently with a
-transfer that is about to flip the marker, and two resets targeting the same
-worktree can never both reach the flip. The runtime generation is captured
-before the first side effect and re-asserted before the response, as in
-create/load.
+sidecar pre-read, and this route holds it for the whole operation. The restore
+records the key it locked, and every later read of the session's own sidecar
+that finds it recording its workspace — the Channel re-read under the lock and
+the Part 4A validation after the load — must name that checkout: if the
+pre-read took no lock (the sidecar was missing, legacy or invalid then) or
+locked another checkout, the restore fails closed with a `500` instead of
+validating that checkout unlocked. A later read that finds a legacy sidecar
+stays on the lock-free legacy path. A restore of `S_old` can therefore never
+pass marker validation concurrently with a transfer that is about to flip the
+marker, and two resets targeting the same worktree can never both reach the
+flip. The runtime generation is captured before the first side effect and
+re-asserted before the response, as in create/load.
 
 Inside the lock, with the sidecar re-read and re-validated under the lock:
 
@@ -815,15 +827,18 @@ supersededBy?: string; // on the old sidecar: the replacement that owns the work
 supersedes?: string; // on the new sidecar: the session it replaced
 ```
 
-The forward link is the redirect signal read on restore — read on its own,
-before any marker or reverse-link read, so a redirect names a candidate owner
-rather than a proven one (see the redirect section below). The reverse link
-makes a reset retry's resume check bidirectional, so a `supersededBy` value
-is only acted on when the session it names also claims to replace `S_old` for
-the same worktree. `isValidWorktreeSession` accepts both as optional strings.
-Readers that do not know the fields ignore them. Only the daemon route writes
-them; only the restore/reset paths read them. The registry, the marker
-format, and the sidecar's versionless shape otherwise stay unchanged.
+The `supersededBy` link is the redirect signal read on restore — read on its
+own, before any marker or `supersedes` read, so a redirect names a candidate
+owner rather than a proven one (see the redirect section below). The
+`supersedes` link makes a reset retry's resume check bidirectional, so a
+`supersededBy` value is only acted on when the session it names also claims to
+replace `S_old` for the same worktree. `isValidWorktreeSession` accepts both as
+optional strings. Readers that do not know the fields ignore them. Only the
+daemon route writes them. The restore and reset routes read both; the shared
+worktree-context restore that a session load or resume runs
+(`restoreWorktreeContext`), the `exit_worktree` tool's stale-marker check and
+the delete-path orphan cleanup (#11024) read `supersededBy`. The registry, the
+marker format, and the sidecar's versionless shape otherwise stay unchanged.
 
 ### Missing-marker restore signal
 
@@ -849,19 +864,21 @@ caller to a replacement the same daemon is about to delete. A Channel restore
 re-reads the sidecar once the worktree-keyed lock is held — still before the
 bridge load — and stops there with `409` code `worktree_session_superseded`
 and the replacement session ID when that locked read finds a valid Part 4A
-sidecar carrying `supersededBy`. Every caller receives the same typed
-failure: a non-Channel restore gets it from the defense-in-depth check the
-Part 4A validation repeats after the load, and simply fails closed on it, as
-it does on any restore integrity error today. For the Channel this is the
-self-healing channel for a reset that completed daemon-side but whose
-registry commit never happened (worker crash between the reset response and
-the registry write): the manager's load catches the typed signal, exact-loads
-the replacement through the normal `loadManagedSession` path — requiring the
-same root, the same canonical worktree path, and `persisted-v1` — and only
-then commits the registry update `S_old → S_new` under the owner lock. A
-failed validation of the replacement leaves the registry unchanged and the
-task fail-closed. The same registry-write-failure window after a successful
-reset heals through this path on the next selection or message.
+sidecar carrying `supersededBy`. Every caller receives the same typed failure:
+a non-Channel restore gets it from the defense-in-depth check the Part 4A
+validation repeats after the load, and simply fails closed on it, as it does
+on any restore integrity error today. For the Channel this is the self-healing
+channel for a reset that completed daemon-side but whose registry commit never
+happened (worker crash between the reset response and the registry write): the
+manager's load catches the typed signal, exact-loads the replacement through
+the normal `loadManagedSession` path — requiring the same root, the same
+canonical worktree path, and `persisted-v1` — and only then commits the
+registry update `S_old → S_new` under the owner lock. A failed validation of
+the replacement leaves the registry unchanged and the task fail-closed. The
+same registry-write-failure window after a successful reset heals through this
+path on the next selection or message. A Part 4A read that names a checkout
+the restore did not lock fails closed with a `500` before either check, and a
+later restore classifies from a read under the lock.
 
 One sub-case gets its own signal. If the redirect target's restore fails
 because the marker still names `S_old` while the sidecar pair agrees
@@ -1077,10 +1094,12 @@ every other daemon failure keeps the existing generic named-session message.
   Channel-scoped, but the Part 4A validation every non-live restore runs
   repeats the check before it consults the marker, so a non-Channel caller
   receives the same typed code rather than the ordinary non-typed Part 4A
-  integrity `409` — and simply fails closed on it. Every non-live Part 4A
+  integrity `500` — and simply fails closed on it. Every non-live Part 4A
   restore takes the worktree-keyed ownership lock for the same reason: the
   reset route is public, so a source-less restore must not attest exclusive
-  ownership while a transfer moves it. `S_old` never reclaims the worktree.
+  ownership while a transfer moves it. A Part 4A sidecar read that names a
+  checkout the restore did not lock fails with a `500` before either check.
+  `S_old` never reclaims the worktree.
 
 ## User-facing error classes
 

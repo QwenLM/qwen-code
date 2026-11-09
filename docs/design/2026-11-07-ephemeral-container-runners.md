@@ -60,13 +60,15 @@ The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains ten s
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
-labels; no central manager is needed. Display names use `ecs-qwen-<poolId>-<slot>`
-with two-digit slots, for example `ecs-qwen-hz4-ephemeral-01`. Replenishment
-reuses the display name after cleaning the previous runner, while the GitHub
-runner ID, container and internal UUID are new for each job. The UUID remains
-in state and diagnostic filenames. The `ecs-qwen-` prefix preserves CI worker
-caps and timeouts; recovery still accepts earlier UUID-based runner names,
-including old `qwen-` identities.
+labels; no central manager is needed. Display names use
+`ecs-qwen-<poolId>-<slot>-<suffix>` with two-digit slots and an
+eight-hex-character suffix, for example `ecs-qwen-hz4-ephemeral-01-1a2b3c4d`.
+Replenishment picks a fresh suffix for every registration, so a leftover
+registration still owning an earlier name can never reject a replacement with
+HTTP 422, while the GitHub runner ID, container and internal UUID are new for
+each job. The UUID remains in state and diagnostic filenames. The `ecs-qwen-`
+prefix preserves CI worker caps and timeouts; recovery still accepts the
+suffixed form, earlier UUID-based runner names, and old `qwen-` identities.
 
 systemd starts the manager at boot when enabled and restarts unexpected exits
 after ten seconds (`Restart=always`). An explicit service stop remains stopped.
@@ -113,6 +115,32 @@ If deleting a container fails, that slot stops; if GitHub registration cleanup
 fails, the failure is recorded and retried instead of endlessly requesting new
 identities. Host failures cannot clean up immediately, so recovery must reclaim
 before accepting new work.
+
+Retrying is only safe when each attempt can still reach the resource it must
+reclaim. Two self-perpetuating stalls were observed on hz4 on 2026-11-08 and are
+now closed. First, killing the `docker create` client on its command timeout
+does not stop the daemon, so a container could appear after cleanup had already
+deleted the slot state; cleanup then refused to touch an unidentifiable
+container, and the only code that could delete it sat behind that refusal. Such
+resources are now identified by their `qwen.instance` label, which must match
+this pool and slot and be unambiguous; anything else still blocks the slot.
+Second, a rejected JIT request deleted the local slot state while a leftover
+registration kept owning the display name, so every retry was rejected and the
+record needed to delete that registration was gone. A definitive rejection now
+reconciles the name instead of discarding the state, and a runner deletion
+GitHub rejects retains the state for the next attempt.
+
+Because these faults leave the process alive, systemd supervision cannot detect
+them. A slot that repeats the same failure for `stallAlertSeconds` (default
+1800, thirty minutes) logs a `STALL ALERT` naming the slot, the duration, the
+count and the error; the clock resets on any successful cycle or changed error
+and each stall episode alerts once. The threshold is wall-clock because failed cycles
+retry with jittered exponential backoff (10 s to 60 s, or 30 s to 300 s under
+HTTP 403/429), so a retry count no longer maps to a fixed delay. The backoff
+sleep is sliced and ends early on shutdown. This is the operator signal for a
+slot that is consuming no jobs; alert on it rather than on service state. The
+earlier retry-count key `stallAlertRetries` is no longer read; a config that
+still carries it falls back to the default.
 
 ## Minimal but necessary deployment boundary
 
@@ -161,7 +189,51 @@ keep their current routing. This avoids migrating browser system dependencies
 that the new image has not verified, and leaves the routing image relationship
 of the existing classifier job and the other workflows unchanged.
 
-The pool label is `ecs-qwen-ephemeral`; all ten deployed runners are ARM64.
+Update 2026-11-08: the credential-free Web-shell Visuals capture job
+moves onto this pool **for untrusted fork PRs only** — same-repo PRs stay
+on the hosted lane, where the job ran before (the original rule above,
+"trusted and same-repository PR routes stay unchanged", still governs).
+The main CI `Test (ubuntu-latest, Node 22.x)` aggregate gate was tried
+here and moved back off (below).
+The capture job matches the pool's security
+model exactly (untrusted PR code, read-only token, only the event-scoped
+`GITHUB_TOKEN`), which supersedes the browser-dependency exclusion above for
+this one job: it reuses the image's Node behind the self-hosted preflight,
+gates on a lane-calibrated disk floor (8 GiB free and less than 85% used —
+the shared 2 GiB default passed a slot with 14.6 GB free on an 89%-used
+filesystem and pnpm died on ENOSPC minutes later), renders with pinned
+`--workers=2` (an unpinned run sizes Chromium from the host's cores inside
+the 4-CPU container and starved the runner process itself), carries a
+routed 90-minute pool ceiling against the hosted 45 (two cold installs
+measured 22m18s plus a Chromium download past 36m48s), and installs the
+DejaVu font baseline plus ffmpeg
+best-effort at runtime — apt egress and the Debian archive stay hard
+requirements because the earlier `playwright install --with-deps` step needs
+the same archive; the best-effort step degrades only its own extra
+font/ffmpeg install failure to fallback fonts and .webm-only recordings
+instead of failing the preview, with bounded apt calls and a post-install
+font check. The first complete pooled render still needs acceptance for
+font metrics and end-to-end duration. Same-repo PRs never leave the hosted lane, so there is
+nothing to revert. Fork-triggered runs receive empty repository variables
+(see the fork section above), so the kill-switch cannot reach them; the
+real fork-path escape is changing the selector on `main`, not the switch.
+The E2E OpenTUI leg deliberately stays hosted: it injects long-lived model
+secrets, which this pool's boundary forbids until a separate trusted pool
+exists.
+
+Update 2026-11-09: the aggregate gate no longer rides this pool. It is a
+required context on `pull_request`, `push` and `merge_group`, and pinning
+it to the manually sized pool parked it in an empty-runner queue for 110
+minutes (job 128729488158) while sibling jobs were served in ~3 —
+`timeout-minutes` does not cover queue time, and the fleet-wide
+kill-switch cannot reach fork runs. It now follows the classifier's
+`ubuntu_runner` exactly like the sibling aggregates: persistent fleet for
+trusted events, hosted for untrusted forks, kill-switch honored through
+the classifier on every path.
+
+The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
+ARM64 runners, and the 2026-11-08 live query showed 22 online slot
+registrations on hz4.
 Register only `self-hosted` and this dedicated label, omitting generic Linux and
 ARM64 labels so existing broad ARM64 selectors cannot admit unrelated jobs.
 Full PR CI on the new image still has to be verified. The recorded
