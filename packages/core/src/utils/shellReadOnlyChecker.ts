@@ -203,7 +203,9 @@ function evaluateAwkCommand(tokens: string[]): boolean {
 
 function evaluateGitRemoteArgs(args: string[]): boolean {
   const action = args.find((arg) => !arg.startsWith('-'))?.toLowerCase();
-  if (action && !['show', 'get-url'].includes(action)) return false;
+  // `show` queries the remote unless `-n` reaches git as an option, which
+  // these tokens cannot prove, so only `get-url` is read-only (#14359).
+  if (action && action !== 'get-url') return false;
   for (const arg of args) {
     if (BLOCKED_GIT_REMOTE_ACTIONS.has(arg.toLowerCase())) return false;
   }

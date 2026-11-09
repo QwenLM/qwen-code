@@ -828,7 +828,13 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
   if (subcommand === 'remote') {
     const action = rest.find((arg) => !arg.startsWith('-'))?.toLowerCase();
     if (!action) return invokesHelper ? 'unknown' : 'read-only';
-    if (['show', 'get-url'].includes(action))
+    // `git remote show` queries the remote (git-upload-pack) and takes any
+    // URL, so it is not a local lookup. `show -n` stays offline, but only
+    // when `-n` reaches git as an option, which the parsed arguments cannot
+    // prove, so every `show` is asked about (#14359). `get-url` never
+    // connects.
+    if (action === 'show') return 'unknown';
+    if (action === 'get-url')
       return rest.some((arg) =>
         /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
           arg,
