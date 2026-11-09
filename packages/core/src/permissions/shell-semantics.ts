@@ -2619,6 +2619,418 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// git commit --amend recognition (#13570)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const AMEND_PREFIX_COMMANDS = new Set([...PREFIX_COMMANDS, 'command']);
+
+const AMEND_PREFIX_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
+  ...PREFIX_COMMAND_FLAGS_WITH_VALUE,
+  ['doas', new Set(['-u', '-C'])],
+  ['env', new Set(['-u', '--unset', '-S', '--split-string', '-C', '--chdir'])],
+  [
+    'ionice',
+    new Set([
+      '-c',
+      '--class',
+      '-n',
+      '--classdata',
+      '-p',
+      '--pid',
+      '-P',
+      '--pgid',
+      '-u',
+      '--uid',
+    ]),
+  ],
+  ['nice', new Set(['-n', '--adjustment'])],
+  ['stdbuf', new Set(['-i', '-o', '-e', '--input', '--output', '--error'])],
+  ['time', new Set(['-f', '--format', '-o', '--output'])],
+]);
+
+const AMEND_LEADING_NOISE = new Set(
+  '! do done elif else esac fi for if in select then time until while'.split(' '),
+);
+
+const AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE =
+  /^(?:-[cC]|--(?:config-env|exec-path|git-dir|list-cmds|namespace|super-prefix|work-tree))$/;
+
+const AMEND_COMMIT_FLAGS_WITH_VALUE =
+  /^(?:-[A-Za-z]*[cCFm]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
+
+const AMEND_UNWRAP_DEPTH_LIMIT = 8;
+
+function amendExecutableBasename(token: string): string {
+  return (token.split(/[\\/]/).pop() ?? token)
+    .toLowerCase()
+    .replace(/\.(?:exe|cmd|bat)$/i, '');
+}
+
+function skipAmendPrefixes(tokens: string[]): string[] {
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (AMEND_LEADING_NOISE.has(token) || isEnvAssignmentToken(token)) {
+      index++;
+      continue;
+    }
+
+    const program = amendExecutableBasename(token);
+    if (!AMEND_PREFIX_COMMANDS.has(program)) break;
+
+    index++;
+    const flagsWithValue = AMEND_PREFIX_FLAGS_WITH_VALUE.get(program);
+    while (index < tokens.length && tokens[index]!.startsWith('-')) {
+      const flag = tokens[index]!;
+      index++;
+      if (
+        flagsWithValue?.has(flag) &&
+        index < tokens.length &&
+        !tokens[index]!.startsWith('-')
+      ) {
+        index++;
+      }
+    }
+    if (program === 'env') {
+      while (index < tokens.length && isEnvAssignmentToken(tokens[index]!)) {
+        index++;
+      }
+    }
+    if (
+      program === 'timeout' &&
+      index < tokens.length &&
+      /^\d/.test(tokens[index]!)
+    ) {
+      index++;
+    }
+  }
+
+  return tokens.slice(index);
+}
+
+function isGitAmendInvocation(tokens: string[]): boolean {
+  if (amendExecutableBasename(tokens[0] ?? '') !== 'git') return false;
+
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      index++;
+      break;
+    }
+    if (!token.startsWith('-')) break;
+    index +=
+      AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length
+        ? 2
+        : 1;
+  }
+
+  if (tokens[index] !== 'commit') return false;
+
+  for (index++; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') return false;
+    if (token === '--amend' || token.startsWith('--amend=')) return true;
+
+    const consumesNext =
+      AMEND_COMMIT_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length;
+    if (consumesNext) index++;
+  }
+  return false;
+}
+
+function tokensContainGitAmend(segment: string, depth: number): boolean {
+  if (depth >= AMEND_UNWRAP_DEPTH_LIMIT) {
+    // Fail closed for pathological wrapper nesting in a permission guard.
+    return true;
+  }
+
+  const unwrapped = stripShellWrapper(segment);
+  if (unwrapped !== segment) {
+    return commandContainsGitAmendAtDepth(unwrapped, depth + 1);
+  }
+
+  const fdRedirects = new Set<number>();
+  const fdCloses = new Set<number>();
+  const tokens = tokenize(segment, fdRedirects, fdCloses);
+  // Redirections can sit between the program and its arguments:
+  // `git >| /dev/null commit --amend` is one git invocation.
+  extractRedirects(tokens, '.', fdRedirects, fdCloses);
+  const words = skipAmendPrefixes(tokens);
+  if (words.length === 0) return false;
+
+  if (amendExecutableBasename(words[0]!) === 'eval') {
+    return commandContainsGitAmendAtDepth(words.slice(1).join(' '), depth + 1);
+  }
+
+  return isGitAmendInvocation(words);
+}
+
+function commandContainsGitAmendAtDepth(
+  command: string,
+  depth: number,
+): boolean {
+  for (const { command: segment } of splitCompoundCommandSegments(
+    stripHeredocBodies(command),
+  )) {
+    if (tokensContainGitAmend(segment, depth)) return true;
+  }
+  return false;
+}
+
+/**
+ * Check whether a shell command actually invokes `git commit --amend`.
+ *
+ * Unlike a raw-substring guard, this ignores quoted text, heredoc bodies,
+ * commit-message arguments, and commands whose program is not git. It is a
+ * positive recognizer only: shapes it does not model (trap bodies, exotic
+ * carriers) are left to the caller's fail-closed literal backstop.
+ */
+export function commandContainsGitAmend(command: string): boolean {
+  return commandContainsGitAmendAtDepth(command, 0);
+}
+
+/**
+ * Programs that only print, search, or copy their arguments and heredoc
+ * input: text they carry is data, never a program the shell runs.
+ */
+const AMEND_INERT_TEXT_PROGRAMS = new Set([
+  'echo',
+  'printf',
+  'grep',
+  'cat',
+  'head',
+  'tail',
+  'wc',
+  'ls',
+]);
+
+/** Mirrors the guard's literal backstop pattern in destructive-commands.ts. */
+const AMEND_MENTION_PATTERN = /\bgit\s+commit\s+--amend\b/g;
+
+interface AmendHeredocBody {
+  start: number;
+  end: number;
+  certified: boolean;
+}
+
+/**
+ * A heredoc opener whose body is provably inert: a single simple command
+ * (no unquoted operator on the line), an inert text program, and every
+ * heredoc on the line uses a quoted delimiter so the body undergoes no
+ * expansion. Anything wider is not certified.
+ */
+function amendHeredocOpenerCertified(line: string): boolean {
+  const program = amendExecutableBasename(
+    line.trimStart().split(/\s+/)[0] ?? '',
+  );
+  if (!AMEND_INERT_TEXT_PROGRAMS.has(program)) return false;
+
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let sawHeredoc = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '(') return false;
+    if (ch === '<' && line[i + 1] === '<') {
+      if (line[i + 2] === '<') return false; // here-string: not a body
+      sawHeredoc = true;
+      let next = i + 2;
+      if (line[next] === '-') next++;
+      while (line[next] === ' ' || line[next] === '\t') next++;
+      if (line[next] !== "'" && line[next] !== '"') return false;
+      i = next;
+      continue;
+    }
+  }
+  return sawHeredoc;
+}
+
+/** Heredoc body ranges of the raw command, with their inert certification. */
+function scanAmendHeredocBodies(command: string): AmendHeredocBody[] {
+  const bodies: AmendHeredocBody[] = [];
+  const pending: { delimiter: string; certified: boolean; start: number }[] =
+    [];
+  let offset = 0;
+  for (const line of command.split('\n')) {
+    const lineEnd = offset + line.length + 1;
+    if (pending.length > 0) {
+      const active = pending[0]!;
+      if (line.trim() === active.delimiter) {
+        bodies.push({
+          start: active.start,
+          end: offset,
+          certified: active.certified,
+        });
+        pending.shift();
+        if (pending.length > 0) pending[0]!.start = lineEnd;
+      }
+    } else {
+      const delimiters = getHeredocDelimiters(line);
+      if (delimiters.length > 0) {
+        const certified = amendHeredocOpenerCertified(line);
+        for (const delimiter of delimiters) {
+          pending.push({ delimiter, certified, start: lineEnd });
+        }
+      }
+    }
+    offset = lineEnd;
+  }
+  for (const body of pending) {
+    bodies.push({
+      start: body.start,
+      end: command.length,
+      certified: body.certified,
+    });
+  }
+  return bodies;
+}
+
+/**
+ * Prove that EVERY literal `git commit --amend` occurrence in the raw
+ * command is inert data: a single-quoted argument of an inert text program,
+ * an unquoted `#` comment, or the quoted-delimiter heredoc body of an inert
+ * text program. Deliberately narrow and fail-closed: double-quoted text,
+ * ANSI-C words, executable-host payloads (`node -e`, shells, `trap`, `su`)
+ * and unquoted mentions are NOT proven, so the caller keeps blocking them
+ * exactly as the base substring guard did. Zero occurrences return false:
+ * a match the prover cannot even see (a dequoted wrapper copy) is not proof.
+ */
+export function amendMentionsProvablyInert(command: string): boolean {
+  const matches = [...command.matchAll(AMEND_MENTION_PATTERN)].map(
+    (match) => match.index,
+  );
+  if (matches.length === 0) return false;
+
+  const bodies = scanAmendHeredocBodies(command);
+  let bodyPtr = 0;
+  let matchPtr = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let inComment = false;
+  let escaped = false;
+  let segmentStart = 0;
+  let spanStart = 0;
+  let spanSegmentStart = 0;
+
+  for (let i = 0; i < command.length; i++) {
+    while (bodyPtr < bodies.length && i >= bodies[bodyPtr]!.end) bodyPtr++;
+    const body = bodies[bodyPtr];
+    if (body && i >= body.start && i < body.end) {
+      while (matchPtr < matches.length && matches[matchPtr]! < body.end) {
+        const at = matches[matchPtr]!;
+        const covering = bodies.filter((b) => at >= b.start && at < b.end);
+        if (!covering.every((b) => b.certified)) return false;
+        matchPtr++;
+      }
+      i = body.end - 1;
+      segmentStart = body.end;
+      inComment = false;
+      continue;
+    }
+
+    if (matchPtr < matches.length && matches[matchPtr] === i) {
+      let inert = false;
+      if (inComment) {
+        inert = true;
+      } else if (inSingle) {
+        const head = skipAmendPrefixes(
+          tokenize(command.slice(spanSegmentStart, spanStart)),
+        );
+        inert =
+          head.length > 0 &&
+          AMEND_INERT_TEXT_PROGRAMS.has(amendExecutableBasename(head[0]!));
+      }
+      if (!inert) return false;
+      matchPtr++;
+    }
+
+    const ch = command[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inComment) {
+      if (ch === '\n') {
+        inComment = false;
+        segmentStart = i + 1;
+      }
+      continue;
+    }
+    if (inAnsiC) {
+      if (ch === '\\') escaped = true;
+      else if (ch === "'") inAnsiC = false;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === "'") {
+      inAnsiC = true;
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      spanStart = i;
+      spanSegmentStart = segmentStart;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /[\s;&|(]/.test(command[i - 1]!))) {
+      inComment = true;
+      continue;
+    }
+    if (ch === '\n' || ch === ';' || ch === '&' || ch === '|' || ch === '(') {
+      segmentStart = i + 1;
+      continue;
+    }
+  }
+  return matchPtr === matches.length;
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,

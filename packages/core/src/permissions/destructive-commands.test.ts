@@ -186,6 +186,45 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectBlocked('git commit --amend --no-edit', 'amend the commit', 'amend');
   });
 
+  it.each([
+    'git -c core.editor=true commit --amend',
+    '/usr/bin/git commit --amend --no-edit',
+    "bash -c 'git commit --amend --no-edit'",
+    'sudo env GIT_COMMITTER_DATE=now git commit --amend --no-edit',
+    'timeout 10 git commit --amend --no-edit',
+    'if true; then git commit --amend --no-edit; fi',
+    "eval 'git commit --amend --no-edit'",
+    'git >| /dev/null commit --amend',
+  ])('blocks amend through an execution wrapper: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  // The recognizer misses these shapes, so the literal backstop must keep
+  // the base guard's block: it may only add denials, never relax one.
+  it.each([
+    "trap 'git commit --amend --no-edit' EXIT",
+    'echo git commit --amend >> CHANGELOG.md',
+    'echo "git commit --amend"',
+    `node -e 'console.log("a report about git commit --amend behaviour")'`,
+    "su -c 'git commit --amend --no-edit'",
+  ])('backstop keeps unprovable amend text blocked: %s', (command) => {
+    expectBlocked(command, 'write a report', 'amend');
+  });
+
+  it.each([
+    "echo 'git commit --amend'",
+    "printf '%s\\n' 'git commit --amend'",
+    "grep -n 'git commit --amend' CHANGELOG.md",
+    'git commit -m --amend',
+    "git log --grep='git commit --amend'",
+    '# git commit --amend',
+    "echo ok # a note about git commit --amend",
+    "cat > notes.txt <<'EOF'\ngit commit --amend\nEOF",
+    "cat <<'EOF' | grep 'git commit --amend'\ngit commit --amend\nEOF",
+  ])('allows provably inert text that mentions amend: %s', (command) => {
+    expectAllowed([command], 'write a report');
+  });
+
   it('allows git commit (without --amend)', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
   });
