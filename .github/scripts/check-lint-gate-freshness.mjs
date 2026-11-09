@@ -147,7 +147,12 @@ function firstLine(message) {
  * silently shortened list.
  */
 export function splitGlobalIgnores(text) {
-  const lines = text.split('\n');
+  // Split on the engine's terminator set, not just \n. A line written
+  // `// x<U+2028> 'hidden/**',` is ONE line to a \n split and gets skipped as a
+  // comment, while the engine ends the comment at U+2028 and reads a real
+  // entry. The extractor would then under-report the branch's own ignores and
+  // certify it fresh. Measured for U+2028, U+2029 and a lone CR.
+  const lines = text.split(/\r\n|[\n\r\u2028\u2029]/);
   const start = lines.findIndex((line) => /^\s*ignores:\s*\[\s*$/.test(line));
   if (start === -1) return null;
   const end = lines.findIndex(
@@ -232,14 +237,26 @@ async function narrowsToIgnoredScope(args) {
 }
 
 /**
- * Same argument for `.prettierignore`, which decides what `prettier --check`
- * covers. The whole file is scope, so there is no remainder to compare — only
- * the pattern set, in the same head-subset-of-base direction.
+ * Same argument for prettier's scope, with one wrinkle: prettier 3 reads
+ * `.gitignore` as well. Measured on 3.6.1 — adding `apps/host/` there drops the
+ * checked-file count from 2 to 1 with `.prettierignore` untouched — so a branch
+ * can narrow its own scope through a file this verdict is not about.
+ *
+ * `.gitignore` is therefore required to be byte-identical rather than folded
+ * into the subset test. It cannot be folded in: the real `.gitignore` carries
+ * a dozen `!` re-inclusions, so `reincludesFiles` would reject every comparison
+ * and the narrowing would be dead code from day one. Requiring equality means
+ * we never reason about its semantics at all.
  */
 async function narrowsToPrettierIgnore(args) {
-  const [baseText, headText] = await fetchGateFilePair(args);
-  const base = ignoreLines(baseText);
-  const head = ignoreLines(headText);
+  const [[basePi, headPi], [baseGi, headGi]] = await Promise.all(
+    ['.prettierignore', '.gitignore'].map((file) =>
+      fetchGateFilePair({ ...args, file }),
+    ),
+  );
+  if (baseGi !== headGi) return false;
+  const base = ignoreLines(basePi);
+  const head = ignoreLines(headPi);
   if (reincludesFiles([...base, ...head])) return false;
   return head.every((entry) => base.includes(entry));
 }
@@ -314,10 +331,16 @@ export async function findStaleGateFiles({
           headSha,
         });
         return ignorable ? null : verdict;
-      } catch {
+      } catch (error) {
         // Fail closed. Propagating would reach main()'s fail-open and discard
         // every OTHER gate file's verdict too, so a transient curl failure on
-        // this one optional refinement would become a blanket pass.
+        // this one optional refinement would become a blanket pass. Say so in
+        // the log: without this the refinement can stop firing for every PR
+        // and leave no trace beyond a stale verdict nobody can explain.
+        console.log(
+          `::warning::lint gate freshness: could not narrow ${verdict.file} ` +
+            `(${error.message}); keeping the stale verdict`,
+        );
         return verdict;
       }
     }),

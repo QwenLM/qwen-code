@@ -240,6 +240,26 @@ function textFetch(baseText, headText, calls = [], file = 'eslint.config.js') {
 const PRETTIER_OPTS = { ...BASE_OPTS, gateFiles: ['.prettierignore'] };
 const ignoreFile = (lines) => `${lines.join('\n')}\n`;
 
+// Prettier's scope is .prettierignore AND .gitignore. Serve both, keyed by
+// file and ref, and pin the path so a wrong-file fetch cannot pass silently.
+function scopeFetch(byFile, calls = []) {
+  return async (path) => {
+    calls.push(path);
+    for (const [file, [baseText, headText]] of Object.entries(byFile)) {
+      const prefix = `/repos/QwenLM/qwen-code/contents/${file}?ref=`;
+      if (!path.startsWith(prefix)) continue;
+      if (path === `${prefix}${GATE_SHA}`) return baseText;
+      if (path === `${prefix}${HEAD_SHA}`) return headText;
+    }
+    throw new Error(`unexpected path: ${path}`);
+  };
+}
+
+const bothIgnoreFiles = (basePi, headPi, baseGi = [], headGi = []) => ({
+  '.prettierignore': [ignoreFile(basePi), ignoreFile(headPi)],
+  '.gitignore': [ignoreFile(baseGi), ignoreFile(headGi)],
+});
+
 test('a base-side global ignore addition does not stale the branch', async () => {
   // Mutation witness: deleting the post-filter leaves this stale. This is the
   // #16200 shape named by all 9 measured freshness reds.
@@ -422,26 +442,28 @@ test('a base-side prettierignore addition does not stale the branch', async () =
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
     fetchJson: divergedJson(),
-    fetchText: textFetch(
-      ignoreFile(['node_modules', 'packages/live-host/']),
-      ignoreFile(['node_modules']),
+    fetchText: scopeFetch(
+      bothIgnoreFiles(
+        ['node_modules', 'packages/live-host/'],
+        ['node_modules'],
+      ),
       calls,
-      '.prettierignore',
     ),
   });
   assert.deepEqual(stale, []);
-  assert.equal(calls.length, 2);
+  // Both scope files, both refs — and only on an already-stale verdict.
+  assert.equal(calls.length, 4);
 });
 
 test('a base-side prettierignore REMOVAL still stales the branch', async () => {
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
     fetchJson: divergedJson(),
-    fetchText: textFetch(
-      ignoreFile(['node_modules']),
-      ignoreFile(['node_modules', 'packages/live-host/']),
-      [],
-      '.prettierignore',
+    fetchText: scopeFetch(
+      bothIgnoreFiles(
+        ['node_modules'],
+        ['node_modules', 'packages/live-host/'],
+      ),
     ),
   });
   assert.equal(stale.length, 1);
@@ -451,12 +473,7 @@ test('a negated prettierignore line blocks the narrowing', async () => {
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
     fetchJson: divergedJson(),
-    fetchText: textFetch(
-      ignoreFile(['*.md', '!keep.md']),
-      ignoreFile(['*.md']),
-      [],
-      '.prettierignore',
-    ),
+    fetchText: scopeFetch(bothIgnoreFiles(['*.md', '!keep.md'], ['*.md'])),
   });
   assert.equal(stale.length, 1);
 });
@@ -485,12 +502,7 @@ test('a leading-space prettierignore pattern is not conflated with its trimmed f
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
     fetchJson: divergedJson(),
-    fetchText: textFetch(
-      ignoreFile([' foo.js']),
-      ignoreFile(['foo.js']),
-      [],
-      '.prettierignore',
-    ),
+    fetchText: scopeFetch(bothIgnoreFiles([' foo.js'], ['foo.js'])),
   });
   assert.equal(stale.length, 1);
 });
@@ -506,6 +518,146 @@ test('the raw media type is pinned', () => {
     'utf8',
   );
   assert.match(source, /curlRaw\(path, token, TEXT_ACCEPT\)/);
+});
+
+for (const [name, sep] of [
+  ['U+2028', '\u2028'],
+  ['U+2029', '\u2029'],
+  ['a lone CR', '\r'],
+]) {
+  test(`a ${name} inside a comment cannot hide an ignore entry`, async () => {
+    // The engine ends a `//` comment at these terminators and reads the rest
+    // as a real entry; a \n-only split saw one comment line and skipped it,
+    // under-reporting the branch's own ignores and certifying it fresh.
+    const stale = await findStaleGateFiles({
+      ...ESLINT_OPTS,
+      fetchJson: divergedJson(),
+      fetchText: textFetch(
+        configWith(['node_modules/*']),
+        configWith(['node_modules/*']).replace(
+          "      'node_modules/*',",
+          `      'node_modules/*',\n      // x${sep} 'hidden/**',`,
+        ),
+      ),
+    });
+    assert.equal(stale.length, 1);
+  });
+}
+
+test('moving the base array into a files-scoped object stays stale', async () => {
+  // The extractor takes the first ignores block without proving it is global.
+  // The remainder byte-compare is what catches this: the `files:` property
+  // lands in `rest`. Pin it so a future loosening of that compare reddens here
+  // instead of silently certifying a narrower branch.
+  const scoped = [
+    'export default tseslint.config(',
+    '  {',
+    '  },',
+    '  {',
+    "    files: ['x'],",
+    '    ignores: [',
+    "      'node_modules/*',",
+    '    ],',
+    '  },',
+    ');',
+    '',
+  ].join('\n');
+  const stale = await findStaleGateFiles({
+    ...ESLINT_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: textFetch(scoped, configWith(['node_modules/*'])),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a branch-only .gitignore entry blocks the prettier narrowing', async () => {
+  // Prettier 3 reads .gitignore too: measured on 3.6.1, adding apps/host/
+  // there drops the checked-file count from 2 to 1. Comparing .prettierignore
+  // alone would certify a branch whose prettier scope is smaller.
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(
+      bothIgnoreFiles(
+        ['node_modules', 'packages/live-host/'],
+        ['node_modules'],
+        [],
+        ['apps/host/'],
+      ),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('any .gitignore difference blocks the prettier narrowing', async () => {
+  // Even a base-side addition: .gitignore is compared by equality, not subset,
+  // because the real file carries `!` re-inclusions that would make a semantic
+  // comparison reject every input. Conservative, and it never reasons about
+  // gitignore semantics.
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    fetchJson: divergedJson(),
+    fetchText: scopeFetch(
+      bothIgnoreFiles(['node_modules'], ['node_modules'], ['apps/host/'], []),
+    ),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('the real prettier scope files keep the narrowing usable', () => {
+  // Anchor-drift guard, matching the eslint one: a `!` or backslash line in
+  // either real file permanently disables the prettier narrowing, and every
+  // other prettier case injects fixtures so nothing else would notice.
+  // Only .prettierignore is parsed for semantics; .gitignore is compared by
+  // equality, so its real `!` lines are expected and must NOT be flagged here.
+  for (const file of ['.prettierignore']) {
+    const entries = ignoreLines(readFileSync(join(repoRoot, file), 'utf8'));
+    assert.ok(entries.length > 0, `${file} yielded no patterns`);
+    const reincluding = entries.filter(
+      (entry) => entry.startsWith('!') || entry.includes('\\'),
+    );
+    assert.deepEqual(
+      reincluding,
+      [],
+      `${file} gained a negated or escaped pattern; the narrowing is permanently disabled for it — teach the parser or drop the entry`,
+    );
+  }
+});
+
+test('the fail-closed catch leaves a diagnostic', () => {
+  // Without it the refinement can stop firing for every PR and leave no trace
+  // beyond a stale verdict nobody can explain. Source-read pin: the catch is
+  // exercised by the fetch-failure case, but that case asserts the verdict, not
+  // the log, so deleting the warning would otherwise stay green.
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  const at = source.indexOf(
+    '} catch (error) {',
+    source.indexOf('const narrow ='),
+  );
+  assert.ok(at > 0, 'fail-closed catch not found');
+  assert.match(
+    source.slice(at, source.indexOf('return verdict;', at)),
+    /::warning::lint gate freshness: could not narrow/,
+    'the fail-closed path must annotate why it kept the verdict',
+  );
+});
+
+test('the JSON media type is pinned alongside the raw one', () => {
+  // The two Accept values sit side by side and read as interchangeable; only
+  // the raw one had a pin. Swapping the JSON half would break every containment
+  // call, and no injected-fixture case would notice.
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  assert.match(
+    source,
+    /curlRaw\(path, token, 'application\/vnd\.github\+json'\)/,
+    'curlJson must keep the JSON media type',
+  );
 });
 
 test('main() wires fetchText into the verdict call', () => {

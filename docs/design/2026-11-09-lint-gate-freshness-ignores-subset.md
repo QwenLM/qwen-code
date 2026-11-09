@@ -106,12 +106,21 @@ A file absent from the table keeps whole-file containment.
    `candidate.sha` (base side) and at `headSha` (branch side).
 3. Extract its scope list. For `eslint.config.js` that is the first
    `ignores: [...]` block, yielding its entry list and the **remainder** — the
-   file with that whole block removed. For `.prettierignore` the whole file is
-   scope: every non-blank line not starting with `#` at column zero is a pattern,
-   and there is no remainder. Only **trailing** whitespace is stripped —
-   measured against prettier, `foo.js` and ` foo.js` ignore different files, so
-   trimming both ends would merge distinct patterns and could certify a branch
-   whose scope is narrower than the base's; `  # foo` likewise stays a pattern.
+   file with that whole block removed. For `.prettierignore` every non-blank
+   line not starting with `#` at column zero is a pattern, and there is no
+   remainder. Only **trailing** whitespace is stripped — measured against
+   prettier, `foo.js` and ` foo.js` ignore different files, so trimming both ends
+   would merge distinct patterns and could certify a branch whose scope is
+   narrower than the base's; `  # foo` likewise stays a pattern.
+
+   `.prettierignore` is not prettier's whole scope: prettier 3 reads `.gitignore`
+   too. Measured on 3.6.1, adding `apps/host/` to `.gitignore` drops the
+   checked-file count from 2 to 1 with `.prettierignore` untouched. That file is
+   therefore fetched as well and required to be **byte-identical**; it is not
+   folded into the subset test, because the real `.gitignore` carries a dozen
+   `!` re-inclusions that would make a semantic comparison reject every input
+   and leave the narrowing dead from day one.
+
 4. Refuse to narrow if either side has a re-including pattern (see below).
 5. Drop the entry when the branch's pattern set is a subset of the base's and,
    for `eslint.config.js`, the two remainders are byte-identical.
@@ -210,6 +219,11 @@ branch-controlled code.
 
 Extraction is line-anchored:
 
+- the text is split on the engine's terminator set, `\r\n|[\n\r\u2028\u2029]`,
+  not on `\n` alone. A line written `// x<U+2028> 'hidden/**',` is one line to a
+  `\n` split and is skipped as a comment, while the engine ends the comment at
+  U+2028 and reads a real entry — the extractor would under-report the branch's
+  own ignores and certify it fresh. Measured for U+2028, U+2029 and a lone CR;
 - the block starts at the first line matching `^\s*ignores:\s*\[\s*$` and ends at
   the next line matching `^\s*\],?\s*$`;
 - within the body, blank lines and lines whose trimmed form starts with `//` are
@@ -232,7 +246,8 @@ able to weaken the gate.
 
 ### Raw media type for the content fetch
 
-The two content fetches request `Accept: application/vnd.github.raw`. The
+The content fetches request `Accept: application/vnd.github.raw` — two for the
+eslint path, four for prettier's two scope files. The
 contents API returns an empty `content` field for files above 1 MB in its JSON
 representation; a raw body avoids silently disabling the narrowing as a file
 grows.
@@ -249,8 +264,8 @@ grows.
 ## Constraints
 
 - Import closure stays `node:` builtins only.
-- A branch that is already fresh must not pay extra API calls; the two fetches
-  happen only on a verdict that was already going to fail.
+- A branch that is already fresh must not pay extra API calls; the narrowing's
+  fetches happen only on a verdict that was already going to fail.
 - The exported `GATE_FILES` list is pinned by an existing test and must not
   change.
 - The suite runs under `node:test`, not vitest.
@@ -303,7 +318,12 @@ Post-implementation:
 - The raw media type and `main()`'s `fetchText` wiring are each pinned, so
   flipping the media type or deleting the wiring reddens a named case rather
   than silently disabling the refinement behind the fail-closed catch.
-- A fetch failure or an extraction failure leaves the stale verdict intact.
+- A fetch failure or an extraction failure leaves the stale verdict intact and
+  emits a `::warning::` annotation naming the file and the cause.
+- A comment-embedded U+2028, U+2029 or lone CR cannot hide an entry.
+- Any `.gitignore` difference blocks the prettier narrowing.
+- A negated or escaped pattern in the real `.prettierignore` reddens a drift
+  guard, so the narrowing cannot go permanently dead unnoticed.
 - Other gate files behave exactly as before, with no extra API calls.
 - `GATE_FILES` is unchanged and the collocated suite passes.
 
