@@ -1072,6 +1072,14 @@ interface InboundTaskRecord {
    */
   privateOnly?: boolean;
   /**
+   * Sessions that authored this same-account comment and must never receive
+   * it (comment-watch authorship exclusion). Persisted so the delivery-time
+   * Gone fallback skips them too: the fallback re-resolves over the followers
+   * and would otherwise hand the comment back to its author when the primary
+   * target is Gone. Absent outside the comment watch.
+   */
+  authorExclude?: string[];
+  /**
    * The bound session this event was routed to and lost, kept after the
    * delivery is cleared so every later row — the re-entered deferrals and the
    * dead-letter at the horizon — can still name it. Attribution only: the
@@ -3822,6 +3830,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             },
             first && targets.length > 1 ? targets : undefined,
             privateOnly,
+            excludeSessionIds,
           ),
         );
         first = false;
@@ -3896,6 +3905,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     delivery?: InboundTaskRecord['delivery'],
     fanout?: InboundTaskRecord['fanout'],
     privateOnly = false,
+    authorExclude?: ReadonlySet<string>,
   ): InboundTaskRecord {
     const existing = this.readInboundTasks().find(
       (record) =>
@@ -3949,6 +3959,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(delivery ? { delivery } : {}),
       ...(fanout ? { fanout } : {}),
       ...(privateOnly ? { privateOnly: true } : {}),
+      ...(authorExclude && authorExclude.size > 0
+        ? { authorExclude: [...authorExclude] }
+        : {}),
     };
     this.updateInboundTasks((records) => [...records, task]);
     this.applyTaskDedupe(task.dedupe);
@@ -6411,6 +6424,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // loop by the finite follower count even if a stale snapshot keeps
       // re-listing dead sessions.
       const goneSessions = new Set<string>([delivery.sessionId]);
+      // The comment watch withholds the comment from its author; the fallback
+      // re-resolves over the followers and must honor that exclusion too, or a
+      // Gone primary target would hand the comment back to its author. When no
+      // non-author follower remains the loop retires privately below.
+      for (const sessionId of task.authorExclude ?? []) {
+        goneSessions.add(sessionId);
+      }
       // The local `delivery` is the FIRST follower; the loop walks past it.
       // The terminal row must name the last one tried, or the operator opens
       // the workspace of a session evicted a step earlier.
@@ -7431,6 +7451,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       'comment',
       'comment',
     );
+    // A partial/untrusted snapshot may omit bound sessions, so the target list
+    // is not a complete enumeration: retiring a comment as "no target" (or
+    // delivering to the visible subset and advancing past it) would skip it
+    // past a session in the unscanned workspace, and no other lane can deliver
+    // a same-account comment. Defer rather than consume (fail-closed, as the
+    // state watch): keep commentSince, advance only the fetch clock, and let a
+    // trustworthy pass re-evaluate.
+    if (
+      !this.boundSnapshotTrusted ||
+      this.lastBindingsPartial ||
+      this.boundRefreshFailed
+    ) {
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      return;
+    }
     const baseline = entry.commentBaseline;
     const alreadyDispatched = (commentKey: string): boolean =>
       this.cursor.dispatchedComments?.includes(commentKey) === true;
@@ -7556,26 +7595,35 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
 
-    // Look up each target's posted comments only now that there is something to
-    // deliver, so a quiet pass costs no serve round-trips. A comment is withheld
-    // only from the session that wrote it.
+    // Look up posted comments only now that there is something to deliver, so a
+    // quiet pass costs no serve round-trips. A comment is withheld only from the
+    // session that wrote it. Query EVERY bound follower, not just the resolved
+    // targets: the delivery-time Gone fallback re-resolves over the followers,
+    // so the exclusion must also cover a same-role author that is not the
+    // primary target, or the fallback would hand the comment back to it.
+    const followerIds = new Set<string>(
+      targets.map((target) => target.sessionId),
+    );
+    for (const follower of this.boundFollowersOf(chatId, number)) {
+      followerIds.add(follower.summary.sessionId);
+    }
     const postedBySession = new Map<string, ReadonlySet<string>>();
-    for (const target of targets) {
+    for (const sessionId of followerIds) {
       const lookup = this.boundSessions.postedCommentIds;
       const ids = lookup
         ? await lookup
-            .call(this.boundSessions, target.sessionId)
+            .call(this.boundSessions, sessionId)
             .catch(() => new Set<string>())
         : new Set<string>();
-      postedBySession.set(target.sessionId, ids);
+      postedBySession.set(sessionId, ids);
     }
     const excludeFor = (
       candidate: (typeof candidates)[number],
     ): Set<string> => {
       const exclude = new Set<string>();
-      for (const target of targets) {
-        if (postedBySession.get(target.sessionId)?.has(candidate.attrKey)) {
-          exclude.add(target.sessionId);
+      for (const sessionId of followerIds) {
+        if (postedBySession.get(sessionId)?.has(candidate.attrKey)) {
+          exclude.add(sessionId);
         }
       }
       return exclude;

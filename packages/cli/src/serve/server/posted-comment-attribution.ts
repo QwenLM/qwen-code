@@ -158,6 +158,11 @@ function isUnescapedWordBoundary(command: string, i: number): boolean {
  * like the quote handling.
  */
 function stripHeredocBodies(command: string): string {
+  // Shell removes a backslash-newline line continuation before parsing, joining
+  // the lines. Normalize it to a space (as segmentation does) so a `#` that
+  // follows a continuation is judged against the joined line: in `: \<newline>
+  // # Use <<'EOF' …` the `#` begins a real comment, not an escaped word.
+  command = command.replace(/\\\r?\n/g, ' ');
   let result = '';
   let quote: string | null = null;
   let i = 0;
@@ -219,6 +224,9 @@ function stripHeredocBodies(command: string): string {
           delim += command[j];
           j++;
         }
+        // A backslash before/within the delimiter quotes it (<<\EOF is <<'EOF'):
+        // the delimiter word itself has the backslashes removed.
+        delim = delim.replace(/\\/g, '');
       }
       if (delim === '') {
         result += command.slice(i, j);
@@ -430,7 +438,8 @@ function creationSegment(command: string): string | undefined {
  * Attribute nothing when a control keyword is present.
  */
 function creationOutputIsAmbiguous(command: string): boolean {
-  const segments = commandSegments(command).map((segment) =>
+  const rawSegments = commandSegments(command);
+  const segments = rawSegments.map((segment) =>
     stripQuotedSpans(stripShellComment(segment)),
   );
   if (
@@ -445,7 +454,29 @@ function creationOutputIsAmbiguous(command: string): boolean {
   const apiCommands = segments.filter((segment) =>
     API_COMMAND_LEAD.test(segment),
   );
-  return apiCommands.length >= 2;
+  if (apiCommands.length >= 2) return true;
+  // Structural source proof: the visible output is produced by the first
+  // command whose stdout is not redirected. If a command BEFORE the creation
+  // writes to stdout (no `>` redirect), the comment-shaped result we parse may
+  // be that command's read/print (`cat url.txt` then create) rather than the
+  // creation's — attribute nothing. A preceding command whose stdout is
+  // redirected contributes no visible output, so it does not block: the heredoc
+  // that writes the body to a file (`cat > note.md <<EOF`) still lets the
+  // creation that follows it attribute.
+  const creationIdx = rawSegments.findIndex((segment) =>
+    segmentIsCreation(segment),
+  );
+  if (creationIdx > 0) {
+    for (let k = 0; k < creationIdx; k++) {
+      const probe = segments[k]!.trim();
+      if (probe === '') continue;
+      // A stdout redirect or a pure assignment contributes no visible output.
+      if (!/>/.test(probe) && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(probe)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**

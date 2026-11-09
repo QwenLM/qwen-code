@@ -471,6 +471,46 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not credit an unredirected read printed before the creation (structural source proof)', () => {
+    // `cat url.txt` writes the comment URL to stdout before the creation runs;
+    // the visible result is the read's, not the creation's, so attribute nothing.
+    const entry = shellResult(
+      'cat url.txt\ngh pr comment 42 --body x',
+      'https://github.com/o/r/pull/42#issuecomment-777',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes when the preceding command redirects stdout (heredoc body to a file)', () => {
+    // The heredoc writes the body to a file (stdout redirected), contributing no
+    // visible output, so the creation that follows is the provable source.
+    const entry = shellResult(
+      "cat > note.md <<'EOF'\nbody text\nEOF\ngh pr comment 42 --body-file note.md",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not scan a heredoc with an escaped delimiter as a creation', () => {
+    // <<\EOF is <<'EOF': the body is data, and the example creation inside it
+    // must not attribute.
+    const entry = shellResult(
+      'cat > note.md <<\\EOF\ngh pr comment 42 --body x\nEOF',
+      'https://github.com/o/r/pull/42#issuecomment-777',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not let a line continuation hide a real comment before a later heredoc', () => {
+    // `: \` + newline joins to `: # Use <<'EOF' …`: the # is a real comment, the
+    // gh api read between it and the later heredoc is real → two API commands.
+    const entry = shellResult(
+      "gh pr comment 42 --body hi >/dev/null\n: \\\n# Use <<'EOF' for the note\ngh api repos/o/r/issues/comments/111 --jq .html_url\ncat >/dev/null <<'EOF'\nplain note\nEOF",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments -X POST -f body='--method GET' --jq '.id'",

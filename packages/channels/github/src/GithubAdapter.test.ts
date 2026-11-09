@@ -23951,6 +23951,119 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         );
       });
 
+      it('defers consumption on a partial bindings snapshot instead of retiring no-target', async () => {
+        // R2-2: a partial scan sees only the author; the session that should
+        // receive the comment is in the unscanned workspace. Consuming the
+        // comment (no-target retire + cursor advance) on incomplete evidence
+        // would skip it past that session forever. Defer, keeping commentSince.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-session',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+          ],
+          partial: true,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const ch = channel as unknown as {
+          prWatchState: { entries: Record<string, { commentSince?: string }> };
+        };
+        expect(ch.prWatchState.entries['owner/repo#42']!.commentSince).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+        expect(
+          readChannelEvents().filter(
+            (event) => event['reason'] === 'comment_watch_no_target',
+          ),
+        ).toHaveLength(0);
+      });
+
+      it('does not hand a watched comment back to its author when the target is Gone', async () => {
+        // R2-3: same role — B is the routing winner (most recent), A authored
+        // the comment and is NOT a primary target. When B is Gone the fallback
+        // re-resolves over the followers; it must skip the author A, not deliver
+        // the comment back to it.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) => {
+            if (sessionId === 'winner-B') {
+              throw new BoundSessionGoneError(sessionId);
+            }
+            return undefined;
+          });
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
       it('delivers a same-account comment under a sender allowlist that excludes the channel account', async () => {
         // The recommended senders:allowlist policy excludes the channel's own
         // login; the private comment watch must still deliver (sender gate
