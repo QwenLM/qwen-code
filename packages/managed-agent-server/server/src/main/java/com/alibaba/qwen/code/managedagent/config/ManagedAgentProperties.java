@@ -763,6 +763,7 @@ public class ManagedAgentProperties
     public static class Extensions
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
         private boolean enabled;
+        private boolean selfServiceEnabled;
         private String artifactDirectory = "";
         private List<String> allowedActors = List.of();
 
