@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -50,7 +51,11 @@ class ManagedSchemaTest {
         for (String declaration : Set.of("DROP TABLE ma_tenant_guard",
                 "CREATE TABLE ma_unpublished (witness INT)",
                 "CREATE VIEW ma_unpublished AS SELECT 1 AS witness",
-                "CREATE TABLE managed_agent_legacy (witness INT)",
+                // Legacy Managed generations, from the repository's own inventory
+                // (R6-1): they must stay visible to the exact-set comparison
+                // instead of being filtered out by a prefix test.
+                "CREATE TABLE qwen_runtime_binding (witness INT)",
+                "CREATE VIEW managed_workspace_registry AS SELECT 1 AS witness",
                 "DROP TABLE ma_tenant_guard; CREATE VIEW ma_tenant_guard AS SELECT 1 AS witness")) {
             DataSource source = initialized();
             try (var connection = source.getConnection(); var statement = connection.createStatement()) {
@@ -61,6 +66,17 @@ class ManagedSchemaTest {
             }
             assertThrows(IllegalStateException.class, () -> ManagedSchema.validateSharedCatalog(source));
         }
+    }
+
+    @Test
+    void sharedCatalogValidationAcceptsBusinessTablesInTheManagedNamespace() throws Exception {
+        // The opposite direction of R6-1: `managed_agent_` is not a reserved
+        // prefix, so an unrelated business table there must not fail the gate.
+        DataSource source = initialized();
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE managed_agent_settings (witness INT)");
+        }
+        assertDoesNotThrow(() -> ManagedSchema.validateSharedCatalog(source));
     }
 
     @Test
