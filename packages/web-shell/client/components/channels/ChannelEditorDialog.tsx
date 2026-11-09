@@ -1719,10 +1719,12 @@ export function ChannelEditorDialog({
               const showRadioGroup = !descriptorPolicy && !repositoryOnly;
               const descriptorGroupPolicy =
                 hasDescriptorGroupPolicy(descriptor);
-              // Mirror of the repository-only branch above. This is the single
-              // carrier for the private-only rule: it covers the descriptor and
-              // the stored config alike, so a stored group policy cannot
-              // resurrect controls this channel cannot use.
+              // Mirror of the repository-only branch above. The draft skip is
+              // what normally keeps this empty: it omits groupPolicy from
+              // draft.values, so the descriptor arm below reads ''. This
+              // ternary is the guard for the other arm — if the descriptor ever
+              // lacked the injected field, the fallback would read the STORED
+              // config, and a stored 'pairing' must not resurrect the panel.
               const effectiveGroupPolicy = privateOnly
                 ? ''
                 : descriptorGroupPolicy

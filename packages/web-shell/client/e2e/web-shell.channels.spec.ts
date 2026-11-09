@@ -989,15 +989,32 @@ test('lists a configured Email channel and hides its inert group controls', asyn
   await expect(
     editor.getByRole('heading', { name: 'Configure Email' }),
   ).toBeVisible();
-  // Readable labels come from the i18n layer, not the raw descriptor keys.
-  await expect(editor.getByLabel('IMAP Host', { exact: true })).toBeVisible();
+  // Locate by role and accessible name, not by label text: FieldShell appends
+  // an aria-hidden "*" to every required label, so the label's text is
+  // "IMAP Host*" and an exact getByLabel matches nothing. The accessible name
+  // skips aria-hidden content, so an exact role name matches the control.
   await expect(
-    editor.getByLabel('Mailbox Address', { exact: true }),
+    editor.getByRole('textbox', { name: 'IMAP Host', exact: true }),
   ).toBeVisible();
-  await expect(editor.getByLabel('Group policy', { exact: true })).toHaveCount(
-    0,
-  );
   await expect(
-    editor.getByLabel('Direct message policy', { exact: true }),
+    editor.getByRole('textbox', { name: 'Mailbox Address', exact: true }),
   ).toBeVisible();
+  await expect(
+    editor.getByRole('combobox', {
+      name: 'Direct message policy',
+      exact: true,
+    }),
+  ).toBeVisible();
+  // Substring name matchers on purpose: an exact matcher would also miss a
+  // rendered "Group policy*", letting this guard pass while the control it
+  // forbids is on screen. Cover the whole group axis, not just the policy.
+  await expect(
+    editor.getByRole('combobox', { name: /Group policy/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('textbox', { name: /Allowed group IDs/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('combobox', { name: /Who can talk in groups/ }),
+  ).toHaveCount(0);
 });

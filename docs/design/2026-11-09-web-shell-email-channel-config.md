@@ -226,13 +226,30 @@ Email case beside it so the two exceptions are stated together.
 
 ## Key design decisions
 
-| Decision                                                                | Rationale                                                                                                                  |
-| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Model Email as private-only on the client, symmetric to repository-only | Follows an existing, tested pattern; no channel contract change and no cross-package escalation                            |
-| Do not add a `supportsGroups` plugin capability                         | A contract change across `channel-base`, the registry, and every adapter for one platform's UI concern is disproportionate |
-| Preserve stored group keys instead of deleting them                     | No observable harm once the controls are hidden; discarding user configuration is not reversible from the UI               |
-| Fix the seven plugin labels as well as adding i18n overrides            | The descriptor is public; `label: key` is an outlier against every sibling and would degrade any non-Web-Shell client      |
-| Add a parity test driven by the real plugin                             | A hand-built descriptor fixture cannot detect drift between the plugin's field list and the editor's assumptions           |
+| Decision                                                                | Rationale                                                                                                                              |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Model Email as private-only on the client, symmetric to repository-only | Follows an existing, tested pattern; no channel contract change and no cross-package escalation                                        |
+| Do not add a `supportsGroups` plugin capability                         | A contract change across `channel-base`, the registry, and every adapter for one platform's UI concern is disproportionate             |
+| Preserve stored group keys instead of deleting them                     | No admission effect, verified at the gate rather than assumed — see below. Discarding user configuration is not reversible from the UI |
+| Fix the seven plugin labels as well as adding i18n overrides            | The descriptor is public; `label: key` is an outlier against every sibling and would degrade any non-Web-Shell client                  |
+| Add a parity test driven by the real plugin                             | A hand-built descriptor fixture cannot detect drift between the plugin's field list and the editor's assumptions                       |
+
+The preserve-not-delete decision was checked at the gate instead of argued from
+the UI. `GroupGate.check()` returns `{ allowed: true }` for any envelope with
+`isGroup` false **before** it reads the policy or the pairing store, and Email
+builds every envelope that way, so no group setting can admit or reject anyone.
+`SenderGate` reads the pairing store only under a `pairing` private policy, which
+Email's enum cannot express.
+
+One residual side effect is real and was measured, not dismissed: a preserved
+`groupPolicy: "pairing"` still makes the channel construct a pairing store and
+enables the daemon's pairing management routes. It is inert — the group gate
+creates requests only for group envelopes and the private gate only under a
+pairing policy, so neither can ever create one; approval always reports
+not-found, the approval list is empty, and the editor renders no pairing panel.
+The store is keyed by channel name and workspace, so there is no cross-channel
+effect. Deleting the stored key would remove that inert residue, at the cost of
+silently discarding configuration the operator may still want.
 
 ## Constraints
 
@@ -273,17 +290,24 @@ Email case beside it so the two exceptions are stated together.
 
 | Group                                    | Result                         |
 | ---------------------------------------- | ------------------------------ |
-| 1 — vitest (whole `channels/` directory) | 449 passed                     |
+| 1 — vitest (whole `channels/` directory) | 451 passed                     |
 | 1 — Email adapter package                | 82 passed                      |
 | 1 — CLI catalog consumers                | 8 passed                       |
 | 2 — Playwright browser E2E               | **Blocked**, see below         |
 | 3 — real-daemon round trip               | 9/9 passed on the local bundle |
 | 4 — build / typecheck / lint / prettier  | passed                         |
 
-Counts are after the code review below; the pre-review round was 385 web-shell
-tests. A full `packages/web-shell` run during review reported 15598 passed, and
+The web-shell count moved 385 → 449 → 451: 385 before the code review below, 449
+after the review's added cases, and 451 once the branch incorporated `main`,
+which brought two upstream `prCommentWatch` cases into the same parity file.
+A full `packages/web-shell` run during review reported 15598 passed, and
 `packages/cli` timed out on unrelated files whose failure set drifted between
 runs — no verdict for that suite, not attributed to this change.
+
+The full `npm run lint` gate reports 658 errors in this checkout, all of them in
+`packages/sdk-java/qwencode/target/reports/apidocs/` — untracked local Javadoc
+output that does not exist in CI. With that directory excluded the gate exits 0,
+and no error-bearing file lies outside it.
 
 The daemon probe was run against both the shipped `qwen` 0.27.0 and the local
 bundle. Eight checks pass on both, confirming the daemon side was already

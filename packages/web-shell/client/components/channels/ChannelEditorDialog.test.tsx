@@ -4269,8 +4269,10 @@ describe('Email channel editor', () => {
     for (const raw of ['imapHost', 'imapPassword', 'smtpPassword']) {
       expect(labels.some((t) => t.includes(raw))).toBe(false);
     }
-    // A key present in only one locale map falls through to the descriptor, so
-    // pin the translated description as well as the label.
+    // getTranslator resolves messages[key] ?? EN[key] ?? key, so a zh-CN gap
+    // renders the ENGLISH copy, not the descriptor. These per-locale label and
+    // description assertions are therefore what pin the translation; the
+    // both-locale sweep below cannot see a single-locale gap.
     expect(document.body.textContent ?? '').not.toContain(
       'Descriptor description',
     );
@@ -4283,9 +4285,12 @@ describe('Email channel editor', () => {
   });
 
   it('renders every mapped Email label from the catalog in both locales', async () => {
-    // A missing catalog entry makes fieldLabel return the raw i18n key, which
-    // the operator would then see as the field's label. The targeted
-    // assertions above name only six fields; this sweeps the whole map.
+    // This sweep catches a key missing from BOTH locale maps: getTranslator
+    // falls back to EN before it returns the raw key, so a single-locale gap
+    // renders English and stays green here — the targeted per-locale
+    // assertions above pin each language. What this adds is the both-missing
+    // case across the WHOLE map, where the operator would see the raw catalog
+    // key as the field's label.
     for (const [language, advancedLabel] of [
       ['en', 'Advanced settings'],
       ['zh-CN', '高级设置'],
