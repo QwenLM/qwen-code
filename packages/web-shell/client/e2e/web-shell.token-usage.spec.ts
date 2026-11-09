@@ -83,6 +83,7 @@ for (const { width, language, theme } of [
               totalTtftMs: 4800,
               totalGenerationDurationMs: 2000,
               totalThroughputOutputTokens: 898,
+              totalThroughputDurationMs: 6800,
             },
           },
           'qwen3.8-max-0902': {

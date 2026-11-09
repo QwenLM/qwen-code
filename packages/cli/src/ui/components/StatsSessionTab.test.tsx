@@ -67,6 +67,7 @@ describe('<SessionTab /> generation metrics', () => {
       totalTtftMs: 800,
       totalGenerationDurationMs: 7000,
       totalThroughputOutputTokens: 300,
+      totalThroughputDurationMs: 7800,
       last: {
         model: 'qwen3-coder',
         ttftMs: 342,
@@ -98,6 +99,7 @@ describe('<SessionTab /> generation metrics', () => {
       totalTtftMs: 100,
       totalGenerationDurationMs: 0,
       totalThroughputOutputTokens: 3,
+      totalThroughputDurationMs: 100,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,
@@ -116,6 +118,7 @@ describe('<SessionTab /> generation metrics', () => {
       totalTtftMs: 100,
       totalGenerationDurationMs: 400,
       totalThroughputOutputTokens: 0,
+      totalThroughputDurationMs: 0,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,

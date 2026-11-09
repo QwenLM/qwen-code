@@ -141,7 +141,8 @@ function areGenerationMetricsEqual(
     a.timedRequests !== b.timedRequests ||
     a.totalTtftMs !== b.totalTtftMs ||
     a.totalGenerationDurationMs !== b.totalGenerationDurationMs ||
-    a.totalThroughputOutputTokens !== b.totalThroughputOutputTokens
+    a.totalThroughputOutputTokens !== b.totalThroughputOutputTokens ||
+    a.totalThroughputDurationMs !== b.totalThroughputDurationMs
   ) {
     return false;
   }
@@ -331,6 +332,8 @@ function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
               metrics.generation.totalGenerationDurationMs,
             totalThroughputOutputTokens:
               metrics.generation.totalThroughputOutputTokens,
+            totalThroughputDurationMs:
+              metrics.generation.totalThroughputDurationMs,
             ...(metrics.generation.last
               ? { last: { ...metrics.generation.last } }
               : {}),

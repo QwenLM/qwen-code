@@ -47,14 +47,24 @@ function sampleDurationMs(sample: TimingSample): number {
 }
 
 /**
+ * Output tokens per second over `durationMs`; undefined without output tokens
+ * (no usage reported) or time.
+ */
+export function tokensPerSecond(
+  outputTokens: number,
+  durationMs: number,
+): number | undefined {
+  return outputTokens > 0 && durationMs > 0
+    ? outputTokens / (durationMs / 1000)
+    : undefined;
+}
+
+/**
  * Output tokens per second over the time from sending the request to its last
- * visible output, TTFT included; undefined without output tokens or time.
+ * visible output, TTFT included.
  */
 export function sampleSpeed(sample: TimingSample): number | undefined {
-  const durationMs = sampleDurationMs(sample);
-  return sample.outputTokens > 0 && durationMs > 0
-    ? sample.outputTokens / (durationMs / 1000)
-    : undefined;
+  return tokensPerSecond(sample.outputTokens, sampleDurationMs(sample));
 }
 
 function metricValue(

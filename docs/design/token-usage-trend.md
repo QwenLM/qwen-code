@@ -45,9 +45,9 @@ Six categorical colors with separate steps for light and dark: blue, orange, aqu
 When any model has samples or failures, a "Speed over time" card appears between the overview and "By model":
 
 - The x-axis is wall-clock time. Each request is a dot in its model's color, and a line traces the median of its five neighbors to show the trend without following every outlier.
-- A toggle switches the y-axis between output speed (tok/s) and first-token latency (s). The chart has one axis at a time. Responses whose generation window is below 100 ms appear in the first-token view only. Since [Output speed over the full request](output-speed-full-request.md) (#16714), a sample's speed includes TTFT, so every sample with output tokens appears in both views.
+- A toggle switches the y-axis between output speed (tok/s) and first-token latency (s). The chart has one axis at a time. A sample's speed is its output tokens over TTFT plus generation time ([Output speed over the full request](output-speed-full-request.md)), so every sample with output tokens appears in both views; one without output tokens appears in the first-token view only.
 - Failed requests appear as red × marks in a strip under the plot, in both views.
-- Hovering or touching shows the nearest request in a tooltip, with crosshair and highlight: model, time, subagent, speed, first token, output tokens and generation time; for a failure, its kind.
+- Hovering or touching shows the nearest request in a tooltip, with crosshair and highlight: model, time, subagent, speed, first token, and output tokens with the time from request to last visible output; for a failure, its kind.
 - With two or more models, a legend doubles as a series toggle. Hiding the last visible series shows all again.
 - The SVG's accessible name summarizes the metric and each visible model's median.
 

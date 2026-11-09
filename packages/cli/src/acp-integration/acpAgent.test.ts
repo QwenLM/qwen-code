@@ -16018,6 +16018,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             totalTtftMs: 500,
             totalGenerationDurationMs: 400,
             totalThroughputOutputTokens: 40,
+            totalThroughputDurationMs: 900,
             last: {
               model: 'model-a',
               ttftMs: 200,
@@ -16049,6 +16050,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         totalTtftMs: 500,
         totalGenerationDurationMs: 400,
         totalThroughputOutputTokens: 40,
+        totalThroughputDurationMs: 900,
       });
       expect(stats.models['model-b']).not.toHaveProperty('generation');
     } finally {

@@ -35,6 +35,7 @@ import {
   SpeedSpread,
   TokenUsageTrend,
   sampleSpeed,
+  tokensPerSecond,
   type TrendSeries,
 } from './TokenUsageTrend';
 
@@ -133,17 +134,19 @@ const OUTCOME_ICONS = {
 
 /**
  * Token-weighted output tokens per second over the timed requests' time from
- * sending each request to its last visible output, TTFT included.
+ * sending each request to its last visible output, TTFT included. Older
+ * daemons do not send that time; their sums only support their own rate over
+ * the generation window.
  */
 function outputSpeed(
   generation: DaemonSessionStatsModelMetrics['generation'],
 ): number | undefined {
   if (!generation) return undefined;
-  const durationMs =
-    generation.totalTtftMs + generation.totalGenerationDurationMs;
-  return generation.totalThroughputOutputTokens > 0 && durationMs > 0
-    ? generation.totalThroughputOutputTokens / (durationMs / 1000)
-    : undefined;
+  return tokensPerSecond(
+    generation.totalThroughputOutputTokens,
+    generation.totalThroughputDurationMs ??
+      generation.totalGenerationDurationMs,
+  );
 }
 
 export function TokenUsagePanel({
@@ -282,6 +285,13 @@ function TokenUsageBody({
         acc.generation.totalGenerationDurationMs += g.totalGenerationDurationMs;
         acc.generation.totalThroughputOutputTokens +=
           g.totalThroughputOutputTokens;
+        // One model from an older daemon leaves the total without it.
+        acc.generation.totalThroughputDurationMs =
+          acc.generation.totalThroughputDurationMs === undefined ||
+          g.totalThroughputDurationMs === undefined
+            ? undefined
+            : acc.generation.totalThroughputDurationMs +
+              g.totalThroughputDurationMs;
       }
       return acc;
     },
@@ -298,6 +308,7 @@ function TokenUsageBody({
         totalTtftMs: 0,
         totalGenerationDurationMs: 0,
         totalThroughputOutputTokens: 0,
+        totalThroughputDurationMs: 0 as number | undefined,
       },
     },
   );

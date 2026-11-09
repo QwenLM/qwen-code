@@ -81,16 +81,23 @@ export interface GenerationTimingSample {
   outputTokens: number;
 }
 
-/**
- * The totals cover the same timed requests. Output speed divides the output
- * tokens by TTFT plus generation time, i.e. each request's time from sending
- * it to its last visible output.
- */
 export interface GenerationMetrics {
   timedRequests: number;
+  /** Summed over every timed request. */
   totalTtftMs: number;
+  /** Summed over every timed request. */
   totalGenerationDurationMs: number;
+  /**
+   * Output tokens of the timed requests that reported any. Output speed
+   * divides them by `totalThroughputDurationMs`.
+   */
   totalThroughputOutputTokens: number;
+  /**
+   * TTFT plus generation time of the same requests as
+   * `totalThroughputOutputTokens`: each one's time from sending it to its last
+   * visible output.
+   */
+  totalThroughputDurationMs: number;
   last?: GenerationTimingSample;
 }
 
@@ -308,6 +315,7 @@ const createInitialGenerationMetrics = (): GenerationMetrics => ({
   totalTtftMs: 0,
   totalGenerationDurationMs: 0,
   totalThroughputOutputTokens: 0,
+  totalThroughputDurationMs: 0,
 });
 
 const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
@@ -805,10 +813,14 @@ export class UiTelemetryService extends EventEmitter {
     const accumulateGeneration = (generation: GenerationMetrics) => {
       generation.timedRequests++;
       generation.totalTtftMs += ttftMs;
-      // Every timed request counts towards output speed. Its denominator
-      // includes TTFT, so a burst of visible output cannot shrink it to zero.
       generation.totalGenerationDurationMs += generationDurationMs;
-      generation.totalThroughputOutputTokens += event.output_token_count;
+      // Output speed includes TTFT, so a burst of visible output cannot
+      // shrink its time to zero. A request without reported output tokens
+      // would add time but no tokens, so it stays out.
+      if (event.output_token_count > 0) {
+        generation.totalThroughputOutputTokens += event.output_token_count;
+        generation.totalThroughputDurationMs += ttftMs + generationDurationMs;
+      }
     };
 
     const generation = (metrics.generation ??=

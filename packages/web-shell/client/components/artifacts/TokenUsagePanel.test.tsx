@@ -677,12 +677,14 @@ describe('TokenUsagePanel', () => {
       totalTtftMs: 4_800,
       totalGenerationDurationMs: 2_000,
       totalThroughputOutputTokens: 170,
+      totalThroughputDurationMs: 6_800,
     };
     stats.models['qwen-max::auto'].generation = {
       timedRequests: 1,
       totalTtftMs: 900,
       totalGenerationDurationMs: 0,
       totalThroughputOutputTokens: 0,
+      totalThroughputDurationMs: 0,
     };
     const container = renderPanel(vi.fn().mockResolvedValue(stats));
     await act(async () => {});
@@ -705,6 +707,24 @@ describe('TokenUsagePanel', () => {
     expect(document.querySelector('[data-slot="tooltip-content"]')).toBeNull();
   });
 
+  it('keeps the generation-window rate for daemons without request time', async () => {
+    const stats = statsFixture();
+    stats.models['qwen-plus::hybrid'].generation = {
+      timedRequests: 4,
+      totalTtftMs: 4_800,
+      totalGenerationDurationMs: 2_000,
+      totalThroughputOutputTokens: 170,
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats));
+    await act(async () => {});
+
+    // An older daemon's sums cover different requests; its own rate is the
+    // only one they support.
+    expect(modelStats(container.querySelector('[data-color]')!)).toContainEqual(
+      ['Output speed', '85.0 tok/s'],
+    );
+  });
+
   it.each(['en', 'zh-CN'] as const)(
     'keeps full model timing labels and values in titles in %s',
     async (language) => {
@@ -714,6 +734,7 @@ describe('TokenUsagePanel', () => {
         totalTtftMs: 4_800,
         totalGenerationDurationMs: 2_000,
         totalThroughputOutputTokens: 898,
+        totalThroughputDurationMs: 6_800,
       };
       const container = renderPanel(vi.fn().mockResolvedValue(stats), language);
       await act(async () => {});
@@ -733,6 +754,7 @@ describe('TokenUsagePanel', () => {
       totalTtftMs: 1_000,
       totalGenerationDurationMs: 4_000,
       totalThroughputOutputTokens: 300,
+      totalThroughputDurationMs: 5_000,
     };
     const container = renderPanel(vi.fn().mockResolvedValue(stats), 'zh-CN');
     await act(async () => {});
@@ -1361,12 +1383,14 @@ describe('TokenUsagePanel', () => {
       totalTtftMs: 3_000,
       totalGenerationDurationMs: 2_000,
       totalThroughputOutputTokens: 200,
+      totalThroughputDurationMs: 5_000,
     };
     stats.models['qwen-max::auto'].generation = {
       timedRequests: 1,
       totalTtftMs: 1_000,
       totalGenerationDurationMs: 2_000,
       totalThroughputOutputTokens: 400,
+      totalThroughputDurationMs: 3_000,
     };
     const container = renderPanel(vi.fn().mockResolvedValue(stats), 'zh-CN');
     await act(async () => {});

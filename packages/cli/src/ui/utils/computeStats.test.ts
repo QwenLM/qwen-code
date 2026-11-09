@@ -291,17 +291,13 @@ describe('computeSessionStats', () => {
 });
 
 describe('outputTokensPerSecond', () => {
-  it('divides output tokens by TTFT plus generation time', () => {
-    expect(outputTokensPerSecond(200, 8_000, 2_000)).toBe(20);
-  });
-
-  it('measures a single-chunk response over its TTFT', () => {
-    expect(outputTokensPerSecond(30, 500, 0)).toBe(60);
+  it('divides output tokens by the time', () => {
+    expect(outputTokensPerSecond(200, 10_000)).toBe(20);
   });
 
   it('is undefined without output tokens or time', () => {
-    expect(outputTokensPerSecond(0, 500, 500)).toBeUndefined();
-    expect(outputTokensPerSecond(10, 0, 0)).toBeUndefined();
+    expect(outputTokensPerSecond(0, 1_000)).toBeUndefined();
+    expect(outputTokensPerSecond(10, 0)).toBeUndefined();
   });
 });
 
@@ -314,13 +310,14 @@ describe('computeGenerationRates', () => {
     });
   });
 
-  it('weights the session rate by tokens over request time', () => {
+  it('includes TTFT in the latest rate and weights the session rate', () => {
     expect(
       computeGenerationRates({
         timedRequests: 2,
         totalTtftMs: 1_000,
         totalGenerationDurationMs: 4_000,
         totalThroughputOutputTokens: 600,
+        totalThroughputDurationMs: 5_000,
         last: {
           model: 'qwen3-coder',
           ttftMs: 500,
@@ -329,5 +326,23 @@ describe('computeGenerationRates', () => {
         },
       }),
     ).toEqual({ lastTps: 50, averageTtft: 500, sessionTps: 120 });
+  });
+
+  it('measures a single-chunk response over its TTFT', () => {
+    expect(
+      computeGenerationRates({
+        timedRequests: 1,
+        totalTtftMs: 500,
+        totalGenerationDurationMs: 0,
+        totalThroughputOutputTokens: 30,
+        totalThroughputDurationMs: 500,
+        last: {
+          model: 'qwen3-coder',
+          ttftMs: 500,
+          generationDurationMs: 0,
+          outputTokens: 30,
+        },
+      }).lastTps,
+    ).toBe(60);
   });
 });

@@ -407,6 +407,7 @@ describe('UiTelemetryService', () => {
         totalTtftMs: 300,
         totalGenerationDurationMs: 1000,
         totalThroughputOutputTokens: 50,
+        totalThroughputDurationMs: 1300,
         last: {
           model: 'qwen-plus',
           ttftMs: 200,
@@ -432,6 +433,7 @@ describe('UiTelemetryService', () => {
         totalTtftMs: 200,
         totalGenerationDurationMs: 300,
         totalThroughputOutputTokens: 40,
+        totalThroughputDurationMs: 500,
         last: {
           model: 'qwen3-coder',
           ttftMs: 100,
@@ -455,12 +457,14 @@ describe('UiTelemetryService', () => {
         totalTtftMs: 150,
         totalGenerationDurationMs: 300,
         totalThroughputOutputTokens: 30,
+        totalThroughputDurationMs: 450,
       });
       expect(metrics.statsModels?.['qwen-plus'].generation).toEqual({
         timedRequests: 1,
         totalTtftMs: 300,
         totalGenerationDurationMs: 0,
         totalThroughputOutputTokens: 20,
+        totalThroughputDurationMs: 300,
       });
       expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
     });
@@ -599,15 +603,37 @@ describe('UiTelemetryService', () => {
         timedResponse({ generation_ms: 99, output_token_count: 10 }),
       );
 
-      // Output speed is totalThroughputOutputTokens over
-      // totalTtftMs + totalGenerationDurationMs, so every sum covers the
-      // same requests.
+      // TTFT keeps the time of a burst above zero: 105 tokens over 299 ms.
       expect(service.getMetrics().generation).toMatchObject({
         timedRequests: 2,
         totalTtftMs: 200,
         totalGenerationDurationMs: 99,
         totalThroughputOutputTokens: 105,
+        totalThroughputDurationMs: 299,
         last: { generationDurationMs: 99, outputTokens: 10 },
+      });
+    });
+
+    it('keeps requests without reported output tokens out of output speed', () => {
+      service.addEvent(
+        timedResponse({ generation_ms: 900, output_token_count: 100 }),
+      );
+      service.addEvent(
+        timedResponse({
+          ttft_ms: 2_000,
+          generation_ms: 1_000,
+          output_token_count: 0,
+        }),
+      );
+
+      // Both count towards TTFT and generation time; only the first has a
+      // rate, so output speed stays 100 tokens over 1 s.
+      expect(service.getMetrics().generation).toMatchObject({
+        timedRequests: 2,
+        totalTtftMs: 2_100,
+        totalGenerationDurationMs: 1_900,
+        totalThroughputOutputTokens: 100,
+        totalThroughputDurationMs: 1_000,
       });
     });
 

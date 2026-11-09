@@ -236,6 +236,7 @@ describe('statsCommand', () => {
         totalTtftMs: 300,
         totalGenerationDurationMs: 2000,
         totalThroughputOutputTokens: 92,
+        totalThroughputDurationMs: 2300,
         last: {
           model: 'qwen3-coder',
           ttftMs: 250,

@@ -3825,14 +3825,23 @@ export interface DaemonSessionStatsModelMetrics {
     /** Streamed requests with a recorded time to first token. */
     timedRequests: number;
     totalTtftMs: number;
-    /** Time from the first to the last visible output, summed. */
+    /**
+     * Time from the first to the last visible output, summed over every timed
+     * request. Older daemons summed it only over windows of at least 100 ms.
+     */
     totalGenerationDurationMs: number;
     /**
-     * Output tokens of the timed requests. Output speed divides them by
-     * `totalTtftMs + totalGenerationDurationMs`. Older daemons summed this
-     * and `totalGenerationDurationMs` only over windows of at least 100 ms.
+     * Output tokens of the timed requests that reported any. Older daemons
+     * summed them over the same requests as `totalGenerationDurationMs`.
      */
     totalThroughputOutputTokens: number;
+    /**
+     * TTFT plus generation time of the requests in
+     * `totalThroughputOutputTokens`; output speed divides the tokens by it.
+     * Absent from older daemons, whose output speed is
+     * `totalThroughputOutputTokens / totalGenerationDurationMs`.
+     */
+    totalThroughputDurationMs?: number;
   };
   /**
    * Most recent timed, non-internal responses (oldest first, at most 200).

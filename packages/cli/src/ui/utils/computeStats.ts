@@ -12,22 +12,23 @@ import type {
 } from '../contexts/SessionContext.js';
 
 /**
- * Output tokens per second over the time from sending a request to its last
- * visible output, TTFT included. Summed timings give a token-weighted rate.
- * Undefined without output tokens (no usage reported) or time.
+ * Output tokens per second over `durationMs`; undefined without output tokens
+ * (no usage reported) or time.
  */
 export function outputTokensPerSecond(
   outputTokens: number,
-  ttftMs: number,
-  generationMs: number,
+  durationMs: number,
 ): number | undefined {
-  const durationMs = ttftMs + generationMs;
   return outputTokens > 0 && durationMs > 0
     ? outputTokens / (durationMs / 1000)
     : undefined;
 }
 
-/** Latest-request TPS, average TTFT and session TPS for `/stats`. */
+/**
+ * Latest-request TPS, average TTFT and session TPS for `/stats`. TPS covers
+ * the time from sending a request to its last visible output, TTFT included;
+ * session TPS is token-weighted.
+ */
 export function computeGenerationRates(
   generation: GenerationMetrics | undefined,
 ): {
@@ -40,8 +41,7 @@ export function computeGenerationRates(
     lastTps: last
       ? outputTokensPerSecond(
           last.outputTokens,
-          last.ttftMs,
-          last.generationDurationMs,
+          last.ttftMs + last.generationDurationMs,
         )
       : undefined,
     averageTtft:
@@ -51,8 +51,7 @@ export function computeGenerationRates(
     sessionTps: generation
       ? outputTokensPerSecond(
           generation.totalThroughputOutputTokens,
-          generation.totalTtftMs,
-          generation.totalGenerationDurationMs,
+          generation.totalThroughputDurationMs,
         )
       : undefined,
   };
