@@ -297,6 +297,29 @@ export function createManager(config, dependencies = {}) {
     return (await run('docker', args)).trim().split('\n').filter(Boolean);
   }
 
+  // The labels are the identity anchor label recovery reads back, so
+  // provisioning and the refusal-path retry anchor must create identical
+  // networks.
+  async function createNetwork(slot, name) {
+    return (
+      await run('docker', [
+        'network',
+        'create',
+        '--driver',
+        'bridge',
+        '--opt',
+        'com.docker.network.bridge.enable_icc=false',
+        '--label',
+        `qwen.pool=${config.poolId}`,
+        '--label',
+        `qwen.slot=${slot}`,
+        '--label',
+        `qwen.instance=${name}`,
+        name,
+      ])
+    ).trim();
+  }
+
   async function collectIdentities(containers, networks) {
     const names = [];
     const inspect = async (args, id) => {
@@ -487,12 +510,9 @@ export function createManager(config, dependencies = {}) {
         }
       }
     }
-    // Reconcile the slot's GitHub registration. Both call sites below use it,
-    // but they run at different points: an identity that exists only in the
-    // resource labels is reconciled while its resources still exist, a
-    // state-anchored identity after the container is stopped and removed. A
-    // refused or rejected deletion throws, so the call site decides what
-    // survives to retry — see `resourceAnchoredIdentity`.
+    // Reconcile the slot's GitHub registration. Both call sites below use
+    // it; each site's comment explains its placement and what a thrown
+    // refusal leaves behind to retry — see `resourceAnchoredIdentity`.
     const reconcileRegistration = async () => {
       const all = await listRunners();
       // A recorded runnerName is exact. A label-recovered identity carries
@@ -584,7 +604,7 @@ export function createManager(config, dependencies = {}) {
     const alreadyGone = (error) =>
       /No such container/i.test(error?.stderr || '');
     // Diagnostics run before any reconciliation refusal so a wedged slot
-    // still exports the one container an operator must inspect (R2-2).
+    // still exports the one container an operator must inspect.
     const captureDiagnostics = async (id) => {
       try {
         const logs = await run('docker', ['logs', '--tail', '10000', id]);
@@ -662,41 +682,26 @@ export function createManager(config, dependencies = {}) {
         // No refusal keeps the CONTAINER. An online match backed by this
         // slot's OWN leftover container would otherwise never clear: the
         // retained container keeps heartbeating, so every cycle throws the
-        // same gate (R1-1). Remove the containers and keep the labelled
-        // network as the retry anchor — the runner can now actually reach
-        // offline, and the network keeps the next cycle in cleanup(). A
-        // permanent identity refusal pins no compute either: the same error
+        // same gate. Remove the containers and keep the labelled network
+        // as the retry anchor — the runner can now actually reach offline,
+        // and the network keeps the next cycle in cleanup(). A permanent
+        // identity refusal pins no compute either: the same error
         // resurfaces from the network anchor until a human reconciles, and
-        // the registration is never deleted (R2-1).
+        // the registration is never deleted.
+        // Persist nothing: a label-recovered identity has no valid state
+        // shape (load() requires a runnerId unless uncertain), so the
+        // labelled network alone anchors the retry for both refusal kinds.
+        // Secure the anchor BEFORE removing the containers: a killed
+        // `docker create` leaves a container-only pile, and if the anchor
+        // creation failed after removal the slot would replenish and leak
+        // the registration. With this order a failed creation still leaves
+        // the containers to bring the next cycle back.
+        if (!networks.length) {
+          await createNetwork(slot, state.name);
+        }
         for (const id of containers) await removeContainer(id);
         if ((await listContainers(slot)).length)
           throw new Error('Container cleanup failed');
-        // Persist nothing: a label-recovered identity has no valid state
-        // shape (no runnerId), so the labelled network stays the anchor for
-        // BOTH refusal kinds — the container is already gone, so no compute
-        // stays pinned, and a permanent identity error resurfaces identically
-        // every cycle until a human reconciles (R2-1).
-        if (!networks.length) {
-          // The pile had no labelled network to anchor the retry (a killed
-          // `docker create` leaves only the container). Create the labelled
-          // anchor the normal provisioning would have made, so the retry
-          // still reaches this gate after the container is gone.
-          await run('docker', [
-            'network',
-            'create',
-            '--driver',
-            'bridge',
-            '--opt',
-            'com.docker.network.bridge.enable_icc=false',
-            '--label',
-            `qwen.pool=${config.poolId}`,
-            '--label',
-            `qwen.slot=${slot}`,
-            '--label',
-            `qwen.instance=${state.name}`,
-            state.name,
-          ]);
-        }
         throw error;
       }
     }
@@ -799,23 +804,7 @@ export function createManager(config, dependencies = {}) {
       await save(slot, state);
       if (!result.encoded_jit_config)
         throw new Error('GitHub returned no JIT configuration');
-      const networkId = (
-        await run('docker', [
-          'network',
-          'create',
-          '--driver',
-          'bridge',
-          '--opt',
-          'com.docker.network.bridge.enable_icc=false',
-          '--label',
-          `qwen.pool=${config.poolId}`,
-          '--label',
-          `qwen.slot=${slot}`,
-          '--label',
-          `qwen.instance=${state.name}`,
-          state.name,
-        ])
-      ).trim();
+      const networkId = await createNetwork(slot, state.name);
       if (!networkId) throw new Error('Docker returned no network ID');
       state.networkId = networkId;
       await save(slot, state);

@@ -48,6 +48,7 @@ async function fixture(t) {
   let foreignCounter = 0;
   let failRemove = false;
   let failNetworkRemove = false;
+  let failNetworkCreate = false;
   let keepContainerAfterRemove = false;
   let loseJit = false;
   let failDelete = false;
@@ -147,6 +148,7 @@ async function fixture(t) {
       return matched.length ? `${matched.map(([id]) => id).join('\n')}\n` : '';
     }
     if (args[0] === 'network' && args[1] === 'create') {
+      if (failNetworkCreate) throw new Error('network creation failed');
       const id = `network-${counter}`;
       networks.set(id, { labels: labelsFromArgs(args) });
       return id;
@@ -213,6 +215,9 @@ async function fixture(t) {
     },
     setFailNetworkRemove: (v) => {
       failNetworkRemove = v;
+    },
+    setFailNetworkCreate: (v) => {
+      failNetworkCreate = v;
     },
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
@@ -1576,7 +1581,7 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
 test('a rejected label-recovered deletion retries from the retained resources', async (t) => {
   // Nothing about a label-recovered identity is persisted, so a rejected
   // DELETE can only be retried if a labelled resource survives the throw.
-  // R1-1: the CONTAINER is now removed even on a retryable refusal — a
+  // The CONTAINER is removed even on a retryable refusal — a
   // retained container keeps its own runner heartbeating and the offline
   // gate could then never clear — and the labelled network is the retry
   // anchor. Cycle 2 must retry the same registration from that anchor.
@@ -1614,7 +1619,7 @@ test('a rejected label-recovered deletion retries from the retained resources', 
         c.args[0] === 'rm' &&
         c.args.includes('container-orphan-0'),
     ),
-    'the container is removed so its runner can actually reach offline (R1-1)',
+    'the container is removed so its runner can actually reach offline',
   );
   assert.ok(
     !f.calls.some(
@@ -1641,7 +1646,7 @@ test('label recovery never deletes an online or unconfirmed registration', async
   // belong to a live runner outside this host's view, and a missing, null or
   // unknown status must fail closed. The gate runs before the registration
   // could be deleted; the container is removed so an online match backed by
-  // this slot's own leftover runner can actually reach offline (R1-1), and
+  // this slot's own leftover runner can actually reach offline, and
   // the labelled network anchor — never a rebuilt pile and never a persisted
   // state file — keeps the next cycle reaching the gate.
   for (const status of ['online', undefined, null, 'busy']) {
@@ -1712,7 +1717,7 @@ test('label recovery never deletes an online or unconfirmed registration', async
       ),
       `the labelled network anchor survives the refusal (${label})`,
     );
-    // R2-2: the refusing cycle still exports the container's diagnostics —
+    // The refusing cycle still exports the container's diagnostics —
     // the one artefact an operator of a wedged slot must inspect.
     const exported = await readdir(f.config.logDir);
     assert.ok(
@@ -1736,7 +1741,7 @@ test('label recovery never deletes an online or unconfirmed registration', async
 });
 
 test('an online registration backed by the own orphan container self-heals', async (t) => {
-  // R1-1: the retained container kept its runner heartbeating, so the
+  // A retained container kept its runner heartbeating, so the
   // offline gate threw identically every cycle and the slot never
   // recovered. Removing the container lets the runner reach offline; the
   // labelled network keeps the retry anchored, and the next cycle deletes
@@ -1786,8 +1791,55 @@ test('an online registration backed by the own orphan container self-heals', asy
   );
 });
 
+test('a failed refusal-anchor creation keeps the containers and leaks nothing', async (t) => {
+  // The refusal path removes the containers and relies on a labelled
+  // network to bring the next cycle back. A container-only pile needs that
+  // anchor created first: if the creation fails AFTER the removal, the slot
+  // would find nothing to clean up, replenish, and leak the registration.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234', status: 'online' });
+  f.setFailNetworkCreate(true);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1));
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'the container survives a failed anchor creation as the retry anchor',
+  );
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ).length,
+    0,
+    'no replenishment while the registration is unreconciled',
+  );
+  f.setFailNetworkCreate(false);
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await manager.cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'the next cycle still reaches the registration and deletes it once offline',
+  );
+});
+
 test('a permanent identity refusal reclaims the container and keeps blocking', async (t) => {
-  // R2-1: an ambiguous identity is permanent — no retry clears it — so the
+  // An ambiguous identity is permanent — no retry clears it — so the
   // container must not be pinned behind it. Cycle 1 removes the container
   // and keeps the labelled network anchor; cycle 2 still fails on the same
   // ambiguity, deletes neither registration, and a manual fix (one
@@ -1841,7 +1893,7 @@ test('a permanent identity refusal reclaims the container and keeps blocking', a
 });
 
 test('the call-site split reconciles each identity exactly once, at its own point', async (t) => {
-  // R2-3: a label-recovered identity is reconciled BEFORE the container is
+  // A label-recovered identity is reconciled BEFORE the container is
   // removed (its only anchor), a state-anchored one only AFTER — deleting a
   // still-connected runner's registration hits GitHub's "runner is busy"
   // rejection on every watchdog kill. Widening the early flag to

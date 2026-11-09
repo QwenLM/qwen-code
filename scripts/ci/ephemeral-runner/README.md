@@ -193,15 +193,22 @@ the slot rather than deleting anything. A label-recovered match (no recorded
 registration name or id) is only deleted when GitHub explicitly reports it
 offline; an online, status-less or unknown-status match blocks the slot
 instead, because it may belong to a live runner outside this host's view. That
-refusal happens before the resources are removed: nothing about a
-label-recovered identity is written to a state file, so the leftover container
-or network is the only thing that brings the slot back into cleanup on the next
-cycle. A runner deletion GitHub rejects (for example while it still reports the
-runner busy) keeps either the slot state or, for a label-recovered identity,
-the retained resources, and is retried, instead of dropping the only record
-that can remove the registration. The identity-less sweep deletes
-registrations before removing the resources for the same reason: a rejected
-deletion is still retried on the next cycle while the pile remains.
+refusal never keeps the container: a retained container would keep its own
+runner heartbeating, so an online match backed by this slot's leftover runner
+could never reach offline and the refusal would sustain itself. The containers
+are removed and a labelled network is kept (or created first, when the pile
+had none) as the retry anchor — nothing about a label-recovered identity is
+written to a state file, so that network is what brings the slot back into
+cleanup on the next cycle. A permanent identity refusal (an ambiguous or
+mismatched identity) reclaims the containers the same way and keeps reporting
+the same error from the network anchor until a human reconciles; it never
+deletes a registration. A runner deletion GitHub rejects (for example while it
+still reports the runner busy) keeps either the slot state or, for a
+label-recovered identity, the network anchor, and is retried, instead of
+dropping the only record that can remove the registration. The identity-less
+sweep deletes registrations before removing the resources for the same
+reason: a rejected deletion is still retried on the next cycle while the pile
+remains.
 
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service
