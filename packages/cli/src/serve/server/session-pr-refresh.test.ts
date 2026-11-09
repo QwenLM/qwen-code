@@ -40,6 +40,7 @@ import {
 import * as sessionListModule from './session-list.js';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
+  prWatchOwnerPath,
   readPrWatchStateSync,
   writePrWatchStateSync,
 } from './pr-watch-store.js';
@@ -2037,6 +2038,96 @@ describe('startSessionPrRefreshTimer', () => {
     // PR-watch seam (no claim, no view, no watch-file write).
     expect(getPrWatchDeps).not.toHaveBeenCalled();
     handle?.dispose();
+  });
+
+  it('stopWatch reads no watch seam while the switch is off', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const getPrWatchDeps = vi.fn(() => undefined);
+    const getPrDrainDeps = vi.fn(() => undefined);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getPrWatchDeps,
+      getPrDrainDeps,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      getPrWatchDeps.mockClear();
+      getPrDrainDeps.mockClear();
+      const store = await import('./pr-watch-store.js');
+      const release = vi.spyOn(store, 'releaseOwnedPrWatchSync');
+      await handle?.stopWatch();
+      // Shutdown must not read a seam the off state never reads, nor even
+      // attempt to release an owner record this daemon never claimed.
+      expect(getPrWatchDeps).not.toHaveBeenCalled();
+      expect(getPrDrainDeps).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+      release.mockRestore();
+    } finally {
+      handle?.dispose();
+    }
+  });
+
+  it('stopWatch releases the owner record after the watch has run', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-stop-'),
+    );
+    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: async (url: string) => ({
+          kind: 'ok' as const,
+          view: {
+            url,
+            title: 'PR 42',
+            headSha: 'a'.repeat(40),
+            state: 'open' as const,
+            checks: 'passing' as const,
+            failingChecks: [] as string[],
+          },
+        }),
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      // The observation claimed the watch; shutdown must hand it back.
+      await vi.waitFor(() => {
+        expect(
+          readPrWatchStateSync(watchDir, {
+            host: 'github.com',
+            repo: 'o/r',
+            number: 42,
+          }).kind,
+        ).toBe('state');
+      });
+      await handle?.stopWatch();
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
   });
 
   it('never reads the PR-drain deps while the observation switch is off', async () => {
