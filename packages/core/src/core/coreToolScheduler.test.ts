@@ -5897,6 +5897,47 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('does not let a PermissionRequest hook allow waive an amend approval', async () => {
+    // R21-1 counterpart to the destructive case above: the amend floor rides
+    // the plain fallback arm, so `requiresHumanDecision` is the only thing
+    // that stops this hook from rewriting a human-authored commit unattended.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails(
+              'Run command',
+              'git commit --amend',
+              'git',
+              onConfirmSpy,
+            ),
+          ),
+        execute,
+      }),
+      {
+        messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+        disableHooks: false,
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('amend-hook-waiver', 'git commit --amend --no-edit'),
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() =>
+      expect(reportedCalls(harness.onToolCallsUpdate).at(-1)?.status).toBe(
+        'awaiting_approval',
+      ),
+    );
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('denies a destructive-command escalation in non-interactive STREAM_JSON instead of offering it to the host', async () => {
     // Counterpart to the test above for the other programmatic approver.
     // STREAM_JSON is exempt from the non-interactive deny because a host can

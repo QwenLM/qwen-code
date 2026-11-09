@@ -1566,6 +1566,27 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
     }
   });
 
+  it('marks the amend approval as one a PermissionRequest hook cannot waive', async () => {
+    // R21-1: the amend floor moved from `blocked:destructive-command` onto the
+    // plain fallback arm, which does not invent the marker by itself. The bit
+    // has to travel on the decision, or a hook `allow` rewrites a
+    // human-authored commit with nobody in the loop.
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: 'git commit --amend --no-edit',
+    });
+    expect(decision.via).toBe('fallback');
+    if (decision.via === 'fallback') {
+      expect(decision.reason).toBe('safety_check');
+      expect(decision.requiresHumanDecision).toBe(true);
+    }
+    const { result } = apply(decision, counters(0, 0, 0, 0));
+    expect(result.kind).toBe('fallback');
+    if (result.kind === 'fallback') {
+      expect(result.requiresHumanDecision).toBe(true);
+    }
+  });
+
   it('leaves the classifier cap fallback hook-waivable', () => {
     // Contrast for the marker above: only the deterministic guard's escalation
     // is human-only. The classifier arm reaches the same two reason codes, and

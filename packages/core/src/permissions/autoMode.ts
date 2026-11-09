@@ -512,7 +512,15 @@ export type AutoModeDecision =
       stage: 'fast' | 'thinking';
       durationMs: number;
     }
-  | { via: 'fallback'; reason: FallbackToAskReason };
+  | {
+      via: 'fallback';
+      reason: FallbackToAskReason;
+      /**
+       * Set when a deterministic floor must be confirmed by a human: a
+       * `PermissionRequest` hook answering `allow` must not waive it.
+       */
+      requiresHumanDecision?: boolean;
+    };
 
 /**
  * Reasons AUTO mode itself is unavailable before a per-call decision can run.
@@ -700,6 +708,9 @@ export function applyAutoModeDecision(
       return {
         kind: 'fallback',
         reason: decision.reason,
+        ...(decision.requiresHumanDecision
+          ? { requiresHumanDecision: true }
+          : {}),
         ...(isDenialFallbackReason(decision.reason)
           ? { message: formatDenialFallbackMessage(decision.reason) }
           : {}),
@@ -907,7 +918,11 @@ export async function evaluateAutoMode(
         input.ctx.cwd ?? input.config.getTargetDir?.(),
       )
     ) {
-      return { via: 'fallback', reason: 'safety_check' };
+      return {
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+      };
     }
   }
 

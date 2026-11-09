@@ -161,6 +161,13 @@ export function registerSessionCommit(sha: string): void {
  * rounds without converging (issue #13570). Instead of hard-blocking, AUTO mode
  * routes an unproven mention to the approval path, where the user decides.
  * A commit this session created needs no approval: it is the agent's own work.
+ *
+ * This confirmation is human-only: AUTO mode marks the fallback
+ * `requiresHumanDecision`, so a `PermissionRequest` hook (or a stream-json
+ * host) answering `allow` cannot waive it. That is deliberate — the guard
+ * exists to stop an unattended rewrite of a commit the agent did not make, and
+ * a hook that could auto-allow it would restore exactly the bypass the guard
+ * is for.
  */
 export function amendNeedsApproval(
   command: string,
