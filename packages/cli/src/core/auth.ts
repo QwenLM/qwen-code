@@ -21,11 +21,13 @@ import { t } from '../i18n/index.js';
  * Handles the initial authentication flow.
  * @param config The application config.
  * @param authType The selected auth type.
+ * @param subscriptionFallbackModel A saved user model eligible for startup fallback.
  * @returns An error message if authentication fails, otherwise null.
  */
 export async function performInitialAuth(
   config: Config,
   authType: AuthType | undefined,
+  subscriptionFallbackModel?: string,
 ): Promise<string | null> {
   if (!authType) {
     return null;
@@ -37,7 +39,7 @@ export async function performInitialAuth(
     return null;
 
   try {
-    await config.refreshAuth(authType, true);
+    await config.refreshAuth(authType, true, subscriptionFallbackModel);
     // The console.log is intentionally left out here.
     // We can add a dedicated startup message later if needed.
 

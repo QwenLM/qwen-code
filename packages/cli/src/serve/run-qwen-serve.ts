@@ -520,8 +520,8 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   workspace?: string | string[];
   requireWebShell?: boolean;
 };
-type WorkspaceSettingsWrite =
-  import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type WorkspaceSettingsWrites =
+  import('./workspace-service/types.js').WorkspaceSettingsWrites;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
 type PersistUserSkillsActivationResult =
@@ -6318,12 +6318,16 @@ async function runQwenServeImpl(
       });
     const persistSettingsFn = (
       workspace: string,
-      writes: WorkspaceSettingsWrite[],
+      requestedWrites: WorkspaceSettingsWrites,
       assertGenerationOpen?: () => void,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
         const fresh = loadSettingsForPersistence(workspace);
+        const writes =
+          typeof requestedWrites === 'function'
+            ? requestedWrites(fresh)
+            : requestedWrites;
         const writesByScope = new Map<
           import('../config/settings.js').SettingScope,
           number
