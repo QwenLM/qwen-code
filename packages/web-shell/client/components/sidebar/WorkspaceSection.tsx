@@ -160,6 +160,7 @@ interface WorkspaceSectionProps {
   sessionCatalogRequestsEnabled?: boolean;
   sessionGroupCatalog?: DaemonSessionGroupCatalog;
   sessionLiveStateEnabled?: boolean;
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   sourceType?: string;
   channelGroupingEnabled?: boolean;
   ungroupedLabel: string;
@@ -293,6 +294,7 @@ export function WorkspaceSection({
   sessionCatalogRequestsEnabled = true,
   sessionGroupCatalog,
   sessionLiveStateEnabled = false,
+  sortBy,
   sourceType,
   channelGroupingEnabled = false,
   ungroupedLabel,
@@ -403,13 +405,14 @@ export function WorkspaceSection({
       options: {
         pageSize: SESSION_LIST_PAGE_SIZE,
         archiveState: 'active',
+        ...(sortBy !== undefined ? { sortBy } : {}),
         ...(sourceType ? { sourceType } : {}),
         ...(organizationEnabled
           ? { view: 'organized' as const, group: 'all' }
           : {}),
       },
     }),
-    [organizationEnabled, sourceType, workspace.cwd],
+    [organizationEnabled, sortBy, sourceType, workspace.cwd],
   );
   const sessionsResult = useSessionCatalogQuery(client, sessionsQuery, {
     autoLoad: sessionCatalogRequestsEnabled && !sessionLiveStateEnabled,

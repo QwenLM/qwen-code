@@ -152,6 +152,7 @@ import {
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
   searchWorkspaceSessionsForResponse,
+  type ListWorkspaceSessionsOptions,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
@@ -6383,8 +6384,18 @@ export function registerSessionRoutes(
     '/session/:id/status',
     withOwnerReadSession(
       'GET /session/:id/status',
-      (_req, res, sessionId, runtime) => {
-        res.status(200).json(runtime.bridge.getSessionSummary(sessionId));
+      async (_req, res, sessionId, runtime) => {
+        const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
+        const service = createWorkspaceRuntimeSessionService(runtime);
+        try {
+          summary.lastUserPromptAt =
+            await service.getLastUserPromptAt(sessionId);
+        } catch {
+          // An unreadable transcript omits the optional field, not the summary.
+          summary.lastUserPromptAt = undefined;
+        }
+        runtime.generationGuard?.assertOpen();
+        res.status(200).json(summary);
       },
     ),
   );
@@ -9826,6 +9837,18 @@ export function registerSessionRoutes(
             ? req.query['cursor']
             : undefined;
         const size = parseSessionPageSizeQuery(req.query['size']);
+        const sortBy = req.query['sortBy'];
+        if (
+          sortBy !== undefined &&
+          sortBy !== 'updatedAt' &&
+          sortBy !== 'lastUserPromptAt'
+        ) {
+          res.status(400).json({
+            error: '`sortBy` must be "updatedAt" or "lastUserPromptAt"',
+            code: 'invalid_session_sort',
+          });
+          return;
+        }
         const rawView = req.query['view'];
         let view: 'organized' | undefined;
         if (rawView !== undefined) {
@@ -9911,18 +9934,20 @@ export function registerSessionRoutes(
             view !== undefined ||
             archiveState === 'archived' ||
             parentSessionId !== undefined ||
-            parsedSource.sourceType !== undefined
+            parsedSource.sourceType !== undefined ||
+            sortBy === 'lastUserPromptAt'
           ) {
             res.status(400).json({
               error:
-                '`liveOnly` cannot be combined with organized view, archived state, parent, or source filters',
+                '`liveOnly` cannot be combined with organized view, archived state, parent, source filters, or question sorting',
               code: 'invalid_session_live_only_filter',
             });
             return;
           }
           liveOnly = true;
         }
-        const options = {
+        const options: ListWorkspaceSessionsOptions = {
+          ...(sortBy !== undefined ? { sortBy } : {}),
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
           ...(archiveState !== undefined ? { archiveState } : {}),
@@ -9964,6 +9989,7 @@ export function registerSessionRoutes(
             (!liveOnly &&
               (runtime.primary ||
                 view === 'organized' ||
+                sortBy === 'lastUserPromptAt' ||
                 archiveState === 'archived' ||
                 parentSessionId !== undefined ||
                 parsedSource.sourceType !== undefined ||
