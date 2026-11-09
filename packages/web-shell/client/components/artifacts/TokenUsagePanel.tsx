@@ -34,6 +34,7 @@ import styles from './TokenUsagePanel.module.css';
 import {
   SpeedSpread,
   TokenUsageTrend,
+  isLegacySpeed,
   sampleSpeed,
   tokensPerSecond,
   type TrendSeries,
@@ -140,13 +141,18 @@ const OUTCOME_ICONS = {
  */
 function outputSpeed(
   generation: DaemonSessionStatsModelMetrics['generation'],
+  legacy: boolean,
 ): number | undefined {
   if (!generation) return undefined;
-  return tokensPerSecond(
-    generation.totalThroughputOutputTokens,
-    generation.totalThroughputDurationMs ??
-      generation.totalGenerationDurationMs,
-  );
+  return legacy
+    ? tokensPerSecond(
+        generation.totalThroughputOutputTokens,
+        generation.totalGenerationDurationMs,
+      )
+    : tokensPerSecond(
+        generation.totalOutputSpeedTokens ?? 0,
+        generation.totalOutputSpeedDurationMs ?? 0,
+      );
 }
 
 export function TokenUsagePanel({
@@ -285,13 +291,11 @@ function TokenUsageBody({
         acc.generation.totalGenerationDurationMs += g.totalGenerationDurationMs;
         acc.generation.totalThroughputOutputTokens +=
           g.totalThroughputOutputTokens;
-        // One model from an older daemon leaves the total without it.
-        acc.generation.totalThroughputDurationMs =
-          acc.generation.totalThroughputDurationMs === undefined ||
-          g.totalThroughputDurationMs === undefined
-            ? undefined
-            : acc.generation.totalThroughputDurationMs +
-              g.totalThroughputDurationMs;
+        acc.generation.totalTimedGenerationDurationMs +=
+          g.totalTimedGenerationDurationMs ?? 0;
+        acc.generation.totalOutputSpeedTokens += g.totalOutputSpeedTokens ?? 0;
+        acc.generation.totalOutputSpeedDurationMs +=
+          g.totalOutputSpeedDurationMs ?? 0;
       }
       return acc;
     },
@@ -308,9 +312,15 @@ function TokenUsageBody({
         totalTtftMs: 0,
         totalGenerationDurationMs: 0,
         totalThroughputOutputTokens: 0,
-        totalThroughputDurationMs: 0 as number | undefined,
+        totalTimedGenerationDurationMs: 0,
+        totalOutputSpeedTokens: 0,
+        totalOutputSpeedDurationMs: 0,
       },
     },
+  );
+  // Every model comes from the same daemon, so one tells which rule applies.
+  const legacySpeed = entries.some(
+    (e) => e.metrics.generation && isLegacySpeed(e.metrics.generation),
   );
   const grandTotal = totals.total;
   const trendSeries: TrendSeries[] = entries
@@ -319,6 +329,7 @@ function TokenUsageBody({
       label: entry.label,
       color: entry.color,
       samples: entry.metrics.timingSamples ?? [],
+      legacySpeed,
       failures: entry.metrics.failures?.recent ?? [],
     }))
     .filter((s) => s.samples.length > 0 || s.failures.length > 0);
@@ -326,7 +337,7 @@ function TokenUsageBody({
   const speedScaleMax = Math.max(
     0,
     ...trendSeries.flatMap((s) =>
-      s.samples.map((sample) => sampleSpeed(sample) ?? 0),
+      s.samples.map((sample) => sampleSpeed(sample, legacySpeed) ?? 0),
     ),
   );
   // Keep legacy daemon responses correctly ordered when total is omitted.
@@ -392,6 +403,7 @@ function TokenUsageBody({
           thoughts={totals.thoughts}
           outcome={{ requests: totals.requests, failed: totals.failed }}
           generation={totals.generation}
+          legacySpeed={legacySpeed}
         />
       </div>
 
@@ -412,6 +424,7 @@ function TokenUsageBody({
               key={entry.key}
               entry={entry}
               grandTotal={grandTotal}
+              legacySpeed={legacySpeed}
               speedScaleMax={speedScaleMax}
             />
           ))}
@@ -546,10 +559,12 @@ function SuccessRateValue({
 function ModelCard({
   entry,
   grandTotal,
+  legacySpeed,
   speedScaleMax,
 }: {
   entry: ModelEntry;
   grandTotal: number;
+  legacySpeed: boolean;
   speedScaleMax: number;
 }) {
   const { t } = useI18n();
@@ -559,16 +574,25 @@ function ModelCard({
   const avgLatency =
     m.api.totalRequests > 0 ? m.api.totalLatencyMs / m.api.totalRequests : 0;
   const { generation } = m;
+  const speed = outputSpeed(generation, legacySpeed);
+  // Averaged over the same requests as TTFT so the two add up to their
+  // latency; Avg latency also counts failed, internal and non-streamed
+  // requests. An older daemon only sums the windows of its output speed.
+  const generationTotal =
+    generation?.totalTimedGenerationDurationMs ??
+    generation?.totalGenerationDurationMs;
+  const showGeneration =
+    speed !== undefined ||
+    (generationTotal !== undefined && generationTotal > 0);
   const timing =
     generation && generation.timedRequests > 0
       ? {
           ttft: generation.totalTtftMs / generation.timedRequests,
-          // Averaged over the same requests as TTFT so the two add up to
-          // their latency; Avg latency also counts failed, internal
-          // and non-streamed requests.
           generation:
-            generation.totalGenerationDurationMs / generation.timedRequests,
-          speed: outputSpeed(generation),
+            showGeneration && generationTotal !== undefined
+              ? generationTotal / generation.timedRequests
+              : undefined,
+          speed,
         }
       : undefined;
   const stats: Array<{ label: string; value: string; node?: ReactNode }> = [
@@ -586,6 +610,10 @@ function ModelCard({
                     rate: timing.speed.toFixed(1),
                   }),
                 },
+              ]
+            : []),
+          ...(timing.generation !== undefined
+            ? [
                 {
                   label: t('tokenUsage.generation'),
                   value: formatDuration(timing.generation),
@@ -630,7 +658,11 @@ function ModelCard({
         ))}
       </dl>
       {m.timingSamples && (
-        <SpeedSpread samples={m.timingSamples} scaleMax={speedScaleMax} />
+        <SpeedSpread
+          samples={m.timingSamples}
+          legacy={legacySpeed}
+          scaleMax={speedScaleMax}
+        />
       )}
       {m.failures && Object.keys(m.failures.byKind).length > 0 && (
         <FailureKinds byKind={m.failures.byKind} />
@@ -697,6 +729,7 @@ function TokenSummary({
   thoughts,
   outcome,
   generation,
+  legacySpeed,
 }: {
   input: number;
   output: number;
@@ -704,9 +737,10 @@ function TokenSummary({
   thoughts: number;
   outcome: RequestOutcome;
   generation: NonNullable<DaemonSessionStatsModelMetrics['generation']>;
+  legacySpeed: boolean;
 }) {
   const { t } = useI18n();
-  const speed = outputSpeed(generation);
+  const speed = outputSpeed(generation, legacySpeed);
   return (
     <dl className={styles.overview}>
       <div className={styles.summaryMetric}>

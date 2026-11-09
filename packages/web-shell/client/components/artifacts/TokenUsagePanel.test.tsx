@@ -677,14 +677,18 @@ describe('TokenUsagePanel', () => {
       totalTtftMs: 4_800,
       totalGenerationDurationMs: 2_000,
       totalThroughputOutputTokens: 170,
-      totalThroughputDurationMs: 6_800,
+      totalTimedGenerationDurationMs: 2_000,
+      totalOutputSpeedTokens: 170,
+      totalOutputSpeedDurationMs: 6_800,
     };
     stats.models['qwen-max::auto'].generation = {
       timedRequests: 1,
       totalTtftMs: 900,
       totalGenerationDurationMs: 0,
       totalThroughputOutputTokens: 0,
-      totalThroughputDurationMs: 0,
+      totalTimedGenerationDurationMs: 0,
+      totalOutputSpeedTokens: 0,
+      totalOutputSpeedDurationMs: 0,
     };
     const container = renderPanel(vi.fn().mockResolvedValue(stats));
     await act(async () => {});
@@ -725,6 +729,30 @@ describe('TokenUsagePanel', () => {
     );
   });
 
+  it('shows generation time for timed requests without reported tokens', async () => {
+    const stats = statsFixture();
+    stats.models['qwen-plus::hybrid'].generation = {
+      timedRequests: 3,
+      totalTtftMs: 3_000,
+      totalGenerationDurationMs: 4_500,
+      totalThroughputOutputTokens: 0,
+      totalTimedGenerationDurationMs: 4_500,
+      totalOutputSpeedTokens: 0,
+      totalOutputSpeedDurationMs: 0,
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats));
+    await act(async () => {});
+
+    // No usage means no rate, but the time still adds up with First token.
+    expect(modelStats(container.querySelector('[data-color]')!)).toEqual([
+      ['First token', '1.0s'],
+      ['Generation', '1.5s'],
+      ['Requests', '4'],
+      ['Success rate', '75.0%'],
+      ['Avg latency', '800ms'],
+    ]);
+  });
+
   it.each(['en', 'zh-CN'] as const)(
     'keeps full model timing labels and values in titles in %s',
     async (language) => {
@@ -734,7 +762,9 @@ describe('TokenUsagePanel', () => {
         totalTtftMs: 4_800,
         totalGenerationDurationMs: 2_000,
         totalThroughputOutputTokens: 898,
-        totalThroughputDurationMs: 6_800,
+        totalTimedGenerationDurationMs: 2_000,
+        totalOutputSpeedTokens: 898,
+        totalOutputSpeedDurationMs: 6_800,
       };
       const container = renderPanel(vi.fn().mockResolvedValue(stats), language);
       await act(async () => {});
@@ -754,7 +784,9 @@ describe('TokenUsagePanel', () => {
       totalTtftMs: 1_000,
       totalGenerationDurationMs: 4_000,
       totalThroughputOutputTokens: 300,
-      totalThroughputDurationMs: 5_000,
+      totalTimedGenerationDurationMs: 4_000,
+      totalOutputSpeedTokens: 300,
+      totalOutputSpeedDurationMs: 5_000,
     };
     const container = renderPanel(vi.fn().mockResolvedValue(stats), 'zh-CN');
     await act(async () => {});
@@ -1383,14 +1415,18 @@ describe('TokenUsagePanel', () => {
       totalTtftMs: 3_000,
       totalGenerationDurationMs: 2_000,
       totalThroughputOutputTokens: 200,
-      totalThroughputDurationMs: 5_000,
+      totalTimedGenerationDurationMs: 2_000,
+      totalOutputSpeedTokens: 200,
+      totalOutputSpeedDurationMs: 5_000,
     };
     stats.models['qwen-max::auto'].generation = {
       timedRequests: 1,
       totalTtftMs: 1_000,
       totalGenerationDurationMs: 2_000,
       totalThroughputOutputTokens: 400,
-      totalThroughputDurationMs: 3_000,
+      totalTimedGenerationDurationMs: 2_000,
+      totalOutputSpeedTokens: 400,
+      totalOutputSpeedDurationMs: 3_000,
     };
     const container = renderPanel(vi.fn().mockResolvedValue(stats), 'zh-CN');
     await act(async () => {});
@@ -1638,6 +1674,32 @@ describe('TokenUsagePanel', () => {
       container.querySelector('[data-testid="token-usage-trend"] h3')
         ?.textContent,
     ).toBe('速度趋势');
+  });
+
+  it('keeps generation-window sample speeds for daemons without request time', async () => {
+    const stats = timedStats();
+    stats.models['qwen-plus::hybrid'].generation = {
+      timedRequests: 4,
+      totalTtftMs: 4_600,
+      totalGenerationDurationMs: 7_000,
+      totalThroughputOutputTokens: 300,
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats));
+    await act(async () => {});
+    const [plus, max] = Array.from(container.querySelectorAll('[data-color]'));
+
+    // The card and its samples share the older daemon's rule: tokens over the
+    // generation window, without the 50 ms one: 50, 80 and 30 tok/s.
+    expect(modelStats(plus!)).toContainEqual(['Output speed', '42.9 tok/s']);
+    expect(
+      plus?.querySelector('[data-testid="token-usage-speed-spread"]')
+        ?.textContent,
+    ).toBe('p50 50 · p10–p90 34–74 tok/s');
+    expect(
+      max?.querySelector('[data-testid="token-usage-speed-spread"]')
+        ?.textContent,
+    ).toBe('p50 140 · p10–p90 132–148 tok/s');
+    expect(seriesDots(container)).toEqual(['0', '0', '0', '1', '1']);
   });
 
   it('omits the trend for daemons without timing samples', async () => {

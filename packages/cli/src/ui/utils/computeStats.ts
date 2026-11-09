@@ -50,8 +50,8 @@ export function computeGenerationRates(
         : undefined,
     sessionTps: generation
       ? outputTokensPerSecond(
-          generation.totalThroughputOutputTokens,
-          generation.totalThroughputDurationMs,
+          generation.totalOutputSpeedTokens,
+          generation.totalOutputSpeedDurationMs,
         )
       : undefined,
   };

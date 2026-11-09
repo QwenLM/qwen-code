@@ -3826,22 +3826,29 @@ export interface DaemonSessionStatsModelMetrics {
     timedRequests: number;
     totalTtftMs: number;
     /**
-     * Time from the first to the last visible output, summed over every timed
-     * request. Older daemons summed it only over windows of at least 100 ms.
+     * Time from the first to the last visible output, summed over requests
+     * whose window is at least 100 ms. With `totalThroughputOutputTokens` it
+     * gives the generation-window rate that clients before
+     * `totalOutputSpeedDurationMs` show.
      */
     totalGenerationDurationMs: number;
-    /**
-     * Output tokens of the timed requests that reported any. Older daemons
-     * summed them over the same requests as `totalGenerationDurationMs`.
-     */
+    /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
     /**
-     * TTFT plus generation time of the requests in
-     * `totalThroughputOutputTokens`; output speed divides the tokens by it.
-     * Absent from older daemons, whose output speed is
-     * `totalThroughputOutputTokens / totalGenerationDurationMs`.
+     * Time from the first to the last visible output, summed over every timed
+     * request like `totalTtftMs`. Absent from older daemons.
      */
-    totalThroughputDurationMs?: number;
+    totalTimedGenerationDurationMs?: number;
+    /**
+     * Output tokens, reasoning counted once, of the timed requests that
+     * reported any. Absent from older daemons.
+     */
+    totalOutputSpeedTokens?: number;
+    /**
+     * TTFT plus generation time of the requests in `totalOutputSpeedTokens`:
+     * output speed divides the tokens by it. Absent from older daemons.
+     */
+    totalOutputSpeedDurationMs?: number;
   };
   /**
    * Most recent timed, non-internal responses (oldest first, at most 200).
@@ -3854,9 +3861,12 @@ export interface DaemonSessionStatsModelMetrics {
     ttftMs: number;
     /**
      * From the first to the last visible output. Output speed divides
-     * `outputTokens` by `ttftMs + generationMs`.
+     * `outputTokens` by `ttftMs + generationMs`; for a daemon without
+     * `generation.totalOutputSpeedDurationMs`, by `generationMs` when it is at
+     * least 100 ms.
      */
     generationMs: number;
+    /** Reasoning counted once; older daemons sent the provider's count. */
     outputTokens: number;
     /** Subagent that issued the request; absent for the main conversation. */
     source?: string;

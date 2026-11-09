@@ -407,7 +407,9 @@ describe('UiTelemetryService', () => {
         totalTtftMs: 300,
         totalGenerationDurationMs: 1000,
         totalThroughputOutputTokens: 50,
-        totalThroughputDurationMs: 1300,
+        totalTimedGenerationDurationMs: 1000,
+        totalOutputSpeedTokens: 50,
+        totalOutputSpeedDurationMs: 1300,
         last: {
           model: 'qwen-plus',
           ttftMs: 200,
@@ -432,8 +434,10 @@ describe('UiTelemetryService', () => {
         timedRequests: 2,
         totalTtftMs: 200,
         totalGenerationDurationMs: 300,
-        totalThroughputOutputTokens: 40,
-        totalThroughputDurationMs: 500,
+        totalThroughputOutputTokens: 20,
+        totalTimedGenerationDurationMs: 300,
+        totalOutputSpeedTokens: 40,
+        totalOutputSpeedDurationMs: 500,
         last: {
           model: 'qwen3-coder',
           ttftMs: 100,
@@ -457,14 +461,18 @@ describe('UiTelemetryService', () => {
         totalTtftMs: 150,
         totalGenerationDurationMs: 300,
         totalThroughputOutputTokens: 30,
-        totalThroughputDurationMs: 450,
+        totalTimedGenerationDurationMs: 300,
+        totalOutputSpeedTokens: 30,
+        totalOutputSpeedDurationMs: 450,
       });
       expect(metrics.statsModels?.['qwen-plus'].generation).toEqual({
         timedRequests: 1,
         totalTtftMs: 300,
         totalGenerationDurationMs: 0,
-        totalThroughputOutputTokens: 20,
-        totalThroughputDurationMs: 300,
+        totalThroughputOutputTokens: 0,
+        totalTimedGenerationDurationMs: 0,
+        totalOutputSpeedTokens: 20,
+        totalOutputSpeedDurationMs: 300,
       });
       expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
     });
@@ -604,12 +612,15 @@ describe('UiTelemetryService', () => {
       );
 
       // TTFT keeps the time of a burst above zero: 105 tokens over 299 ms.
+      // The legacy generation-window sums still leave both windows out.
       expect(service.getMetrics().generation).toMatchObject({
         timedRequests: 2,
         totalTtftMs: 200,
-        totalGenerationDurationMs: 99,
-        totalThroughputOutputTokens: 105,
-        totalThroughputDurationMs: 299,
+        totalGenerationDurationMs: 0,
+        totalThroughputOutputTokens: 0,
+        totalTimedGenerationDurationMs: 99,
+        totalOutputSpeedTokens: 105,
+        totalOutputSpeedDurationMs: 299,
         last: { generationDurationMs: 99, outputTokens: 10 },
       });
     });
@@ -631,10 +642,37 @@ describe('UiTelemetryService', () => {
       expect(service.getMetrics().generation).toMatchObject({
         timedRequests: 2,
         totalTtftMs: 2_100,
-        totalGenerationDurationMs: 1_900,
-        totalThroughputOutputTokens: 100,
-        totalThroughputDurationMs: 1_000,
+        totalTimedGenerationDurationMs: 1_900,
+        totalOutputSpeedTokens: 100,
+        totalOutputSpeedDurationMs: 1_000,
       });
+    });
+
+    it('counts reasoning reported apart from the output in output speed', () => {
+      // Gemini reports 800 hidden reasoning tokens apart from 200 visible
+      // ones; the 8 s before the first visible output went to the reasoning.
+      service.addEvent(
+        apiResponse('gemini-2.5-pro', 10_000, [10, 200, 1_010, 0, 800], {
+          auth_type: 'gemini',
+          prompt_id: 'user-query',
+          ttft_ms: 8_000,
+          generation_ms: 2_000,
+        }),
+        'session-a',
+      );
+
+      const metrics = service.getMetricsForSession('session-a');
+      expect(metrics.generation).toMatchObject({
+        totalGenerationDurationMs: 2_000,
+        totalThroughputOutputTokens: 200,
+        totalOutputSpeedTokens: 1_000,
+        totalOutputSpeedDurationMs: 10_000,
+        last: { outputTokens: 1_000 },
+      });
+      expect(
+        metrics.statsModels?.['gemini-2.5-pro'].timingSamples?.[0]
+          ?.outputTokens,
+      ).toBe(1_000);
     });
 
     it('keeps generation metrics isolated per session', () => {

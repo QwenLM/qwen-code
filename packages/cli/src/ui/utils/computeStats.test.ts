@@ -317,7 +317,9 @@ describe('computeGenerationRates', () => {
         totalTtftMs: 1_000,
         totalGenerationDurationMs: 4_000,
         totalThroughputOutputTokens: 600,
-        totalThroughputDurationMs: 5_000,
+        totalTimedGenerationDurationMs: 4_000,
+        totalOutputSpeedTokens: 600,
+        totalOutputSpeedDurationMs: 5_000,
         last: {
           model: 'qwen3-coder',
           ttftMs: 500,
@@ -334,8 +336,10 @@ describe('computeGenerationRates', () => {
         timedRequests: 1,
         totalTtftMs: 500,
         totalGenerationDurationMs: 0,
-        totalThroughputOutputTokens: 30,
-        totalThroughputDurationMs: 500,
+        totalThroughputOutputTokens: 0,
+        totalTimedGenerationDurationMs: 0,
+        totalOutputSpeedTokens: 30,
+        totalOutputSpeedDurationMs: 500,
         last: {
           model: 'qwen3-coder',
           ttftMs: 500,

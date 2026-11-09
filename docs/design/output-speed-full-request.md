@@ -16,29 +16,36 @@ Implemented for #16714. This changes how CLI `/stats` and Web Shell Token Usage 
 
 ### D1 — Output speed includes TTFT
 
-Per request, output speed is `outputTokens / (ttftMs + generationMs)`: the output tokens over the time from sending the request to its last visible output. Per session or model, it is the token-weighted ratio `totalThroughputOutputTokens / totalThroughputDurationMs`, where `totalThroughputDurationMs` sums TTFT plus generation time over the requests whose tokens are counted. Tool execution between requests is not in any request's time, so a multi-turn session's speed excludes it.
+Per request, output speed is `outputTokens / (ttftMs + generationMs)`: the output tokens over the time from sending the request to its last visible output. Per session or model, it is the token-weighted ratio `totalOutputSpeedTokens / totalOutputSpeedDurationMs`, where `totalOutputSpeedDurationMs` sums TTFT plus generation time over the requests whose tokens are counted. Tool execution between requests is not in any request's time, so a multi-turn session's speed excludes it.
 
 This matches the public definition that Artificial Analysis adopted in its methodology v3.0.0 (2026-11-03): output tokens, reasoning included, received per second over the request's full duration, including time to first token, and excluding tool time between requests in multi-turn work. The end point is the last visible chunk rather than the stream end. The usage chunk that follows carries no output, and D2 of the generation-timing design already ends the window there to keep consumer time out.
 
 ### D2 — No 100 ms floor
 
-`UiTelemetryService` adds every timed request's TTFT and generation window to `totalTtftMs` and `totalGenerationDurationMs`, without the 100 ms floor. With TTFT in the denominator, a burst can no longer shrink a request's time to zero. A response whose visible output arrives in a single chunk (`generation_ms = 0`) now has a rate: its tokens over its TTFT.
+With TTFT in the denominator, a burst can no longer shrink a request's time to zero, so output speed counts every timed request. A response whose visible output arrives in a single chunk (`generation_ms = 0`) now has a rate: its tokens over its TTFT. `totalTimedGenerationDurationMs` sums every timed request's generation window, like `totalTtftMs`, so the two cover the same requests.
+
+`totalGenerationDurationMs` and `totalThroughputOutputTokens` keep their meaning: generation time and output tokens of the windows of at least 100 ms. A client released before this change divides one by the other. Without the floor, that division would read thousands of tokens per second for a session with many single-chunk responses.
 
 ### D3 — Requests without output tokens have no rate
 
-A timed request that reports no output tokens, for example because the provider sent no usage, still counts towards TTFT and generation time. It is left out of `totalThroughputOutputTokens` and `totalThroughputDurationMs`, because it would add time without tokens and pull the rate down. When a request or a sum has no output tokens, or no time was recorded, the surfaces show no rate rather than `0 tok/s`.
+A timed request that reports no output tokens, for example because the provider sent no usage, still counts towards TTFT and generation time. It is left out of `totalOutputSpeedTokens` and `totalOutputSpeedDurationMs`, because it would add time without tokens and pull the rate down. When a request or a sum has no output tokens, or no time was recorded, the surfaces show no rate rather than `0 tok/s`.
 
-### D4 — Surfaces
+### D4 — Reasoning counted once
+
+Output speed counts reasoning tokens once, by the same rule as billable output. OpenAI-compatible providers and Qwen OAuth include reasoning in their output count. Gemini reports it apart: `candidatesTokenCount` leaves out `thoughtsTokenCount`. A reported total decides when it fits either convention. Without this rule, a Gemini thinking model would have its reasoning time in the denominator but not its reasoning tokens in the numerator: 8 s of hidden reasoning (800 tokens) followed by 200 tokens over 2 s would read 20 tok/s instead of about 100. The latest request's `outputTokens` and `timingSamples[].outputTokens` use the same count.
+
+### D5 — Surfaces
 
 - **CLI `/stats`:** TPS for the latest request and Session TPS, in the Ink tab, the OpenTUI dialog and the text output. One helper computes all three, and the Generation Time line keeps showing the generation window.
-- **Web Shell Token Usage:** the overview's session output speed and each model's output speed use D1. Each model's Generation average still divides `totalGenerationDurationMs` by `timedRequests`. Without the floor it now covers the same requests as First token, so the two add up to the timed requests' average time to last visible output. The panel and the timeline share one rate helper.
+- **Web Shell Token Usage:** the overview's session output speed and each model's output speed use D1. Each model's Generation average divides `totalTimedGenerationDurationMs` by `timedRequests`, so it covers the same requests as First token, and the two add up to the timed requests' average time to last visible output. It shows whenever the model has a speed or any generation time, so a model whose requests reported no usage still shows it. The panel and the timeline share one rate helper.
 - **Speed timeline and per-model spread:** each sample's speed uses D1, so short generation windows are plotted in the speed view too. The tooltip's "N output tokens in D" uses the same time, TTFT plus generation.
-- **Wire types:** the daemon stats route's per-model `generation` gains an optional `totalThroughputDurationMs`. `totalGenerationDurationMs`, `totalThroughputOutputTokens` and `timingSamples[].generationMs` keep their names and shapes, and their documentation describes the new rule.
+- **Wire types:** the daemon stats route's per-model `generation` gains three optional fields: `totalTimedGenerationDurationMs`, `totalOutputSpeedTokens` and `totalOutputSpeedDurationMs`. `totalGenerationDurationMs`, `totalThroughputOutputTokens` and `timingSamples[].generationMs` keep their names, shapes and meaning.
 
 ## Compatibility
 
-- The only new field, `totalThroughputDurationMs`, is optional on the wire. Nothing is removed or renamed. A resumed session replays its events through the new rules.
-- A Web Shell reading an older daemon gets no `totalThroughputDurationMs`. That daemon's sums cover different requests (its TTFT covers all timed requests, its tokens and generation time only windows of at least 100 ms), so the only rate they support is its own: `totalThroughputOutputTokens / totalGenerationDurationMs`. The Web Shell shows that rate until the daemon is updated.
+- The new fields are optional on the wire. Nothing is removed, renamed or redefined, so a client released before this change shows the same generation-window rate from a new daemon. A resumed session replays its events through the new rules.
+- `timingSamples[].outputTokens` now counts reasoning once (D4). The value is unchanged for OpenAI-compatible providers and Qwen OAuth; for Gemini it now includes the reasoning tokens.
+- A Web Shell reading an older daemon gets none of the new fields. That daemon's sums cover different requests (its TTFT covers all timed requests, its tokens and generation time only windows of at least 100 ms), so the only rate they support is its own: `totalThroughputOutputTokens / totalGenerationDurationMs`. Until the daemon is updated, the Web Shell shows that rate on the overview and the model cards. The timeline and the per-model spread use the same rule, tokens over generation windows of at least 100 ms, so the panel shows one definition of speed. Every model in a status comes from the same daemon, so one model without the fields decides for all of them.
 - All output speeds read lower than before. The difference is larger for long prompts and for providers that hide reasoning text.
 - TTFT starts when the request is issued, so it already covers SDK retries that happen before the stream opens. Such a retry now also lowers that request's output speed, as it would for a client timing the whole call.
 
@@ -50,7 +57,7 @@ A timed request that reports no output tokens, for example because the provider 
 
 ## Validation
 
-- **Core:** TTFT and generation sums include every timed request, short and zero windows included. The throughput sums leave out requests without output tokens. All stay per model in `statsModels`.
+- **Core:** `totalTtftMs` and `totalTimedGenerationDurationMs` include every timed request, short and zero windows included. The output-speed sums leave out requests without output tokens and count reasoning once. `totalGenerationDurationMs` and `totalThroughputOutputTokens` still leave out windows under 100 ms. All stay per model in `statsModels`.
 - **CLI:** the helper divides by TTFT plus generation, gives a single-chunk response a rate, and returns no rate without tokens or time. `/stats` text and the Ink tab show the new values.
-- **Web Shell:** the model grid and overview use D1, and fall back to the generation-window rate for a daemon without `totalThroughputDurationMs`. The timeline plots short windows in the speed view, and its tooltip duration includes TTFT. The per-model spread uses the same speeds.
+- **Web Shell:** the model grid and overview use D1. For a daemon without the new fields, the cards, the overview, the timeline and the spread all use the generation-window rate. The timeline plots short windows in the speed view, and its tooltip duration includes TTFT. A model whose timed requests reported no tokens shows its Generation average without a speed.
 - **Live check:** run a headless session against Token Plan with local telemetry output, then compare `/stats` with output tokens over the time from request to last visible chunk taken from the recorded events.

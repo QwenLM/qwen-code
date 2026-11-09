@@ -30,6 +30,8 @@ export interface TrendSeries {
   /** Color slot shared with the model card. */
   color: string;
   samples: TimingSample[];
+  /** Samples from a daemon without full-request speed; see `isLegacySpeed`. */
+  legacySpeed?: boolean;
   failures: FailureSample[];
 }
 
@@ -41,9 +43,25 @@ const PAD = { left: 48, right: 8, top: 16, bottom: 22 } as const;
 const HIT_RADIUS = 28;
 const MEDIAN_WINDOW = 5;
 
-/** Time from sending the request to its last visible output. */
-function sampleDurationMs(sample: TimingSample): number {
-  return sample.ttftMs + sample.generationMs;
+/** Shortest generation window that measures a legacy output rate. */
+const LEGACY_MIN_RATE_WINDOW_MS = 100;
+
+/**
+ * Whether these totals come from a daemon before full-request output speed.
+ * Its sums and samples only support the rate over the generation window.
+ */
+export function isLegacySpeed(
+  generation: DaemonSessionStatsModelMetrics['generation'],
+): boolean {
+  return generation?.totalOutputSpeedDurationMs === undefined;
+}
+
+/**
+ * The time a sample's speed divides by: from sending the request to its last
+ * visible output, or the generation window alone from an older daemon.
+ */
+function sampleDurationMs(sample: TimingSample, legacy: boolean): number {
+  return legacy ? sample.generationMs : sample.ttftMs + sample.generationMs;
 }
 
 /**
@@ -61,17 +79,27 @@ export function tokensPerSecond(
 
 /**
  * Output tokens per second over the time from sending the request to its last
- * visible output, TTFT included.
+ * visible output, TTFT included. From an older daemon, over the generation
+ * window when it is long enough to measure a rate.
  */
-export function sampleSpeed(sample: TimingSample): number | undefined {
-  return tokensPerSecond(sample.outputTokens, sampleDurationMs(sample));
+export function sampleSpeed(
+  sample: TimingSample,
+  legacy = false,
+): number | undefined {
+  if (legacy && sample.generationMs < LEGACY_MIN_RATE_WINDOW_MS) {
+    return undefined;
+  }
+  return tokensPerSecond(sample.outputTokens, sampleDurationMs(sample, legacy));
 }
 
 function metricValue(
   sample: TimingSample,
   metric: TrendMetric,
+  legacy: boolean | undefined,
 ): number | undefined {
-  return metric === 'speed' ? sampleSpeed(sample) : sample.ttftMs / 1000;
+  return metric === 'speed'
+    ? sampleSpeed(sample, legacy)
+    : sample.ttftMs / 1000;
 }
 
 /** Linear-interpolated quantile of an unsorted list; undefined when empty. */
@@ -157,7 +185,7 @@ export function TokenUsageTrend({ series }: { series: TrendSeries[] }) {
     }
     const values = visible.flatMap((s) =>
       s.samples
-        .map((p) => metricValue(p, metric))
+        .map((p) => metricValue(p, metric, s.legacySpeed))
         .filter((v): v is number => v !== undefined),
     );
     const yMax = niceMax(Math.max(0, ...values));
@@ -173,7 +201,10 @@ export function TokenUsageTrend({ series }: { series: TrendSeries[] }) {
     const lines: Array<{ series: TrendSeries; d: string }> = [];
     for (const s of visible) {
       const valued = s.samples
-        .map((sample) => ({ sample, value: metricValue(sample, metric) }))
+        .map((sample) => ({
+          sample,
+          value: metricValue(sample, metric, s.legacySpeed),
+        }))
         .filter(
           (p): p is { sample: TimingSample; value: number } =>
             p.value !== undefined,
@@ -253,7 +284,7 @@ export function TokenUsageTrend({ series }: { series: TrendSeries[] }) {
       .map((s) => {
         const median = quantile(
           s.samples
-            .map((p) => metricValue(p, metric))
+            .map((p) => metricValue(p, metric, s.legacySpeed))
             .filter((v): v is number => v !== undefined),
           0.5,
         );
@@ -438,7 +469,8 @@ function TrendTooltip({
   const { sample, failure, series } = point;
   const at = sample?.at ?? failure!.at;
   const source = sample?.source ?? failure?.source;
-  const speed = sample ? sampleSpeed(sample) : undefined;
+  const legacy = series.legacySpeed ?? false;
+  const speed = sample ? sampleSpeed(sample, legacy) : undefined;
   const left = Math.min(
     Math.max(0, point.x - size.width / 2),
     Math.max(0, chartWidth - size.width),
@@ -477,7 +509,7 @@ function TrendTooltip({
           <div>
             {t('tokenUsage.trendOutput', {
               count: sample!.outputTokens.toLocaleString('en-US'),
-              duration: formatDuration(sampleDurationMs(sample!)),
+              duration: formatDuration(sampleDurationMs(sample!, legacy)),
             })}
           </div>
         </>
@@ -489,14 +521,16 @@ function TrendTooltip({
 /** Per-model output-speed spread: every sample as a dot on a shared scale. */
 export function SpeedSpread({
   samples,
+  legacy,
   scaleMax,
 }: {
   samples: TimingSample[];
+  legacy: boolean;
   scaleMax: number;
 }) {
   const { t } = useI18n();
   const speeds = samples
-    .map(sampleSpeed)
+    .map((sample) => sampleSpeed(sample, legacy))
     .filter((v): v is number => v !== undefined);
   if (speeds.length < 2 || !(scaleMax > 0)) return null;
   const p10 = quantile(speeds, 0.1)!;

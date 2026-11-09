@@ -6,7 +6,7 @@
 
 已为 #14722 实现。Web Shell「Token 消耗」面板和 daemon 会话 stats 路由新增按模型统计的首 token 延迟（TTFT）、生成时间和输出速度。本改动同时修正 CLI `/stats` 现有生成计时里的两处测量错误。它基于 [`/stats` 生成计时指标](2026-07-24-generation-stats.md)和 [LLM 请求计时拆解](telemetry-llm-request-timing-design.md)两份设计，修改了 TTFT 的触发时机和生成窗口的测量方式。它还扩展了 daemon/Web Shell 的 stats 结构，而 `/stats` 设计当时没有改动这一结构。
 
-[按完整请求时间计算输出速度](output-speed-full-request.zh-CN.md)（#16714）后来修订了输出速度：现在包含 TTFT，D2 中的 100 ms 门槛已去掉。下文描述的是本设计在 #14722 中实现时的规则。
+[按完整请求时间计算输出速度](output-speed-full-request.zh-CN.md)（#16714）后来修订了输出速度：现在包含 TTFT，并计入小于 100 ms 的窗口。它的总和放在新字段中；下文的字段保持这里描述的含义。下文描述的是本设计在 #14722 中实现时的规则。
 
 ## 问题
 
