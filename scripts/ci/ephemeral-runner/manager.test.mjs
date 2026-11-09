@@ -48,6 +48,7 @@ async function fixture(t) {
   let foreignCounter = 0;
   let failRemove = false;
   let failNetworkRemove = false;
+  let failNetworkCreate = false;
   let keepContainerAfterRemove = false;
   let loseJit = false;
   let failDelete = false;
@@ -147,6 +148,7 @@ async function fixture(t) {
       return matched.length ? `${matched.map(([id]) => id).join('\n')}\n` : '';
     }
     if (args[0] === 'network' && args[1] === 'create') {
+      if (failNetworkCreate) throw new Error('network creation failed');
       const id = `network-${counter}`;
       networks.set(id, { labels: labelsFromArgs(args) });
       return id;
@@ -213,6 +215,9 @@ async function fixture(t) {
     },
     setFailNetworkRemove: (v) => {
       failNetworkRemove = v;
+    },
+    setFailNetworkCreate: (v) => {
+      failNetworkCreate = v;
     },
     setKeepContainerAfterRemove: (v) => {
       keepContainerAfterRemove = v;
@@ -1570,6 +1575,385 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
         c.args.includes('/repos/owner/repo/actions/runners/77'),
     ),
     'the registration is deleted even though its display name is suffixed',
+  );
+});
+
+test('a rejected label-recovered deletion retries from the retained resources', async (t) => {
+  // Nothing about a label-recovered identity is persisted, so a rejected
+  // DELETE can only be retried if a labelled resource survives the throw.
+  // The CONTAINER is removed even on a retryable refusal — a
+  // retained container keeps its own runner heartbeating and the offline
+  // gate could then never clear — and the labelled network is the retry
+  // anchor. Cycle 2 must retry the same registration from that anchor.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  f.setFailDelete(true, 422);
+  const manager = createManager(f.config, { command: f.command });
+  const deletes = () =>
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ).length;
+  await assert.rejects(
+    manager.cycle(1),
+    /Runner 77 deletion was rejected \(HTTP 422\)/,
+    'cycle 1 reports the rejected deletion it cannot complete yet',
+  );
+  assert.equal(deletes(), 1, 'cycle 1 attempted this registration once');
+  assert.equal(
+    f.runnerList().length,
+    1,
+    'the rejected registration survives cycle 1',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'the container is removed so its runner can actually reach offline',
+  );
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'docker' && c.args[0] === 'network' && c.args[1] === 'rm',
+    ),
+    'the labelled network anchor is retained so the next cycle still reaches the retry',
+  );
+  f.setFailDelete(false);
+  await manager.cycle(1);
+  assert.equal(deletes(), 2, 'cycle 2 retries the same registration');
+  assert.deepEqual(
+    f
+      .runnerList()
+      .map((entry) => entry.id)
+      .filter((id) => id === 77),
+    [],
+    'the registration is gone once the retry succeeds',
+  );
+});
+
+test('label recovery never deletes an online or unconfirmed registration', async (t) => {
+  // A label-recovered identity is not state-recorded: an online match may
+  // belong to a live runner outside this host's view, and a missing, null or
+  // unknown status must fail closed. The gate runs before the registration
+  // could be deleted; the container is removed so an online match backed by
+  // this slot's own leftover runner can actually reach offline, and
+  // the labelled network anchor — never a rebuilt pile and never a persisted
+  // state file — keeps the next cycle reaching the gate.
+  for (const status of ['online', undefined, null, 'busy']) {
+    const label = status === undefined ? 'status-less' : `status ${status}`;
+    const f = await fixture(t);
+    f.addOrphanContainer({
+      'qwen.pool': 'trial',
+      'qwen.slot': '1',
+      'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    });
+    f.setRunner({
+      id: 77,
+      name: 'ecs-qwen-trial-01-cafe1234',
+      status,
+    });
+    const manager = createManager(f.config, { command: f.command });
+    await assert.rejects(
+      manager.cycle(1),
+      /not reported offline/,
+      `cycle 1 refuses to delete a ${label} registration`,
+    );
+    await assert.rejects(
+      manager.cycle(1),
+      /not reported offline/,
+      `cycle 2 reaches the gate again with no pile rebuilt (${label})`,
+    );
+    assert.ok(
+      !f.calls.some(
+        (c) =>
+          c.program === 'gh' &&
+          c.args.includes('DELETE') &&
+          c.args.includes('/repos/owner/repo/actions/runners/77'),
+      ),
+      `a ${label} registration is never deleted`,
+    );
+    assert.equal(
+      f.calls.filter(
+        (c) =>
+          c.program === 'gh' &&
+          c.args.includes(
+            '/repos/owner/repo/actions/runners/generate-jitconfig',
+          ),
+      ).length,
+      0,
+      `no JIT request while a ${label} registration survives`,
+    );
+    assert.equal(
+      f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+        .length,
+      0,
+      `no replacement while a ${label} registration survives`,
+    );
+    assert.ok(
+      f.calls.some(
+        (c) =>
+          c.program === 'docker' &&
+          c.args[0] === 'rm' &&
+          c.args.includes('container-orphan-0'),
+      ),
+      `the orphan container is removed so its runner can reach offline (${label})`,
+    );
+    assert.ok(
+      !f.calls.some(
+        (c) =>
+          c.program === 'docker' &&
+          c.args[0] === 'network' &&
+          c.args[1] === 'rm',
+      ),
+      `the labelled network anchor survives the refusal (${label})`,
+    );
+    // The refusing cycle still exports the container's diagnostics —
+    // the one artefact an operator of a wedged slot must inspect.
+    const exported = await readdir(f.config.logDir);
+    assert.ok(
+      exported.some(
+        (name) => name.includes('container-or') && name.endsWith('.log'),
+      ),
+      `container logs are captured before the refusal (${label})`,
+    );
+    assert.ok(
+      exported.some(
+        (name) => name.includes('container-or') && name.endsWith('.tar'),
+      ),
+      `the _diag archive is captured before the refusal (${label})`,
+    );
+    await assert.rejects(
+      readFile(join(f.config.stateDir, 'slot-1.json')),
+      { code: 'ENOENT' },
+      `no slot state is persisted to carry a ${label} identity`,
+    );
+  }
+});
+
+test('an online registration backed by the own orphan container self-heals', async (t) => {
+  // A retained container kept its runner heartbeating, so the
+  // offline gate threw identically every cycle and the slot never
+  // recovered. Removing the container lets the runner reach offline; the
+  // labelled network keeps the retry anchored, and the next cycle deletes
+  // the registration and replenishes the slot.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({
+    id: 77,
+    name: 'ecs-qwen-trial-01-cafe1234',
+    status: 'online',
+  });
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /not reported offline/);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'cycle 1 removes the container whose heartbeat sustains the refusal',
+  );
+  // The container is gone, so the real runner stops heartbeating and GitHub
+  // reports it offline.
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await manager.cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'cycle 2 deletes the now-offline registration',
+  );
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ),
+    'cycle 2 replenishes the slot',
+  );
+});
+
+test('a failed refusal-anchor creation keeps the containers and leaks nothing', async (t) => {
+  // The refusal path removes the containers and relies on a labelled
+  // network to bring the next cycle back. A container-only pile needs that
+  // anchor created first: if the creation fails AFTER the removal, the slot
+  // would find nothing to clean up, replenish, and leak the registration.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234', status: 'online' });
+  f.setFailNetworkCreate(true);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1));
+  assert.ok(
+    !f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'the container survives a failed anchor creation as the retry anchor',
+  );
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ).length,
+    0,
+    'no replenishment while the registration is unreconciled',
+  );
+  f.setFailNetworkCreate(false);
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  await manager.cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
+    'the next cycle still reaches the registration and deletes it once offline',
+  );
+});
+
+test('a permanent identity refusal reclaims the container and keeps blocking', async (t) => {
+  // An ambiguous identity is permanent — no retry clears it — so the
+  // container must not be pinned behind it. Cycle 1 removes the container
+  // and keeps the labelled network anchor; cycle 2 still fails on the same
+  // ambiguity, deletes neither registration, and a manual fix (one
+  // registration left) lets the slot replenish.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  f.setExtraRunners([{ id: 78, name: 'ecs-qwen-trial-01-beef5678' }]);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /Ambiguous runner identity/);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'docker' &&
+        c.args[0] === 'rm' &&
+        c.args.includes('container-orphan-0'),
+    ),
+    'cycle 1 reclaims the container instead of pinning it',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .length,
+    0,
+    'the ambiguity deletes neither registration',
+  );
+  await assert.rejects(manager.cycle(1), /Ambiguous runner identity/);
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ).length,
+    0,
+    'the slot stays blocked on the persisted ambiguity',
+  );
+  // Manual reconciliation removes one registration; the slot recovers.
+  f.setExtraRunners([]);
+  await manager.cycle(1);
+  assert.ok(
+    f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    ),
+    'the slot replenishes once the ambiguity is resolved',
+  );
+});
+
+test('the call-site split reconciles each identity exactly once, at its own point', async (t) => {
+  // A label-recovered identity is reconciled BEFORE the container is
+  // removed (its only anchor), a state-anchored one only AFTER — deleting a
+  // still-connected runner's registration hits GitHub's "runner is busy"
+  // rejection on every watchdog kill. Widening the early flag to
+  // `Boolean(state?.name)` must turn the second half red.
+  const f = await fixture(t);
+  f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234' });
+  const manager = createManager(f.config, { command: f.command });
+  await manager.cycle(1);
+  const deleteAt = f.calls.findIndex(
+    (c) =>
+      c.program === 'gh' &&
+      c.args.includes('DELETE') &&
+      c.args.includes('/repos/owner/repo/actions/runners/77'),
+  );
+  const removeAt = f.calls.findIndex(
+    (c) =>
+      c.program === 'docker' &&
+      c.args[0] === 'rm' &&
+      c.args.includes('container-orphan-0'),
+  );
+  assert.ok(deleteAt !== -1 && removeAt !== -1);
+  assert.equal(
+    f.calls.filter(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ).length,
+    1,
+    'the label-recovered identity is reconciled exactly once',
+  );
+  assert.ok(
+    deleteAt < removeAt,
+    'a label-recovered identity is reconciled before its anchor is removed',
+  );
+  // A state-anchored identity: the DELETE must come AFTER the docker rm.
+  const g = await fixture(t);
+  const anchored = createManager(g.config, { command: g.command });
+  await anchored.cycle(1);
+  const anchoredDeleteAt = g.calls.findIndex(
+    (c) => c.program === 'gh' && c.args.includes('DELETE'),
+  );
+  const anchoredRemoveAt = g.calls.findIndex(
+    (c) => c.program === 'docker' && c.args[0] === 'rm',
+  );
+  assert.ok(anchoredDeleteAt !== -1 && anchoredRemoveAt !== -1);
+  assert.ok(
+    anchoredRemoveAt < anchoredDeleteAt,
+    'a state-anchored identity is reconciled only after the container is removed',
+  );
+  assert.equal(
+    g.calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .length,
+    1,
+    'the state-anchored identity is reconciled exactly once',
   );
 });
 
