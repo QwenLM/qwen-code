@@ -233,7 +233,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // them an empty page would satisfy the negative half with the filter
         // removed.
         strangerOwned = createSession(tenant, STRANGER, false);
-        actorless = createSession(tenant, null, false);
+        actorless = createLegacySession(tenant);
         pendingAction = insertAction(tenant, bound);
         // An accepted answer consumes its Action, and the accepted probe
         // parks an ACTION_RESPONSE operation nothing else may shadow: the
@@ -642,13 +642,25 @@ public class SurfaceAdmissionAcceptanceTest {
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
-        // The legacy arm: no Workspace selection, no actor, admitted.
+        // The legacy creation arm now requires a trusted actor: the
+        // ownership row is mandatory on every fresh Session, so a
+        // tenant-header-only create answers 401 instead of writing a
+        // row-less Session. Pre-existing row-less Sessions keep their
+        // tenant-wide reads (pinned by the actorless fixture).
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
-                .andExpect(status().isAccepted());
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"" + nextKey()
+                                + "\",\"agentId\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
     }
 
     // The admitted list probes only prove "not refused": pin that a
@@ -711,7 +723,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // created without a principal, so it never wrote an ownership row and
         // mutates tenant-wide — and no in-progress operation or Turn collides
         // with the next probe.
-        String renamed = createSession(tenant, null, false);
+        String renamed = createLegacySession(tenant);
         mvc.perform(patch("/v1/agents/sessions/" + renamed)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
@@ -719,8 +731,8 @@ public class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"renamed\"}"))
                 .andExpect(status().isOk());
-        String receiving = createSession(tenant, null, false);
-        String second = createSession(tenant, null, false);
+        String receiving = createLegacySession(tenant);
+        String second = createLegacySession(tenant);
         String message = "\"input\":[{\"type\":\"text\",\"text\":\"hi\"}]";
         MvcResult submitted = mvc.perform(post("/v1/agents/sessions/"
                         + receiving + "/events")
@@ -806,7 +818,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.type").value("action_response"));
         // The legacy arm of lifecycle is tenant-wide: a genuine no-row Session
         // closes for any caller in the tenant, even a stranger.
-        String extra = createSession(tenant, null, false);
+        String extra = createLegacySession(tenant);
         mvc.perform(post("/api/agent/web-shell/v1/sessions/close")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, STRANGER))
@@ -819,7 +831,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // owner, so its unbound Action gate admits the caller tenant-wide. The
         // carrying Session is fresh: an accepted response parks an
         // ACTION_RESPONSE operation that must not shadow later probes.
-        String answered = createSession(tenant, null, false);
+        String answered = createLegacySession(tenant);
         String action = insertAction(tenant, answered);
         String body = "{\"sessionId\":\"" + answered + "\",\"actionId\":\""
                 + action + "\",\"idempotencyKey\":\"" + nextKey()
@@ -1851,6 +1863,24 @@ public class SurfaceAdmissionAcceptanceTest {
         return JSON.readTree(mvc.perform(create)
                 .andExpect(status().isAccepted()).andReturn().getResponse()
                 .getContentAsString()).path("id").asText();
+    }
+
+    // A genuine pre-V40 row-less Session: creation now requires an actor on
+    // both surfaces, so the legacy fixture is created with one and its
+    // ownership row is removed, exactly the state a historical Session is
+    // in. Its tenant-wide reads and mutations stay pinned by the probes.
+    private String createLegacySession(String tenant) throws Exception {
+        String session = createSession(tenant, OWNER, false);
+        jdbc.update("DELETE FROM ma_session_principal"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        // The structured principal key on the CREATE_SESSION receipt is the
+        // durable exclusion mark; a genuine legacy row carries the raw
+        // creator key (or none), so restore that state too.
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND'"
+                + " AND operation = 'CREATE_SESSION'", tenant, session);
+        return session;
     }
 
     private void grant(String tenant, String actor, boolean canCreate) {

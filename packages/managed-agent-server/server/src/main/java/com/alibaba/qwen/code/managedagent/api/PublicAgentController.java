@@ -103,7 +103,7 @@ public class PublicAgentController {
             throw new ManagedAgentException(400, "unsupported_feature", "Session worktrees require a bound Workspace.");
         }
         CommandAdmission admission = selection == null
-                ? service.createSession(tenant.tenantId(), tenant.actorId(),
+                ? service.createSession(tenant.requirePrincipal(),
                         idempotencyKey, request.agentId(),
                         request.agentRevision(), null, request.metadata(),
                         request.input(), com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()))

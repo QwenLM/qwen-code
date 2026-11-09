@@ -247,7 +247,7 @@ public class WebShellAgentController {
         // clientId-only contract is asserted here and immediately
         // discarded. The Session title travels in the title field.
         WebShellAdmission admission = webShell(selection == null
-                ? service.createSession(tenant.tenantId(), tenant.actorId(),
+                ? service.createSession(tenant.requirePrincipal(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input(),
                         com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()))

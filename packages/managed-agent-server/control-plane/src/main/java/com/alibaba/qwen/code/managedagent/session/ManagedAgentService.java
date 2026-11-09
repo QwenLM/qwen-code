@@ -2336,6 +2336,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
      * model beyond its read access.
      */
     void requireTaskCanceller(SessionRecord session, String actorId) {
+        // Same split as requireReadGrant: the bound arm compares the raw
+        // actor, never a byte-bounded principal.
+        if (session.workspace() != null) {
+            if (!workspaces.accessOf(session.tenantId(), actorId,
+                    session.workspace().getWorkspaceId())
+                    .atLeast(WorkspaceAccess.OPERATOR)) {
+                throw new ManagedAgentException(403, "task_forbidden",
+                        "Only a Workspace operator may cancel the task.");
+            }
+            return;
+        }
         requireTaskCanceller(session,
                 principalOf(session.tenantId(), actorId));
     }
@@ -2425,8 +2436,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public SessionRecord requireReadableSession(String tenantId,
             String actorId, String sessionId) {
-        return requireReadableSession(tenantId,
-                principalOf(tenantId, actorId), sessionId);
+        SessionRecord session = inputPolicy.requireVisibleSession(tenantId,
+                sessionId);
+        requireReadGrant(session, actorId);
+        return session;
     }
 
     public SessionRecord requireReadableSession(SessionPrincipal principal,
@@ -2450,6 +2463,18 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     void requireReadGrant(SessionRecord session, String actorId) {
+        // The bound arm checks the raw actor: the filter bounds it in code
+        // points while a principal bounds bytes, so constructing one here
+        // would 400 a long non-ASCII actor this Workspace path served
+        // before. Only the unbound ownership arm needs a principal.
+        if (session.workspace() != null) {
+            if (!workspaces.canRead(session.tenantId(), actorId,
+                    session.workspace().getWorkspaceId())) {
+                throw new ManagedAgentException(404,
+                        "session_not_found", "The Session was not found.");
+            }
+            return;
+        }
         requireReadGrant(session,
                 principalOf(session.tenantId(), actorId));
     }

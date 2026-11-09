@@ -1462,19 +1462,26 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request) {
         requireRequest(request);
-        return JdbcRepositorySupport.read(dataSource, connection -> {
+        // One transaction snapshot: under autoCommit the slot and binding
+        // reads straddle a concurrent release and the locked-read consistency
+        // check would throw on a legally retired generation.
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
             Slot slot = selectSlot(connection, JdbcRepositorySupport.requestKey(request), false);
             if (slot != null) {
                 requireSlotIdentity(slot, request);
                 if (slot.activeBindingId != null) {
                     RuntimeBindingRecord active =
                             selectById(connection, slot.activeBindingId, false);
-                    if (active == null || !active.isActive()
-                            || !active.getRequest().equals(request)) {
+                    if (active == null || !active.getRequest().equals(request)) {
                         throw new IllegalStateException(
                                 "Runtime binding slot is inconsistent");
                     }
-                    return active;
+                    if (active.isActive()) {
+                        return active;
+                    }
+                    // A release committed between the two statements: fall
+                    // through to the durable latest generation, which this
+                    // contract must return even when retired.
                 }
             }
             try (PreparedStatement statement = connection.prepareStatement(

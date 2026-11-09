@@ -208,12 +208,16 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       readManagedExternalBoot(boot, path.join(root, 'boot.json')),
     ).rejects.toThrow('admission failed');
     await fs.chmod(path.join(root, 'registration.json'), 0o600);
+    const externalStorage = boot.storage;
+    if (externalStorage.kind !== 'external') {
+      throw new Error('expected an external storage boot');
+    }
     await fs.writeFile(
       path.join(root, 'registration.json'),
       JSON.stringify({
         providerId: 'external-a',
         physicalKey: 'physical-a',
-        aliasPath: boot.storage.aliasPath,
+        aliasPath: externalStorage.aliasPath,
         mountRoot: boot.mountRoot,
       }),
     );

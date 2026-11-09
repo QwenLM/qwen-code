@@ -261,7 +261,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_tenant"));
 
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor("tenant-header"))
                         .header(TenantContextFilter.HEADER, "tenant-header")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
@@ -286,7 +286,7 @@ class ManagedAgentServerIntegrationTest {
         // A NBSP-only title must coerce to untitled on create, matching the
         // rename route's blankness predicate; otherwise the server stores a
         // value it later refuses to accept back on PATCH (validRenameTitle).
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor("tenant-nbsp-create"))
                         .header(TenantContextFilter.HEADER, "tenant-nbsp-create")
                         .header("Authorization", "Bearer ignored-by-design")
                         .header("Idempotency-Key", "create-key-nbsp")
@@ -301,7 +301,7 @@ class ManagedAgentServerIntegrationTest {
     void metadataTitleLongerThan256AnswersInvalidTitle() throws Exception {
         // The metadata-wide 512 value cap must not preempt the unified
         // title policy: an over-long title entry answers the title code.
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor("tenant-meta-long-title"))
                         .header(TenantContextFilter.HEADER, "tenant-meta-long-title")
                         .header("Authorization", "Bearer ignored-by-design")
                         .header("Idempotency-Key", "create-key-meta-long-title")
@@ -322,7 +322,7 @@ class ManagedAgentServerIntegrationTest {
                 {"agent_id":"qwen-code","metadata":{"title":"demo"},
                  "input":[{"type":"text","text":"hello"}]}
                 """;
-        MvcResult first = mvc.perform(post("/v1/agents/sessions")
+        MvcResult first = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Authorization", "Bearer ignored-by-design")
                         .header("Idempotency-Key", "create-key")
@@ -336,6 +336,7 @@ class ManagedAgentServerIntegrationTest {
                 .andReturn();
         String sessionId = objectMapper.readTree(
                 first.getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         assertThat(UUID.fromString(sessionId).toString()).isEqualTo(sessionId);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " INFORMATION_SCHEMA.COLUMNS WHERE"
@@ -369,7 +370,7 @@ class ManagedAgentServerIntegrationTest {
                         event.get("sequence").asLong() > firstSequence);
 
         int submitsBeforeReplay = harness.submitCount();
-        MvcResult replay = mvc.perform(post("/v1/agents/sessions")
+        MvcResult replay = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "create-key")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -383,7 +384,7 @@ class ManagedAgentServerIntegrationTest {
                 .isEqualTo(sessionId);
         assertThat(harness.submitCount()).isEqualTo(submitsBeforeReplay);
 
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "create-key")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -408,7 +409,7 @@ class ManagedAgentServerIntegrationTest {
         harness.returnRuntimeRecovery(tenant, recovery);
         int submissions = harness.submitCount();
 
-        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "runtime-recovery-create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -419,6 +420,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id")
                 .asText();
+        legacyState(tenant, sessionId);
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 mvc.perform(get("/v1/agents/sessions/{id}/events",
@@ -435,7 +437,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void managesThePublicSessionLifecycle() throws Exception {
         String tenant = "tenant-lifecycle-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "lifecycle-create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -443,6 +445,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
 
         int renames = harness.renameCount();
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
@@ -632,7 +635,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void rejectsCloseUntilTheActiveTurnSettles() throws Exception {
         String tenant = "tenant-close-active-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "close-active-create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -641,6 +644,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
                 assertThat(harness.hasHeldTurn()).isTrue());
         int closes = harness.closeCount(sessionId);
@@ -679,7 +683,7 @@ class ManagedAgentServerIntegrationTest {
     void deletesAClosedSessionWhileTheHarnessIsUnavailable()
             throws Exception {
         String tenant = "tenant-closed-delete-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "closed-delete-create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -688,6 +692,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
             assertThat(store.findActiveTurns(tenant,
                     java.util.List.of(sessionId)))
@@ -723,7 +728,7 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
         String tenant = "tenant-rename-retry-" + UUID.randomUUID();
-        MvcResult created = mvc.perform(post("/v1/agents/sessions")
+        MvcResult created = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry-create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -731,6 +736,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn();
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         harness.failNextRename();
 
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
@@ -769,6 +775,7 @@ class ManagedAgentServerIntegrationTest {
         MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"requestId":"trace-1",
@@ -784,6 +791,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
+        legacyState(tenant, sessionId);
 
         MvcResult submitted = mvc.perform(post(
                                 "/api/agent/web-shell/v1/turns/submit")
@@ -884,6 +892,7 @@ class ManagedAgentServerIntegrationTest {
         MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"active-create",
@@ -893,6 +902,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
+        legacyState(tenant, sessionId);
         String submit = """
                 {"idempotencyKey":"active-turn","sessionId":"%s",
                  "input":[{"type":"text","text":"hold"}]}
@@ -968,6 +978,7 @@ class ManagedAgentServerIntegrationTest {
         MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"concurrent-create",
@@ -977,6 +988,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
+        legacyState(tenant, sessionId);
         List<Map<String, Object>> input = List.of(Map.of(
                 "type", "text", "text", "race"));
         CyclicBarrier gate = new CyclicBarrier(2);
@@ -2336,6 +2348,7 @@ class ManagedAgentServerIntegrationTest {
         MvcResult created = mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"uncertain-create",
@@ -2345,6 +2358,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
+        legacyState(tenant, sessionId);
         MvcResult submitted = mvc.perform(post(
                         "/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -2401,13 +2415,14 @@ class ManagedAgentServerIntegrationTest {
         String tenant = "tenant-paging-" + UUID.randomUUID();
         List<String> ids = new ArrayList<>();
         for (String name : List.of("page-a", "page-b", "page-c")) {
-            ids.add(objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
+            ids.add(objectMapper.readTree(mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                             .header(TenantContextFilter.HEADER, tenant)
                             .header("Idempotency-Key", "paging-" + name)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                     .andExpect(status().isAccepted()).andReturn()
                     .getResponse().getContentAsString()).get("id").asText());
+            legacyState(tenant, ids.get(ids.size() - 1));
         }
 
         JsonNode first = objectMapper.readTree(mvc.perform(
@@ -2462,6 +2477,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"unavailable-create",
@@ -2470,6 +2486,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
+                        legacyState(tenant, sessionId);
         String submit = """
                 {"idempotencyKey":"unavailable-turn","sessionId":"%s",
                  "input":[{"type":"text","text":"hold"}]}
@@ -2555,15 +2572,17 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(create))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
+                        legacyState(tenant, sessionId);
 
         harness.setAvailable(false);
         try {
-            mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+            mvc.perform(post("/api/agent/web-shell/v1/sessions/create").principal(tenantActor(tenant))
                             .header(TenantContextFilter.HEADER, tenant)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(create))
@@ -2579,13 +2598,14 @@ class ManagedAgentServerIntegrationTest {
     void replaysACompletedRenameAfterTheSessionWasDeleted() throws Exception {
         String tenant = "tenant-rename-replay-" + UUID.randomUUID();
         String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
+                        post("/v1/agents/sessions").principal(tenantActor(tenant))
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "replay-create")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"before delete\"}"), tenant,
@@ -2630,7 +2650,7 @@ class ManagedAgentServerIntegrationTest {
         // Without the required Idempotency-Key header the request fails
         // binding before the body is read: the parameter advice answers 400
         // invalid_request.
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor("tenant-415"))
                         .header(TenantContextFilter.HEADER, "tenant-415")
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("not json"))
@@ -2639,7 +2659,7 @@ class ManagedAgentServerIntegrationTest {
         // With the header present, dispatch reaches the body read and the
         // text/plain payload raises HttpMediaTypeNotSupportedException: the
         // dedicated handler answers 415, never the 500 catch-all.
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor("tenant-415"))
                         .header(TenantContextFilter.HEADER, "tenant-415")
                         .header("Idempotency-Key", "media-415")
                         .contentType(MediaType.TEXT_PLAIN)
@@ -2654,13 +2674,14 @@ class ManagedAgentServerIntegrationTest {
             throws Exception {
         String tenant = "tenant-unarchive-replay-" + UUID.randomUUID();
         String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
+                        post("/v1/agents/sessions").principal(tenantActor(tenant))
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "replay-create")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         String closeId = objectMapper.readTree(mvc.perform(
                         post("/v1/agents/sessions/{id}/close", sessionId)
                                 .header(TenantContextFilter.HEADER, tenant)
@@ -2702,13 +2723,14 @@ class ManagedAgentServerIntegrationTest {
             throws Exception {
         String tenant = "tenant-create-replay-delete-" + UUID.randomUUID();
         String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
+                        post("/v1/agents/sessions").principal(tenantActor(tenant))
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "replay-create")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         String deleteId = objectMapper.readTree(lifecycle(
                         delete("/v1/agents/sessions/{id}", sessionId), tenant,
                         "replay-delete")
@@ -2721,7 +2743,7 @@ class ManagedAgentServerIntegrationTest {
         // re-reads the Session before responding, so a create replay after
         // delete answers 404 — the shared replay header scopes its
         // last-visible promise to those two routes.
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "replay-create")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -2743,11 +2765,13 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(create))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
+                        legacyState(tenant, sessionId);
         String deleteId = objectMapper.readTree(lifecycle(
                         delete("/v1/agents/sessions/{id}", sessionId), tenant,
                         "ws-replay-delete")
@@ -2760,7 +2784,7 @@ class ManagedAgentServerIntegrationTest {
         // route re-reads the Session and answers 404, while the WebShell
         // route answers the recorded 202 admission carrying the tombstoned
         // sessionId.
-        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(create))
@@ -2773,13 +2797,14 @@ class ManagedAgentServerIntegrationTest {
     void theTitleBoundIsEnforcedInUtf16CodeUnits() throws Exception {
         String tenant = "tenant-title-units-" + UUID.randomUUID();
         String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
+                        post("/v1/agents/sessions").principal(tenantActor(tenant))
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "title-units")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         // 128 astral characters are exactly 256 UTF-16 code units — the
         // boundary where the schema's code-point count and the server's
         // unit count still agree.
@@ -2821,7 +2846,7 @@ class ManagedAgentServerIntegrationTest {
         assertThat(webShellTitle.get("maxLength").asInt()).isEqualTo(256);
         assertThat(webShellTitle.get("description").asText())
                 .contains("UTF-16");
-        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"idempotencyKey\":\"title-webshell-over\","
@@ -2838,7 +2863,7 @@ class ManagedAgentServerIntegrationTest {
         // writable through every path end to end.
         String fullTitle = "t".repeat(256);
         String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
+                        post("/v1/agents/sessions").principal(tenantActor(tenant))
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "title-create")
                                 .contentType(MediaType.APPLICATION_JSON)
@@ -2847,13 +2872,14 @@ class ManagedAgentServerIntegrationTest {
                                         + "\"}}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"" + fullTitle + "\"}"), tenant,
                 "title-rewrite")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value(fullTitle));
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "title-create-too-long")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -2876,7 +2902,7 @@ class ManagedAgentServerIntegrationTest {
                 "title-control")
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "title-create-control")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -2898,7 +2924,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
         // On create a blank title normalizes to absent, never stored.
-        mvc.perform(post("/v1/agents/sessions")
+        mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "title-create-blank")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -2913,7 +2939,7 @@ class ManagedAgentServerIntegrationTest {
             throws Exception {
         String tenant = "tenant-locale-turn-" + UUID.randomUUID();
         String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
+                        post("/v1/agents/sessions").principal(tenantActor(tenant))
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "locale-turn-create")
                                 .contentType(MediaType.APPLICATION_JSON)
@@ -2921,6 +2947,7 @@ class ManagedAgentServerIntegrationTest {
                                         + "{\"type\":\"text\",\"text\":\"hold\"}]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
                 assertThat(harness.hasHeldTurn()).isTrue());
 
@@ -2959,13 +2986,14 @@ class ManagedAgentServerIntegrationTest {
             throws Exception {
         String tenant = "tenant-locale-" + UUID.randomUUID();
         String sessionId = objectMapper.readTree(mvc.perform(
-                        post("/v1/agents/sessions")
+                        post("/v1/agents/sessions").principal(tenantActor(tenant))
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .header("Idempotency-Key", "locale-create")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString()).get("id").asText();
+        legacyState(tenant, sessionId);
 
         java.util.Locale previous = java.util.Locale.getDefault();
         java.util.Locale.setDefault(new java.util.Locale("tr", "TR"));
@@ -2993,6 +3021,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"budget-create",
@@ -3001,6 +3030,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
+                        legacyState(tenant, sessionId);
         String chunk = "x".repeat(1_000_000);
         StringBuilder oversized = new StringBuilder(
                 "{\"idempotencyKey\":\"budget-submit\",\"sessionId\":\""
@@ -3043,7 +3073,7 @@ class ManagedAgentServerIntegrationTest {
         // ignored — neither validated and dropped, nor persisted: a
         // metadata title does not become the Session's title.
         MvcResult created = mvc.perform(
-                post("/api/agent/web-shell/v1/sessions/create")
+                post("/api/agent/web-shell/v1/sessions/create").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -3058,6 +3088,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString())
                 .get("sessionId").asText();
+        legacyState(tenant, sessionId);
         mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -3108,6 +3139,7 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
+                        .principal(tenantActor(tenant))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"idempotencyKey\":\"oversized-create-"
                                 + arm + "\",\"agentId\":\"qwen-code\","
@@ -3115,6 +3147,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
+                        legacyState(tenant, sessionId);
         mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -3569,5 +3602,30 @@ class ManagedAgentServerIntegrationTest {
             org.mockito.Mockito.verify(transport, org.mockito.Mockito.never()).release(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
             org.mockito.Mockito.verify(provisioner, org.mockito.Mockito.times(1)).provision(org.mockito.ArgumentMatchers.any(com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest.class));
         }
+    }
+
+    private static com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor tenantActor(String tenant) {
+        return new com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor() {
+            @Override
+            public String tenantId() {
+                return tenant;
+            }
+
+            @Override
+            public String actorId() {
+                return "actor-a";
+            }
+
+            @Override
+            public String getName() {
+                return "actor-a";
+            }
+        };
+    }
+
+    private void legacyState(String tenant, String sessionId) {
+        jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND' AND operation = 'CREATE_SESSION'", tenant, sessionId);
     }
 }

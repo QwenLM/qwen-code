@@ -252,12 +252,14 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
         Object reported = response.get("storage");
         ExternalStorageRegistry.RegisteredExternalStorage registered = binding(request);
         if (registered.ephemeral()) {
-            if (!"RUNNING".equals(response.get("state"))) {
-                if (reported != null) {
-                    throw refuse("ephemeral_workspace_identity_mismatch",
-                            "Unexpected ephemeral evidence.");
-                }
+            if (reported == null) {
+                // Absent evidence keeps the phase-1 meaning on every state,
+                // RUNNING included: this profile authorizes no writes yet.
                 return super.observation(request, seed, handle, response);
+            }
+            if (!"RUNNING".equals(response.get("state"))) {
+                throw refuse("ephemeral_workspace_identity_mismatch",
+                        "Unexpected ephemeral evidence.");
             }
             if (!(reported instanceof Map<?, ?> evidence)
                     || !evidence.keySet().equals(Set.of("kind", "provisionRequestId",
