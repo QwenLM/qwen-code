@@ -531,10 +531,14 @@ function writesNoStdout(probe: string): boolean {
  * through. `tee` copies stdin to stdout (its operands are output FILES) and a
  * bare `cat` reads stdin. Any other stage may ignore stdin and print its own
  * output — `create | cat url.txt` prints the FILE, not the creation's result —
- * so the origin is no longer provable and nothing is attributed.
+ * so the origin is no longer provable and nothing is attributed. An input
+ * redirect overrides the pipe as well: in `create | tee < url.txt` the `tee`
+ * reads the FILE, so even a passthrough command no longer proves the source.
  */
 function passesStdinThrough(rawStage: string): boolean {
   const stage = stripQuotedSpans(stripShellComment(rawStage)).trim();
+  // `< file` and `<<< word` both replace the pipe as this stage's stdin.
+  if (stage.includes('<')) return false;
   return /^tee(?:\s|$)/.test(stage) || stage === 'cat';
 }
 
@@ -552,11 +556,14 @@ function passesStdinThrough(rawStage: string): boolean {
  * and `cd … && create` is not vetoed. A stderr-only redirect (`2>`) does NOT
  * silence stdout. A pipe keeps a pipeline together only while every downstream
  * stage provably passes that stdout through (`create | tee`, `create | cat`);
- * `create | cat url.txt` prints a FILE and attributes nothing. A shell
- * conditional/loop is ambiguous (static
- * analysis cannot prove which branch executed). When the source cannot be
- * proven, attribute nothing (fail-open: the author may self-echo once, but a
- * mere reader is never credited with comments it only read).
+ * `create | cat url.txt` prints a FILE, and an input redirect overrides the pipe
+ * (`create | tee < url.txt`), so both attribute nothing. Silence is judged from
+ * the argument TEXT with only the quote characters removed, never from
+ * quote-stripped spans — `export '-p'` prints just like `export -p`. A shell
+ * conditional/loop is ambiguous (static analysis cannot prove which branch
+ * executed). When the source cannot be proven, attribute nothing (fail-open:
+ * the author may self-echo once, but a mere reader is never credited with
+ * comments it only read).
  */
 function creationOutputIsAmbiguous(command: string): boolean {
   const stripped = stripHeredocBodies(command);
@@ -583,7 +590,12 @@ function creationOutputIsAmbiguous(command: string): boolean {
     const probe = stripQuotedSpans(stripShellComment(independent)).trim();
     if (probe === '') continue;
     if (hasStdoutRedirect(probe)) continue;
-    if (writesNoStdout(probe)) continue;
+    // Decide silence from the argument TEXT, not from quote-stripped spans:
+    // stripping turns `export '-p'` into `export ''`, an empty operand that
+    // would look silent even though the shell prints the variables. Removing
+    // only the quote characters keeps the flag visible.
+    const unquoted = stripShellComment(independent).replace(/['"]/g, '').trim();
+    if (writesNoStdout(unquoted)) continue;
     // A pure assignment produces no stdout; an env-prefixed creation does (and
     // is recognised as a creation, so it is not excluded here).
     if (

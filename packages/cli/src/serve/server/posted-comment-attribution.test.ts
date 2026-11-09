@@ -548,6 +548,42 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not treat tee as a passthrough when its stdin is redirected from a file', () => {
+    // `tee < url.txt` reads the FILE instead of the pipe, so the visible URL is
+    // the file's old comment even though tee normally echoes stdin.
+    const entry = shellResult(
+      'gh pr comment 42 --body hi | tee < url.txt',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not treat tee as a passthrough when a herestring replaces its stdin', () => {
+    const entry = shellResult(
+      'gh pr comment 42 --body hi | tee <<< word',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt a QUOTED export -p, which prints the variables', () => {
+    // `export '-p'` runs the same print as `export -p`; stripping quoted spans
+    // would turn it into an empty operand and wrongly look silent.
+    const entry = shellResult(
+      "export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; false && gh pr comment 42 --body hi; export '-p'",
+      'export REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-111"',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes after export with a quoted value (silent operand form)', () => {
+    const entry = shellResult(
+      "export FOO='bar'\ngh pr comment 42 --body hi",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('attributes a creation piped into a bare cat (stdin passthrough)', () => {
     const entry = shellResult(
       'gh pr comment 42 --body hi | cat',
