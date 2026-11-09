@@ -43,6 +43,28 @@ import static org.mockito.Mockito.when;
 class HarnessPoolConnectorTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void personalMemoryUsesTheNegotiatedPoolCapability(boolean supported) {
+        var features = new java.util.ArrayList<>(List.of("harness-pool-owner/1", "harness-instance-lifecycle/1"));
+        if (supported) {
+            features.add("session-memory/1");
+        }
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var clientA = client("a");
+        var clientB = client("b");
+        when(clientA.capabilities().getFeatures()).thenReturn(features);
+        when(clientB.capabilities().getFeatures()).thenReturn(features);
+        try (var pool = new HarnessPoolConnector(settings(), mock(HarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true), ignored -> leaf(), null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            assertThat(pool.supportsPersonalMemory()).isFalse();
+            pool.refresh();
+            assertThat(pool.supportsPersonalMemory()).isEqualTo(supported);
+        }
+    }
+
     @Test
     void extensionCommandsKeepTheSavedOwnerAndNegotiatedCapability() {
         var placements = mock(HarnessPlacementStore.class);

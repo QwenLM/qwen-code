@@ -72,6 +72,7 @@ vi.mock('@octokit/rest', () => {
       },
       pulls: {
         get: vi.fn(),
+        listReviewComments: vi.fn(),
       },
       checks: {
         listForRef: vi.fn(),
@@ -142,6 +143,7 @@ const mockOctokit = octokitModule.__mockOctokit as {
     };
     pulls: {
       get: ReturnType<typeof vi.fn>;
+      listReviewComments: ReturnType<typeof vi.fn>;
     };
     checks: {
       listForRef: ReturnType<typeof vi.fn>;
@@ -17555,6 +17557,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     const watchConfig = {
       deliverToBoundSessions: true,
+      // These tests cover the state watch; the orthogonal comment watch is
+      // exercised by its own suite and would otherwise add listComments /
+      // listReviewComments calls to the paginate routing below.
+      prCommentWatch: false,
       prWatchEvents: [
         'ci_failure',
         'merge_conflict',
@@ -18650,6 +18656,40 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           stderr2.mockRestore();
         }
         expect(degradedRows('watch_budget_low')).toHaveLength(2);
+      });
+
+      it('journals the recovery edge once, not on every later healthy poll', async () => {
+        // Closing the episode must CLEAR the open flag. Without that clear,
+        // each subsequent healthy poll re-enters the close path and appends
+        // another recovery row — the edge becomes a per-poll heartbeat and
+        // rotates the useful rows out of the timeline. The existing recovery
+        // case goes low again right after recovering, so it never observes a
+        // second healthy poll and cannot catch this.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode opens
+          mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // episode closes: exactly one recovery row
+          expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+
+          // Two more healthy polls with the episode already closed.
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
       });
 
       it('honours a configured reserve of 0 as disabling the gate', async () => {
@@ -24953,6 +24993,1179 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
               event['type'] === 'task' && event['outcome'] === 'retired',
           ),
         ).toHaveLength(0);
+      });
+    });
+
+    describe('PR comment watch', () => {
+      const commentWatchConfig = {
+        deliverToBoundSessions: true,
+        prWatchEvents: [],
+        prCommentWatch: true,
+      };
+
+      function routeCommentPaginate(): void {
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('ref' in params) return mockOctokit.rest.checks.listForRef();
+            if ('pull_number' in params)
+              return mockOctokit.rest.pulls.listReviewComments();
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+          [],
+        );
+      }
+
+      function seedCommentBaseline(): void {
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          },
+        });
+      }
+
+      function conversationComment(overrides: Record<string, unknown> = {}) {
+        return {
+          id: 555,
+          node_id: 'IC_555',
+          body: 'please fix the overflow',
+          created_at: '2026-07-02T10:00:00.000Z',
+          // Same account the channel authenticates as: the watch closes the
+          // same-account gap; other-account comments go to the notification lanes.
+          user: { login: 'test-bot' },
+          ...overrides,
+        };
+      }
+
+      it('delivers a new conversation comment to the bound session', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0]!;
+        expect(sessionId).toBe('bound-session');
+        expect(prompt).toContain('New comment by @test-bot');
+        expect(prompt).toContain('please fix the overflow');
+      });
+
+      it('renders the observed PR title in the comment prompt metadata', async () => {
+        // The watch carries the last observed title so %title% is not empty.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            title: 'Fix the overflow',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          },
+        });
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
+        expect(prompt).toContain('Title: Fix the overflow');
+      });
+
+      it('leaves other-account comments to the notification lanes (no consumption)', async () => {
+        // A comment by a different account produces a GitHub notification and is
+        // delivered by the notification lanes under the thread's reason/roles.
+        // The watch must not consume it: recording the shared dedupe key after
+        // reaching only a subset of roles would starve the other roles.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'someone-else' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('IC_555');
+      });
+
+      it('leaves other-account inline review comments to the notification lanes', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 780,
+            node_id: 'PRRC_780',
+            body: 'an external reviewer note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'someone-else' },
+            path: 'src/a.ts',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('PRRC_780');
+      });
+
+      it('does not re-deliver an already-dispatched comment on a re-list', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        // A held window re-lists the same comment; the dedupe key must skip it.
+        const ch = channel as unknown as {
+          cursor: { dispatchedComments?: string[] };
+          prWatchState: {
+            entries: Record<string, { commentLastFetchAt?: number }>;
+          };
+        };
+        ch.prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('fails open when the attribution lookup throws', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockRejectedValue(new Error('lookup unavailable'));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // Missing authorship evidence must not withhold the comment.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('withholds a comment the bound session itself posted', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        // Same account as the channel, but authored by the bound session.
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // No target is left to receive it and the notification lanes cannot see
+        // a same-account comment, so the skip row is its only journal trace.
+        const rows = readChannelEvents().filter(
+          (event) => event['reason'] === 'comment_watch_no_target',
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          type: 'inbound',
+          outcome: 'skipped',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+          messageId: 'IC_555',
+        });
+      });
+
+      it('delivers a same-account comment posted by a different session', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        // The bound session did NOT post ic:555 (another session did, under
+        // the same GitHub login the channel authenticates as).
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('withholds a same-account comment only from its author among multiple role targets', async () => {
+        // The central fix/verify topology: two roles bound to the PR, the fix
+        // session authored the comment. Exclusion must be per-target — the
+        // verify session still receives it. Mutating the filter to "any
+        // excluded session drops all targets" reds this case.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: {
+              'fix:comment': 'Address the findings (fix).',
+              'verify:comment': 'Re-verify the findings.',
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: ['fix', 'verify'].map((role) =>
+            makeBinding({
+              sessionId: `${role}-session`,
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role,
+                },
+              ],
+            }),
+          ),
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'fix-session' ? new Set(['ic:555']) : new Set(),
+          );
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe(
+          'verify-session',
+        );
+      });
+
+      it('defers consumption on a partial bindings snapshot instead of retiring no-target', async () => {
+        // R2-2: a partial scan sees only the author; the session that should
+        // receive the comment is in the unscanned workspace. Consuming the
+        // comment (no-target retire + cursor advance) on incomplete evidence
+        // would skip it past that session forever. Defer, keeping commentSince.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-session',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+          ],
+          partial: true,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const ch = channel as unknown as {
+          prWatchState: { entries: Record<string, { commentSince?: string }> };
+        };
+        expect(ch.prWatchState.entries['owner/repo#42']!.commentSince).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+        expect(
+          readChannelEvents().filter(
+            (event) => event['reason'] === 'comment_watch_no_target',
+          ),
+        ).toHaveLength(0);
+      });
+
+      it('does not hand a watched comment back to its author when the target is Gone', async () => {
+        // R2-3: same role — B is the routing winner (most recent), A authored
+        // the comment and is NOT a primary target. When B is Gone the fallback
+        // re-resolves over the followers; it must skip the author A, not deliver
+        // the comment back to it.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) => {
+            if (sessionId === 'winner-B') {
+              throw new BoundSessionGoneError(sessionId);
+            }
+            return undefined;
+          });
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it('does not reselect the author during task recovery after a queue-full deferral (R2-3)', async () => {
+        // The author exclusion must constrain the recovery/revalidation
+        // reselection too, not only the Gone loop: a deferred task carries
+        // delivery=B and authorExclude=[A]; A then becomes the newest same-role
+        // session, and recovery must not retarget the comment to A.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        // The queue-full-deferred task as persisted: delivery=B, exclusion=[A].
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'deferred-comment-task',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'winner-B',
+              role: 'fix',
+            },
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // A becomes the newest same-role session before recovery runs.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it.each([
+        // The silent shapes matter most: a string is iterable and null is
+        // defaulted away, so neither throws at the delivery loop — they just
+        // exclude nobody and hand the comment back to its author.
+        ['a bare string', 'author-A'],
+        ['null', null],
+        ['a number', 42],
+        ['an object', { author: 'author-A' }],
+        ['an array with a non-string member', ['author-A', 7]],
+      ])(
+        'rejects a task record whose authorExclude is %s',
+        async (_name, authorExclude) => {
+          await initChannel(commentWatchConfig, { boundSessions });
+          boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+          writeInboundTasks([
+            makeInboundTaskRecord({
+              id: 'corrupt-author-exclude',
+              state: 'accepted',
+              issueNumber: 42,
+              delivery: { kind: 'bound-session', sessionId: 'winner-B' },
+              privateOnly: true,
+              authorExclude: authorExclude as unknown as string[],
+            }),
+          ]);
+          const recovery = channel as unknown as {
+            recoverInboundTasks: () => Promise<void>;
+            inboundPersistenceBlocked: boolean;
+          };
+          await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+            'invalid GitHub inbound task state',
+          );
+          expect(recovery.inboundPersistenceBlocked).toBe(true);
+          expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        },
+      );
+
+      it('names the offending record when the task store is rejected', async () => {
+        // One bad record blocks every healthy task in the file, so the
+        // rejection has to locate it for whoever repairs the store by hand.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({ id: 'healthy-task' }),
+          makeInboundTaskRecord({
+            id: 'corrupt-author-exclude',
+            state: 'accepted',
+            issueNumber: 42,
+            delivery: { kind: 'bound-session', sessionId: 'winner-B' },
+            privateOnly: true,
+            authorExclude: 42 as unknown as string[],
+          }),
+        ]);
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+        };
+        await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+          'invalid GitHub inbound task state at record 1 (corrupt-author-exclude)',
+        );
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('does not reselect the author during LEGACY-mode task recovery (F3)', async () => {
+        // Same exclusion contract without boundSessionActions: legacy mode
+        // re-resolves the single winner, so once the author becomes the newest
+        // binding the recovered task must retire instead of delivering to it.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'deferred-legacy-comment-task',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'winner-B',
+              role: 'fix',
+            },
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // The author is now the single legacy winner.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it('a reconstructed fan-out sibling inherits authorExclude (R2-3)', async () => {
+        // A crash between the two claims leaves only the carrier, holding
+        // fanout=[B,V] and authorExclude=[A]. Recovery rebuilds V's task; once A
+        // becomes the newest verify session that sibling must still exclude A.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: {
+              'fix:comment': 'Address the findings.',
+              'verify:comment': 'Re-verify the findings.',
+            },
+          },
+          { boundSessions },
+        );
+        const prFor = (role: string) => ({
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role,
+        });
+        const bindingsWith = (authorNewest: boolean) => ({
+          bindings: [
+            makeBinding({
+              sessionId: 'fix-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prFor('fix')],
+            }),
+            makeBinding({
+              sessionId: 'verify-V',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prFor('verify')],
+            }),
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: authorNewest
+                ? '2026-07-03T00:00:00.000Z'
+                : '2026-06-30T00:00:00.000Z',
+              prs: [prFor('verify')],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.listPrBindings.mockResolvedValue(bindingsWith(false));
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'fanout-carrier',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'fix-B',
+              role: 'fix',
+            },
+            fanout: [
+              { sessionId: 'fix-B', role: 'fix', completed: true },
+              { sessionId: 'verify-V', role: 'verify' },
+            ],
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // A becomes the newest verify session before recovery rebuilds V.
+        boundSessions.listPrBindings.mockResolvedValue(bindingsWith(true));
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it('delivers a same-account comment under a sender allowlist that excludes the channel account', async () => {
+        // The recommended senders:allowlist policy excludes the channel's own
+        // login; the private comment watch must still deliver (sender gate
+        // waived for this lane) rather than retire as preflight_rejected.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            groupPolicy: 'allowlist',
+            groups: {
+              'owner/repo': { senders: 'allowlist', allowedUsers: ['alice'] },
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('delivers an inline review comment with file/line context', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 777,
+            node_id: 'PRRC_777',
+            body: 'guard this branch',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            path: 'src/a.ts',
+            line: 12,
+            side: 'RIGHT',
+            html_url: 'https://github.com/owner/repo/pull/42#discussion_r777',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
+        expect(prompt).toContain('inline review comment by @test-bot');
+        expect(prompt).toContain('src/a.ts');
+        expect(prompt).toContain('(line 12, RIGHT)');
+        expect(prompt).toContain('guard this branch');
+      });
+
+      it('excluded self-authored comments do not block the batch tail', async () => {
+        // A run of same-second comments all posted by the bound session must not
+        // occupy the per-pass batch slots and stall the cursor: a later comment
+        // by another session still has to be delivered.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const own = new Set<string>();
+        const selfComments = Array.from({ length: 25 }, (_, i) => {
+          own.add(`ic:${900 + i}`);
+          return {
+            id: 900 + i,
+            node_id: `IC_${900 + i}`,
+            body: 'my own note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+          };
+        });
+        const tail = {
+          id: 999,
+          node_id: 'IC_999',
+          body: 'a finding from another session',
+          created_at: '2026-07-02T10:00:01.000Z',
+          user: { login: 'test-bot' },
+        };
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(own);
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          ...selfComments,
+          tail,
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'a finding from another session',
+        );
+      });
+
+      it('withholds an inline review comment the bound session posted', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['rc:777']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 777,
+            node_id: 'PRRC_777',
+            body: 'my own note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            path: 'src/a.ts',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('baselines silently on first observation (no backlog delivery)', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        // No seeded watch state: the first pass must baseline, not deliver.
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(
+          readWatchState().entries['owner/repo#42']!['commentBaseline'],
+        ).toBeDefined();
+      });
+
+      it('does not watch comments when prCommentWatch is false', async () => {
+        await initChannel(
+          { ...commentWatchConfig, prCommentWatch: false },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+      });
+
+      it('does not consume a comment it cannot route, leaving it to the notification lanes', async () => {
+        // Role-aware actions with only a reason-specific key: the watch resolves
+        // the narrower `comment` class and matches nothing, so it must not record
+        // the shared dedupe key — that would make the mention lane skip the same
+        // comment as a duplicate and lose a delivery that worked before.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:mention': 'reply' },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('IC_555');
+      });
+
+      it('keeps the comment cursor when a dispatch does not settle', async () => {
+        // dispatchEnvelope returns false before a durable claim when the
+        // publication audit is unreadable; advancing commentSince here would
+        // skip the comment past with no task and no re-delivery chance.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const dispatch = vi
+          .spyOn(
+            channel as unknown as {
+              dispatchEnvelope: (...args: unknown[]) => Promise<boolean>;
+            },
+            'dispatchEnvelope',
+          )
+          .mockResolvedValue(false);
+        try {
+          await pollOnce();
+        } finally {
+          dispatch.mockRestore();
+        }
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+      });
+
+      it('fails fast on a rate-limited comment fetch instead of sleep-retrying', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockRejectedValue(
+          Object.assign(new Error('rate limited'), {
+            status: 429,
+            response: { headers: {} },
+          }),
+        );
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // The fail-fast predicate throws on the first 429 (no sleep-retry), and
+        // the shared error aborts the watch pass rather than being swallowed.
+        expect(mockOctokit.rest.issues.listComments).toHaveBeenCalledTimes(1);
+      });
+
+      it('issues no pulls.get for a comment-only channel', async () => {
+        // commentWatchConfig subscribes no state events, so the per-poll state
+        // observation is skipped and the comment fetch is the only watch call.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+      });
+
+      it('records comment times so watch dedupe keys stay evictable', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const cursor = (
+          channel as unknown as {
+            cursor: { dispatchedCommentTimes?: Record<string, string> };
+          }
+        ).cursor;
+        expect(cursor.dispatchedCommentTimes?.['IC_555']).toBe(
+          '2026-07-02T10:00:00.000Z',
+        );
+      });
+
+      it('caps a deliverable burst at the batch size and resumes before the tail', async () => {
+        // 21 deliverable comments (none self-authored) must enter the capped
+        // branch: 20 dispatch this pass, and the cursor resumes before the last
+        // processed comment so the tail drains next pass instead of dropping.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        const burst = Array.from({ length: 21 }, (_, i) => ({
+          id: 1000 + i,
+          node_id: `IC_${1000 + i}`,
+          body: `finding ${i}`,
+          created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+          user: { login: 'test-bot' },
+        }));
+        mockOctokit.rest.issues.listComments.mockResolvedValue(burst);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(20);
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-02T10:00:18.000Z',
+        );
+      });
+
+      it('skips the fetch inside the recheck interval', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: Date.now(),
+          },
+        });
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('is on by default when prCommentWatch is omitted', async () => {
+        await initChannel(
+          { deliverToBoundSessions: true, prWatchEvents: [] },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('drains a merged binding in a comment-only channel (no perpetual fetch)', async () => {
+        // watchOnePr (the only prState writer) is skipped for comment-only
+        // channels, so without draining on the binding's terminal state a
+        // merged PR would be comment-fetched every interval forever.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'merged',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('shares one burst budget across watched PRs in a pass', async () => {
+        // Two due PRs with 21 deliverable comments each: a per-PR cap would
+        // claim 40 tasks in one poll; the pass-wide budget claims 20 and leaves
+        // the second PR's cursor untouched so its tail resumes next pass.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        const seeded = {
+          headSha: 'sha-1',
+          prState: 'open',
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+        };
+        seedWatchState({
+          'owner/repo#42': { ...seeded },
+          'owner/repo#43': { ...seeded },
+        });
+        mockPull({});
+        const burstFor = (pr: number) =>
+          Array.from({ length: 21 }, (_, i) => ({
+            id: pr * 1000 + i,
+            node_id: `IC_${pr}_${i}`,
+            body: `finding ${i}`,
+            created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+            user: { login: 'test-bot' },
+          }));
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('pull_number' in params) return [];
+            if ('issue_number' in params)
+              return params['issue_number'] === 42
+                ? burstFor(42)
+                : burstFor(43);
+            return [];
+          },
+        );
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(20);
+        expect(readWatchState().entries['owner/repo#43']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+      });
+
+      it('delivers a single long comment intact, not cut to the aggregate batch budget', async () => {
+        // A watch delivery carries one comment; the aggregate lane's 400-char
+        // per-comment budget would cut the actionable steps past the cut.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({
+            body: `${'repro detail '.repeat(100)} FINAL-ACTIONABLE-STEP`,
+          }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'FINAL-ACTIONABLE-STEP',
+        );
       });
     });
   });

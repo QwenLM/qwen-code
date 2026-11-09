@@ -1445,6 +1445,7 @@ export default {
   Reqs: 'Запросов',
   'Input Tokens': 'Входных токенов',
   'Output Tokens': 'Выходных токенов',
+  'Output (incl. Reasoning)': 'Вывод (с рассуждением)',
   'Savings Highlight:': 'Экономия:',
   'of input tokens were served from the cache, reducing costs.':
     'входных токенов обслужено из кэша, снижая затраты.',

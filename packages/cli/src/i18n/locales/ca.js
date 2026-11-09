@@ -1557,6 +1557,7 @@ export default {
   Reqs: 'Sol·licituds',
   'Input Tokens': "Tokens d'entrada",
   'Output Tokens': 'Tokens de sortida',
+  'Output (incl. Reasoning)': 'Sortida (amb raonament)',
   'Savings Highlight:': 'Estalvis destacats:',
   'of input tokens were served from the cache, reducing costs.':
     "dels tokens d'entrada s'han servit des de la memòria cau, reduint els costos.",
