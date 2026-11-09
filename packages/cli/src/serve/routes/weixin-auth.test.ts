@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createServer, type Server } from 'node:http';
+import { createServer, request as httpRequest, type Server } from 'node:http';
 import {
   existsSync,
   mkdtempSync,
@@ -35,6 +35,8 @@ class FakeIlink {
   statusCalls = 0;
   statusQrcodes: string[] = [];
   statusHttpCode = 200;
+  /** Holds the mint open, so a client can vanish while it is in flight. */
+  mintDelayMs = 0;
   private server: Server | undefined;
   private dispose: (() => void) | undefined;
   baseUrl = '';
@@ -47,6 +49,10 @@ class FakeIlink {
         const body =
           this.qrResponses[Math.min(this.qrCalls, this.qrResponses.length - 1)];
         this.qrCalls += 1;
+        if (this.mintDelayMs > 0) {
+          setTimeout(() => res.end(JSON.stringify(body)), this.mintDelayMs);
+          return;
+        }
         res.end(JSON.stringify(body));
         return;
       }
@@ -386,6 +392,58 @@ describe('weixin auth routes', () => {
       expect(item.body).toEqual({ code: 'too_many_flows' });
     }
     expect(fake.qrCalls).toBe(4);
+  });
+
+  it('drops a flow whose client vanished before the mint answered', async () => {
+    // A tab refresh during login aborts the POST, so the client never learns
+    // the id and can never cancel. The daemon must not keep the flow: a leaked
+    // slot would leave one fewer real login able to start. The drop is
+    // triggered by the upstream call actually arriving rather than by a sleep,
+    // which would race the mint on a loaded machine and fail for the wrong
+    // reason.
+    const mintDelayMs = 1000;
+    fake.mintDelayMs = mintDelayMs;
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const gone = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/auth/weixin/flows',
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json',
+        },
+      });
+      // The client disappearing is the point of the test, not a failure.
+      gone.on('error', () => undefined);
+      gone.end('{}');
+      const deadline = Date.now() + 8000;
+      while (fake.qrCalls === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(fake.qrCalls).toBeGreaterThan(0);
+      gone.destroy();
+      // Let the delayed mint answer, so the drop is the only thing that could
+      // have freed the slot.
+      await new Promise((resolve) => setTimeout(resolve, mintDelayMs + 400));
+    } finally {
+      fake.mintDelayMs = 0;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+
+    // All four slots are free again; a leak would make the fourth 429.
+    fake.qrResponses = [
+      { qrcode: 'qr-ok', qrcode_img_content: 'https://scan.example/ok' },
+    ];
+    const statuses: number[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const ok = await auth(request(app).post('/auth/weixin/flows')).send({});
+      statuses.push(ok.status);
+    }
+    expect(statuses).toEqual([201, 201, 201, 201]);
   });
 
   it('ends expired after the refresh budget', async () => {

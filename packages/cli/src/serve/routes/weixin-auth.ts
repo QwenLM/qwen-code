@@ -126,6 +126,15 @@ export function registerWeixinAuthRoutes(
       // check and then all register, exceeding MAX_FLOWS.
       flows.set(id, flow);
 
+      // If the client goes away before the mint answers, it never learns this
+      // id and so can never cancel it — the flow would hold a slot and poll
+      // the upstream for its whole deadline with nobody able to stop it. A
+      // tab refresh during login is enough to trigger that. `writableEnded`
+      // keeps the normal path (response already sent) out of this.
+      res.on('close', () => {
+        if (!res.writableEnded) cancel(id);
+      });
+
       let qrcodeId: string;
       try {
         const qr = await startLogin(apiBaseUrl);

@@ -153,6 +153,10 @@ Flow lifecycle:
 
 - At most 4 concurrent flows; the fifth request gets `429` with
   `code: 'too_many_flows'`, matching the subscription route's cap pattern.
+  A client that disconnects before the mint answers cannot cancel what it never
+  learned the id of, so the route drops that flow itself (`res` closed before
+  the response finished) — otherwise a page refresh mid-login would hold a slot
+  for the flow's whole deadline.
 - Starting a flow calls `startLogin`, renders `qrcodeUrl` to `qrText`, and stores
   the view. A response that carries a QR id but no scannable URL is treated as a
   failed mint (`502 qr_unavailable`, slot released) rather than a live flow: with
@@ -207,7 +211,10 @@ subscription auth routes and calls the dispose function on shutdown.
   ref so a host re-render cannot restart the timer. On unmount it cancels a flow
   that is still live: the daemon keeps such a flow — and its upstream polling —
   alive without a browser, so closing the editor would otherwise leak slots
-  until four abandoned attempts made every real login answer `429`.
+  until four abandoned attempts made every real login answer `429`. The window
+  where the start request is still in flight is covered too: the unmount
+  cleanup has no id yet, so the resolved response cancels the flow it created
+  instead of silently dropping it.
 - `ChannelEditorDialog.tsx` — render the panel at the top of the credentials
   section when `descriptor.type === 'weixin'`. The login API arrives as an
   optional prop, matching how every other daemon call in this dialog is injected

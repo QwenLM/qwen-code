@@ -145,7 +145,16 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
     setError(undefined);
     try {
       const next = await apiRef.current.start();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) {
+        // The flow was created after the panel went away, so the unmount
+        // cleanup never saw its id and it would poll the upstream for its whole
+        // deadline with nobody watching — the same leak, in the window a user
+        // hits by clicking login and immediately closing the dialog.
+        if (next && !isTerminal(next.status)) {
+          void apiRef.current.cancel(next.id).catch(() => undefined);
+        }
+        return;
+      }
       if (!next) {
         setUnsupported(true);
         return;

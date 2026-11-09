@@ -311,6 +311,58 @@ describe('WeixinLoginPanel', () => {
     expect(cancel).toHaveBeenCalledWith('flow-1');
   });
 
+  it('cancels a flow the daemon creates after the panel unmounts', async () => {
+    // The unmount cleanup can only cancel a flow it has seen. Clicking login
+    // and immediately closing the dialog leaves the POST in flight, so the
+    // flow is born after the panel is gone — and would poll the upstream for
+    // its whole deadline unless the resolved start drops it.
+    let resolveStart: (flow: DaemonWeixinLoginFlow) => void = () => undefined;
+    const start = vi.fn().mockReturnValue(
+      new Promise<DaemonWeixinLoginFlow>((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    await renderPanel({ start, cancel });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    act(() => root.unmount());
+    unmounted = true;
+
+    await act(async () => {
+      resolveStart(WAITING);
+      await Promise.resolve();
+    });
+
+    expect(cancel).toHaveBeenCalledWith('flow-1');
+  });
+
+  it('leaves a flow that was already terminal when the start resolved', async () => {
+    let resolveStart: (flow: DaemonWeixinLoginFlow) => void = () => undefined;
+    const start = vi.fn().mockReturnValue(
+      new Promise<DaemonWeixinLoginFlow>((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    await renderPanel({ start, cancel });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    act(() => root.unmount());
+    unmounted = true;
+
+    await act(async () => {
+      resolveStart({ id: 'flow-1', status: 'ready' });
+      await Promise.resolve();
+    });
+
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it('does not cancel a flow that already finished', async () => {
     const { cancel } = await renderPanel({
       poll: vi.fn().mockResolvedValue({ id: 'flow-1', status: 'ready' }),
