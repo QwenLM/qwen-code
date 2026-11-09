@@ -527,6 +527,31 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.createSession).not.toHaveBeenCalled();
   });
 
+  it('clears the send latch when a host session switch aborts an in-flight submit', async () => {
+    // R7-7: the pending key embeds the session id in host mode, so switching
+    // re-runs the restore effect and aborts the controller the in-flight send
+    // captured; that send never reaches its own `setBusy(false)`.
+    mocks.client.submitPrompt.mockReturnValue(new Promise(() => {}));
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    await act(async () => {
+      mocks.editorProps!.onSubmit('in flight', undefined, undefined, () => {});
+      await flush();
+    });
+    expect(mocks.editorProps?.disabled).toBe(true);
+
+    // A host switch hands the page a new session id (and so a new pending key).
+    await render('s2', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    await act(async () => {
+      await flush();
+    });
+    // The aborted send can no longer clear its own latch, so the restore must.
+    expect(mocks.editorProps?.disabled).toBe(false);
+  });
+
   it('marks the real page wrapper as the composer keydown focus region', async () => {
     await render('s1');
     // useComposerCore keys "type anywhere" off this attribute plus a

@@ -850,6 +850,11 @@ function ManagedSessionsContent({
     lifetime.current = abort;
     setPendingRestoreFailed(false);
     setRestoreBusy(true);
+    // The pending key changed, so the previous controller was aborted and any
+    // send it owned can never reach its own `setBusy(false)` (R7-7). Only this
+    // effect may clear it: a non-host switch keeps the same key and leaves a
+    // live send running under it.
+    setBusy(false);
     void readManagedPending(pendingKey).then(
       (value) => {
         if (abort.signal.aborted) return;
