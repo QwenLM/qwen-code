@@ -351,7 +351,7 @@ const WORKSPACES: DaemonWorkspaceCapability[] = [
 ];
 
 const { ChannelEditorDialog } = await import('./ChannelEditorDialog');
-const { I18nProvider } = await import('../../i18n');
+const { I18nProvider, getTranslator } = await import('../../i18n');
 
 let container: HTMLDivElement;
 let root: Root;
@@ -4205,6 +4205,27 @@ const EMAIL: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// The 17 keys FIELD_LABEL_KEYS.email maps (privatePolicy is shared, not here).
+const EMAIL_LABEL_KEYS = [
+  'address',
+  'imapHost',
+  'imapUser',
+  'imapPassword',
+  'smtpHost',
+  'smtpUser',
+  'smtpPassword',
+  'folder',
+  'imapPort',
+  'smtpPort',
+  'imapSecure',
+  'smtpSecure',
+  'proactiveRecipients',
+  'pollInterval',
+  'maxMessageBytes',
+  'maxAttachmentBytes',
+  'maxTextLength',
+].map((k) => `channels.editor.field.email.${k}`);
+
 const EMAIL_INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'agent-mail',
   config: {
@@ -4240,7 +4261,15 @@ describe('Email channel editor', () => {
     expect(labels.some((t) => t.includes('IMAP Password'))).toBe(true);
     expect(labels.some((t) => t.includes('SMTP Password'))).toBe(true);
     // The descriptor used to carry `label: key` for all seven required fields.
-    for (const raw of ['imapHost', 'imapPassword', 'smtpPassword']) {
+    for (const raw of [
+      'address',
+      'imapHost',
+      'imapUser',
+      'smtpHost',
+      'smtpUser',
+      'imapPassword',
+      'smtpPassword',
+    ]) {
       expect(labels.some((t) => t.includes(raw))).toBe(false);
     }
     expect(document.body.textContent ?? '').not.toContain(
@@ -4266,7 +4295,15 @@ describe('Email channel editor', () => {
     expect(labels.some((t) => t.includes('IMAP 服务器'))).toBe(true);
     expect(labels.some((t) => t.includes('IMAP 密码'))).toBe(true);
     expect(labels.some((t) => t.includes('SMTP 密码'))).toBe(true);
-    for (const raw of ['imapHost', 'imapPassword', 'smtpPassword']) {
+    for (const raw of [
+      'address',
+      'imapHost',
+      'imapUser',
+      'smtpHost',
+      'smtpUser',
+      'imapPassword',
+      'smtpPassword',
+    ]) {
       expect(labels.some((t) => t.includes(raw))).toBe(false);
     }
     // getTranslator resolves messages[key] ?? EN[key] ?? key, so a zh-CN gap
@@ -4308,6 +4345,24 @@ describe('Email channel editor', () => {
       ).toEqual([]);
       // Guard against a vacuous sweep: the fields must actually have rendered.
       expect(labels.length).toBeGreaterThan(15);
+
+      // Per-key, per-locale: the catalog must actually contain the key (a
+      // single-locale gap falls back to EN, which the raw-key sweep above
+      // cannot see), and the rendered label must be that catalog value. This
+      // is what pins each translation rather than only the both-missing case.
+      const t = getTranslator(language);
+      const en = getTranslator('en');
+      // Required labels render a trailing aria-hidden asterisk in their text.
+      const normalized = labels.map((text) => text.replace(/\*+$/, '').trim());
+      for (const key of EMAIL_LABEL_KEYS) {
+        const catalog = t(key);
+        expect(catalog).not.toBe(key);
+        expect(normalized).toContain(catalog);
+        // A zh-CN gap silently falls back to EN, which the checks above cannot
+        // see (rendered == catalog == EN). Every Email label is translated, so
+        // requiring zh != en is what pins the zh catalog entry's presence.
+        if (language === 'zh-CN') expect(catalog).not.toBe(en(key));
+      }
     }
   });
 
@@ -4316,7 +4371,12 @@ describe('Email channel editor', () => {
 
     expect(sectionHeadingOf(fieldByLabel('IMAP Host'))).toBe('Connection');
     expect(sectionHeadingOf(fieldByLabel('SMTP Host'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('IMAP Port'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('SMTP Port'))).toBe('Connection');
     expect(sectionHeadingOf(fieldByLabel('IMAP Implicit TLS'))).toBe(
+      'Connection',
+    );
+    expect(sectionHeadingOf(fieldByLabel('SMTP Implicit TLS'))).toBe(
       'Connection',
     );
     expect(sectionHeadingOf(fieldByLabel('Mailbox Address'))).toBe(
@@ -4355,7 +4415,35 @@ describe('Email channel editor', () => {
     const labels = labelTexts();
     expect(labels.some((t) => t.includes('Group policy'))).toBe(false);
     expect(labels.some((t) => t.includes('Allowed group IDs'))).toBe(false);
-    expect(document.body.textContent ?? '').not.toContain('Pairing requests');
+    // The panel's real headings are "Pending requests" / "Pairing approvals";
+    // "Pairing requests" never renders, so asserting its absence was vacuous.
+    expect(document.body.textContent ?? '').not.toContain('Pending requests');
+    expect(document.body.textContent ?? '').not.toContain('Pairing approvals');
+  });
+
+  it('keeps the pairing panel closed when the descriptor lacks the group field', async () => {
+    // The registry always injects groupPolicy today, so the stored-config
+    // fallback arm of effectiveGroupPolicy is normally unreachable. Drive it
+    // anyway: with the field absent from the descriptor, only the private-only
+    // branch stops a stored 'pairing' from resurrecting the panel.
+    const noGroupDescriptor = {
+      ...EMAIL,
+      fields: EMAIL.fields.filter((f) => f.key !== 'groupPolicy'),
+    };
+    await renderDialog({
+      descriptor: noGroupDescriptor,
+      instance: {
+        ...EMAIL_INSTANCE,
+        config: {
+          ...EMAIL_INSTANCE.config,
+          groupPolicy: 'pairing',
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        },
+      },
+    });
+
+    expect(document.body.textContent ?? '').not.toContain('Pending requests');
+    expect(document.body.textContent ?? '').not.toContain('Pairing approvals');
   });
 
   it('offers exactly the three private policies the adapter supports', async () => {
