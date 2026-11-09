@@ -35,6 +35,12 @@ function isBlanketDenyOf(toolName: string, rawRule: string): boolean {
   // `deny: ["Edit"]` spelling and fork an extractor whose every save is then
   // refused.
   if (!toolMatchesRuleToolName(rule.toolName, toolName)) return false;
+  // The last two conditions restate the match-any-invocation branch of
+  // `matchesRule` in `permissions/rule-parser.ts`: a rule reaches a call with
+  // no path or specifier only when it carries neither. Reusing `matchesRule`
+  // here would not be equivalent — it answers "does this rule match *this*
+  // invocation", not "does it match every path" — so state the coupling
+  // instead: if that branch's notion of a bare rule changes, change this too.
   return !rule.specifier && !rule.toolParamMatchers?.length;
 }
 
