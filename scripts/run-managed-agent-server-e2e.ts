@@ -2019,12 +2019,13 @@ function siblingFinalPlan(
 
 // B3: read the durable round and cost ledger the way recovery restores them.
 // The round comes from the latest hosted-model-request (model.attempt.recoveryRef);
-// the budget snapshot and per-model token metrics are reverse-scanned from the
-// route/usage resources exactly as bindBudget does on a cold load.
+// the budget snapshot and per-model metrics are reverse-scanned from route/usage
+// resources. Diagnostic usage keeps raw charged output separately from metrics.
 interface B3RoundBudget {
   round: number;
   budget: unknown;
   models: unknown;
+  rawOutputTokensTotal?: number;
 }
 function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
   const attempts = readJournalManagedEvents(port, sessionFilter)
@@ -2064,17 +2065,36 @@ function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
   }
   let budget: unknown;
   let models: unknown;
+  let rawOutputTokensTotal: number | undefined;
   for (let i = attempts.length - 1; i >= 0; i -= 1) {
     for (const field of ['usageRef', 'routeRef']) {
       const saved = readResource(attempts[i].payload[field]);
       if (!saved) continue;
       if (budget === undefined && 'budget' in saved) budget = saved['budget'];
-      if (models === undefined && saved['models']) models = saved['models'];
+      if (models === undefined) {
+        const statistics = saved['statistics'] as
+          | {
+              rawOutputTokensTotal: number;
+              models: Array<{ key: string; metrics: unknown }>;
+            }
+          | undefined;
+        if (statistics) {
+          models = Object.fromEntries(
+            statistics.models.map((model) => [model.key, model.metrics]),
+          );
+          rawOutputTokensTotal = statistics.rawOutputTokensTotal;
+        } else if (saved['models']) models = saved['models'];
+      }
     }
     if (budget !== undefined && models !== undefined) break;
   }
   if (round < 0) throw new Error('B3 window has no saved model-request round');
-  return { round, budget: budget ?? null, models: models ?? null };
+  return {
+    round,
+    budget: budget ?? null,
+    models: models ?? null,
+    ...(rawOutputTokensTotal === undefined ? {} : { rawOutputTokensTotal }),
+  };
 }
 
 // B3: the turn cost snapshot and per-model token ledger must survive the
@@ -2097,6 +2117,19 @@ function assertB3CostContinuity(
     throw new Error(
       `B3 recovery reset the turn budget snapshot: before=${JSON.stringify(before.budget)} after=${JSON.stringify(after.budget)}`,
     );
+  if (before.rawOutputTokensTotal !== undefined) {
+    if (
+      !Number.isFinite(before.rawOutputTokensTotal) ||
+      before.rawOutputTokensTotal <= 0
+    )
+      throw new Error('B3 crash-boundary raw output ledger was not exercised');
+    if (
+      after.rawOutputTokensTotal === undefined ||
+      !Number.isFinite(after.rawOutputTokensTotal) ||
+      after.rawOutputTokensTotal < before.rawOutputTokensTotal
+    )
+      throw new Error('B3 recovery wiped the raw output ledger');
+  }
   const b3ModelsBefore = (before.models ?? {}) as Record<
     string,
     { tokens?: { candidates?: number } }
@@ -3440,7 +3473,7 @@ try {
         ),
       );
       if (
-        privateHead[0] !== '2' ||
+        privateHead[0] !== '3' ||
         checkpoint.continuation?.phase !== 'await_action' ||
         checkpoint.approval?.requestId !== originalApprovalId
       ) {

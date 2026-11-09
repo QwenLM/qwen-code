@@ -56,6 +56,12 @@ public interface ManagedExtensionRecordStore {
     public Map<String, WebShellModelContext> findModelContexts(
             String tenantId, List<String> sessionIds);
 
+    public record ModelDiagnostics(JsonNode context, JsonNode statistics,
+            Long contextSequence, Long statisticsSequence, Long observedAt,
+            Long readRevision, boolean stale, List<String> coverageGaps) { }
+
+    public ModelDiagnostics findModelDiagnostics(String tenantId, String sessionId);
+
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId);
 
     public Optional<TaskTarget> findTaskTarget(String tenantId,

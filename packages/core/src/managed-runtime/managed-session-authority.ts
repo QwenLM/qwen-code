@@ -1339,6 +1339,7 @@ export class LocalManagedSessionAuthority {
         readonly outcome: string;
         readonly stopReason: string | null;
         readonly resultRef: ManagedSessionDurableRef;
+        readonly usageRef?: ManagedSessionDurableRef | null;
         readonly occurredAt: number;
         readonly eventId: string;
       };
@@ -1454,7 +1455,7 @@ export class LocalManagedSessionAuthority {
               outcome: request.turn.outcome,
               stopReason: request.turn.stopReason,
               resultRef: request.turn.resultRef,
-              usageRef: null,
+              usageRef: request.turn.usageRef ?? null,
               pendingOwnersRef: null,
             },
           },
@@ -3234,7 +3235,11 @@ export class LocalManagedSessionAuthority {
       refs = [command.argsRef, command.replyRef];
     } else if (domain === 'history_maintenance') {
       const maintenance = parseHistoryMaintenance(record);
-      refs = [maintenance.requestRef, maintenance.candidateRef];
+      refs = [
+        maintenance.requestRef,
+        maintenance.candidateRef,
+        ...(maintenance.schemaVersion === 2 ? [maintenance.modelStatsRef] : []),
+      ];
     } else if (domain === 'team_task') {
       const task = parseTeamTask(record);
       refs = [task.descriptionRef, task.metadataRef];

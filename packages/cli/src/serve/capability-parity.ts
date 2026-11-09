@@ -221,9 +221,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_env: NO_MANAGED_EQUIVALENT('no Managed workspace env route'),
   workspace_preflight: NO_MANAGED_EQUIVALENT('no Managed preflight route'),
   session_context: NO_MANAGED_EQUIVALENT('no Managed session context route'),
-  session_context_usage: NO_MANAGED_EQUIVALENT(
-    'no Managed context usage route',
-  ),
+  session_context_usage: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_CONTEXT_USAGE',
+  },
   session_supported_commands: NO_MANAGED_EQUIVALENT(
     'no Managed supported-commands route',
   ),
@@ -249,7 +250,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'tool:monitor',
   },
-  session_stats: NO_MANAGED_EQUIVALENT('no Managed session statistics route'),
+  session_stats: {
+    standing: 'managed',
+    evidence: 'surface:SESSION_MODEL_STATISTICS',
+  },
   session_lsp: NO_MANAGED_EQUIVALENT('no LSP in the Managed execution profile'),
   session_resources: {
     standing: 'managed',

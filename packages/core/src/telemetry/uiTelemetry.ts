@@ -402,6 +402,7 @@ export interface UiTelemetryReplaySnapshot {
   readonly sessionId: string;
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
+  readonly sessionOutputBaseline: number | undefined;
   readonly sessionWasClosed: boolean;
   /**
    * The session the process was on when the replay began — the one a failed
@@ -415,6 +416,7 @@ export interface UiTelemetryReplaySnapshot {
   readonly outgoingSessionId?: string;
   /** Absent when the outgoing session had no bucket yet — restore removes it. */
   readonly outgoingSessionMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionOutputBaseline?: number | undefined;
   readonly outgoingSessionWasClosed?: boolean;
   readonly lastPromptTokenCount: number;
   readonly lastCachedContentTokenCount: number;
@@ -424,6 +426,7 @@ export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
   #sessionMetrics: Map<string, SessionMetrics> = new Map();
+  #sessionOutputBaselines: Map<string, number> = new Map();
   #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
   #lastCachedContentTokenCount = 0;
@@ -467,12 +470,23 @@ export class UiTelemetryService extends EventEmitter {
    */
   getTotalOutputTokens(sessionId: string): number {
     const metrics = this.#sessionMetrics.get(sessionId);
-    if (!metrics) return 0;
-    let total = 0;
-    for (const model of Object.values(metrics.models)) {
+    let total = this.#sessionOutputBaselines.get(sessionId) ?? 0;
+    for (const model of Object.values(metrics?.models ?? {})) {
       total += model.tokens.candidates;
     }
     return total;
+  }
+
+  restoreSessionOutputTokensBaseline(sessionId: string, total: number): void {
+    if (!Number.isFinite(total) || total < 0 || total > Number.MAX_SAFE_INTEGER)
+      return;
+    const current = this.getTotalOutputTokens(sessionId);
+    if (total > current)
+      this.#sessionOutputBaselines.set(
+        sessionId,
+        (this.#sessionOutputBaselines.get(sessionId) ?? 0) + total - current,
+      );
+    this.#closedSessions.delete(sessionId);
   }
 
   restoreSessionModelMetrics(
@@ -581,10 +595,14 @@ export class UiTelemetryService extends EventEmitter {
       sessionMetrics: sessionMetrics
         ? cloneSessionMetrics(sessionMetrics)
         : undefined,
+      sessionOutputBaseline: this.#sessionOutputBaselines.get(sessionId),
       sessionWasClosed: this.#closedSessions.has(sessionId),
       outgoingSessionId: outgoing,
       outgoingSessionMetrics: outgoingSessionMetrics
         ? cloneSessionMetrics(outgoingSessionMetrics)
+        : undefined,
+      outgoingSessionOutputBaseline: outgoing
+        ? this.#sessionOutputBaselines.get(outgoing)
         : undefined,
       outgoingSessionWasClosed: outgoing
         ? this.#closedSessions.has(outgoing)
@@ -609,12 +627,14 @@ export class UiTelemetryService extends EventEmitter {
       snapshot.sessionId,
       snapshot.sessionMetrics,
       snapshot.sessionWasClosed,
+      snapshot.sessionOutputBaseline,
     );
     if (snapshot.outgoingSessionId) {
       this.#restoreSessionState(
         snapshot.outgoingSessionId,
         snapshot.outgoingSessionMetrics,
         snapshot.outgoingSessionWasClosed,
+        snapshot.outgoingSessionOutputBaseline,
       );
     }
     this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
@@ -629,6 +649,7 @@ export class UiTelemetryService extends EventEmitter {
     sessionId: string,
     metrics: SessionMetrics | undefined,
     wasClosed: boolean | undefined,
+    outputBaseline: number | undefined,
   ): void {
     if (metrics) {
       this.#sessionMetrics.set(sessionId, cloneSessionMetrics(metrics));
@@ -636,6 +657,11 @@ export class UiTelemetryService extends EventEmitter {
       // No bucket existed before the replay; the replay created one. Drop it
       // rather than leave an empty bucket that reads as a live session.
       this.#sessionMetrics.delete(sessionId);
+    }
+    if (outputBaseline === undefined) {
+      this.#sessionOutputBaselines.delete(sessionId);
+    } else {
+      this.#sessionOutputBaselines.set(sessionId, outputBaseline);
     }
     if (wasClosed) {
       this.#closedSessions.add(sessionId);
@@ -650,6 +676,7 @@ export class UiTelemetryService extends EventEmitter {
   reset(): void {
     this.#metrics = createInitialMetrics();
     this.#sessionMetrics.clear();
+    this.#sessionOutputBaselines.clear();
     this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
@@ -661,11 +688,13 @@ export class UiTelemetryService extends EventEmitter {
   }
 
   resetSession(sessionId: string): void {
+    this.#sessionOutputBaselines.delete(sessionId);
     this.#sessionMetrics.set(sessionId, createInitialMetrics());
     this.#closedSessions.delete(sessionId);
   }
 
   removeSession(sessionId: string): void {
+    this.#sessionOutputBaselines.delete(sessionId);
     this.#sessionMetrics.delete(sessionId);
     this.#closedSessions.add(sessionId);
     if (this.#closedSessions.size > UiTelemetryService.#MAX_CLOSED_SESSIONS) {
