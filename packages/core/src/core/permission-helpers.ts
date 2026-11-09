@@ -124,7 +124,8 @@ export async function isPathDeniedByReadRule(
     targetDir,
   );
   if (!pm.hasRelevantRules(context)) return false;
-  return (await pm.evaluate(context)) === 'deny';
+  const decision = await pm.evaluate(context);
+  return decision === 'deny' || decision === 'ask';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -283,6 +283,29 @@ describe('RipGrepTool', () => {
       }
     });
 
+    it('filters matches covered by a path-scoped Read ask rule', async () => {
+      const askedFile = path.join(tempRootDir, 'fileA.txt');
+      Object.assign(mockConfig, {
+        getPermissionManager: () => ({
+          hasRelevantRules: () => true,
+          evaluate: async (context: { filePath?: string }) =>
+            context.filePath === askedFile ? 'ask' : 'default',
+        }),
+      });
+
+      const result = await searchWith(
+        hit('fileA.txt', 1, 'hello world') +
+          hit('sub/fileC.txt', 1, 'another world'),
+        { pattern: 'world' },
+      );
+
+      expect(result.llmContent).not.toContain('fileA.txt');
+      expect(result.llmContent).toContain('sub/fileC.txt');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'sub', 'fileC.txt'),
+      ]);
+    });
+
     it('should treat summary-only JSON output as no matches', async () => {
       const result = await searchWith(
         jsonLine({ type: 'summary', data: { stats: { matches: 0 } } }),

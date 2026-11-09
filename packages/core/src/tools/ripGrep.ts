@@ -30,6 +30,7 @@ import {
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
+import { isPathDeniedByReadRule } from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -320,6 +321,30 @@ class GrepToolInvocation extends BaseToolInvocation<
           resolvedPathCache,
           filteringOptions.customIgnoreFiles,
         );
+      }
+
+      // Ripgrep is workspace-auto-approved, but its result set must still
+      // honour path-scoped Read deny/ask rules before counts and truncation.
+      const permissionManager = this.config.getPermissionManager?.();
+      if (permissionManager) {
+        const permittedLines: RipgrepMatchLine[] = [];
+        for (const line of allLines) {
+          const absolutePath = toAbsoluteResultPath(
+            line.filePath,
+            searchPaths,
+            resolvedPathCache,
+          );
+          if (
+            !(await isPathDeniedByReadRule(
+              permissionManager,
+              absolutePath,
+              this.config.getTargetDir(),
+            ))
+          ) {
+            permittedLines.push(line);
+          }
+        }
+        allLines = permittedLines;
       }
 
       // Deduplicate lines from potentially overlapping workspace directories.
