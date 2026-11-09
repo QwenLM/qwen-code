@@ -1303,9 +1303,12 @@ final class WorkspaceCsiApplicationInventory {
                 value = CsiNativeActivationProof.inputBlocks(raw);
             } else if (Set.of("managed-activation-boundary", "managed-activation-install", "managed-admission",
                     "managed-checkpoint", "managed-checkpoint-history", "managed-definition", "managed-file_history", "managed-hosted-model-route",
-                    "managed-hosted-model-usage", "managed-root", "managed-tool-definition", "managed-tool-input", "managed-turn-result").contains(kind)
+                    "managed-hosted-model-usage", "managed-root", "managed-tool-definition", "managed-tool-input", "managed-turn-result", "managed-execution-diagnostics", "managed-activity-projection").contains(kind)
                     || com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(kind)) {
                 value = CsiNativeActivationProof.readObject(raw);
+                if ("managed-execution-diagnostics".equals(kind)) {
+                    com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.requireEvidence(value);
+                }
             } else {
                 block("ma_resource", row, "unsupported_historical_payload");
                 return;
@@ -3036,15 +3039,21 @@ final class WorkspaceCsiApplicationInventory {
             }
             Row modelContext = null;
             Row modelStatistics = null;
+            List<Row> activityReferences = List.of();
             try {
                 modelContext = modelContextReference(transactions, rows("ma_session_record"), rows("ma_resource"),
                         rows("ma_resource_ref"), original.request(), Math.addExact(Instant.parse(intent.startedAt()).toEpochMilli(), 300_000));
                 if (CsiFilesRetirementProfile.hasDiagnostics(original.request().getScope())) {
                     modelStatistics = CsiModelDiagnosticProjection.reference(transactions, rows("ma_session_record"), rows("ma_resource"),
                             rows("ma_resource_ref"), original.request(), Math.addExact(Instant.parse(intent.startedAt()).toEpochMilli(), 300_000), true);
-                    long expectedRows = (modelContext == null ? 0 : 1) + (modelStatistics == null ? 0 : 1);
+                    if (CsiFilesRetirementProfile.hasActivityDiagnostics(original.request().getScope())) {
+                        activityReferences = CsiActivityDiagnosticProjection.references(transactions, rows("ma_session_record"),
+                                rows("ma_resource"), rows("ma_resource_ref"), original.request(),
+                                Math.addExact(Instant.parse(intent.startedAt()).toEpochMilli(), 300_000));
+                    }
+                    long expectedRows = (modelContext == null ? 0 : 1) + (modelStatistics == null ? 0 : 1) + activityReferences.size();
                     requireEncoded(rows("ma_session_record").stream().filter(row -> row.membership == Membership.ORIGINAL).count() == expectedRows);
-                    long expectedVersion = resources.values().stream().anyMatch(row ->
+                    long expectedVersion = resources.values().stream().anyMatch(row -> "managed-execution-diagnostics".equals(row.text("kind"))) ? 4 : resources.values().stream().anyMatch(row ->
                             com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(row.text("kind"))) ? 3 : 1;
                     requireEncoded(head != null && Objects.equals(expectedVersion, head.number("storage_version")));
                 }
@@ -3058,6 +3067,7 @@ final class WorkspaceCsiApplicationInventory {
                 expect("ma_resource_ref", ref, resources.containsKey(ref.text("resource_id"))
                         && (modelContext != null && Arrays.equals(modelContext.bytes(), ref.bytes())
                                 || modelStatistics != null && Arrays.equals(modelStatistics.bytes(), ref.bytes())
+                                || activityReferences.stream().anyMatch(edge -> Arrays.equals(edge.bytes(), ref.bytes()))
                                 || "JOURNAL".equals(ref.text("owner_kind")) && at != null && at > 0 && at <= revision));
             }
             for (Row resource : resources.values()) {

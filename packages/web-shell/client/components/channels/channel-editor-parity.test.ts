@@ -238,3 +238,46 @@ describe('repository filter rule parity (editor mirror vs daemon authority)', ()
     expect(management.validateConfig?.(config)).toBeUndefined();
   });
 });
+
+describe('default-on boolean fields survive a UI save', () => {
+  const instanceWith = (
+    config: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot => ({
+    name: 'parity',
+    config: { type: 'github', useLocalGh: true, ...config },
+    secrets: {},
+    startsWithServe: false,
+    runtime: { state: 'stopped' },
+  });
+
+  it('seeds and saves prCommentWatch=true when the key is absent', () => {
+    const instance = instanceWith({ deliverToBoundSessions: true });
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'parity';
+    expect(draft.values['prCommentWatch']).toBe(true);
+    const { config } = buildChannelUpsertRequest(
+      descriptor,
+      draft,
+      'rev-1',
+      instance,
+    );
+    expect(config['prCommentWatch']).toBe(true);
+  });
+
+  it('keeps an explicitly stored prCommentWatch=false', () => {
+    const instance = instanceWith({
+      deliverToBoundSessions: true,
+      prCommentWatch: false,
+    });
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'parity';
+    expect(draft.values['prCommentWatch']).toBe(false);
+    const { config } = buildChannelUpsertRequest(
+      descriptor,
+      draft,
+      'rev-1',
+      instance,
+    );
+    expect(config['prCommentWatch']).toBe(false);
+  });
+});

@@ -5,6 +5,10 @@
  */
 
 import {
+  EXECUTION_DIAGNOSTICS_KIND,
+  parseManagedExecutionEvidence,
+} from './managed-execution-diagnostics.js';
+import {
   parseManagedPermissionRules,
   nonEmptyManagedPermissionRules,
   type ManagedPermissionRules,
@@ -179,6 +183,7 @@ export interface ManagedMemoryQuery {
 
 export interface HttpManagedSessionStores {
   supportsModelDiagnostics(): boolean;
+  supportsExecutionDiagnostics(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -279,6 +284,7 @@ export function createHttpManagedSessionStores(
   resources.bind(client);
   return {
     supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
+    supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -329,7 +335,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2, 3].includes(head.storageVersion) ||
+    ![1, 2, 3, 4].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -491,10 +497,15 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (resources.size !== references.size) {
     throw corrupt('snapshot resource enumeration conflicts.');
   }
+  const executionPresent = [...resources.values()].some(
+    ({ ref }) => ref.kind === EXECUTION_DIAGNOSTICS_KIND,
+  );
+  if (executionPresent && head.storageVersion < 4)
+    throw corrupt('Execution diagnostics require storage version 4.');
   const diagnosticsPresent = [...resources.values()].some(({ ref }) =>
     MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
   );
-  if (diagnosticsPresent && head.storageVersion !== 3)
+  if (diagnosticsPresent && head.storageVersion < 3)
     throw corrupt('snapshot diagnostics require storage version 3.');
   const definitionResource = resources.get(
     scan.header.definitionRef.resourceId,
@@ -511,7 +522,11 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     (profile === 'csi-files-retirement/1' &&
       (diagnosticsPresent || head.storageVersion !== 1)) ||
     (profile === 'csi-files-retirement/2' &&
-      head.storageVersion !== (diagnosticsPresent ? 3 : 1))
+      (executionPresent ||
+        head.storageVersion !== (diagnosticsPresent ? 3 : 1))) ||
+    (profile === 'csi-files-retirement/3' &&
+      head.storageVersion !==
+        (executionPresent ? 4 : diagnosticsPresent ? 3 : 1))
   )
     throw corrupt('snapshot CSI profile storage floor conflicts.');
   for (const [resourceId, revisions] of references) {
@@ -888,6 +903,9 @@ interface TransactionDescriptor {
 }
 
 class ManagedSessionStoreHttpClient {
+  supportsExecutionDiagnostics(): boolean {
+    return (this.grant?.supportedStorageVersion ?? 1) >= 4;
+  }
   supportsModelDiagnostics(): boolean {
     return (this.grant?.supportedStorageVersion ?? 1) >= 3;
   }
@@ -1306,6 +1324,11 @@ class ManagedSessionStoreHttpClient {
       );
       requireStoredTransactionMatches(transaction, descriptor);
       if (
+        head.storageVersion < 4 &&
+        descriptor.refs.some((ref) => ref.kind === EXECUTION_DIAGNOSTICS_KIND)
+      )
+        throw corrupt('Execution diagnostics require storage version 4.');
+      if (
         head.storageVersion < 3 &&
         descriptor.refs.some((ref) =>
           MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
@@ -1536,7 +1559,7 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2, 3].includes(storageVersion) ||
+      ![1, 2, 3, 4].includes(storageVersion) ||
       storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
@@ -1649,6 +1672,11 @@ class ManagedSessionStoreHttpClient {
         const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
+          if (
+            storageVersion < 4 &&
+            resource.kind === EXECUTION_DIAGNOSTICS_KIND
+          )
+            throw corrupt('Execution diagnostics require storage version 4.');
           if (
             storageVersion < 3 &&
             (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
@@ -2080,6 +2108,13 @@ class ManagedSessionStoreHttpClient {
       throw new ManagedSessionRecordError(
         'Managed Session Store does not support model diagnostics storage version 3.',
       );
+    if (
+      commitResources.some(
+        (resource) => resource.kind === EXECUTION_DIAGNOSTICS_KIND,
+      ) &&
+      grant.supportedStorageVersion < 4
+    )
+      throw corrupt('Execution diagnostics require storage version 4.');
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -2357,7 +2392,7 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '3',
+            'X-Qwen-Managed-Max-Readable-Storage-Version': '4',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -2899,7 +2934,7 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2, 3].includes(head.storageVersion) ||
+      ![1, 2, 3, 4].includes(head.storageVersion) ||
       head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
@@ -3113,7 +3148,7 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '3',
+          'X-Qwen-Managed-Max-Readable-Storage-Version': '4',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -3599,9 +3634,11 @@ export function collectNestedResourceRefs(
     // re-admits its predecessor through preparation.intentRef, which SQL's
     // activation proof reads from this transaction.
     return record['schemaVersion'] === 2 &&
-      ['csi-files-retirement/1', 'csi-files-retirement/2'].includes(
-        String(record['profile']),
-      )
+      [
+        'csi-files-retirement/1',
+        'csi-files-retirement/2',
+        'csi-files-retirement/3',
+      ].includes(String(record['profile']))
       ? collectRefs([record['preparation']])
       : [];
   }
@@ -3609,6 +3646,12 @@ export function collectNestedResourceRefs(
     return hostedRecoveryReferences(
       parseHostedRecoveryResource(bytes, undefined, ref.kind),
     );
+  }
+  if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('Unsupported execution diagnostics version.');
+    parseManagedExecutionEvidence(bytes);
+    return [];
   }
   if (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind)) {
     if (ref.schemaVersion !== 1)

@@ -134,4 +134,22 @@ describe('useManagedDiagnostics', () => {
     expect(latest.error).toBe(true);
     expect(latest.snapshot).toBeUndefined();
   });
+  it('settles a disabled read after aborting an in-flight statistics request', async () => {
+    let resolve!: (value: ManagedDiagnosticStats) => void;
+    vi.mocked(provider.getStatistics).mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await render();
+    expect(latest.loading).toBe(true);
+    const signal = vi.mocked(provider.getStatistics).mock.calls[0][1].signal;
+    await render({ enabled: false });
+    expect(signal?.aborted).toBe(true);
+    expect(latest.loading).toBe(false);
+    await act(async () => resolve(diagnosticStats));
+    expect(latest.loading).toBe(false);
+    expect(latest.snapshot).toBeUndefined();
+  });
 });

@@ -437,6 +437,26 @@ export function createJavaManagedAgentProvider(
       },
     },
     diagnostics: {
+      async getActivityStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getActivityStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listActivity(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listActivity(
+            {
+              sessionId,
+              kind: request.kind,
+              cursor: request.cursor,
+              limit: request.limit,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
       async getContextUsage(sessionId, request) {
         return requireDiagnosticSnapshot(
           await client.getDiagnosticContextUsage(sessionId, request.signal),

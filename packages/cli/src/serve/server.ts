@@ -158,6 +158,7 @@ import { registerSessionRoutes } from './routes/session.js';
 import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
+import { registerSessionPostedCommentsRoutes } from './routes/session-posted-comments.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
   createRequestedSessionIdAdmission,
@@ -3095,6 +3096,13 @@ export function createServeApp(
   // Read-only reverse lookup (PR bindings → sessions) for channel workers
   // that deliver GitHub events into the session following a PR.
   registerSessionPrBindingsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  // Read-only authorship lookup (which comments a session posted) for the
+  // bound PR comment watch, so a bound session receives every other author's
+  // comments but not its own.
+  registerSessionPostedCommentsRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });

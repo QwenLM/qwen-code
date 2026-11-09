@@ -1517,6 +1517,9 @@ public class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.SESSION_ACTIVITY)) {
+            query.add("kind=tools");
+        }
         if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
             query.add("workspaceId=workspace");
             query.add("cwdRelative=.");
@@ -1681,7 +1684,7 @@ public class SurfaceAdmissionAcceptanceTest {
             case SESSION_RECOVERY_RECHECK -> publicSurface
                     ? "{\"turnId\":\"turn_0000000000000000\"}"
                     : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
-            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST, SESSION_RESOURCES, SESSION_AGENT_TRACE -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";
@@ -1730,8 +1733,9 @@ public class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP,
-                    SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS ->
+                    SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_ACTIVITY_STATS ->
                     "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_ACTIVITY -> "{\"sessionId\":\"" + session + "\",\"kind\":\"tools\"}";
             case MCP_MANAGEMENT -> {
                 if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
                     yield "{\"sessionId\":\"" + session + "\"}";

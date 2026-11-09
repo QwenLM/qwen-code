@@ -267,6 +267,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.WebShellActivityQueryRequest.class,
+                            List.of("WebShellActivityQueryRequest")),
                     entry(ApiModels.ManagedMcpServerPin.class,
                             List.of("ManagedMcpServerPin")),
                     entry(ApiModels.ManagedMcpManagementCommand.class,
@@ -1774,6 +1776,26 @@ class ManagedAgentApiContractTest {
                             body.substring(0, body.length() - 1) + "," + extra + "}");
                 }
             }
+        }
+        for (String suffix : List.of("activity-stats", "activity")) {
+            boolean statistics = "activity-stats".equals(suffix);
+            String operation = statistics ? "SessionActivityStatistics" : "SessionActivity";
+            String path = "/v1/agents/sessions/{id}/" + suffix;
+            var read = get(path, session).header(TENANT, tenant).principal(principal);
+            if (!statistics) {
+                read.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 200, read, null);
+            var unauthorized = get(path, session).header(TENANT, tenant);
+            if (!statistics) {
+                unauthorized.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 401, unauthorized, null);
+            String body = "{\"sessionId\":\"" + session + "\"" + (statistics ? "}" : ",\"kind\":\"tools\"}");
+            String web = WEB_SHELL + "/session-" + suffix + "/query";
+            exchange(drift, "query" + operation, 200, post(web).header(TENANT, tenant).principal(principal), body);
+            exchange(drift, "query" + operation, 401, post(web).header(TENANT, tenant), body);
+            exchange(drift, "query" + operation, 400, post(web).header(TENANT, tenant).principal(principal), "{}");
         }
     }
 
