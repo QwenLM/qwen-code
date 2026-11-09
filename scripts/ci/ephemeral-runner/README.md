@@ -189,7 +189,10 @@ is removed from the slot namespace). The label carries the instance name, not
 the registration's display name, so
 recovery matches registrations under both the bare display name written by
 older versions and the current suffixed one; an ambiguous match still blocks
-the slot rather than deleting anything.
+the slot rather than deleting anything. A label-recovered match (no recorded
+registration name or id) is only deleted when GitHub explicitly reports it
+offline; an online or status-less match keeps the slot blocked and retries,
+because it may belong to a live runner outside this host's view.
 A runner deletion GitHub rejects (for example while it still reports the runner
 busy) keeps the slot state and is retried, instead of dropping the only record
 that can remove the registration. The identity-less sweep deletes

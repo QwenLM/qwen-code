@@ -607,6 +607,16 @@ export function createManager(config, dependencies = {}) {
           'JIT response was lost; runner not found, manual reconciliation required',
         );
       for (const runner of runners) {
+        // A label-recovered identity (no recorded runnerName or runnerId)
+        // is not state-anchored: an online match may belong to a live
+        // runner outside this host's view, and a missing or unknown status
+        // must fail closed. Keep the resources and state so the next cycle
+        // retries, exactly like a rejected deletion. Identity checks
+        // above still see every match, so a mismatch stays blocking.
+        if (!state.runnerName && !state.runnerId && runner.status !== 'offline')
+          throw new Error(
+            `Runner ${runner.id} is not reported offline; keeping slot state to retry`,
+          );
         try {
           await gh([
             '-X',

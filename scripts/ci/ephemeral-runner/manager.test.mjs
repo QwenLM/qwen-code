@@ -1573,6 +1573,48 @@ test('label recovery deletes the orphaned suffixed registration', async (t) => {
   );
 });
 
+test('label recovery never deletes an online or status-less registration', async (t) => {
+  // A label-recovered identity is not state-recorded: an online match may
+  // belong to a live runner outside this host's view, and a record with no
+  // status must fail closed. The first cycle removes the orphan resources
+  // but must not touch the registration or replenish; a later cycle with
+  // the registration still present must keep blocking, never delete it.
+  for (const status of ['online', undefined]) {
+    const f = await fixture(t);
+    const orphanLabels = {
+      'qwen.pool': 'trial',
+      'qwen.slot': '1',
+      'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    };
+    f.addOrphanContainer(orphanLabels);
+    f.setRunner({
+      id: 77,
+      name: 'ecs-qwen-trial-01-cafe1234',
+      status,
+    });
+    const manager = createManager(f.config, { command: f.command });
+    await assert.rejects(manager.cycle(1), /not reported offline/);
+    // Re-create the pile so the second cycle still reaches label recovery.
+    f.addOrphanContainer(orphanLabels);
+    await assert.rejects(manager.cycle(1), /not reported offline/);
+    assert.ok(
+      !f.calls.some(
+        (c) =>
+          c.program === 'gh' &&
+          c.args.includes('DELETE') &&
+          c.args.includes('/repos/owner/repo/actions/runners/77'),
+      ),
+      `a ${status ?? 'status-less'} registration survives label recovery`,
+    );
+    assert.equal(
+      f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+        .length,
+      0,
+      'no replacement while the unconfirmed registration survives',
+    );
+  }
+});
+
 test('disagreeing labels keep reporting while Docker refuses removals', async (t) => {
   const f = await fixture(t);
   const manager = createManager(f.config, { command: f.command });
