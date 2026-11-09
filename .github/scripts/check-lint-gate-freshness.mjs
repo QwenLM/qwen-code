@@ -228,7 +228,11 @@ async function narrowsToIgnoredScope(args) {
   const [baseText, headText] = await fetchGateFilePair(args);
   const base = splitGlobalIgnores(baseText);
   const head = splitGlobalIgnores(headText);
-  if (!base || !head) return false;
+  // Throw, not `return false`: the caller's catch is what emits the warning,
+  // so a silent false here would keep the verdict with no trace — the exact
+  // unexplained-stale case the annotation exists for.
+  if (!base || !head)
+    throw new Error('could not extract the global ignores block');
   if (reincludesFiles([...base.entries, ...head.entries])) return false;
   return (
     base.rest === head.rest &&
@@ -236,25 +240,71 @@ async function narrowsToIgnoredScope(args) {
   );
 }
 
+// Every ignore file prettier can discover, at any depth. The lane groups by
+// the nearest ancestor carrying one, so `packages/cli/.gitignore` scopes its
+// own group just as the root pair does.
+const SCOPE_FILE_RE = /(?:^|\/)\.(?:gitignore|prettierignore)$/;
+const ROOT_PRETTIER_IGNORE = '.prettierignore';
+
+function scopeFileBlobs(tree) {
+  return new Map(
+    tree.tree
+      .filter((e) => e.type === 'blob' && SCOPE_FILE_RE.test(e.path))
+      .map((e) => [e.path, e.sha]),
+  );
+}
+
 /**
- * Same argument for prettier's scope, with one wrinkle: prettier 3 reads
- * `.gitignore` as well. Measured on 3.6.1 — adding `apps/host/` there drops the
- * checked-file count from 2 to 1 with `.prettierignore` untouched — so a branch
- * can narrow its own scope through a file this verdict is not about.
+ * Same subset argument for prettier's scope, but prettier's scope is not one
+ * file: it reads `.gitignore` too (measured on 3.6.1 — adding `apps/host/`
+ * there drops the checked-file count from 2 to 1), and it discovers both kinds
+ * at every depth.
  *
- * `.gitignore` is therefore required to be byte-identical rather than folded
- * into the subset test. It cannot be folded in: the real `.gitignore` carries
- * a dozen `!` re-inclusions, so `reincludesFiles` would reject every comparison
- * and the narrowing would be dead code from day one. Requiring equality means
- * we never reason about its semantics at all.
+ * So instead of guessing which files matter, compare the whole ignore-file set
+ * from both trees. Every one of them except the root `.prettierignore` must be
+ * byte-identical, which blob SHAs answer without fetching content. They cannot
+ * be folded into the subset test: the real `.gitignore` carries a dozen `!`
+ * re-inclusions, so `reincludesFiles` would reject every comparison and the
+ * narrowing would be dead code from day one.
+ *
+ * The base side is read at `baseRef`, the base TIP — not at `baseSha`. That
+ * distinction is load-bearing: `baseSha` is the newest commit touching
+ * `.prettierignore`, and a later base-side `.gitignore` change would otherwise
+ * be invisible, because `.gitignore` owns no gate verdict of its own.
  */
-async function narrowsToPrettierIgnore(args) {
-  const [[basePi, headPi], [baseGi, headGi]] = await Promise.all(
-    ['.prettierignore', '.gitignore'].map((file) =>
-      fetchGateFilePair({ ...args, file }),
+async function narrowsToPrettierIgnore({
+  fetchJson,
+  fetchText,
+  repo,
+  baseRef,
+  headSha,
+}) {
+  const [baseTree, headTree] = await Promise.all(
+    [baseRef, headSha].map((ref) =>
+      fetchJson(
+        `/repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+      ),
     ),
   );
-  if (baseGi !== headGi) return false;
+  // A truncated tree is a partial answer; never narrow on one.
+  if (baseTree.truncated || headTree.truncated) return false;
+  const baseBlobs = scopeFileBlobs(baseTree);
+  const headBlobs = scopeFileBlobs(headTree);
+  for (const [path, sha] of baseBlobs) {
+    if (path === ROOT_PRETTIER_IGNORE) continue;
+    if (headBlobs.get(path) !== sha) return false;
+  }
+  for (const path of headBlobs.keys()) {
+    if (path === ROOT_PRETTIER_IGNORE) continue;
+    if (!baseBlobs.has(path)) return false;
+  }
+  const [basePi, headPi] = await Promise.all(
+    [baseRef, headSha].map((ref) =>
+      fetchText(
+        `/repos/${repo}/contents/${ROOT_PRETTIER_IGNORE}?ref=${encodeURIComponent(ref)}`,
+      ),
+    ),
+  );
   const base = ignoreLines(basePi);
   const head = ignoreLines(headPi);
   if (reincludesFiles([...base, ...head])) return false;
@@ -324,10 +374,12 @@ export async function findStaleGateFiles({
       if (!narrow) return verdict;
       try {
         const ignorable = await narrow({
+          fetchJson,
           fetchText,
           repo,
           file: verdict.file,
           baseSha: verdict.sha,
+          baseRef,
           headSha,
         });
         return ignorable ? null : verdict;
