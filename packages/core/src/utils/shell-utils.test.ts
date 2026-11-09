@@ -23,6 +23,8 @@ import {
   getShellConfiguration,
   hasNonFinalTopLevelBackgroundOperator,
   hasUnsafeMonitorBackgroundOperator,
+  hasUnprovableWrapperScript,
+  hasUnstrippablePayloadOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
   normalizeMonitorCommand,
@@ -1292,6 +1294,21 @@ describe('normalizeMonitorCommand', () => {
     ).toEqual([{ virtualTool: 'write_file', filePath: '/tmp/p' }]);
   });
 
+  // R3-5 (#16540 review, round 4): the brace scanner had its own quote state
+  // machine, which read `$'a\',b'` as closed at the escaped quote and split the
+  // group in the middle of a word. One scanner now decides all of it, so a comma
+  // inside an ANSI-C word is data and the first expanded word is what bash runs
+  // (witnessed: `printf '%s\n' {$'a\',b',c}` prints `a',b` then `c`).
+  it("splits a brace group with one $'…'-aware scanner", () => {
+    expect(stripShellWrapper(`bash -c {$'a\\',b',c}`)).toBe(`a',b`);
+    // A comma inside an ANSI-C word is data, not a separator.
+    expect(stripShellWrapper(`bash -c {a,$'b,c'}`)).toBe('a');
+    // Quoted alternatives keep expanding.
+    expect(stripShellWrapper(`bash -c {--,'cat > /etc/motd'}`)).toBe(
+      'cat > /etc/motd',
+    );
+  });
+
   // R3-6: eighteen two-part groups enumerate 2^18 words and only the first is
   // ever read. The product is capped, so the wrapper fails closed instead of
   // overflowing the stack (measured: RangeError on a 98-character command).
@@ -1846,7 +1863,45 @@ describe('splitCommands', () => {
 // R1-4 / R1-6 (#16540 review): bash builds BYTES from an ANSI-C word, so a
 // multi-byte UTF-8 sequence spelled with `\xHH` decodes to the character it
 // writes, and `\c?` is DEL.
-describe('decodeAnsiCWord byte semantics', () => {
+// Round 6 (#16540 review): the two markers a permission gate and the monitor
+// need. Projecting the word after an unresolvable `-c` slot is right for op
+// extraction, but that projection is not provably the script bash runs — it may
+// be only `$0`, and an unquoted expansion is word-split — so `sh -c $TERM 'ls -l'`
+// read as read-only `ls -l` and auto-executed with no prompt.
+describe('wrapper script provability and payload operator markers', () => {
+  it.each([
+    // The `-c` slot is nothing but an expansion: the script is unprovable.
+    ["sh -c $TERM 'ls -l'", true],
+    [`bash -c "$X" 'cat > /etc/motd'`, true],
+    [`bash -c $(echo '--') 'cat > /etc/passwd'`, true],
+    // A fully quoted payload with an expansion IS the script: word splitting
+    // cannot reach it, so the projection is faithful and stays allowable.
+    [`bash -c "tail -f $LOG &"`, false],
+    [`bash -c "cat > /etc/motd"`, false],
+    [`bash -c -- 'cat > /etc/motd'`, false],
+    [`bash -c $'cat > /etc/motd'`, false],
+    ['ls -l', false],
+  ])('hasUnprovableWrapperScript(%s) === %s', (command, want) => {
+    expect(hasUnprovableWrapperScript(command)).toBe(want);
+  });
+
+  it.each([
+    // The operator survives into the spawn: the tracked shell would fork the
+    // payload and exit 0 before it ran.
+    ["bash -c $'exit 1 \\x26'", true],
+    ["bash -c $'exit 1 & &'", true],
+    ['bash -c "exit 1 &"&', true],
+    // The operator WAS stripped, so the monitor may run it.
+    [`bash -c "tail -f $LOG &"`, false],
+    [`bash -c "exit 1 &"`, false],
+    [`bash -c $'echo $X &' arg0`, false],
+    ['tail -f app.log', false],
+  ])('hasUnstrippablePayloadOperator(%s) === %s', (command, want) => {
+    expect(hasUnstrippablePayloadOperator(command)).toBe(want);
+  });
+});
+
+describe('round-4 lexing regressions', () => {
   // R3-3 (#16540 review): bash 5.3.20 writes `61 1c 74 62` for BOTH
   // `$'a\c\\tb'` and `$'a\c\tb'`, so the character after a `\c\` operand is
   // literal text — and a second backslash there escapes the character after it

@@ -846,28 +846,18 @@ function findUnquotedChar(token: string, from: number, target: string): number {
  * it: an unquoted `,` (list) or `..` (sequence). A quoted separator is data.
  */
 function hasBraceExpansionSeparator(braceBody: string): boolean {
-  let quote: '"' | "'" | '' = '';
-  for (let i = 0; i < braceBody.length; i++) {
-    const ch = braceBody[i]!;
-    if (quote === "'") {
-      if (ch === "'") quote = '';
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === '\\') i++;
-      else if (ch === '"') quote = '';
-      continue;
-    }
-    if (ch === '\\') {
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (ch === ',') return true;
-    if (ch === '.' && braceBody[i + 1] === '.') return true;
+  // One scanner for all of it: `findUnquotedChar` already models `'…'`, `"…"`,
+  // backslash escapes and `$'…'` (where `\'` does NOT close the word), so a
+  // separator inside an ANSI-C word is data. The private state machine this used
+  // to carry read `$'a\',b'` as closed at the escaped quote and split the group
+  // in the middle of a word (#16540 review, R3-5).
+  if (findUnquotedChar(braceBody, 0, ',') !== -1) return true;
+  for (
+    let dot = findUnquotedChar(braceBody, 0, '.');
+    dot !== -1;
+    dot = findUnquotedChar(braceBody, dot + 1, '.')
+  ) {
+    if (braceBody[dot + 1] === '.') return true;
   }
   return false;
 }
@@ -1070,40 +1060,21 @@ function expandBraceWords(token: string): string[] | null {
   if (close === -1) return null;
   const body = trimmed.slice(open + 1, close);
   if (!hasBraceExpansionSeparator(body)) return null;
+  // Split on UNQUOTED commas with the same scanner the rest of this file uses,
+  // so `$'…'` is one word and a comma inside it is data (#16540 review, R3-5).
+  // An unterminated quote is left to the quote removal below, which returns null
+  // for it and fails the expansion closed.
   const parts: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | '' = '';
-  let i = 0;
-  while (i < body.length) {
-    const ch = body[i]!;
-    if (quote !== '') {
-      current += ch;
-      if (ch === quote) quote = '';
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      i++;
-      continue;
-    }
-    if (ch === '\\' && i + 1 < body.length) {
-      current += ch + body[i + 1]!;
-      i += 2;
-      continue;
-    }
-    if (ch === ',') {
-      parts.push(current);
-      current = '';
-      i++;
-      continue;
-    }
-    current += ch;
-    i++;
+  let start = 0;
+  for (
+    let comma = findUnquotedChar(body, 0, ',');
+    comma !== -1;
+    comma = findUnquotedChar(body, comma + 1, ',')
+  ) {
+    parts.push(body.slice(start, comma));
+    start = comma + 1;
   }
-  if (quote !== '') return null;
-  parts.push(current);
+  parts.push(body.slice(start));
   if (parts.length < 2) return null;
   // Nested groups (cartesian expansion) are not enumerated.
   if (parts.some((part) => part.includes('{'))) return null;
@@ -2014,6 +1985,24 @@ interface ParsedMonitorShellWrapper {
    * spawns the command exactly as written (#16075 review, R13-1).
    */
   spawnOverride?: string;
+  /**
+   * The `-c` slot is nothing but an expansion, so which word is the script
+   * cannot be proved statically: if the expansion resolves to `--` (or to
+   * nothing) the word after it is the script, otherwise that word is only `$0`.
+   * An UNQUOTED expansion is also word-split, so it can inject anything.
+   * Analysis still projects the following word so its writes and self-kill
+   * pattern are seen, but no caller may auto-allow on that projection
+   * (#16540 review, R4-4 / R4-5 / round 6).
+   */
+  wrapperScriptUnprovable?: boolean;
+  /**
+   * The payload's background operator cannot be removed without rewriting the
+   * user's bytes (an encoded `\x26`, or two operators where trimming one would
+   * leave a runnable command). The spawn therefore still backgrounds the payload
+   * and the tracked shell exits 0 before it finishes, so the monitor must refuse
+   * the command instead of reporting success (#16540 review, R3-7).
+   */
+  payloadOperatorUnstrippable?: boolean;
 }
 
 export interface NormalizedMonitorCommand {
@@ -2337,6 +2326,12 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
             innerQuote: '',
             innerArgsSuffix: terminator.rest.replace(/^[ \t]+/, ''),
             wrapperPayloadUnresolved: true,
+            // A word that is nothing but expansion may itself BE the terminator,
+            // so the projected script is not provably what bash runs
+            // (#16540 review, R4-4).
+            ...(hasLiteralBeyondExpansions(terminatorQuote.text)
+              ? {}
+              : { wrapperScriptUnprovable: true }),
             spawnOverride: buildMonitorSpawnOverride(
               wrapperTokens,
               terminator.token,
@@ -2348,6 +2343,9 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
           innerCommand: trimmed,
           innerQuote: '',
           wrapperPayloadUnresolved: true,
+          // Unquoted expansion in the `-c` slot: word splitting applies, so the
+          // script is whatever the variable holds (#16540 review, R4-5).
+          wrapperScriptUnprovable: true,
         };
       }
       if (terminator && terminatorWord === '--') {
@@ -2489,7 +2487,12 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
-        ...(payloadAmpUnremovable ? { wrapperPayloadUnresolved: true } : {}),
+        ...(payloadAmpUnremovable
+          ? {
+              wrapperPayloadUnresolved: true,
+              payloadOperatorUnstrippable: true,
+            }
+          : {}),
         ...(payloadIsAnsiC ||
         backgroundAmpBehindPrefix ||
         payloadEndsInBackgroundOperator
@@ -2526,6 +2529,29 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
       rest = operandToken.rest;
     }
   }
+}
+
+/**
+ * Whether the command is a shell wrapper whose `-c` slot cannot be resolved
+ * statically, so the word analysis projects is not provably the script bash
+ * runs — it may be only `$0`, and an unquoted expansion is word-split. Projecting
+ * it is still right for op extraction (the write and the self-kill pattern are
+ * real), but a permission gate must not auto-allow on it: `sh -c $TERM 'ls -l'`
+ * read as read-only `ls -l` and executed with no prompt (#16540 review, round 6).
+ */
+export function hasUnprovableWrapperScript(command: string): boolean {
+  return parseMonitorShellWrapper(command).wrapperScriptUnprovable === true;
+}
+
+/**
+ * Whether the payload's background operator survives into the spawn command.
+ * The tracked shell would then fork the payload and exit before it ran, so
+ * `settleFromExit(0)` reports success for a failure nobody observed: the monitor
+ * must refuse the command rather than run it (#16540 review, R3-7). A payload
+ * whose operator WAS stripped (`bash -c "tail -f $LOG &"`) is not affected.
+ */
+export function hasUnstrippablePayloadOperator(command: string): boolean {
+  return parseMonitorShellWrapper(command).payloadOperatorUnstrippable === true;
 }
 
 export function normalizeMonitorCommand(

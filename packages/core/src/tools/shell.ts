@@ -88,6 +88,7 @@ import {
   getShellConfiguration,
   getShellDisplayName,
   hasShellSubstitution,
+  hasUnprovableWrapperScript,
   SHELL_SELF_KILL_REJECTION,
   type ShellConfiguration,
   type ShellType,
@@ -2279,7 +2280,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // `echo ok`, which the AST classifies as read-only. Without this
     // gate the command auto-executes silently with no confirmation
     // dialog and no warning. See PR #4386 R6 (cid 3298521039).
-    if (hasShellSubstitution(this.params.command)) {
+    if (
+      hasShellSubstitution(this.params.command) ||
+      // A wrapper whose `-c` slot is nothing but an expansion has no provable
+      // script: the projected word may be only `$0`, and an unquoted expansion
+      // is word-split, so anything can be injected into the slot. Projecting it
+      // is right for op extraction, but `sh -c $TERM 'ls -l'` read as read-only
+      // `ls -l` and auto-executed with no prompt (#16540 review, round 6).
+      hasUnprovableWrapperScript(this.params.command)
+    ) {
       return 'ask';
     }
 
