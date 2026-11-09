@@ -316,14 +316,24 @@ base 实测，把那一行回退会让两条 Email 用例都以 `expected false 
 
 **其余已处理的发现：**
 
-| 发现                                                                                             | 处理                                                                                                                                               |
-| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 重新生成的 `NOTICES.txt` 写入了 committed lockfile 不会解析出的版本，会让 CI 的 notices 门禁变红 | 已回退；随后一次 `npm run build` 把它重新生成为与 `HEAD` 逐字相同，证实回退后的状态正是生成器的产物                                                |
-| 插件标签修复没有 committed 测试，且一处夹具注释谎称 parity 套件钉住了它                          | 在 `packages/cli/src/commands/channel/email-baseline.test.ts` 补生产者侧断言（可读标签、注入的 `groupPolicy`、TLS 默认值），并把注释改为指向该文件 |
-| parity 中两条关于 `groupPolicy` 的断言是空过的——真实插件描述符根本没有该字段                     | 已移除；注入形状由 `channel-editor-state` 夹具钉住，现在也在生产者侧钉住                                                                           |
-| 17 个 Email i18n 键中只有 6 个被任何测试渲染过                                                   | 把对话框夹具补齐到完整字段表，并新增双语扫描，断言没有标签泄漏原始 `channels.editor.field.` 键                                                     |
-| Email 的端点与 TLS 开关渲染在“应用凭据”区                                                        | 把六个 Email 专属键加入 `CONNECTION_FIELD_KEYS`，并补分区归属用例                                                                                  |
-| `descriptorGroupPolicy` 上的 `!privateOnly &&` 是同一规则的第二个、无法被钉住的承重者            | 已移除；`effectiveGroupPolicy` 现在是唯一承重者，与 repository-only 分支完全对称                                                                   |
+| 发现                                                                                                              | 处理                                                                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 重新生成的 `NOTICES.txt` 写入了 committed lockfile 不会解析出的版本，会让 CI 的 notices 门禁变红                  | 已回退；随后一次 `npm run build` 把它重新生成为与 `HEAD` 逐字相同，证实回退后的状态正是生成器的产物                                                                |
+| 插件标签修复没有 committed 测试，且一处夹具注释谎称 parity 套件钉住了它                                           | 在 `packages/cli/src/commands/channel/email-baseline.test.ts` 补生产者侧断言（可读标签、注入的 `groupPolicy`、TLS 默认值），并把注释改为指向该文件                 |
+| parity 中两条关于 `groupPolicy` 的断言是空过的——真实插件描述符根本没有该字段                                      | 已移除；注入形状由 `channel-editor-state` 夹具钉住，现在也在生产者侧钉住                                                                                           |
+| 17 个 Email i18n 键中只有 6 个被任何测试渲染过                                                                    | 把对话框夹具补齐到完整字段表，并新增双语扫描，断言没有标签泄漏原始 `channels.editor.field.` 键                                                                     |
+| Email 的端点与 TLS 开关渲染在“应用凭据”区                                                                         | 把六个 Email 专属键加入 `CONNECTION_FIELD_KEYS`，并补分区归属用例                                                                                                  |
+| `descriptorGroupPolicy` 上的 `!privateOnly &&` 是同一规则的第二个、无法被钉住的承重者                             | 已移除。后续一轮验证进一步纠正了配套注释：通常使策略为空的是 draft skip；ternary 守的是 stored-config 回退臂，而非整条规则                                         |
+| 六个 Email 数字字段未声明 `maximum`，而运行时强制上界，导致越界值通过内联校验、仅在保存时以横幅失败               | 按 `MAX_POLL_INTERVAL_MS` 的惯例把上界作为命名常量在 config 解析器与描述符之间共享，并新增 parity 用例钉住每个上界与内联 `outOfRange`；删除一个 `maximum` 实测变红 |
+| 新增浏览器用例用精确标签文本定位必填控件，而标签带 aria-hidden 星号故永不匹配；群组零数量守卫朝危险方向有同样缺陷 | 改用 role＋无障碍名称，群组轴改用子串名称匹配并覆盖整条轴；真实 Chromium 实测（旧形式 0 匹配、新形式 1、守卫 0）                                                   |
+
+**判定为范围外而未采纳的发现（既有、与平台无关）：** 配置保留审计实证了两处本
+diff 未触碰代码中的缺陷，且各自在已接入平台（DingTalk 对照）上复现，因此放开
+Email 只是延续既有缺陷而非新造：编辑器会丢弃 `messageRoutes` 中值为空白的条目
+（当 `defaultMessageRoute` 指向它时还会卡死保存）；注册表注入的共享字段
+（`instructions`、`defaultMessageRoute`）里的 `$ENV_VAR` 会被烘焙成解析后的字面
+量，因为 store 的还原只覆盖插件自声明的 `envResolvable` 字段。两者都应单独立项；
+前者还与"该记录是否有路由"的判定共用 `parseRouteRecord`，不是一行能修的。
 
 **未采纳的发现：** 把流量形状这一事实放进插件/descriptor 能力位，而不是客户端
 集合。这正是「关键设计决策」中已经否决的备选方案——为一个平台的 UI 关切做跨包
