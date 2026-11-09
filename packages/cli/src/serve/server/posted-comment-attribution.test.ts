@@ -728,9 +728,35 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
-  it('still attributes when the export value is QUOTED (cannot expand)', () => {
+  it('refuses a DOUBLE-quoted expansion (quotes do not stop expansion)', () => {
     const entry = shellResult(
       'export PATH="$PATH:/x"\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a SINGLE-quoted expansion (truly literal)', () => {
+    const entry = shellResult(
+      "export SEARCH='$PATH:/x'\ngh pr comment 42 --body hi",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not exempt set "$@", which expands to ZERO words', () => {
+    // With no positional parameters `"$@"` supplies no argument at all, so the
+    // bare, printing `set` runs. Double quotes are not proof of a kept word.
+    const entry = shellResult(
+      'set --\nexport REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-"111; false && gh pr comment 42 --body hi; set "$@"',
+      'REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes an ESCAPED dollar (literal, never expands)', () => {
+    const entry = shellResult(
+      'set --\nset "\\$@"\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
@@ -756,14 +782,15 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
-  it('still attributes a quoted expansion that keeps one positional word', () => {
-    // `set "$E"` with an empty E keeps ONE empty parameter, unlike `set $E`,
-    // which vanishes into the bare printing form.
+  it('refuses set "$E" too rather than model which expansions keep a word', () => {
+    // `"$E"` does keep one empty parameter in bash, but telling it apart from
+    // `"$@"` means modelling every expansion form. Refusing both is the
+    // fail-open direction and keeps the rule a single quote-level distinction.
     const entry = shellResult(
       'E=\nset "$E"\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
-    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+    expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
   it('still attributes after a quoted export value containing spaces', () => {

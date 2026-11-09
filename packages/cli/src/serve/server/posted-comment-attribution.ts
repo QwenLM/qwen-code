@@ -543,10 +543,13 @@ const LITERAL_WORD_CHAR = /[A-Za-z0-9_=./:@%+,-]/;
 
 /**
  * An operand word after the shell's quote removal. `expandable` records that
- * the word contains an UNQUOTED character outside the literal set, so the shell
- * may still expand it, split it, or delete it. Characters taken from inside
- * quotes or after a backslash are literal and never set the flag — `set "$E"`
- * keeps one empty positional parameter, while `set $E` can vanish entirely.
+ * the shell may still expand, split or delete the word. Only SINGLE quotes and
+ * backslash escapes make text literal: double quotes suppress splitting and
+ * globbing but NOT expansion, and `"$@"` / `"${a[@]}"` expand to ZERO words when
+ * there are no positional parameters / the array is empty — leaving the bare,
+ * printing `set`. A `$` or backtick inside double quotes therefore still flags
+ * the word, which also refuses the harmless `set "$E"`; that is the fail-open
+ * direction and cheaper than modelling which expansions preserve a word.
  */
 interface ShellWord {
   text: string;
@@ -573,6 +576,8 @@ function shellWords(text: string): ShellWord[] {
       } else if (ch === '\\' && quote === '"' && i + 1 < text.length) {
         current += text[++i];
       } else {
+        // Double quotes do not stop parameter/command expansion.
+        if (quote === '"' && (ch === '$' || ch === '`')) expandable = true;
         current += ch;
       }
       continue;
