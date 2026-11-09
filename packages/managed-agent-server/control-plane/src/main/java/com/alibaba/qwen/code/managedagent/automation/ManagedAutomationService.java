@@ -840,7 +840,7 @@ public class ManagedAutomationService {
      * and the command row meets the definition it already created.
      */
     public static String scheduleIdFor(String tenantId, String idempotencyKey) {
-        return "asch_" + com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.sha256(tenantId + '\0'
+        return "asch_" + AutomationLedgerStore.sha256(tenantId + '\0'
                 + idempotencyKey).substring(0, 32);
     }
 

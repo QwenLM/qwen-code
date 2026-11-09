@@ -6,6 +6,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -24,13 +28,13 @@ import java.util.Objects;
 /** Durable ownership; an endpoint disappearing never authorizes another writer. */
 @Repository
 @Qualifier("managedAgentTransactionManager")
-public class HarnessPlacementStore
-        implements com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore {
+public class JdbcHarnessPlacementStore
+        implements HarnessPlacementStore {
     private static final String COLUMNS = "tenant_id, session_id, workspace_id, harness_instance_id, "
             + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state";
     private final JdbcTemplate jdbc;
 
-    public HarnessPlacementStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcHarnessPlacementStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
@@ -51,7 +55,7 @@ public class HarnessPlacementStore
     }
 
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String key = ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch));
         var saved = jdbc.query("SELECT b.inline_bytes, b.sha256 FROM ma_session_record r JOIN ma_resource b"
                 + " ON b.session_scope_key = r.session_scope_key AND b.resource_id = r.record_resource_id"
@@ -65,7 +69,7 @@ public class HarnessPlacementStore
                     if (!DigestUtils.sha256Hex(bytes).equals(row.getString(2))) {
                         throw blocked("harness_release_receipt_corrupt");
                     }
-                    return com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+                    return ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
                 }, scope, key, tenant, session, "managed-hosted_harness_release");
         if (saved.isEmpty()) {
             return null;
@@ -202,20 +206,20 @@ public class HarnessPlacementStore
     }
 
     static String releaseId(long epoch) {
-        return com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore.releaseId(epoch);
+        return HarnessPlacementStore.releaseId(epoch);
     }
 
     static boolean released(JdbcTemplate jdbc, String tenant, String session, long epoch) {
         return !jdbc.query("SELECT record_id FROM ma_session_record WHERE session_scope_key = ?"
                 + " AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_kind = 'DOMAIN'",
-                (row, index) -> row.getString(1), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session),
                 ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch)),
                 tenant, session, RELEASE_DOMAIN).isEmpty();
     }
 
     private Placement lockEligible(String tenant, String session, OperationRecord operation) {
         if (operation != null) {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
             ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         }
         var current = lock(tenant, session);
@@ -242,7 +246,7 @@ public class HarnessPlacementStore
         if (!List.of("CLOSE", "ARCHIVE", "DELETE").contains(operation.kind().name())
                 || operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2
                 || operation.leaseOwner() == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
         var rows = jdbc.query("SELECT o.claim_generation, o.claim_until, o.claim_owner, o.delivery_state,"
                 + " o.lifecycle_protocol_version, f.phase, f.operation_id FROM ma_operation o JOIN ma_session_head f"
@@ -255,7 +259,7 @@ public class HarnessPlacementStore
                 JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()),
                 JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()));
         if (rows.size() != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
         Object[] row = rows.getFirst();
         if (!Objects.equals(row[0], operation.claimGeneration()) || (Long) row[1] <= now(jdbc)
@@ -264,7 +268,7 @@ public class HarnessPlacementStore
                 || !(operation.lifecycleProtocolVersion() == 0
                         ? "DRAINING".equals(row[5]) && row[6] == null
                         : List.of("DRAINING", "LIFECYCLE_ONLY").contains(row[5]) && operation.operationId().equals(row[6]))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
     }
 

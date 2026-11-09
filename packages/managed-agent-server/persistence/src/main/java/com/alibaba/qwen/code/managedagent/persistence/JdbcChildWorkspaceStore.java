@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -21,8 +23,8 @@ import java.util.Map;
 import java.util.Set;
 
 @Repository
-public class ChildWorkspaceStore
-        implements com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore {
+public class JdbcChildWorkspaceStore
+        implements ChildWorkspaceStore {
     /** The merge is in the parent's working tree; only the worktree and the pins remain. */
 
     /**
@@ -52,7 +54,7 @@ public class ChildWorkspaceStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
 
-    public ChildWorkspaceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager) {
+    public JdbcChildWorkspaceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
     }
@@ -85,10 +87,10 @@ public class ChildWorkspaceStore
             var storages = jdbc.queryForList("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ? FOR UPDATE",
                     String.class, tenantId, parent.getWorkspaceId());
             if (storages.size() != 1 || !parent.getStorageId().equals(storages.getFirst())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storages.getFirst());
-            String childId = com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.childWorkspaceId(tenantId, parentSessionId, childRunId);
+            String childId = ChildWorkspaceStore.childWorkspaceId(tenantId, parentSessionId, childRunId);
             jdbc.update("INSERT IGNORE INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state, workspace_kind, parent_workspace_id, parent_session_id,"
                     + " child_run_id, child_workspace_id, parent_cwd_relative, child_state, gmt_create, gmt_modified)"
@@ -148,7 +150,7 @@ public class ChildWorkspaceStore
     public Row claim(Row row, String owner, long now, long leaseMillis) {
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, row.tenantId());
-            String storage = WorkspaceExecutionStore.storageKey(jdbc, new ContextBinding(row.tenantId(), row.workspaceId(),
+            String storage = JdbcWorkspaceExecutionStore.storageKey(jdbc, new ContextBinding(row.tenantId(), row.workspaceId(),
                     row.workspaceGeneration(), row.storageId(), ".", com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
             List<String> physical = jdbc.queryForList("SELECT holder_key FROM ma_storage_owner WHERE storage_key = ?"
                     + " AND maintenance_id = ? AND holder_key IS NOT NULL FOR UPDATE", String.class, storage, row.childWorkspaceId());
@@ -212,7 +214,7 @@ public class ChildWorkspaceStore
             }
             Row current = find(claimed.tenantId(), claimed.parentSessionId(), claimed.childRunId());
             return current != null && finish.equals(current.finishRequest())
-                    && transition(claimed, owner, toState, com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.columns("last_error", null), now);
+                    && transition(claimed, owner, toState, ChildWorkspaceStore.columns("last_error", null), now);
         });
     }
 

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigIns
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,18 +18,18 @@ import java.util.List;
 import java.util.Map;
 
 @Repository
-public class ManagedSessionSkills
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills {
+public class JdbcManagedSessionSkills
+        implements ManagedSessionSkills {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final RequestDigests digests;
-    private final ManagedAgentDefinitionStore definitions;
+    private final JdbcManagedAgentDefinitionStore definitions;
     @org.springframework.beans.factory.annotation.Autowired
     @org.springframework.context.annotation.Lazy
-    private ManagedExtensionRecordStore resources;
+    private JdbcManagedExtensionRecordStore resources;
 
-    public ManagedSessionSkills(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
-            RequestDigests digests, ManagedAgentDefinitionStore definitions) {
+    public JdbcManagedSessionSkills(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
+            RequestDigests digests, JdbcManagedAgentDefinitionStore definitions) {
         this.jdbc = jdbc;
         this.json = json;
         this.digests = digests;

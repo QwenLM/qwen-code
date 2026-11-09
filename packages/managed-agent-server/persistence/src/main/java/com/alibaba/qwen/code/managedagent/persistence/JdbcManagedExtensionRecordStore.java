@@ -15,6 +15,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedTeamRecor
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
+import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -63,8 +67,8 @@ import java.util.regex.Pattern;
  * committed.
  */
 @Repository
-public class ManagedExtensionRecordStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore {
+public class JdbcManagedExtensionRecordStore
+        implements ManagedExtensionRecordStore {
     private static final ObjectMapper JSON = JsonMapper.builder(JsonFactory
                     .builder().streamReadConstraints(StreamReadConstraints
                             .builder().maxNestingDepth(ManagedSessionStoreModels
@@ -78,7 +82,7 @@ public class ManagedExtensionRecordStore
             + " session_scope_key = ? AND operation_hash = ?";
 
     private static final Logger LOG = LoggerFactory.getLogger(
-            ManagedExtensionRecordStore.class);
+            JdbcManagedExtensionRecordStore.class);
 
     /**
      * A session message its Session's lineage refuses (H4d): only this store holds a child's
@@ -122,14 +126,14 @@ public class ManagedExtensionRecordStore
 
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
-    private final ManagedTaskEventStore taskEvents;
+    private final JdbcManagedTaskEventStore taskEvents;
     private final ManagedModelDiagnosticProjection modelDiagnostics;
     private final ManagedActivityDiagnosticProjection activityDiagnostics;
     private final ManagedMcpSettingsProjection mcpSettingsProjection;
 
     @Autowired
-    public ManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
+    public JdbcManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            AgentStateStore sessions, JdbcManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;
         this.taskEvents = taskEvents;
@@ -139,14 +143,14 @@ public class ManagedExtensionRecordStore
     }
 
     /** A store beside no public Session table, which announces nothing. */
-    public ManagedExtensionRecordStore(JdbcTemplate jdbc) {
+    public JdbcManagedExtensionRecordStore(JdbcTemplate jdbc) {
         this(jdbc, (AgentStateStore) null);
     }
 
     /** A store that journals its own task events beside the table. */
-    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+    public JdbcManagedExtensionRecordStore(JdbcTemplate jdbc,
             AgentStateStore sessions) {
-        this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
+        this(jdbc, sessions, new JdbcManagedTaskEventStore(jdbc));
     }
 
     /** A task's projection row and the resource holding its record's latest committed body. */
@@ -160,7 +164,7 @@ public class ManagedExtensionRecordStore
     public Optional<JsonNode> findRecord(String tenantId, String sessionId, String domain, String recordId) {
         Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
         require(body != null, "Unknown extension record domain.");
-        JsonNode record = recordBody(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionId,
+        JsonNode record = recordBody(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionId,
                 domain, recordId, id -> readResource(tenantId, sessionId, id));
         if (record != null) {
             body.require().accept(record);
@@ -235,7 +239,7 @@ public class ManagedExtensionRecordStore
         arguments.add(tenantId);
         for (String sessionId : sessionIds) {
             keys.add("(r.session_scope_key = ? AND r.record_key = ? AND r.session_id = ?)");
-            arguments.add(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId));
+            arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, sessionId));
             arguments.add(ManagedExtensionProjection.recordKey(sessionId,
                     MODEL_CONTEXT_DOMAIN, MODEL_CONTEXT_ID));
             arguments.add(sessionId);
@@ -314,7 +318,7 @@ public class ManagedExtensionRecordStore
                         result.getString("kind"), result.getInt("schema_version"),
                         result.getLong("byte_length"), result.getString("sha256"),
                         result.getBytes("inline_bytes")),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 tenantId, sessionId, resourceId).stream().findFirst()
                 .orElseThrow(() -> rejected("Missing committed MCP resource."));
         require(resource.bytes() != null
@@ -396,7 +400,7 @@ public class ManagedExtensionRecordStore
         String lastSubtype = null;
         for (int index = 0; index < lines.length; index++) {
             JsonNode record =
-                    nativeRecords == null ? com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(lines[index]) : nativeRecords.get(index);
+                    nativeRecords == null ? ManagedExtensionRecordStore.parse(lines[index]) : nativeRecords.get(index);
             if (record == null) {
                 throw new ManagedAgentException(400,
                         ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
@@ -493,7 +497,7 @@ public class ManagedExtensionRecordStore
                 }
                 if ("compressed".equals(maintenance.path("outcome").asText())) {
                     long compaction = maintenance.path("compactionRevision").longValue();
-                    boolean sameTransaction = java.util.Arrays.stream(lines).map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
+                    boolean sameTransaction = java.util.Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
                             .filter(Objects::nonNull).map(line -> line.path("managedSession"))
                             .anyMatch(candidate -> "context.compacted".equals(candidate.path("kind").asText())
                                     && candidate.path("sequence").longValue() == compaction
@@ -547,7 +551,7 @@ public class ManagedExtensionRecordStore
         ManagedExtensionRecords.durableRef(ref, "compaction.summaryRef");
         StoredResource resource = resources.apply(ref.get("resourceId").textValue());
         requireReference(resource, ref);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, "hosted_context_compaction", "latest");
         long sequence = event.get("sequence").longValue();
         int inserted = jdbc.update("INSERT IGNORE INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id,"
@@ -605,7 +609,7 @@ public class ManagedExtensionRecordStore
         JsonNode ref = payload.path("usageRef");
         if (!jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE session_scope_key = ?"
                 + " AND record_kind = 'DOMAIN' AND domain = 'history_maintenance' AND settled_at IS NULL LIMIT 1",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId)).isEmpty()) {
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId)).isEmpty()) {
             return;
         }
         if (!"output_committed".equals(payload.path("state").textValue())
@@ -634,7 +638,7 @@ public class ManagedExtensionRecordStore
             require(usage.get("context").isNull() || payload.path("attemptId").equals(usage.get("context").get("attemptId")),
                     "Context belongs to another model attempt.");
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, MODEL_CONTEXT_DOMAIN,
                 MODEL_CONTEXT_ID);
         long sequence = event.get("sequence").longValue();
@@ -681,7 +685,7 @@ public class ManagedExtensionRecordStore
                         + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                         + " AND record_key = ? FOR UPDATE",
                 (result, rowNum) -> result.getString(1),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, domain,
                         recordId));
         // The lineage read must be a locking read on purpose: under
@@ -726,7 +730,7 @@ public class ManagedExtensionRecordStore
         boolean dispatch = false;
         var revisions = new java.util.HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
-            JsonNode parsed = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+            JsonNode parsed = ManagedExtensionRecordStore.parse(line);
             if (parsed == null) {
                 throw new ManagedAgentException(400,
                         ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
@@ -736,12 +740,12 @@ public class ManagedExtensionRecordStore
             JsonNode payload = event.path("payload");
             if ("input.accepted".equals(event.path("kind").asText())
                     || "tool.intent".equals(event.path("kind").asText())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
             if ("model.attempt".equals(event.path("kind").asText())
                     && "started".equals(payload.path("state").asText())) {
                 if (v2) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
                 }
                 dispatch = true;
             }
@@ -759,20 +763,20 @@ public class ManagedExtensionRecordStore
                     "schedule", "automation_run", "session_message", "channel_delivery", "tool_stage").contains(domain))) {
                 if (!List.of("monitor_run", "child_run", "child_acceptance", "mcp_configuration", "mcp_operation",
                         "hook_execution", "hook_registration", "schedule", "automation_run", "session_message", "channel_delivery", "tool_stage").contains(domain)) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
                 }
                 JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
                 JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
                 if (previous == null || requiresLifecycleDispatch(previous, next)
                         || !ManagedExtensionProjection.RECORD_BODIES.get(domain).isSuccessor().test(previous, next)) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
                 }
                 continue;
             }
             if (!hookDomain
                     && !"child_run".equals(domain)
                     && !"child_acceptance".equals(domain)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
             if (hookDomain) {
                 JsonNode next = readBody(resources.apply(
@@ -791,7 +795,7 @@ public class ManagedExtensionRecordStore
             Function<String, StoredResource> resources) {
         var revisions = new java.util.HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
-            JsonNode parsed = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+            JsonNode parsed = ManagedExtensionRecordStore.parse(line);
             if (parsed == null) {
                 throw new ManagedAgentException(400,
                         ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
@@ -802,19 +806,19 @@ public class ManagedExtensionRecordStore
             JsonNode payload = event.path("payload");
             if ("input.accepted".equals(kind) || "tool.intent".equals(kind)
                     || "model.attempt".equals(kind) && "started".equals(payload.path("state").asText())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
             if (!"domain.committed".equals(kind)) {
                 continue;
             }
             String domain = payload.path("domain").asText();
             if (!List.of("hook_execution", "hook_registration").contains(domain)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
             JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
             JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
             if (previous == null || requiresLifecycleDispatch(previous, next)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
         }
     }
@@ -830,7 +834,7 @@ public class ManagedExtensionRecordStore
                                         + " record_kind = 'DOMAIN' AND session_scope_key = ? AND"
                                         + " record_key = ? AND tenant_id = ? AND session_id = ? AND"
                                         + " domain = ? AND record_id = ?",
-                String.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, domain, id), tenantId, sessionId, domain, id).stream().map(resource -> {
                     JsonNode record = readBody(readResource(tenantId, sessionId, resource));
                     ManagedExtensionProjection.RECORD_BODIES.get(domain).require().accept(record);
@@ -849,7 +853,7 @@ public class ManagedExtensionRecordStore
         JsonNode after = next.path("run");
         String execution = before.path("execution").asText();
         if (!List.of("", "intent").contains(execution) && !before.path("runtime").equals(after.path("runtime"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
         }
         return "intent".equals(execution) && !List.of("intent", "not_started_proven").contains(after.path("execution").asText());
     }
@@ -886,7 +890,7 @@ public class ManagedExtensionRecordStore
                         + " record_kind = 'DOMAIN' AND session_scope_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND task_kind = 'child_agent'"
                         + " AND task_state NOT IN ('completed', 'failed', 'cancelled')",
-                Long.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
+                Long.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
     }
 
     public String childSessionId(String tenantId, String sessionId, TaskRow task) {
@@ -976,7 +980,7 @@ public class ManagedExtensionRecordStore
      */
     private static void requireDomainCommitted(JsonNode payload,
             String domain, boolean stageH) {
-        require(!HarnessPlacementStore.RELEASE_DOMAIN.equals(domain),
+        require(!JdbcHarnessPlacementStore.RELEASE_DOMAIN.equals(domain),
                 "Harness release receipts can only be written by the ownership release transaction.");
         try {
             ManagedExtensionRecords.closed(payload, PAYLOAD_FIELDS,
@@ -1032,7 +1036,7 @@ public class ManagedExtensionRecordStore
         List<String> inputs = new ArrayList<>();
         for (int index = 0; index < Math.min(eventCount, lines.length);
                 index++) {
-            JsonNode event = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(lines[index]);
+            JsonNode event = ManagedExtensionRecordStore.parse(lines[index]);
             if (event != null && EVENT_SUBTYPE.equals(event.path("subtype")
                     .textValue()) && "input.accepted".equals(event
                             .path("managedSession").path("kind").textValue())) {
@@ -1163,7 +1167,7 @@ public class ManagedExtensionRecordStore
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
         }
         if (domain.equals("channel_delivery")) {
-            ChannelInstanceStore.requireReconciliationFence(jdbc, tenantId, sessionId,
+            JdbcChannelInstanceStore.requireReconciliationFence(jdbc, tenantId, sessionId,
                     record.get("deliveryId").textValue(), operationId);
             JsonNode ref = record.get("contentRef");
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
@@ -1209,7 +1213,7 @@ public class ManagedExtensionRecordStore
         String recordId = body.recordId().apply(record);
         String recordKey = ManagedExtensionProjection.recordKey(sessionId,
                 domain, recordId);
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId,
+        String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
                 sessionId);
         ManagedHookRecords.AdmissionKeys keys =
                 ManagedHookRecords.admissionKeys(domain, record);
@@ -1310,7 +1314,7 @@ public class ManagedExtensionRecordStore
         StoredRow previous = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM"
                         + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND record_key = ?",
-                ManagedExtensionRecordStore::storedRow, scopeKey, recordKey)
+                JdbcManagedExtensionRecordStore::storedRow, scopeKey, recordKey)
                 .stream().findFirst().orElse(null);
         String operationHash = sha256(operationId);
         if (domain.equals("session_message")) {
@@ -1414,7 +1418,7 @@ public class ManagedExtensionRecordStore
                                 record.get("targetSessionId")),
                         binding);
                 require(record.get("automationRunId").textValue().equals(
-                                com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(
+                                AutomationLedgerStore.automationRunId(
                                         record.get("scheduleId").textValue(),
                                         record.get("occurrenceKey").textValue())),
                         "Automation run id must be derived from its definition"
@@ -1544,14 +1548,14 @@ public class ManagedExtensionRecordStore
                     projection.settledAt(), scopeKey, recordKey);
         }
         if (domain.equals("schedule")) {
-            new AutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
+            new JdbcAutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
                     sessionId, revision, record, committedAt);
         }
         if (domain.equals("child_run") && "consumed".equals(deliveryState)) {
             // The relay may have classified its ledger row between the
             // acceptance and this consuming revision; the parent's commit
             // carries the later fact and corrects the mirror with it.
-            new ChildResultRelayStore(jdbc).markConsumed(tenantId, sessionId,
+            new JdbcChildResultRelayStore(jdbc).markConsumed(tenantId, sessionId,
                     recordId, committedAt);
         }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
@@ -1636,7 +1640,7 @@ public class ManagedExtensionRecordStore
     }
 
     static JsonNode readBody(StoredResource resource) {
-        JsonNode record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(),
+        JsonNode record = ManagedExtensionRecordStore.parse(new String(resource.bytes(),
                 StandardCharsets.UTF_8));
         require(record != null, "The Stage H record is not a JSON object the"
                 + " Session authority can read.");

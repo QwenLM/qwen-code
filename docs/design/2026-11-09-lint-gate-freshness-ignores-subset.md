@@ -125,7 +125,8 @@ A file absent from the table keeps whole-file containment.
    that without fetching content. They are not folded into the subset test: the
    real `.gitignore` carries a dozen `!` re-inclusions, so a semantic comparison
    would reject every input and leave the narrowing dead from day one. A
-   truncated tree is a partial answer and never narrows.
+   truncated tree is a partial answer: it throws, so the verdict is kept and the
+   catch annotates why, rather than silently disabling the narrowing.
 
    **The base side is read at `baseRef`, the base tip — not at the gate commit.**
    `.gitignore` owns no gate verdict, so reading it at the newest commit touching
@@ -336,7 +337,8 @@ Post-implementation:
   that logs.
 - The prettier narrowing reads the base tree at the base tip, covers nested
   ignore files, and refuses to narrow on a truncated tree or on any ignore file
-  added or removed on either side.
+  added or removed on either side. Truncation annotates, like extraction failure.
+- A base ref containing a slash is URI-encoded in the tree path.
 - A comment-embedded U+2028, U+2029 or lone CR cannot hide an entry.
 - Any `.gitignore` difference blocks the prettier narrowing.
 - A negated or escaped pattern in the real `.prettierignore` reddens a drift
