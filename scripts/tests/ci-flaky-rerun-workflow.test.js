@@ -1820,8 +1820,9 @@ describe('ci failure patrol workflow', () => {
       GIT_CONFIG_PARAMETERS: '',
       GIT_CONFIG_GLOBAL: releaseGitConfig,
     };
-    // Pin the global file back to the planted config so the positive control
-    // still exercises the hooksPath the fixture wrote.
+    // The positive control pins the global file back to the planted config,
+    // so it exercises the hooksPath the fixture wrote while the bare base env
+    // stays under the release ambient.
     const fixtureGitConfig = {
       GIT_CONFIG_GLOBAL: join(home, '.gitconfig'),
     };
@@ -1834,7 +1835,6 @@ describe('ci failure patrol workflow', () => {
           ...process.env,
           ...releaseAmbient,
           HOME: home,
-          ...fixtureGitConfig,
           ...env,
         },
       });
@@ -1859,14 +1859,14 @@ describe('ci failure patrol workflow', () => {
       // Positive control: with the planted global config in force, an ordinary
       // force-checkout fires the hook. If this stops firing the fixture is
       // dead and the assertion below would pass vacuously.
-      git(['checkout', '--force', 'HEAD']);
+      git(['checkout', '--force', 'HEAD'], fixtureGitConfig);
       expect(existsSync(sentinel)).toBe(true);
 
       rmSync(sentinel);
-      // The ambient is why the pin above is load-bearing: with it in force the
-      // planted config is outranked and the hook cannot fire. Remove its
-      // GIT_CONFIG_GLOBAL and this assertion must go red.
-      git(['checkout', '--force', 'HEAD'], releaseAmbient);
+      // The bare base env keeps the ambient in force, so the planted config
+      // is outranked and the hook cannot fire. Remove the ambient's
+      // GIT_CONFIG_GLOBAL spread and this assertion must go red.
+      git(['checkout', '--force', 'HEAD']);
       expect(existsSync(sentinel)).toBe(false);
 
       const stepEnv = {
