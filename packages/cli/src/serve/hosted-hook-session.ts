@@ -112,9 +112,7 @@ export function hostedConfigScopedOwnerId(
   sessionKey: ManagedSessionKey,
   configRevision: number,
 ): string {
-  return `${CONFIG_SCOPED_OWNER_PREFIX}${createHash('sha256')
-    .update(JSON.stringify([sessionKey, configRevision]))
-    .digest('hex')}`;
+  return `${CONFIG_SCOPED_OWNER_PREFIX}${digest([sessionKey, configRevision])}`;
 }
 
 /**

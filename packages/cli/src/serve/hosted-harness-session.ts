@@ -659,20 +659,31 @@ function blockRecovery(
 }
 
 /**
- * The config-scoped owners this Session actually holds. A detach must never
- * terminally release one: the id is recomputed on the next load and a RELEASED
- * row makes every later Hook unacquirable (R13-1/R14-1/R28-1). Keyed on the
- * owners the Harness constructed, not on the id's shape — a channel `inputId`
- * is client-chosen and only length-bounded, so a turn can carry the same
- * prefix without being an owner, and that turn's Runtime is still owed a drain.
+ * The owners this Session holds whose id the next load recomputes. A detach
+ * must never terminally release one: a RELEASED row makes that id
+ * unacquirable ever after (R13-1/R14-1/R28-1). Keyed on the owners the Harness
+ * constructed, never on a held entry's shape — a channel `inputId` is
+ * client-chosen and only length-bounded, so a turn can carry the same prefix
+ * without being an owner, and that turn's Runtime is still owed a drain.
+ *
+ * The MCP owner qualifies by identity: `mcp-<digest>` comes from the durable
+ * configuration ids and is just as reload-stable (R2-7). Only when MCP owns
+ * its broker, though — a broker shared with Hooks can carry the per-load
+ * `hooks-activation-*` id, which no successor recomputes and which must stay
+ * releasable (R14-1).
  */
-function configScopedOwnerIds(session: HostedSession): Set<string> {
+export function reloadStableOwnerIds(session: {
+  hooks?: { broker: { runtimeSessionId: string } };
+  mcp?: { broker: { runtimeSessionId: string } };
+}): Set<string> {
+  const mcpOwner =
+    session.mcp && session.mcp.broker !== session.hooks?.broker
+      ? session.mcp.broker.runtimeSessionId
+      : undefined;
   return new Set(
-    [
-      session.hooks?.broker.runtimeSessionId,
-      session.mcp?.broker.runtimeSessionId,
-    ].filter(
-      (id): id is string => id !== undefined && isHostedConfigScopedOwner(id),
+    [session.hooks?.broker.runtimeSessionId, mcpOwner].filter(
+      (id): id is string =>
+        id !== undefined && (id === mcpOwner || isHostedConfigScopedOwner(id)),
     ),
   );
 }
@@ -8384,12 +8395,12 @@ export function registerHostedHarnessSessionRoutes(
           // needs a keep-READY drain to close: the release used here would
           // tombstone the deterministic Hook owner (R13-1/R14-1).
           let heldDrainUnproven = false;
-          const configScopedOwners = configScopedOwnerIds(session);
+          const reloadStableOwners = reloadStableOwnerIds(session);
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {
-              // A detach must never terminally release a config-scoped owner:
+              // A detach must never terminally release a reload-stable owner:
               // the id is recomputed on the next load and a RELEASED row makes
-              // every later Hook unacquirable (R13-1/R14-1). The restore can
+              // every later acquire refused (R13-1/R14-1). The restore can
               // seed one here from the Broker's hold rows, and the load cannot
               // know which protocol will close it, so the invariant lives at
               // the release rather than at a restore gate (R28-1). Leaving the
@@ -8397,12 +8408,15 @@ export function registerHostedHarnessSessionRoutes(
               // park #16579 tracks. A delete is terminal, so it may release.
               if (
                 kind !== 'delete' &&
-                configScopedOwners.has(hostedRuntimeSessionId(heldTurn))
+                reloadStableOwners.has(hostedRuntimeSessionId(heldTurn))
               ) {
                 // The owner's Runtime is deliberately left running, so this
                 // close proved no stop. Settle the loops on runtime_lost below
                 // rather than certifying a stop_requested it never issued.
                 heldDrainUnproven = true;
+                writeStderrLineSafe(
+                  `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (R28-1).`,
+                );
                 continue;
               }
               try {
@@ -13112,21 +13126,24 @@ export function registerHostedHarnessSessionRoutes(
         // tolerated so the close is not wedged, but it is not a proven stop
         // either — the loops below must still settle runtime_lost.
         let heldDrainUnproven = false;
-        const configScopedOwners = configScopedOwnerIds(session);
+        const reloadStableOwners = reloadStableOwnerIds(session);
         if (brokerOptions) {
           for (const heldTurn of [...session.heldRuntimeTurns]) {
             // Same invariant as the v2 drain, and it predates it: the restore
-            // seeds config-scoped owners from the Broker's hold rows, and a
+            // seeds reload-stable owners from the Broker's hold rows, and a
             // detach must not tombstone an id the next load recomputes
             // (R13-1/R14-1/R28-1). A DELETE is terminal and may release.
             if (
               req.method !== 'DELETE' &&
-              configScopedOwners.has(hostedRuntimeSessionId(heldTurn))
+              reloadStableOwners.has(hostedRuntimeSessionId(heldTurn))
             ) {
               // Unproven, not failed: a detach declines to certify the stop,
               // it must not turn the park into a close failure at the rethrow
               // below.
               heldDrainUnproven = true;
+              writeStderrLineSafe(
+                `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (R28-1).`,
+              );
               continue;
             }
             try {

@@ -92,6 +92,7 @@ import {
 import {
   attributeShellReceipts,
   registerHostedHarnessSessionRoutes,
+  reloadStableOwnerIds,
   settleCancelledHookTurn,
   settleCrashedWakeTurnAftermath,
 } from './hosted-harness-session.js';
@@ -25640,7 +25641,7 @@ describe('Hosted Harness tool approvals', () => {
       const loaded = await headers(
         supertest(reloaded).post(`/session/${SESSION_ID}/load`),
       ).send(definition);
-      expect(loaded.status, JSON.stringify(loaded.body)).toBe(200);
+      expect(loaded.status).toBe(200);
       expect(activeHolds).toHaveBeenCalled();
       const resident = (
         wakeDeps.last as {
@@ -25692,14 +25693,16 @@ describe('Hosted Harness tool approvals', () => {
             : await headers(
                 supertest(reloaded).post(`/session/${SESSION_ID}/detach`),
               ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-      expect(response.status, JSON.stringify(response.body)).toBe(
-        protocol === 2 ? 200 : 204,
-      );
+      expect(response.status).toBe(protocol === 2 ? 200 : 204);
       // The ordinary turn and the lookalike always drain: they prove the loop
       // ran, and the lookalike pins that the exemption is not the prefix.
       expect(releasedOwners.has(hostedRuntimeSessionId(ordinary))).toBe(true);
       expect(releasedOwners.has(lookalike)).toBe(true);
       expect(releasedOwners.has(owner)).toBe(terminal);
+      // Skipping is not discharging: the obligation stays owed, which is what
+      // keeps the handback refusing busy and lets a later terminal close in
+      // this resident still release the owner (R2-6).
+      expect(resident.heldRuntimeTurns.has(owner)).toBe(!terminal);
       // A skipped owner is a Runtime this close never stopped, so the loop
       // must not certify stop_requested for it (R1-1). The spy is reached on
       // every arm, so a wrong settle is a failure, not a silent pass.
@@ -25708,6 +25711,71 @@ describe('Hosted Harness tool approvals', () => {
       );
     },
   );
+
+  it.each([
+    {
+      shape: 'Hooks alone holding the config-scoped owner',
+      shared: false,
+      hooksId: `extensions-components-${'a'.repeat(64)}`,
+      mcpId: undefined,
+      exempt: true,
+    },
+    {
+      shape: 'Hooks alone holding a per-load activation owner',
+      shared: false,
+      hooksId: 'hooks-activation-1',
+      mcpId: undefined,
+      exempt: false,
+    },
+    {
+      shape: 'MCP alone holding a durable mcp-<digest> owner',
+      shared: false,
+      hooksId: undefined,
+      mcpId: 'mcp-abc123',
+      exempt: true,
+    },
+    {
+      shape: 'MCP alone holding the config-scoped owner',
+      shared: false,
+      hooksId: undefined,
+      mcpId: `extensions-components-${'b'.repeat(64)}`,
+      exempt: true,
+    },
+    {
+      shape: 'a broker shared with Hooks carrying a per-load activation owner',
+      shared: true,
+      hooksId: 'hooks-activation-1',
+      mcpId: 'hooks-activation-1',
+      exempt: false,
+    },
+    {
+      shape: 'a broker shared with Hooks carrying the config-scoped owner',
+      shared: true,
+      hooksId: `extensions-components-${'c'.repeat(64)}`,
+      mcpId: `extensions-components-${'c'.repeat(64)}`,
+      exempt: true,
+    },
+  ])('exempts only reload-stable owners: $shape', (c) => {
+    // The route fixtures cannot drive every owner shape — a Session carrying
+    // MCP on a workspace profile must settle through v2 and does not release
+    // its writer for a reload — so the decision itself is pinned here. The
+    // shared-broker rows are why the MCP element is admitted by identity only
+    // when MCP owns the broker: the same object under Hooks can carry the
+    // per-load id a successor never recomputes (R14-1/R2-5/R2-7).
+    const hooksBroker = c.hooksId ? { runtimeSessionId: c.hooksId } : undefined;
+    const mcpBroker = c.mcpId
+      ? c.shared
+        ? hooksBroker
+        : { runtimeSessionId: c.mcpId }
+      : undefined;
+    const owners = reloadStableOwnerIds({
+      hooks: hooksBroker ? { broker: hooksBroker } : undefined,
+      mcp: mcpBroker ? { broker: mcpBroker } : undefined,
+    });
+    const id = c.mcpId ?? c.hooksId;
+    expect(owners.has(id!)).toBe(c.exempt);
+    expect(owners.size).toBe(c.exempt ? 1 : 0);
+  });
 
   it('refuses the tool_stage recovery domain when extensions are disabled', async () => {
     const key = {
