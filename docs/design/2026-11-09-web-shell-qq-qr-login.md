@@ -174,9 +174,9 @@ Add an optional `qrLogin` capability to `ChannelManagementDescriptor`. It accept
 a handler bundle mirroring the connector callbacks plus an `AbortSignal`, and
 returns a dispose function. The daemon never learns QQ protocol details.
 
-Extend boolean field defaults. `ChannelConfigFieldDescriptorBase.default` is
-currently `string` (`packages/channels/base/src/types.ts:459`), which cannot
-express a boolean default; see decision D6.
+No change to field defaults is needed. `ChannelConfigFieldDescriptorBase.default`
+stays `string`; boolean kinds express their default as `'true'` / `'false'`, which
+the management editor already resolves (D6).
 
 ### Layer 2 — `packages/channels/qqbot`
 
@@ -352,8 +352,8 @@ reuse the transport.
 ## Validation Plan
 
 Unit tests, collocated per project convention: QQ descriptor shape and
-`validateConfig` rejection matrix; registry validation of the new capability and
-of boolean defaults; login-session lifecycle including expiry, cancel,
+`validateConfig` rejection matrix; registry validation of the new capability,
+including malformed and null `qrLogin` values; login-session lifecycle including expiry, cancel,
 concurrency cap, and take-over; route ownership and trust gating on both
 prefixes; secret never present in snapshots or event payloads; editor boolean
 initialization for a true-default field; English and Chinese label rendering

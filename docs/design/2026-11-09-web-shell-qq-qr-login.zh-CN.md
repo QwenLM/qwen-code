@@ -154,8 +154,8 @@ OAuth device flow 提供了可模仿的入口形状:POST 启动,新流程返回 
 回调对应的 handler 以及一个 `AbortSignal`,并返回一个 dispose 函数。daemon 永远
 不需要知道 QQ 协议细节。
 
-扩展布尔字段的默认值支持。`ChannelConfigFieldDescriptorBase.default` 目前是
-`string`(`packages/channels/base/src/types.ts:459`),无法表达布尔默认值;见决策 D6。
+不需要改动字段默认值。`ChannelConfigFieldDescriptorBase.default` 保持 `string`;
+布尔 kind 以 `'true'` / `'false'` 表达默认值,管理编辑器本就能解析(见 D6)。
 
 ### 第 2 层 —— `packages/channels/qqbot`
 
@@ -295,7 +295,7 @@ URL 或 task id,因此未来的适配器可以复用该传输层。
 ## 验证计划
 
 单元测试,按项目约定与源码同目录放置:QQ 描述符形状与 `validateConfig` 拒绝矩阵;
-registry 对新能力与布尔默认值的校验;登录会话生命周期,含过期、取消、并发上限与
+registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会话生命周期,含过期、取消、并发上限与
 接管;两个前缀上的路由所有权与信任门禁;快照与事件载荷中绝不出现 secret;
 真默认值字段的编辑器布尔初始化;中英文文案按语种分别断言渲染。
 
