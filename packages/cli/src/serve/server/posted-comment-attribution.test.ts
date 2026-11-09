@@ -637,6 +637,54 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not exempt a set operand that pathname expansion can delete', () => {
+    // Under `nullglob` a pattern matching nothing is removed, so this runs a
+    // bare `set`, which prints every variable. `shopt` is redirected so it is
+    // not itself the second producer that would make this vacuous.
+    const entry = shellResult(
+      'U=issuecomment; export REVIEW_URL=https://github.com/o/r/pull/42#$U-111; shopt -s nullglob >/dev/null; false && gh pr comment 42 --body hi; set zzz*',
+      'REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt a brace list that expands into a set option', () => {
+    // `set {-o,}` expands to `set -o ''`, which lists the options — the
+    // unexpanded word looks like an innocuous positional parameter.
+    const entry = shellResult(
+      'gh pr comment 42 --body hi; set {-o,}',
+      'https://github.com/o/r/pull/42#issuecomment-111\nallexport off',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt an unquoted glob in an export operand', () => {
+    // Bash protects an assignment word from `nullglob`, but the detector cannot
+    // assume that across shells: a deleted `FOO=*` would leave a bare `export`.
+    // Refusing it costs this attribution, which is the fail-open direction.
+    const entry = shellResult(
+      'shopt -s nullglob >/dev/null\nexport FOO=*\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes after set -- with a glob (positional words never print)', () => {
+    const entry = shellResult(
+      'set -- zzz*\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('still attributes after a QUOTED glob in an export value', () => {
+    const entry = shellResult(
+      'export FOO="*"\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('still attributes when an export VALUE expands (never an option)', () => {
     const entry = shellResult(
       'X="a -p"\nexport FOO=$X\ngh pr comment 42 --body hi',

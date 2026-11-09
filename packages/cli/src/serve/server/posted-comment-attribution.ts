@@ -532,14 +532,26 @@ const NO_STDOUT_FIRST_WORDS = new Set([
 ]);
 
 /**
+ * An operand word after the shell's quote removal. `glob` records an UNQUOTED
+ * pathname-expansion character: under `nullglob` such a word can disappear
+ * entirely when nothing matches, which turns `set *` into a bare, printing
+ * `set`. A quoted `*` is literal and carries no such risk.
+ */
+interface ShellWord {
+  text: string;
+  glob: boolean;
+}
+
+/**
  * Split operand text into words and remove the quoting the shell removes:
  * quote delimiters, `\x` escapes and the `$` of an ANSI-C `$'…'`. Expansions are
  * NOT performed, so a word that still holds `$` or a backtick stays unresolved
  * and the caller refuses to prove anything about it.
  */
-function shellWords(text: string): string[] {
-  const words: string[] = [];
+function shellWords(text: string): ShellWord[] {
+  const words: ShellWord[] = [];
   let current = '';
+  let glob = false;
   let started = false;
   let quote: string | null = null;
   for (let i = 0; i < text.length; i++) {
@@ -572,22 +584,37 @@ function shellWords(text: string): string[] {
     }
     if (/\s/.test(ch)) {
       if (started) {
-        words.push(current);
+        words.push({ text: current, glob });
         current = '';
+        glob = false;
         started = false;
       }
       continue;
     }
+    if (ch === '*' || ch === '?' || ch === '[') glob = true;
     current += ch;
     started = true;
   }
-  if (started) words.push(current);
+  if (started) words.push({ text: current, glob });
   return words;
 }
 
-/** A word with no expansion left in it, so the shell cannot reshape it. */
-function isLiteralWord(word: string): boolean {
-  return !word.includes('$') && !word.includes('`');
+/**
+ * A word the shell can neither expand away nor reshape: no parameter/command
+ * expansion, no unquoted pathname expansion, and no brace list (which can
+ * produce an option the builtin then acts on, as in `set {,-o}`).
+ */
+function isLiteralWord(word: ShellWord): boolean {
+  if (word.glob || word.text.includes('$') || word.text.includes('`')) {
+    return false;
+  }
+  // Substring checks, not a brace-matching regex: a transcript command can be
+  // long, and `\{[^}]*,…[^}]*\}` backtracks quadratically when no `}` is present.
+  const braceList =
+    word.text.includes('{') &&
+    word.text.includes('}') &&
+    (word.text.includes(',') || word.text.includes('..'));
+  return !braceList;
 }
 
 /**
@@ -596,14 +623,16 @@ function isLiteralWord(word: string): boolean {
  * cluster containing `p` is refused outright, since `export`-style printing is
  * the failure this guards and `set -p` costs at most one attribution.
  */
-function setOperandsAreSilent(words: string[]): boolean {
+function setOperandsAreSilent(words: ShellWord[]): boolean {
   if (words.length === 0) return false;
   for (let i = 0; i < words.length; i++) {
     const word = words[i]!;
-    if (word === '--') return words.slice(i + 1).every(isLiteralWord);
-    if (/^[-+][A-Za-z]+$/.test(word)) {
-      if (word.includes('p')) return false;
-      if (word.endsWith('o') && i === words.length - 1) return false;
+    // Past `--` nothing is an option, and `set` with positional parameters never
+    // prints — even if a later word expands away or matches no file.
+    if (word.text === '--') return true;
+    if (/^[-+][A-Za-z]+$/.test(word.text)) {
+      if (word.text.includes('p')) return false;
+      if (word.text.endsWith('o') && i === words.length - 1) return false;
       continue;
     }
     if (!isLiteralWord(word)) return false;
@@ -613,17 +642,19 @@ function setOperandsAreSilent(words: string[]): boolean {
 
 function writesNoStdout(command: string): boolean {
   const words = shellWords(command.replace(/^[()\s]+/, ''));
-  const first = words[0];
+  const first = words[0]?.text;
   if (first === undefined) return true;
   if (NO_STDOUT_FIRST_WORDS.has(first)) return true;
   const operands = words.slice(1);
   if (first === 'export') {
     // A literal `NAME` / `NAME=value` word can never be read as an option, even
-    // when its value expands; a word that is not literal in that position can.
+    // when its value expands. It must still survive the shell: an unquoted glob
+    // can delete the whole word under `nullglob`, leaving a bare `export`.
     return (
       operands.length > 0 &&
-      operands.every((word) =>
-        /^[A-Za-z_][A-Za-z0-9_]*(?:=[\s\S]*)?$/.test(word),
+      operands.every(
+        (word) =>
+          !word.glob && /^[A-Za-z_][A-Za-z0-9_]*(?:=[\s\S]*)?$/.test(word.text),
       )
     );
   }
@@ -666,11 +697,13 @@ function passesStdinThrough(rawStage: string): boolean {
  * the argument TEXT with the shell's own quote removal, never from
  * quote-stripped spans — `export '-p'`, `export \-p` and `export $'-p'` all print
  * just like `export -p`, and only literal `NAME`/`NAME=value` operands (or a
- * provably silent `set` option list) are exempt. A shell conditional/loop is
- * ambiguous (static analysis cannot prove which branch executed). When the
- * source cannot be proven, attribute nothing (fail-open:
- * the author may self-echo once, but a mere reader is never credited with
- * comments it only read).
+ * provably silent `set` option list) are exempt. An operand the shell could
+ * still delete or reshape — an expansion, an unquoted glob (`nullglob` turns
+ * `set *` into a bare, printing `set`), or a brace list — is never provable.
+ * A shell conditional/loop is ambiguous (static analysis cannot prove which
+ * branch executed). When the source cannot be proven, attribute nothing
+ * (fail-open: the author may self-echo once, but a mere reader is never
+ * credited with comments it only read).
  */
 function creationOutputIsAmbiguous(command: string): boolean {
   const stripped = stripHeredocBodies(command);
