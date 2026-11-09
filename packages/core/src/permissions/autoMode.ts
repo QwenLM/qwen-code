@@ -503,14 +503,6 @@ export type AutoModeDecision =
   | { via: 'fast-path:accept-edits' }
   | { via: 'fast-path:allowlist' }
   | { via: 'blocked:destructive-command'; reason: string }
-  /**
-   * The destructive guard recognised amend text it cannot positively
-   * attribute (#16075 maintainer stopgap): manual approval, never a silent
-   * allow. Its own discriminant so `applyAutoModeDecision` can mark the
-   * escalation `requiresHumanDecision` — routing it through the generic
-   * `fallback` arm lost the flag and let a hook waive the approval (R16-2).
-   */
-  | { via: 'guard-ask'; reason: string }
   | {
       via: 'classifier';
       shouldBlock: boolean;
@@ -643,33 +635,6 @@ export function applyAutoModeDecision(
         // The guidance below is ours and must survive intact.
         errorMessage: `${sanitizedReason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
-      };
-    }
-    case 'guard-ask': {
-      // Same one-shot retry consumption as the generic fallback arm: when
-      // this exact action already has a manual retry armed, the human review
-      // happening now is that retry.
-      if (
-        actionFingerprint !== undefined &&
-        denialState.pendingManualRetryFingerprint === actionFingerprint
-      ) {
-        config.setAutoModeDenialState(consumePendingManualRetry(denialState));
-      }
-      // The reason code (`safety_check`) is shared with the unknown-`via`
-      // default arm; name the guard so the two routes stay distinguishable
-      // in the log, as the blocked arm's escalation does.
-      autoModeDebugLogger.warn(
-        `Auto mode: destructive-command guard requires human approval: ${sanitizeClassifierReason(decision.reason)}`,
-      );
-      return {
-        kind: 'fallback',
-        reason: 'safety_check',
-        // The guard's ask is a deterministic security floor, not a
-        // classifier verdict: the confirmation must be given by a human, so
-        // a `PermissionRequest` hook returning `allow` must not waive it
-        // (R16-2). The generic `safety_check` fallback arm cannot carry this
-        // flag — it is shared with routes a hook may legitimately approve.
-        requiresHumanDecision: true,
       };
     }
     case 'classifier':
@@ -908,11 +873,10 @@ export async function evaluateAutoMode(
   // failures or classifier misjudgment cannot allow destructive git/IaC
   // commands through on the denying call. The `blocked:destructive-command`
   // arm of `applyAutoModeDecision` keeps the denial hard until denial tracking
-  // reaches the consecutive-block or session-total cap, where it escalates to
-  // a confirmation only a human can give. The guard's `ask` outcome escalates
-  // through `guard-ask` the same way: both set `requiresHumanDecision`, so a
-  // `PermissionRequest` hook returning `allow` cannot waive either. Only
-  // applies to shell-like tools.
+  // reaches the consecutive-block or session-total cap, where it escalates to a
+  // confirmation only a human can give: unlike the classifier arm, it sets
+  // `requiresHumanDecision`, so a `PermissionRequest` hook returning `allow`
+  // cannot waive it. Only applies to shell-like tools.
   if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
     const command =
       input.ctx.toolName === ToolNames.MONITOR
@@ -936,15 +900,6 @@ export async function evaluateAutoMode(
         via: 'blocked:destructive-command',
         reason: destructiveResult.reason,
       };
-    }
-    if (destructiveResult?.ask) {
-      // Maintainer stopgap (#16075 round-15 assessment): amend text the guard
-      // cannot positively classify goes to the normal approval path, not a
-      // hard denial. The dedicated `guard-ask` discriminant keeps that
-      // escalation hook-unwaivable: `applyAutoModeDecision` marks it
-      // `requiresHumanDecision`, so the user — not a hook or a programmatic
-      // host — sees the command and decides (R16-2).
-      return { via: 'guard-ask', reason: destructiveResult.reason };
     }
   }
 

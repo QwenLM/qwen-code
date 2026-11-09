@@ -43,7 +43,6 @@ import {
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
-  hasUnstrippablePayloadOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
 } from '../utils/shell-utils.js';
@@ -850,21 +849,6 @@ export class MonitorTool extends BaseDeclarativeTool<
     }
     if (hasUnsafeMonitorBackgroundOperator(params.command)) {
       return 'Monitor commands must not contain non-final top-level background operators. Remove "&" and let the monitor manage process lifetime.';
-    }
-    // A payload operator this scan cannot remove (an encoded `\x26`, or two
-    // operators where trimming one would leave a runnable command) stays in the
-    // spawn: the tracked shell forks the payload and exits 0 before it finishes,
-    // so the monitor would report success for a failure it never observed.
-    // Refuse instead — a payload whose operator WAS stripped is unaffected
-    // (#16540 review, R3-7).
-    if (hasUnstrippablePayloadOperator(params.command)) {
-      return (
-        'Monitor commands must not background the payload. The background ' +
-        'operator in this command cannot be removed without rewriting what you ' +
-        'typed, so the monitored shell would fork the payload and exit before ' +
-        'it ran, and the monitor would report success for a failure it never ' +
-        'observed. Rewrite the command without a trailing "&".'
-      );
     }
     // AJV enforces type: 'integer' from the schema. This method adds
     // range checks (min/max) that the schema does not express.

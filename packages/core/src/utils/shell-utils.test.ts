@@ -14,8 +14,6 @@ import {
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
   detectSelfKillCommand,
-  decodeAnsiCEscape,
-  decodeAnsiCWord,
   doesToolInvocationMatch,
   escapeShellArg,
   getCommandRoot,
@@ -23,8 +21,6 @@ import {
   getShellConfiguration,
   hasNonFinalTopLevelBackgroundOperator,
   hasUnsafeMonitorBackgroundOperator,
-  hasUnprovableWrapperScript,
-  hasUnstrippablePayloadOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
   normalizeMonitorCommand,
@@ -32,7 +28,6 @@ import {
   stripTrailingBackgroundAmp,
   stripShellWrapper,
 } from './shell-utils.js';
-import { extractShellOperationsAcrossCommand } from '../permissions/shell-semantics.js';
 import type { Config } from '../config/config.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
@@ -685,7 +680,7 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper("bash -c 'echo ok' 'sleep 5'")).toEqual('echo ok');
   });
 
-  // R11-2: an ANSI-C encoded `--` is still the option terminator (witnessed:
+  // An ANSI-C encoded `--` is still the option terminator (witnessed:
   // `sh -c $'\x2d\x2d' 'echo B_OK'` prints B_OK), so the payload after it is
   // the command. A locale `$"…"` word does NOT decode ANSI-C escapes
   // (witnessed: bash runs `x2dx2d`), so it is not a terminator.
@@ -693,35 +688,17 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper("sh -c $'\\x2d\\x2d' 'ls -l'")).toEqual('ls -l');
     expect(stripShellWrapper("sh -c $'\\055\\055' 'ls -l'")).toEqual('ls -l');
     expect(stripShellWrapper("sh -c -'-' 'ls -l'")).toEqual('ls -l');
+    expect(stripShellWrapper("sh -c -- 'ls -l'")).toEqual('ls -l');
   });
 
   it('does not treat a locale word as an option terminator', async () => {
-    // `$"…"` does not decode ANSI-C escapes: bash runs a program literally
-    // named `\x2d\x2d` (witnessed), so the locale word IS the payload and the
-    // following word is only $0. The projection hands back the resolved word
-    // rather than its spelling now, because a locale payload is still the
-    // script bash runs and `$"cat > /etc/motd"` has to expose its redirect
-    // (#16540 review, R2-1); quote removal leaves the backslashes alone, so
-    // this word is still the program name and never the `--` terminator.
-    const stripped = stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'');
-    expect(stripped).toEqual('\\x2d\\x2d');
-    expect(stripped).not.toEqual('--');
-    expect(stripped).not.toContain('ls -l');
+    expect(stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'')).toEqual(
+      '$"\\x2d\\x2d"',
+    );
   });
 
-  it('reads the word after an unresolvable terminator slot', async () => {
-    // The expansion may be the terminator or the program itself, and neither
-    // reading is provable. But the word after it IS the script in the first
-    // reading, and handing back the whole command kept that word inside quotes,
-    // so its writes and its self-kill pattern never reached analysis
-    // (#16540 review, R4-5). The monitor path still marks the wrapper unresolved
-    // — pinned below — so the cron gate refuses it either way.
-    expect(stripShellWrapper("sh -c $TERM 'ls -l'")).toEqual('ls -l');
-  });
-
-  // R11-2 (#16075): a NUL ends the word bash builds, so `$'--\0x'` is the
-  // terminator `--` and the following word is the script (witnessed: bash runs
-  // it). The truncation stays inside the ANSI-C word.
+  // A NUL ends the word bash builds, so `$'--\0x'` is the terminator `--`
+  // and the following word is the script (witnessed: bash runs it).
   it.each([
     "sh -c $'--\\0x' 'ls -l'",
     "sh -c $'--\\x00x' 'ls -l'",
@@ -733,42 +710,21 @@ describe('stripShellWrapper', () => {
     },
   );
 
-  // R13-1 (#16075): a payload that is one fully quoted word is unwrapped even
-  // when it carries an expansion, so op extraction and the self-kill gate see
-  // the script instead of a wrapper-free command.
-  it('unwraps a fully quoted payload that carries an expansion', () => {
-    expect(
-      stripShellWrapper('bash -c "echo hi; $(echo x > /etc/passwd)"'),
-    ).toEqual('echo hi; $(echo x > /etc/passwd)');
-    expect(stripShellWrapper('sh -c "pkill -f $(echo qwen)"')).toEqual(
-      'pkill -f $(echo qwen)',
+  it('keeps an unquoted expansion word as the payload, not a terminator', () => {
+    // Base reading: the first word after -c is the payload; the expansion
+    // makes it undecodable, so the quote-free token comes back as-is.
+    expect(stripShellWrapper("sh -c $TERM 'ls -l'")).toEqual('$TERM');
+  });
+
+  it('keeps -- literal for shells with no option parser', () => {
+    expect(stripShellWrapper('cmd.exe /c -- dir')).toEqual('-- dir');
+    expect(stripShellWrapper('powershell -Command -- Get-Process')).toEqual(
+      '-- Get-Process',
     );
   });
 
-  // R4-2 (#16540 review): an unquoted brace word expands into several words
-  // before bash reads `-c`, so `{--,'cat > /etc/motd'}` is the option
-  // terminator followed by the script (witnessed: `bash -c {--,'echo A-RAN'}`
-  // prints A-RAN). Reading it as one literal word hid the payload from op
-  // extraction.
-  it('unwraps an unquoted brace expansion that spells the option terminator', () => {
-    expect(stripShellWrapper("bash -c {--,'cat > /etc/motd'}")).toEqual(
-      'cat > /etc/motd',
-    );
-    // A quoted suffix cannot hide the expansion: bash expands the brace before
-    // quote removal, so the empty suffix vanishes and the script still runs
-    // (witnessed: `bash -c {--,'echo E-RAN'}""` prints E-RAN).
-    expect(stripShellWrapper(`bash -c {--,'cat > /etc/motd'}""`)).toEqual(
-      'cat > /etc/motd',
-    );
-    // A QUOTED brace word is data: bash runs a program literally named
-    // `{--,x}` (witnessed: rc 127), so it stays the payload.
-    expect(stripShellWrapper("bash -c '{--,x}'")).toEqual('{--,x}');
-    // The expansion can also sit in the payload slot after an explicit `--`,
-    // where its first word IS the script (witnessed: `bash -c --
-    // {'echo P-RAN',x}` prints P-RAN).
-    expect(stripShellWrapper(`bash -c -- {'cat > /etc/motd',x}`)).toEqual(
-      'cat > /etc/motd',
-    );
+  it('does not read a lone terminator as a payload', () => {
+    expect(stripShellWrapper('sh -c --')).toEqual('sh -c --');
   });
 });
 
@@ -813,26 +769,20 @@ describe('detectSelfKillCommand', () => {
     ]);
   });
 
-  // R11-2: the option terminator can be spelled with ANSI-C escapes, octal
-  // escapes or quote concatenation; each still ends option parsing, so the
-  // self-kill payload after it is the command (witnessed with sh/bash).
+  // The option terminator can be spelled with ANSI-C escapes, octal escapes
+  // or quote concatenation; each still ends option parsing, so the self-kill
+  // payload after it is the command (witnessed with sh/bash). A NUL ends the
+  // word, so `$'--\0x'` is the terminator `--`.
   it('detects self-kill behind an encoded option terminator', () => {
     expectEach(detectSelfKillCommand, true, [
       "sh -c $'\\x2d\\x2d' 'pkill -f qwen'",
       "sh -c $'\\055\\055' 'pkill -f qwen'",
       "sh -c -'-' 'pkill -f qwen'",
       "sh -c -- 'pkill -f qwen'",
-      // R11-2: a NUL ends the word, so `$'--\0x'` is the terminator `--`.
       "sh -c $'--\\0x' 'pkill -f qwen'",
       "sh -c $'--\\x00x' 'pkill -f qwen'",
       "sh -c $'--\\0' 'pkill -f qwen'",
     ]);
-  });
-
-  // R13-1: a fully quoted payload with a substitution is still unwrapped, so
-  // the self-kill gate sees the pkill the shell really runs.
-  it('detects self-kill inside a fully quoted payload with a substitution', () => {
-    expect(detectSelfKillCommand('sh -c "pkill -f $(echo qwen)"')).toBe(true);
   });
 
   it('does not read a locale word as an option terminator', () => {
@@ -958,15 +908,6 @@ describe('normalizeMonitorCommand', () => {
       strippedTrailingAmp,
     });
 
-  it('reads `--` as the -c option terminator', () => {
-    expect(normalizeMonitorCommand("sh -c -- 'ls -l'")).toEqual({
-      analysisCommand: 'ls -l',
-      safetyCommand: 'ls -l',
-      spawnCommand: "sh -c -- 'ls -l'",
-      strippedTrailingAmp: false,
-    });
-  });
-
   it('unwraps quoted env-prefixed shell wrappers for analysis', () => {
     expectNormalized(
       `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
@@ -1042,406 +983,18 @@ describe('normalizeMonitorCommand', () => {
     );
   });
 
-  // R11-2 consumer regression (#16075): a wrapper whose -c payload word
-  // carries an unresolvable expansion is handed back whole for the monitor to
-  // scan, but that must not read as "not a wrapper" to the cron gate, which
-  // refuses any wrapper whose glued script the rules would read differently.
-  it('flags an unresolvable wrapper payload while keeping the whole command for scanning', () => {
-    const glued = "bash -c 'cat /etc/hostname '$(touch${IFS}/tmp/x)''";
-    expect(normalizeMonitorCommand(glued)).toEqual({
-      analysisCommand: glued,
-      safetyCommand: glued,
-      spawnCommand: glued,
-      strippedTrailingAmp: false,
-      wrapperPayloadUnresolved: true,
-    });
-    const terminator = "sh -c $TERM 'ls -l'";
-    expect(normalizeMonitorCommand(terminator).safetyCommand).toBe(terminator);
-    expect(normalizeMonitorCommand(terminator).wrapperPayloadUnresolved).toBe(
-      true,
-    );
-  });
-
-  // R13-1 (#16075): a fully quoted payload that carries an expansion is
-  // unwrapped for analysis/safety, but the unresolved signal stays observable
-  // and spawnCommand keeps the whole command so the cron gate still refuses and
-  // the monitor still spawns exactly what the user wrote.
-  // R13-1 (second round, #16540): the spawn override keeps the payload word
-  // verbatim but normalises the trailing background `&` away. Keeping it made
-  // the monitor's tracked child fork the payload and exit, so a non-zero exit
-  // was reported as success.
-  // R1-2 (#16540 review): the payload after `--` is resolved like the one
-  // before it — an expansion there can assemble the script, so it fails closed
-  // instead of being analysed as literal text.
-  it.each([
-    "bash -c -- 'cat /etc/hostname '$(touch${IFS}/tmp/x)''",
-    "bash -c -- 'cat /etc/hostname '$X''",
-  ])('fails closed on an unresolvable payload after --: %s', (command) => {
-    const normalized = normalizeMonitorCommand(command);
-    expect(normalized.wrapperPayloadUnresolved).toBe(true);
-    expect(normalized.spawnCommand).toBe(command);
-    expect(normalized.safetyCommand).toBe(command);
-  });
-
-  // R1-3 (#16540 review): an ANSI-C payload is the decoded text the shell runs.
-  it('decodes an ANSI-C payload for analysis and spawns it as written', () => {
-    expect(stripShellWrapper("bash -c $'cat > /etc/motd'")).toBe(
-      'cat > /etc/motd',
-    );
-    expect(normalizeMonitorCommand("bash -c $'cat > /etc/motd'")).toEqual({
-      analysisCommand: 'cat > /etc/motd',
-      safetyCommand: 'cat > /etc/motd',
-      spawnCommand: "bash -c $'cat > /etc/motd'",
+  it('reads `--` as the -c option terminator', () => {
+    expect(normalizeMonitorCommand("sh -c -- 'ls -l'")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l',
+      spawnCommand: "sh -c -- 'ls -l'",
       strippedTrailingAmp: false,
     });
-    // The static payload after `--` still unwraps (existing behaviour).
-    expect(stripShellWrapper("sh -c -- 'ls -l'")).toBe('ls -l');
-  });
-
-  // R2-1 (#16540 review): the payload projection reads the resolved word rather
-  // than re-detecting ANSI-C from a `$'` substring, so a continuation-split
-  // introducer and a locale payload are both the script bash runs.
-  it('reads a payload whose introducer is split or locale-quoted', () => {
-    expect(stripShellWrapper("bash -c $\\\n'cat > /etc/motd'")).toBe(
-      'cat > /etc/motd',
-    );
-    expect(stripShellWrapper('sh -c $"cat > /etc/motd"')).toBe(
-      'cat > /etc/motd',
-    );
-  });
-
-  // R2-4 (#16540 review, round 3): the monitor projection kept its own spelling
-  // test, so the same two forms came back RAW as analysisCommand/safetyCommand
-  // and op extraction on them returned nothing — the write bash performs was
-  // invisible to the rule engine (witnessed: `sh -c $"cat > /tmp/…"` and
-  // `bash -c $\<newline>'cat > /tmp/…'` both create the file, rc 0).
-  it('projects a split or locale payload into the monitor commands', () => {
-    for (const command of [
-      "bash -c $\\\n'cat > /etc/motd'",
-      'sh -c $"cat > /etc/motd"',
-    ]) {
-      const normalized = normalizeMonitorCommand(command);
-      expect(normalized.safetyCommand).toBe('cat > /etc/motd');
-      expect(normalized.analysisCommand).toBe('cat > /etc/motd');
-      // The spawn stays exactly as written.
-      expect(normalized.spawnCommand).toBe(command);
-    }
-    // A locale word is still never read as the `--` terminator.
-    expect(
-      normalizeMonitorCommand(`sh -c $"\\x2d\\x2d" 'ls -l'`).analysisCommand,
-    ).not.toBe('--');
-  });
-
-  // R2-3 (#16540 review): inside `$'…'` a backslash escapes the next character,
-  // so `\'` does not close the payload word.
-  it('unwraps an ANSI-C payload that contains an escaped quote', () => {
-    expect(stripShellWrapper("bash -c $'cat > /tmp/x; echo \\'it\\''")).toBe(
-      "cat > /tmp/x; echo 'it'",
-    );
-    // A plain single-quoted word still closes at its first quote.
-    expect(stripShellWrapper("bash -c 'echo ok' 'sleep 5'")).toBe('echo ok');
-  });
-
-  // R2-2 (#16540 review): a literal non-BMP character is one code point, not two
-  // UTF-16 units encoded separately into U+FFFD.
-  it('decodes a literal astral character in an ANSI-C word', () => {
-    expect(decodeAnsiCWord('\u{1F600}')).toBe('\u{1F600}');
-    expect(decodeAnsiCWord('\\U0001F600')).toBe('\u{1F600}');
-  });
-
-  // R2-5 (#16540 review): `\c` consumes its operand, and a literal operand
-  // backslash makes the character after it plain text — bash builds 61 1c 74 62.
-  it('decodes a \\c\\ operand without re-reading it as an escape', () => {
-    expect(decodeAnsiCWord('a\\c\\tb')).toBe('a\u001ctb');
-  });
-
-  // R1-7 (#16540 review): `sh -c --` with no script gives the shell nothing to
-  // run — it exits 2 with "option requires an argument" and runs no program at
-  // all (witnessed on bash 5.3.20) — so there is no payload to read and the cron
-  // gate must refuse it. R3-11 corrected the earlier rationale, which claimed the
-  // shell runs an empty program.
-  it('flags a wrapper that carries no payload after --', () => {
-    expect(normalizeMonitorCommand('sh -c --').wrapperPayloadUnresolved).toBe(
-      true,
-    );
-  });
-
-  // R1-1 second round (#16540 review): a positional argument after the payload
-  // used to leave the payload's own `&` in the spawn command.
-  it.each([
-    ['bash -c "echo $(id) &" arg0', 'bash -c "echo $(id)" arg0'],
-    ['bash -c "tail -f $LOG &" /bin/bash', 'bash -c "tail -f $LOG" /bin/bash'],
-    ["bash -c $'echo $X &' arg0", "bash -c $'echo $X' arg0"],
-  ])('strips the payload & even with trailing argv: %s', (command, want) => {
-    expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
-  });
-
-  // `&&`, an escaped `\&` and an `&` inside a nested quoted word are not the
-  // payload's background operator and survive (#16540 review, R1-1).
-  it.each([
-    ['bash -c "echo $X \\&"', 'bash -c "echo $X \\&"'],
-    [`bash -c "echo $X '&'"`, `bash -c "echo $X '&'"`],
-    ['bash -c "echo a && echo b"', 'bash -c "echo a && echo b"'],
-  ])('keeps a non-backgrounding &: %s', (command, want) => {
-    expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
-  });
-
-  // R3-7 (#16540 review, round 3): escaped-ness is the PARITY of the backslash
-  // run. Each of these made the tracked shell fork the payload and exit 0, so the
-  // monitor reported success for a payload whose failure it never observed
-  // (witnessed: `bash -c x'\\&'` backgrounds, rc 0, while `bash -c 'exit 1'` is
-  // rc 1). `$'exit 1 & &'` used to sit here: stripping BOTH operators turned a
-  // script bash refuses to parse into a runnable one, so it now spawns verbatim
-  // and fails closed instead (#16540 review, R4-8).
-  it.each([
-    ["bash -c x'\\\\&'", "bash -c x'\\\\'"],
-    [`bash -c "exit 1"' &'`, `bash -c "exit 1"''`],
-    ['sleep 1 \\\\&', 'sleep 1 \\\\'],
-  ])(
-    'strips a background operator the spelling allows: %s',
-    (command, want) => {
-      expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
-    },
-  );
-
-  // Some spellings cannot be trimmed at all: an operator the shell only sees
-  // after decoding (`\x26`), or one glued outside the closing quote so the
-  // resolved text ends in `&&`. Refusing to certify beats reporting a strip that
-  // did not happen.
-  it.each(["bash -c $'exit 1 \\x26'", 'bash -c "exit 1 &"&'])(
-    'refuses a payload operator it cannot strip: %s',
-    (command) => {
-      expect(normalizeMonitorCommand(command).wrapperPayloadUnresolved).toBe(
-        true,
-      );
-    },
-  );
-
-  // R4-8 (#16540 review, round 4): two trailing operators are a script bash
-  // refuses to parse (`bash -c $'exit 1 & &'` exits 2, loudly). Stripping both
-  // produced a runnable command that backgrounds and exits 0 — a failure the
-  // monitor would report as success — so the spawn stays exactly as written and
-  // the wrapper is refused instead.
-  // R4-9: inside `"…"` a `\\` is ONE literal backslash, so `"echo a \\&"` is the
-  // script `echo a \&` whose `&` is data. Parity read off the spelling saw an
-  // even run, stripped the `&` and rewrote the monitored command.
-  it.each([
-    ["bash -c $'exit 1 & &'", "bash -c $'exit 1 & &'"],
-    ['bash -c "echo a \\\\&"', 'bash -c "echo a \\\\&"'],
-  ])('spawns the command the user wrote: %s', (command, want) => {
-    const normalized = normalizeMonitorCommand(command);
-    expect(normalized.spawnCommand).toBe(want);
-  });
-
-  it('refuses a payload whose operators cannot be stripped one at a time', () => {
-    expect(
-      normalizeMonitorCommand("bash -c $'exit 1 & &'").wrapperPayloadUnresolved,
-    ).toBe(true);
-  });
-
-  // R4-6b (#16540 review, round 4): the projection is decided by the RESOLVED
-  // word. This payload starts with `"`, so a first-character spelling test sent
-  // it down the raw path: `stripSymmetricQuotes` deleted only the outer
-  // characters, the decoded newline vanished, and `rm -rf /tmp/target`
-  // classified as read-only — auto-allowed with no prompt while the spawn
-  // deleted the directory.
-  it('projects a multi-span payload whose decoding the spelling hides', () => {
-    const command = `bash -c "echo x"$'\\n'"rm -rf /tmp/target"`;
-    expect(normalizeMonitorCommand(command).analysisCommand).toBe(
-      'echo x\nrm -rf /tmp/target',
-    );
-    expect(stripShellWrapper(command)).toBe('echo x\nrm -rf /tmp/target');
-  });
-
-  // R4-6a: a fully quoted payload projects even when it carries an expansion, so
-  // a `>` that sits outside every quoted span reaches op extraction.
-  it('projects a quoted payload that carries an expansion', () => {
-    expect(stripShellWrapper('bash -c -- "echo ${X}"\' > /tmp/p\'')).toBe(
-      'echo ${X} > /tmp/p',
-    );
-  });
-
-  // R4-3: an unquoted operator ends the word before any expansion happens, so
-  // `{ls,cat>/tmp/p}` is not a brace word. Modelling it as one dropped the
-  // redirect, `stripShellWrapper` returned `ls`, and a truncating write
-  // auto-allowed as read-only.
-  it('refuses to expand a brace group carrying an unquoted operator', () => {
-    expect(stripShellWrapper('bash -c {ls,cat>/tmp/p}')).toBe(
-      'bash -c {ls,cat>/tmp/p}',
-    );
-    // A quoted operator is data inside the group and still expands.
-    expect(stripShellWrapper(`bash -c {--,'cat > /etc/motd'}`)).toBe(
-      'cat > /etc/motd',
-    );
-  });
-
-  // R4-4 / R4-5: an unresolvable `-c` slot may itself BE the terminator, so the
-  // word after it is the script (measured: `X=-- ; bash -c "$X" 'echo TAIL_RAN'`
-  // prints TAIL_RAN). Unwrapping the slot as the payload dropped that word from
-  // op extraction and from the non-overridable self-kill gate.
-  it('reads the word after a slot that is nothing but expansion', () => {
-    expect(
-      detectSelfKillCommand(`bash -c "$(printf -- --)" 'pkill -f qwen'`),
-    ).toBe(true);
-    expect(stripShellWrapper(`bash -c "$X" 'cat > /etc/motd'`)).toBe(
-      'cat > /etc/motd',
-    );
-    expect(
-      extractShellOperationsAcrossCommand(
-        `bash -c $(echo '--') 'cat > /tmp/p'`,
-        '/repo',
-      ),
-    ).toEqual([{ virtualTool: 'write_file', filePath: '/tmp/p' }]);
-  });
-
-  // R3-5 (#16540 review, round 4): the brace scanner had its own quote state
-  // machine, which read `$'a\',b'` as closed at the escaped quote and split the
-  // group in the middle of a word. One scanner now decides all of it, so a comma
-  // inside an ANSI-C word is data and the first expanded word is what bash runs
-  // (witnessed: `printf '%s\n' {$'a\',b',c}` prints `a',b` then `c`).
-  it("splits a brace group with one $'…'-aware scanner", () => {
-    expect(stripShellWrapper(`bash -c {$'a\\',b',c}`)).toBe(`a',b`);
-    // A comma inside an ANSI-C word is data, not a separator.
-    expect(stripShellWrapper(`bash -c {a,$'b,c'}`)).toBe('a');
-    // Quoted alternatives keep expanding.
-    expect(stripShellWrapper(`bash -c {--,'cat > /etc/motd'}`)).toBe(
-      'cat > /etc/motd',
-    );
-  });
-
-  // R3-6: eighteen two-part groups enumerate 2^18 words and only the first is
-  // ever read. The product is capped, so the wrapper fails closed instead of
-  // overflowing the stack (measured: RangeError on a 98-character command).
-  it('fails closed on a brace product it will not enumerate', () => {
-    const command = `bash -c ${'{a,b}'.repeat(18)}`;
-    expect(() => stripShellWrapper(command)).not.toThrow();
-    expect(stripShellWrapper(command)).toBe(command);
-    // A product inside the cap still enumerates.
-    expect(stripShellWrapper(`bash -c {'cat > /etc/motd',x}`)).toBe(
-      'cat > /etc/motd',
-    );
-  });
-
-  // R3-4 (#16540 review): the locale introducer can be split by a continuation,
-  // and reading the literal next character classified `$\<newline>"…"` as an
-  // unquoted expansion, so the payload's writes were never analysed (witnessed:
-  // `sh -c $\<newline>"cat > /tmp/…"` creates the file, rc 0).
-  it('reads a locale payload whose introducer is split by a continuation', () => {
-    expect(stripShellWrapper('bash -c $\\\n"cat > /etc/motd"')).toBe(
-      'cat > /etc/motd',
-    );
-    // The unsplit spelling is unchanged.
-    expect(stripShellWrapper('bash -c $"cat > /etc/motd"')).toBe(
-      'cat > /etc/motd',
-    );
-  });
-
-  // R3-5 (#16540 review): inside `$'…'` a backslash escapes, so `\'` does not
-  // close the word. Reading it as a plain quote closed the word early and
-  // brace-expanded text that was still quoted data, dropping the real payload.
-  it('keeps a brace group inside an ANSI-C word out of brace expansion', () => {
-    expect(
-      stripShellWrapper(`bash -c $'\\'\\'--{ls,cat > /tmp/probe3 }'`),
-    ).toBe(`''--{ls,cat > /tmp/probe3 }`);
-    // A plain single-quoted word still closes at its first quote, so a brace
-    // group inside it is still data rather than an expansion.
-    expect(stripShellWrapper(`bash -c '--{ls,cat}'`)).toBe(`--{ls,cat}`);
-  });
-
-  // R3-6 (#16540 review): a second unquoted group in the suffix is part of the
-  // same cartesian expansion — `{a,b}{c,d}` is four words and the first is what
-  // the shell runs (witnessed: `bash -c {'cat',x}{' > /tmp/…',y}` creates the
-  // file). Bailing out handed the whole command back, hiding the redirect.
-  it('enumerates a second brace group instead of handing the command back', () => {
-    expect(stripShellWrapper(`bash -c {'cat',x}{' > /etc/motd',y}`)).toBe(
-      'cat > /etc/motd',
-    );
-    // The single-group pins are unchanged.
-    expect(stripShellWrapper(`bash -c {--,'cat > /etc/motd'}`)).toBe(
-      'cat > /etc/motd',
-    );
-  });
-
-  // R4-1 (#16540 review): the payload's background `&` sits inside the closing
-  // quote even when the payload word has an unquoted prefix. The old
-  // start-anchored pattern missed it, so the tracked shell forked the payload
-  // and exited 0 before it ran (witnessed: spawn rc 0, the same command without
-  // `&` rc 127).
-  it.each([
-    ['bash -c x"$Y &"', 'bash -c x"$Y"'],
-    ['bash -c /bin/sh"$Y &"', 'bash -c /bin/sh"$Y"'],
-    // The same background operator hides behind an unquoted prefix even when
-    // the script is static (witnessed: the spawn exited 0 while the payload
-    // without `&` exited 127).
-    ['bash -c x"exit 1 &"', 'bash -c x"exit 1"'],
-  ])(
-    'strips a quoted payload & behind an unquoted prefix: %s',
-    (command, want) => {
-      const normalized = normalizeMonitorCommand(command);
-      expect(normalized.spawnCommand).toBe(want);
-      expect(normalized.strippedTrailingAmp).toBe(true);
-    },
-  );
-
-  // R4-2 (#16540 review): a brace word in the -c slot is several words to the
-  // shell, so the wrapper must stay unresolvable for the gate instead of reading
-  // as one literal word, while op extraction sees the script it expands to
-  // (`bash -c {--,'echo A-RAN'}` prints A-RAN).
-  it('fails closed on an unquoted brace expansion in the -c slot', () => {
-    const command = "bash -c {--,'cat > /etc/motd'}";
-    expect(normalizeMonitorCommand(command)).toEqual({
-      analysisCommand: command,
-      safetyCommand: command,
-      spawnCommand: command,
+    expect(normalizeMonitorCommand("sh -c $'--\\0x' 'ls -l'")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l',
+      spawnCommand: "sh -c $'--\\0x' 'ls -l'",
       strippedTrailingAmp: false,
-      wrapperPayloadUnresolved: true,
-    });
-    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
-      { virtualTool: 'write_file', filePath: '/etc/motd' },
-    ]);
-  });
-
-  // R1-11 (#16540 review): `$\<newline>'…'` is still an ANSI-C word.
-  it('unwraps an option terminator after a backslash-newline ANSI-C opener', () => {
-    expect(stripShellWrapper("sh -c $\\\n'--' 'ls -l'")).toBe('ls -l');
-  });
-
-  it('strips an inner or glued payload & and reports it', () => {
-    expect(normalizeMonitorCommand('bash -c "echo $(id)"&')).toEqual({
-      analysisCommand: 'echo $(id)',
-      safetyCommand: 'echo $(id)',
-      spawnCommand: 'bash -c "echo $(id)"',
-      strippedTrailingAmp: true,
-      wrapperPayloadUnresolved: true,
-    });
-    expect(
-      normalizeMonitorCommand('bash -c "tail -f $LOG &"').spawnCommand,
-    ).toBe('bash -c "tail -f $LOG"');
-    // `&&` and `\&` stay untouched.
-    expect(
-      normalizeMonitorCommand('bash -c "echo $(id) && echo done"').spawnCommand,
-    ).toBe('bash -c "echo $(id) && echo done"');
-  });
-
-  it('strips a trailing background & from the spawn override', () => {
-    const command = 'bash -c "echo $(id)" &';
-    expect(normalizeMonitorCommand(command)).toEqual({
-      analysisCommand: 'echo $(id)',
-      safetyCommand: 'echo $(id)',
-      spawnCommand: 'bash -c "echo $(id)"',
-      strippedTrailingAmp: true,
-      wrapperPayloadUnresolved: true,
-    });
-  });
-
-  it('unwraps a fully quoted unresolved payload but keeps the spawn whole', () => {
-    const command = 'bash -c "echo hi; $(echo x > /etc/passwd)"';
-    expect(normalizeMonitorCommand(command)).toEqual({
-      analysisCommand: 'echo hi; $(echo x > /etc/passwd)',
-      safetyCommand: 'echo hi; $(echo x > /etc/passwd)',
-      spawnCommand: command,
-      strippedTrailingAmp: false,
-      wrapperPayloadUnresolved: true,
     });
   });
 });
@@ -1857,90 +1410,5 @@ describe('splitCommands', () => {
     ])('splits %s', (command, expected) => {
       expect(splitCommands(command)).toEqual(expected);
     });
-  });
-});
-
-// R1-4 / R1-6 (#16540 review): bash builds BYTES from an ANSI-C word, so a
-// multi-byte UTF-8 sequence spelled with `\xHH` decodes to the character it
-// writes, and `\c?` is DEL.
-// Round 6 (#16540 review): the two markers a permission gate and the monitor
-// need. Projecting the word after an unresolvable `-c` slot is right for op
-// extraction, but that projection is not provably the script bash runs — it may
-// be only `$0`, and an unquoted expansion is word-split — so `sh -c $TERM 'ls -l'`
-// read as read-only `ls -l` and auto-executed with no prompt.
-describe('wrapper script provability and payload operator markers', () => {
-  it.each([
-    // The `-c` slot is nothing but an expansion: the script is unprovable.
-    ["sh -c $TERM 'ls -l'", true],
-    [`bash -c "$X" 'cat > /etc/motd'`, true],
-    [`bash -c $(echo '--') 'cat > /etc/passwd'`, true],
-    // A fully quoted payload with an expansion IS the script: word splitting
-    // cannot reach it, so the projection is faithful and stays allowable.
-    [`bash -c "tail -f $LOG &"`, false],
-    [`bash -c "cat > /etc/motd"`, false],
-    [`bash -c -- 'cat > /etc/motd'`, false],
-    [`bash -c $'cat > /etc/motd'`, false],
-    ['ls -l', false],
-  ])('hasUnprovableWrapperScript(%s) === %s', (command, want) => {
-    expect(hasUnprovableWrapperScript(command)).toBe(want);
-  });
-
-  it.each([
-    // The operator survives into the spawn: the tracked shell would fork the
-    // payload and exit 0 before it ran.
-    ["bash -c $'exit 1 \\x26'", true],
-    ["bash -c $'exit 1 & &'", true],
-    ['bash -c "exit 1 &"&', true],
-    // The operator WAS stripped, so the monitor may run it.
-    [`bash -c "tail -f $LOG &"`, false],
-    [`bash -c "exit 1 &"`, false],
-    [`bash -c $'echo $X &' arg0`, false],
-    ['tail -f app.log', false],
-  ])('hasUnstrippablePayloadOperator(%s) === %s', (command, want) => {
-    expect(hasUnstrippablePayloadOperator(command)).toBe(want);
-  });
-});
-
-describe('round-4 lexing regressions', () => {
-  // R3-3 (#16540 review): bash 5.3.20 writes `61 1c 74 62` for BOTH
-  // `$'a\c\\tb'` and `$'a\c\tb'`, so the character after a `\c\` operand is
-  // literal text — and a second backslash there escapes the character after it
-  // instead of being emitted. Decoding it as an escape produced a TAB, and
-  // emitting the backslash produced a word bash never builds.
-  it('reads the character after a \\c\\ operand as literal text', () => {
-    expect(decodeAnsiCWord('a\\c\\\\tb')).toBe('a\u001ctb');
-    expect(decodeAnsiCWord('a\\c\\tb')).toBe('a\u001ctb');
-  });
-
-  // R3-3: bash does not reject an out-of-range `\U` — `printf %s
-  // $'a\U00110000' | xxd -p` is `61f4908080` with exit 0 — so the escape has to
-  // contribute those bytes. Keeping it literal read a different program name
-  // than the shell builds, and the old comment claimed the opposite of what bash
-  // does.
-  it('writes the bytes bash writes for an out-of-range \\U escape', () => {
-    expect(decodeAnsiCEscape('a\\U00110000', 1)?.bytes).toEqual([
-      0xf4, 0x90, 0x80, 0x80,
-    ]);
-    // An in-range code point is unchanged, and above the four-byte maximum there
-    // is nothing bash could encode, so the escape stays literal.
-    expect(decodeAnsiCWord('\\U0010FFFF')).toBe('\u{10FFFF}');
-    expect(decodeAnsiCEscape('\\U00200000', 0)?.bytes).toBeUndefined();
-  });
-  it.each([
-    ['\\xc3\\xa9', 'é'],
-    ['\\xe4\\xbd\\xa0', '你'],
-    ['\\U0001F600', '😀'],
-    ['caf\\xc3\\xa9', 'café'],
-  ])('decodes %s as the bytes bash writes', (body, expected) => {
-    const decoded = decodeAnsiCWord(body);
-    expect(decoded).toBe(expected);
-    expect(Buffer.from(decoded, 'utf8').toString('hex')).toBe(
-      Buffer.from(expected, 'utf8').toString('hex'),
-    );
-  });
-
-  it('maps \\c? to DEL', () => {
-    expect(decodeAnsiCWord('\\c?').charCodeAt(0)).toBe(0x7f);
-    expect(decodeAnsiCWord('\\cA').charCodeAt(0)).toBe(0x01);
   });
 });

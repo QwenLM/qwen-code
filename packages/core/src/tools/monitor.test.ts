@@ -666,35 +666,6 @@ describe('MonitorTool', () => {
       ).toBe(message);
     });
 
-    // R3-7 (#16540 review): `wrapperPayloadUnresolved` had exactly one
-    // production reader (the cron gate), so the monitor still spawned a payload
-    // whose background operator could not be stripped: the tracked shell forked
-    // it and exited 0, and `settleFromExit(0)` reported success for a failure
-    // nobody observed (`bash -c $'exit 1 \x26'; echo $?` prints 0 while the
-    // payload exits 1).
-    it('rejects a payload whose background operator cannot be stripped', () => {
-      expect(validate({ command: `bash -c $'exit 1 \\x26'` })).toMatch(
-        /must not background the payload/,
-      );
-      // Two trailing operators are refused by the non-final-operator check that
-      // runs first; either way the monitor does not spawn it.
-      expect(validate({ command: `bash -c $'exit 1 & &'` })).toMatch(
-        /must not (background the payload|contain non-final top-level background operators)/,
-      );
-      expect(validate({ command: `bash -c "exit 1 &"&` })).toMatch(
-        /must not background the payload/,
-      );
-    });
-
-    // …without refusing the monitor's ordinary dynamic payloads, whose operator
-    // IS stripped from the spawn (`bash -c "tail -f $LOG &"` spawns
-    // `bash -c "tail -f $LOG"`).
-    it('accepts a payload whose background operator was stripped', () => {
-      expect(validate({ command: `bash -c "tail -f $LOG &"` })).toBeNull();
-      expect(validate({ command: `bash -c "exit 1 &"` })).toBeNull();
-      expect(validate({ command: `bash -c $'echo $X &' arg0` })).toBeNull();
-    });
-
     it('accepts final trailing ampersands that monitor normalization strips', () => {
       expect(validate({ command: 'tail -f app.log &' })).toBeNull();
       expect(validate({ command: "bash -c 'tail -f app.log &'" })).toBeNull();

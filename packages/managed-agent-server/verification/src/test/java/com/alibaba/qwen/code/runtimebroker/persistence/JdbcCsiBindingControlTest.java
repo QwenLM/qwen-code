@@ -10,6 +10,8 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.time.Duration;
@@ -135,8 +137,9 @@ class JdbcCsiBindingControlTest {
         assertNotNull(fixture.bindings().releaseOperation(original.getBindingId(), "owner", claimed.getOperationGeneration()));
     }
 
-    @Test
-    void aRetainedCurrentPinCannotBeSkippedWhenTheBindingCapabilityLooksGeneric() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "csi-files-retirement/2"})
+    void aRetainedCurrentPinCannotBeSkippedWhenTheBindingCapabilityLooksGeneric(String profile) throws Exception {
         var fixture = fixture();
         var original = fixture.bindings().findOrCreate(request());
         var ordinary = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
@@ -153,6 +156,11 @@ class JdbcCsiBindingControlTest {
                     + "', request_key = '" + ordinary.requestKey() + "'");
             sql(connection,
                     "DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
+            sql(connection, "UPDATE ma_session SET tool_profile = '" + profile + "', runtime_request_key = NULL");
+            connection.setAutoCommit(false);
+            assertThrows(RuntimeBrokerException.class,
+                    () -> JdbcCsiFilesRetirementGuard.lockExecutionControl(connection, original.getBindingId()));
+            connection.rollback();
         }
         assertEquals(ordinary, fixture.bindings().findById(original.getBindingId()).getRequest());
         assertThrows(RuntimeBrokerException.class,

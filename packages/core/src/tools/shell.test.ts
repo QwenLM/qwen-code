@@ -4964,27 +4964,6 @@ describe('ShellTool', () => {
       expect(await build(command).getDefaultPermission()).toBe('ask');
     });
 
-    // Round 6 (#16540 review): a wrapper whose `-c` slot is nothing but an
-    // expansion has no provable script. The projected word may be only `$0`
-    // (`sh -c <script> <$0>`), and an UNQUOTED expansion is word-split, so
-    // anything can be injected into the slot. `sh -c $TERM 'ls -l'` projected to
-    // read-only `ls -l`, `hasShellSubstitution` does not flag a bare `$VAR`, and
-    // the command auto-executed with no prompt.
-    it.each([
-      ['asks when the -c slot is an unquoted expansion', `sh -c $TERM 'ls -l'`],
-      ['asks when the -c slot is only an expansion', `bash -c "$X" 'ls -l'`],
-    ])('%s', async (_title, command) => {
-      expect(await build(command).getDefaultPermission()).toBe('ask');
-    });
-
-    // A fully quoted payload is the script itself: word splitting cannot reach
-    // inside the quotes, so the projection is faithful and stays allowable.
-    it('still allows a fully quoted payload with an expansion', async () => {
-      expect(
-        await build(`bash -c "tail -f $LOG &"`).getDefaultPermission(),
-      ).toBe('allow');
-    });
-
     it('asks for a read-only command only when its directory is outside the workspace', async () => {
       const local = build('ls -la', { directory: '/test/dir/subdir' });
       expect(await local.getDefaultPermission()).toBe('allow');

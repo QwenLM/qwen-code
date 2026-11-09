@@ -47,6 +47,7 @@ public class ManagedSessionStore
     private final JournalResourceWrites resourceWrites;
     private final JournalWriterLifecycle writerLifecycle;
     private final JournalCommit commits;
+    private final org.springframework.transaction.support.TransactionTemplate writerTransactions;
 
     public ManagedSessionStore(JdbcTemplate jdbc) {
         this(jdbc, new ManagedExtensionRecordStore(jdbc));
@@ -85,6 +86,9 @@ public class ManagedSessionStore
                         ? original
                         : null;
         var manager = new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource());
+        this.writerTransactions = new org.springframework.transaction.support.TransactionTemplate(manager);
+        this.writerTransactions.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        this.writerTransactions.setTimeout(30);
         ToolPublicationRetentionStore outputRetention = new ToolPublicationRetentionStore(jdbc, manager);
         var ownerReads = new org.springframework.transaction.support.TransactionTemplate(manager);
         ownerReads.setTimeout(10);
@@ -94,7 +98,7 @@ public class ManagedSessionStore
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
         this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention, ownerReads);
         this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc);
-        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings);
+        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords);
         this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
     }
 
@@ -167,16 +171,23 @@ public class ManagedSessionStore
                 placement, publicationGuard);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {
-        return writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request, null);
+        return acquireWriter(tenantId, sessionId, writerToken, request, null);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
             AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        return writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request, authority);
+        JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
+        fencing.requireCredential(tenantId, request.workspaceId(), sessionId, writerToken);
+        for (;;) {
+            WriterGrant grant = writerTransactions.execute(status -> writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request, authority));
+            if (grant != null) {
+                return grant;
+            }
+        }
     }
 
     @Transactional
