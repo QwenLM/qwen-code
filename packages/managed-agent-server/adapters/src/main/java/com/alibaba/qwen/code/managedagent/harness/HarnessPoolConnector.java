@@ -378,7 +378,7 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsSideQueries() {
-        return feature("side-query/1") && !accepting.isEmpty();
+        return feature(HarnessFeature.SIDE_QUERY) && !accepting.isEmpty();
     }
 
     @Override

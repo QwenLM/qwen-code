@@ -857,7 +857,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean supportsSideQueries() {
         try {
-            return sessionStore.isEnabled() && client().capabilities().getFeatures().contains("side-query/1");
+            return sessionStore.isEnabled() && HarnessFeature.SIDE_QUERY.in(client().capabilities().getFeatures());
         } catch (RuntimeException unavailable) {
             return false;
         }
