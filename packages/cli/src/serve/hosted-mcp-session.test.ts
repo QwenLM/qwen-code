@@ -2101,6 +2101,21 @@ it('charges only live MCP selections against the 32-entry capacity', () => {
   expect(added).toHaveLength(33);
   expect(added.filter((entry) => entry.state !== 'removed')).toHaveLength(2);
 
+  // The accepted maximum is 16 enabled: tightening the bound by one must
+  // turn this assertion red while the 17-enabled rejection below stays green.
+  const atEnabledCapacity = previous.map((entry, index) => ({
+    ...entry,
+    state: (index < 15 ? 'enabled' : 'removed') as 'enabled' | 'removed',
+  }));
+  const filled = selectedMcpServers(
+    atEnabledCapacity,
+    managementCommand('add', 'server-32', 0, {
+      ...pin,
+      serverId: 'server-32',
+    }),
+  );
+  expect(filled.filter((entry) => entry.state === 'enabled')).toHaveLength(16);
+
   const tooManyLive = Array.from({ length: 32 }, (_, index) => ({
     ...pin,
     serverId: `server-${index}`,
@@ -2148,6 +2163,32 @@ it('commits a 32-live-plus-tombstone snapshot that a fresh reader opens', async 
   // restoring `body['servers'].length > 32` there must turn this read red.
   const history = await readHostedMcpSettings(session);
   expect(history.at(-1)?.servers).toHaveLength(33);
+});
+
+it('refuses a durable record whose live selections exceed the reader capacity', async () => {
+  // commitHostedMcpSettings performs no capacity validation of its own, so
+  // the reader is the only gate on a record at rest: deleting or widening
+  // its non-removed count clause must turn this rejection red.
+  const previous = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `live-${index}`,
+    state: 'disabled' as const,
+  }));
+  const command = managementCommand('add', 'live-32', 0, {
+    ...pin,
+    serverId: 'live-32',
+  });
+  const overfilled = [
+    ...previous,
+    { ...pin, serverId: 'live-32', state: 'disabled' as const },
+  ];
+  expect(overfilled.filter((entry) => entry.state !== 'removed')).toHaveLength(
+    33,
+  );
+  await commitHostedMcpSettings(session, command, overfilled);
+  await expect(readHostedMcpSettings(session)).rejects.toThrow(
+    'Invalid MCP settings.',
+  );
 });
 
 it('adds MCP to an ordinary Session with no initial pins and rejects an unpublished definition before committing', async () => {
