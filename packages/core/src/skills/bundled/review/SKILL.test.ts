@@ -413,10 +413,46 @@ describe('bundled review skill', () => {
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
     // …and the re-run instruction, including the flag-replacement rule that
-    // keeps a second `--since` from reading as two anchors.
+    // keeps a second `--since`/`--since-model` from reading as two anchors.
     expect(body).toContain(
-      'REPLACING any `--since` it already carries, never appending a second one',
+      'REPLACING any `--since` and any `--since-model` it already carries, ' +
+        'never appending a second one',
     );
+    // The marker recovery re-run must carry BOTH fields, taken from the side
+    // file's `sha`/`model` pair. The command "above" it carries neither on this
+    // path (no cache), or another model's when the cache anchor was withheld —
+    // so a reader who copies the model half from there is refused as
+    // `cross-model-anchor` and reviews the full diff. Sliced to THIS sentence
+    // — the same `--since <sha>` words occur in the cache path, where they are
+    // already correct — so the assertion cannot be satisfied by that other
+    // occurrence.
+    const reRunAt = body.indexOf(
+      're-run the `fetch-pr` command from above with',
+    );
+    expect(reRunAt).toBeGreaterThan(-1);
+    const reRunSentence = body.slice(
+      reRunAt,
+      body.indexOf('never appending a second one', reRunAt),
+    );
+    expect(reRunSentence).toContain('--since-model');
+  });
+
+  it('describes the effective incremental scope without the retired range model', () => {
+    // The `effective: true` bullet used to call the report's diff `since..head`
+    // — the full-range model the narrowing replaced. Naming that range invites
+    // a reader to hand the anchor to git, which this same section forbids; the
+    // published scope is `incremental.scope`'s file classes.
+    const body = skillBody();
+    const at = body.indexOf('`effective: true` (no `upToDate`)');
+    expect(at).toBeGreaterThan(-1);
+    const rest = body.slice(at + 1);
+    const nextBullet = rest.indexOf('\n    - `');
+    expect(nextBullet).toBeGreaterThan(-1);
+    const bullet = rest.slice(0, nextBullet);
+    expect(bullet).not.toMatch(/since\.\.head/);
+    expect(bullet).toContain('`deltaFiles`');
+    expect(bullet).toContain('`interaction[]`');
+    expect(bullet).toContain('`contextFileCount`');
   });
 
   it('pins which refusal reasons the recovery flow may retry', () => {
@@ -1931,6 +1967,54 @@ describe('bundled review skill', () => {
     );
     expect(posting).not.toContain('position-independent substring test');
     expect(posting).not.toContain('occurs _anywhere_ in its body');
+  });
+
+  it('warns that --new-findings is not the canonical artifact (#9218)', () => {
+    // Revert guard: the artifact's `line` is the agent's claim and its `id`
+    // sits on every finding, so handing this flag the artifact makes the
+    // overlap dedup key on a line no comment was placed at — a duplicate then
+    // reads as disjoint. The step that writes the file has to say so, name the
+    // resolver's input as the other forbidden sibling, and keep the three
+    // qualifications that make the recipe safe: the body-only placeholder the
+    // resolver cannot carry, the carried-only `id`, and the `startLine` rename
+    // a mechanical projection trips over (#9218 review).
+    const posting = referenceBody('posting.md');
+    // Unique to this sentence. The bare phrase "is the agent's claim" also sits
+    // in the resolver section, where it would keep the assertion green after
+    // the rationale here was reworded (#9218 review, R1-6).
+    expect(posting).toContain(
+      "the artifact's `locations[].line` is the agent's claim",
+    );
+    expect(posting).toContain("nor the resolver's INPUT `…-anchors.json`");
+    expect(posting).toContain('raw `…-anchors-resolved.json` output');
+    expect(posting).toContain(
+      'only `path`, `line`, `start_line`, and optional carried `id`',
+    );
+    expect(posting).toContain('drop `anchor` and all other resolver metadata');
+    expect(posting).toContain(
+      'spells the range field `startLine`, so rename it',
+    );
+    expect(posting).toContain(
+      '`line` must be a nonnegative integer (missing/null means 0)',
+    );
+    expect(posting).toContain(
+      '`start_line`, when present, must be a positive integer with a positive `line`',
+    );
+    expect(posting).toContain(
+      'still add one id-less placeholder `{path, line}` for every body-only Critical',
+    );
+    expect(posting).toContain(
+      "an aggregate's locations carry `<id>-k`, which this shape refuses",
+    );
+    expect(posting).toContain(
+      'Match the full finding ID or its `<findingId>-k` expansion',
+    );
+    expect(posting).toContain(
+      'never blindly strip a trailing `-<n>`, because a standalone ledger ID such as `R3-2` is already complete',
+    );
+    expect(posting).toContain(
+      'must never be written over the canonical artifact',
+    );
   });
 
   it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {

@@ -163,10 +163,10 @@ public final class ToolPublicationDataStore {
             capture.set(field, manifest.path(field));
         }
         var publication = jdbc.query("SELECT producer_phase, admission_resource_id,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM ma_output_capture"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope(key), publicationId).getFirst();
         require("REFERENCED".equals(publication.get("producer_phase"))
-                && ((Number) publication.get("quarantined")).intValue() == 0,
+                && ((Number) publication.get("is_quarantined")).intValue() == 0,
                 "Original publication receipt is unavailable");
         String admissionId = (String) publication.get("admission_resource_id");
         byte[] bytes = readResource(key, publicationId, admissionId);
@@ -355,7 +355,7 @@ public final class ToolPublicationDataStore {
                                     + " AND publication_id = ? AND slot_key = ? AND operation_id = ? AND capture_state = 'CANDIDATE'",
                             bytes, scope, publicationId, slot, operationId);
                 }
-                jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", verification_ready = TRUE, verification_next_at = ?, claim_owner = NULL, claim_until = NULL WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
+                jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_verification_ready = TRUE, verification_next_at = ?, claim_owner = NULL, claim_until = NULL WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
                         now(), scope, publicationId, operationId);
             });
             verificationWakeup.run();
@@ -367,7 +367,7 @@ public final class ToolPublicationDataStore {
     }
 
     boolean verifyNextOperation() {
-        var candidates = jdbc.query("SELECT scope_key, publication_id, operation_id, claim_generation, verification_request_json FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND execution_mode = 'ASYNC' AND state = 'PENDING' AND verification_ready = TRUE AND verification_next_at <= " + ManagedSchemaTime.SQL_NOW + " ORDER BY verification_next_at, scope_key, publication_id, operation_id LIMIT 32", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
+        var candidates = jdbc.query("SELECT scope_key, publication_id, operation_id, claim_generation, verification_request_json FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND execution_mode = 'ASYNC' AND state = 'PENDING' AND is_verification_ready = TRUE AND verification_next_at <= " + ManagedSchemaTime.SQL_NOW + " ORDER BY verification_next_at, scope_key, publication_id, operation_id LIMIT 32", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
         boolean processed = false;
         for (var candidate : candidates) {
             String scope = (String) candidate.get("scope_key");
@@ -841,7 +841,7 @@ public final class ToolPublicationDataStore {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         String scope = scope(key);
-        var rows = jdbc.query("SELECT o.state, o.result_json, o.failure_status, o.failure_code, CASE WHEN o.execution_mode = 'ASYNC' AND o.verification_ready THEN 1 ELSE 0 END AS ready, COALESCE(o.recovery_deadline, o.deadline) AS deadline, CASE WHEN o.claim_owner IS NULL OR o.claim_until < " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS retryable, p.tenant_id, p.token_hash, p.workspace_id, p.session_id FROM ma_operation o JOIN ma_output_capture p ON p.scope_key = o.scope_key AND p.publication_id = o.publication_id WHERE o.operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND o.scope_key = ? AND o.publication_id = ? AND o.operation_id = ?",
+        var rows = jdbc.query("SELECT o.state, o.result_json, o.failure_status, o.failure_code, CASE WHEN o.execution_mode = 'ASYNC' AND o.is_verification_ready THEN 1 ELSE 0 END AS ready, COALESCE(o.recovery_deadline, o.deadline) AS deadline, CASE WHEN o.claim_owner IS NULL OR o.claim_until < " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS retryable, p.tenant_id, p.token_hash, p.workspace_id, p.session_id FROM ma_operation o JOIN ma_output_capture p ON p.scope_key = o.scope_key AND p.publication_id = o.publication_id WHERE o.operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND o.scope_key = ? AND o.publication_id = ? AND o.operation_id = ?",
                 (r, n) -> {
                     Map<String, Object> row = new HashMap<>();
                     for (String field : List.of("state", "tenant_id", "workspace_id", "session_id", "token_hash",
@@ -892,10 +892,10 @@ public final class ToolPublicationDataStore {
         transactions.executeWithoutResult(status -> {
             var authorization = authorizeClaim(key, scope, publicationId, token);
             var publication = jdbc.query("SELECT producer_phase, finish_operation_id,"
-                    + " finish_predecessor_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                    + " finish_predecessor_id, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                     + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                     scope, publicationId).getFirst();
-            require(((Number) publication.get("quarantined")).intValue() == 0,
+            require(((Number) publication.get("is_quarantined")).intValue() == 0,
                     "Publication is quarantined");
             List<Operation> rows = operation(scope, publicationId, operationId, true);
             require(rows.size() == 1, "Publication operation is missing");
@@ -1063,7 +1063,7 @@ public final class ToolPublicationDataStore {
     private JsonNode finishedInternal(JsonNode key, String publicationId) {
         String scope = scope(key);
         var publications = jdbc.query("SELECT producer_phase,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, binding_json,"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, binding_json,"
                 + " terminal_resource_id, finish_operation_id FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
@@ -1074,7 +1074,7 @@ public final class ToolPublicationDataStore {
         require("FINISHED".equals(publication.get("producer_phase"))
                 || "REFERENCED".equals(publication.get("producer_phase")),
                 "Publication has no finished result");
-        require(((Number) publication.get("quarantined")).intValue() == 0,
+        require(((Number) publication.get("is_quarantined")).intValue() == 0,
                 "Finished publication is quarantined");
         String resourceId = (String) publication.get("terminal_resource_id");
         Resource terminal = catalogResource(key, publicationId, resourceId);
@@ -1102,7 +1102,7 @@ public final class ToolPublicationDataStore {
                 "Invalid admission outcome");
         byte[] bytes = outcome.toString().getBytes(StandardCharsets.UTF_8);
         require(bytes.length <= MAX_TERMINAL, "Admission outcome is too large");
-        grants.lockStagedPlacement(key, publicationId);
+        grants.lockStagedPlacement(key, publicationId, false);
         JsonNode original = finished(key, publicationId, writerToken);
         JsonNode envelope = original.path("result");
         String decision = "complete".equals(text(envelope.path("capture"), "captureStatus"))
@@ -1116,12 +1116,9 @@ public final class ToolPublicationDataStore {
         String digest = ToolPublicationContract.sha256(bytes);
         String scope = scope(key);
         AdmissionCandidate candidate = transactions.execute(status -> {
-            lockOriginalSettledResult(key, publicationId, original);
-            lockTenant(key);
-            sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), writerId, writerGeneration, writerToken);
+            grants.lockAdmissionLane(key, publicationId, original, writerId, writerGeneration, writerToken);
             var publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
-                    + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined,"
+                    + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined,"
                     + " admission_bytes, admission_used_bytes,"
                     + " admission_resource_id, terminal_resource_id FROM ma_output_capture"
                     + " WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
@@ -1131,7 +1128,7 @@ public final class ToolPublicationDataStore {
             require("FINISHED".equals(publication.get("producer_phase"))
                     || "REFERENCED".equals(publication.get("producer_phase")),
                     "Publication is not finished");
-            require(((Number) publication.get("quarantined")).intValue() == 0,
+            require(((Number) publication.get("is_quarantined")).intValue() == 0,
                     "Publication is quarantined");
             require(original.path("terminal").path("resourceId").asText()
                     .equals(publication.get("terminal_resource_id")),
@@ -1176,18 +1173,15 @@ public final class ToolPublicationDataStore {
         }
         if (!candidate.verified()) {
             transactions.executeWithoutResult(status -> {
-                lockOriginalSettledResult(key, publicationId, original);
-                lockTenant(key);
-                sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                        text(key, "sessionId"), writerId, writerGeneration, writerToken);
+                grants.lockAdmissionLane(key, publicationId, original, writerId, writerGeneration, writerToken);
                 var publication = jdbc.query("SELECT producer_phase, terminal_resource_id, binding_json, binding_digest,"
-                        + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                        + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                         + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
                         + " AND workspace_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
                         text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId")).getFirst();
                 ToolPublicationStore.requireLockedBinding(publication, original.path("binding"));
                 require("FINISHED".equals(publication.get("producer_phase"))
-                        && ((Number) publication.get("quarantined")).intValue() == 0
+                        && ((Number) publication.get("is_quarantined")).intValue() == 0
                         && original.path("terminal").path("resourceId").asText()
                         .equals(publication.get("terminal_resource_id")), "Admission publication changed");
                 Stored row = stored(scope, publicationId, "admission", true).get(0);
@@ -1285,11 +1279,11 @@ public final class ToolPublicationDataStore {
             return new FinishClaim(0, null, terminal.objectKey(), terminal.resourceId(), binding, receipt);
         }
         Map<String, Object> row = jdbc.query("SELECT producer_phase, active_operation_id,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined,"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined,"
                 + " finish_operation_id, finish_predecessor_id, finish_digest, producer_bytes,"
                 + " producer_used_bytes FROM ma_output_capture WHERE scope_key = ?"
                 + " AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
-        require(((Number) row.get("quarantined")).intValue() == 0,
+        require(((Number) row.get("is_quarantined")).intValue() == 0,
                 "Publication is quarantined");
         String phase = (String) row.get("producer_phase");
         require("OPEN".equals(phase) || "FINISHING".equals(phase) || "FINISHED".equals(phase),
@@ -1367,7 +1361,7 @@ public final class ToolPublicationDataStore {
         List<Operation> current = operation(scope, publicationId, operationId, true);
         requireOperationClaim(current, claim.epoch(), now());
         Map<String, Object> publication = jdbc.query("SELECT producer_phase,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, finish_operation_id,"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, finish_operation_id,"
                 + " finish_predecessor_id, finish_digest, active_operation_id, capture_used_bytes,"
                 + " producer_used_bytes FROM ma_output_capture WHERE scope_key = ?"
                 + " AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
@@ -1375,7 +1369,7 @@ public final class ToolPublicationDataStore {
                 && operationId.equals(publication.get("finish_operation_id"))
                 && digest.equals(publication.get("finish_digest"))
                 && publication.get("active_operation_id") == null
-                && ((Number) publication.get("quarantined")).intValue() == 0,
+                && ((Number) publication.get("is_quarantined")).intValue() == 0,
                 "Finish barrier changed");
         if (claim.predecessor() != null) {
             List<Operation> previous = operation(scope, publicationId, claim.predecessor(), true);
@@ -1502,10 +1496,10 @@ public final class ToolPublicationDataStore {
             return new ScanClaim(0, exactSucceededReplay(scope, publicationId, operationId, slot, requestDigest));
         }
         var phase = jdbc.query("SELECT producer_phase, finish_predecessor_id,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
-        require(((Number) phase.get("quarantined")).intValue() == 0,
+        require(((Number) phase.get("is_quarantined")).intValue() == 0,
                 "Publication is quarantined");
         require("OPEN".equals(phase.get("producer_phase"))
                 || "FINISHING".equals(phase.get("producer_phase"))
@@ -1677,7 +1671,7 @@ public final class ToolPublicationDataStore {
                     requireOperationClaim(rows, epoch, current);
                     long until = Math.min(rows.get(0).deadline().getTime(),
                             current.getTime() + claimTimeout.toMillis());
-                    jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_until = ?, verification_next_at = CASE WHEN execution_mode = 'ASYNC' AND verification_ready THEN ? ELSE verification_next_at END WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
+                    jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_until = ?, verification_next_at = CASE WHEN execution_mode = 'ASYNC' AND is_verification_ready THEN ? ELSE verification_next_at END WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
                             new Timestamp(until), new Timestamp(until), scope, publicationId, operationId);
                 });
                 next = System.nanoTime() + interval;
@@ -1707,7 +1701,7 @@ public final class ToolPublicationDataStore {
         transactions.executeWithoutResult(status -> {
             retention.lockRetainedPublication(scope, publicationId);
             requireVerificationClaim(scope, publicationId);
-            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", quarantined = TRUE WHERE scope_key = ? AND publication_id = ?", scope, publicationId);
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_key = ? AND publication_id = ?", scope, publicationId);
             jdbc.update("UPDATE ma_resource SET capture_state = 'QUARANTINED'"
                     + " WHERE scope_key = ? AND publication_id = ?"
                     + " AND slot_key = ? AND capture_state = 'VERIFIED'", scope, publicationId, slot);
@@ -1798,10 +1792,10 @@ public final class ToolPublicationDataStore {
             return new Candidate(saved.objectKey(), saved.resourceId(), 0, replay);
         }
         var phase = jdbc.query("SELECT producer_phase, finish_predecessor_id,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
-        require(((Number) phase.get("quarantined")).intValue() == 0,
+        require(((Number) phase.get("is_quarantined")).intValue() == 0,
                 "Publication is quarantined");
         require("OPEN".equals(phase.get("producer_phase"))
                 || "FINISHING".equals(phase.get("producer_phase"))
@@ -1939,27 +1933,27 @@ public final class ToolPublicationDataStore {
         grants.requireStagedCall(key, publicationId);
     }
 
-    void lockStagedPlacement(JsonNode key, String publicationId) {
-        grants.lockStagedPlacement(key, publicationId);
+    void lockStagedPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
+        grants.lockStagedPlacement(key, publicationId, requirePlacement);
     }
 
-    void lockPublicationPlacement(JsonNode key, String publicationId) {
-        grants.lockPublicationPlacement(key, publicationId);
+    boolean lockPublicationPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
+        return grants.lockPublicationPlacement(key, publicationId, requirePlacement);
     }
 
-    void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
-        grants.lockOriginalSettledResult(key, publicationId, finished);
+    boolean lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
+        return grants.lockOriginalSettledResult(key, publicationId, finished);
     }
 
     private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId,
             String slot, String requestDigest) {
         var publication = jdbc.query("SELECT producer_phase, finish_operation_id,"
-                + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " terminal_resource_id, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
         require(("FINISHED".equals(publication.get("producer_phase"))
                 || "REFERENCED".equals(publication.get("producer_phase")))
-                && ((Number) publication.get("quarantined")).intValue() == 0,
+                && ((Number) publication.get("is_quarantined")).intValue() == 0,
                 "Original publication is not finished");
         List<Operation> prior = operation(scope, publicationId, operationId, true);
         require(prior.size() == 1 && "SUCCEEDED".equals(prior.get(0).state())
@@ -1986,13 +1980,6 @@ public final class ToolPublicationDataStore {
                 String.class, scope, publicationId, operationId);
         require(saved != null, "Original receipt is missing");
         return ToolPublicationContract.readJson(saved.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private void lockTenant(JsonNode key) {
-        // The entry point's first tenant-guard acquisition on this lane, so
-        // it runs bounded with the shared named-failure mapping (#13800).
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
-                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private List<Map<String, Object>> sealRows(String scope, String publicationId, String streamId) {
@@ -2131,14 +2118,14 @@ public final class ToolPublicationDataStore {
 
     private List<Operation> operation(String scope, String publicationId, String operationId, boolean locked) {
         return jdbc.query("SELECT request_digest, slot_key, state, claim_generation, claim_until, execution_mode,"
-                        + " verification_ready,"
+                        + " is_verification_ready,"
                         + " COALESCE(recovery_deadline, deadline) AS deadline"
                         + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ?"
                         + " AND operation_id = ?" + (locked ? " FOR UPDATE" : ""),
                 (r, n) -> new Operation(r.getString("request_digest"), r.getString("slot_key"),
                         r.getString("state"), r.getLong("claim_generation"), ManagedSchemaTime.timestamp(r, "claim_until"),
                         ManagedSchemaTime.timestamp(r, "deadline"), "ASYNC".equals(r.getString("execution_mode")),
-                        r.getBoolean("verification_ready")), scope, publicationId, operationId);
+                        r.getBoolean("is_verification_ready")), scope, publicationId, operationId);
     }
 
     private void verify(String scope, String publicationId, String objectKey, long length, String digest) {
@@ -2292,7 +2279,7 @@ public final class ToolPublicationDataStore {
         arguments.add(ToolPublicationRetentionStore.hash(text(key, "sessionId")));
         arguments.addAll(ids);
         var rows = jdbc.query("SELECT publication_id, producer_phase, admission_resource_id,"
-                + " receipt_revision, receipt_sequence, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " receipt_revision, receipt_sequence, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ?"
                 + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
                 + " AND NOT EXISTS (SELECT 1 FROM ma_session r"
@@ -2306,7 +2293,7 @@ public final class ToolPublicationDataStore {
 
     static boolean referenced(Map<String, Object> row, JsonNode outcomeRef, long revision, long sequence) {
         return row != null && "REFERENCED".equals(row.get("producer_phase"))
-                && row.get("quarantined") instanceof Number mark && mark.intValue() == 0
+                && row.get("is_quarantined") instanceof Number mark && mark.intValue() == 0
                 && outcomeRef != null && outcomeRef.path("resourceId").isTextual()
                 && outcomeRef.path("resourceId").asText().equals(row.get("admission_resource_id"))
                 && row.get("receipt_revision") instanceof Number r && r.longValue() == revision
@@ -2318,7 +2305,7 @@ public final class ToolPublicationDataStore {
         guard.run();
         String scope = scope(key);
         var publications = jdbc.query("SELECT binding_json, producer_phase,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM ma_output_capture"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
                 text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
@@ -2328,7 +2315,7 @@ public final class ToolPublicationDataStore {
         require(!requireFinished || "FINISHED".equals(publication.get("producer_phase"))
                 || "REFERENCED".equals(publication.get("producer_phase")),
                 "Publication is not finished");
-        require(((Number) publication.get("quarantined")).intValue() == 0,
+        require(((Number) publication.get("is_quarantined")).intValue() == 0,
                 "Publication is quarantined");
         JsonNode binding = ToolPublicationContract.readJson(
                 ((String) publication.get("binding_json")).getBytes(StandardCharsets.UTF_8));

@@ -6,6 +6,8 @@ import type {
   ManagedExtensionSettings,
   ManagedExtensionSnapshot,
   ManagedExtensionSelection,
+  ManagedExtensionImportMetadata,
+  ManagedExtensionInspection,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
@@ -13,7 +15,6 @@ import type {
   ManagedMcpManagementSnapshot,
 } from './managed-mcp-management-types';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
-
 export type ManagedAgentSessionPhase =
   | 'created'
   | 'admitted'
@@ -100,6 +101,45 @@ export function managedPermissionRulesEqual(
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+export type ManagedDiagnosticContextUsage =
+  components['schemas']['ManagedDiagnosticContextUsage'];
+export type ManagedDiagnosticStats =
+  components['schemas']['ManagedDiagnosticStats'];
+export type ManagedDiagnosticResources =
+  components['schemas']['ManagedDiagnosticResources'];
+export type ManagedDiagnosticAgentTrace =
+  components['schemas']['ManagedDiagnosticAgentTrace'];
+
+export interface ManagedDiagnosticsProvider {
+  getActivityStatistics?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<components['schemas']['ManagedDiagnosticActivityStats']>;
+  listActivity?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & {
+      kind: 'tools' | 'files' | 'skills';
+      cursor?: string;
+      limit?: number;
+    },
+  ): Promise<components['schemas']['ManagedDiagnosticActivityPage']>;
+  getContextUsage(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticContextUsage>;
+  getStatistics(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticStats>;
+  getResources(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticResources>;
+  listAgentTrace(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+  ): Promise<ManagedDiagnosticAgentTrace>;
+}
 export type ManagedSessionRecovery = components['schemas']['SessionRecovery'];
 export type ManagedTurnCancelOperation =
   components['schemas']['WebShellCommandOperation'];
@@ -217,6 +257,7 @@ export interface ManagedAgentSessionSummary {
     actions?: boolean;
     childAgents?: boolean;
     tasks?: boolean;
+    diagnostics?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
@@ -325,8 +366,7 @@ export interface ManagedWorkspaceRegistration {
   ): Promise<ManagedWorkspaceCreateOperation>;
 }
 
-/** A Hosted tool approval waiting for the Session owner's answer. */
-export interface ManagedAgentPendingAction {
+interface ManagedAgentActionIdentity {
   actionId: string;
   sessionId: string;
   /** Public Turn ID; absent when the Turn could not be resolved. */
@@ -335,12 +375,39 @@ export interface ManagedAgentPendingAction {
   toolName: string;
   inputRevision: number;
   policyRevision: string;
+  createdAt?: number;
   expiresAt: number;
+}
+
+export interface ManagedAgentPendingPermissionAction
+  extends ManagedAgentActionIdentity {
+  kind?: 'permission';
   options: Array<{ id: string; label: string }>;
   inputPreview?: components['schemas']['WebShellActionInputPreview'];
 }
 
+export interface ManagedAgentPendingQuestionAction
+  extends ManagedAgentActionIdentity {
+  kind: 'question';
+  questions: components['schemas']['WebShellActionQuestion'][];
+}
+
+export type ManagedAgentPendingAction =
+  | ManagedAgentPendingPermissionAction
+  | ManagedAgentPendingQuestionAction;
+
+export type ManagedAgentQuestionAnswer =
+  components['schemas']['WebShellQuestionAnswer'];
+
+export interface ManagedAgentQuestionResponse {
+  kind: 'question';
+  answers: ManagedAgentQuestionAnswer[];
+}
+
+export type ManagedAgentActionResponse = string | ManagedAgentQuestionResponse;
+
 export interface ManagedAgentProvider {
+  readonly diagnostics?: ManagedDiagnosticsProvider;
   readonly userMessages?: {
     query(
       sessionId: string,
@@ -424,6 +491,35 @@ export interface ManagedAgentProvider {
       archive: Blob,
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedExtensionPackageOperation>;
+    importPackage?(
+      workspaceId: string,
+      extensionId: string | undefined,
+      metadata: ManagedExtensionImportMetadata,
+      source: Blob,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    previewPackage?(
+      workspaceId: string,
+      metadata: ManagedExtensionImportMetadata,
+      source: Blob,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionInspection>;
+    inspect?(
+      workspaceId: string,
+      pin: ManagedExtensionPin,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionInspection>;
+    lookupPackageOperation?(
+      workspaceId: string,
+      kind: 'publish' | 'settings',
+      idempotencyKey: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    lookupApplyOperation?(
+      sessionId: string,
+      idempotencyKey: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
     settings(
       workspaceId: string,
       extensionId: string,
@@ -480,7 +576,7 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedMcpManagementSnapshot>;
   };
-  /** Present when the provider can serve Hosted permission Actions. */
+  /** Present when the provider can serve Hosted Actions. */
   readonly actions?: {
     listPending(
       sessionId: string,
@@ -488,7 +584,7 @@ export interface ManagedAgentProvider {
     ): Promise<ManagedAgentPendingAction[]>;
     respond(
       action: ManagedAgentPendingAction,
-      optionId: string,
+      response: ManagedAgentActionResponse,
       options: ManagedAgentCommandOptions,
     ): Promise<void>;
   };
@@ -716,7 +812,7 @@ export interface ManagedAgentProvider {
     sessionId: string,
     request: { text: string; input?: ManagedInputBlock[] },
     options: ManagedAgentCommandOptions,
-  ): Promise<ManagedAgentTurnAdmission & { operationId: string }>;
+  ): Promise<ManagedAgentTurnAdmission & { operationId?: string }>;
   cancel(
     sessionId: string,
     turnId: string,

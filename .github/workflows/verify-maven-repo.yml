@@ -113,6 +113,13 @@ jobs:
             qwen-managed-agent-runtime-broker
             qwen-managed-agent-persistence
             qwen-managed-agent-adapters
+            qwen-managed-agent-runtime-external
+            qwen-managed-agent-runtime-host
+            qwen-managed-agent-runtime-http
+            qwen-managed-agent-runtime-local
+            qwen-managed-agent-runtime-kubernetes
+            qwen-managed-agent-runtime-ssh
+            qwen-managed-agent-runtime-static
             qwen-managed-agent-server
             qwen-managed-agent-verification
             acp-sdk

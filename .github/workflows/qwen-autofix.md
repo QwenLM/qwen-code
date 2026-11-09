@@ -265,6 +265,7 @@ from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 - [158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-158)
 - [159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…](#af-159)
 - [160. (top level) · Env constant commentary — Moved out of the workflow verbatim to keep the file under GitHub's start-runs gate…](#af-160)
+- [161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…](#af-161)
 
 ---
 
@@ -2547,6 +2548,26 @@ runner) means grep exits 1, which would kill the step exactly
 when there is nothing to clean.
 ```
 
+The two preamble lines above that block are not the allowlist sweep and
+carry their own rationale. The worktree-scoped config file
+(`git rev-parse --git-path config.worktree`) is deleted first: a worktree
+keeps per-worktree config separately, and `extensions.worktreeConfig` is
+what makes git read it at all. Because `extensions.` is itself a KEPT
+allowlist key, that file is the one place a prior job on this pool can
+still plant `core.hooksPath` while the sweep below reports itself clean —
+so the file and the matching local `extensions.worktreeConfig` key both
+go before the sweep.
+
+The hooks path is then resolved with `GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_SYSTEM=/dev/null`, i.e. from the repository only, and only
+after the allowlist sweep. Both properties are load-bearing: resolving
+before the sweep would let a config a global override supplied decide the
+path the containment guard validates, and a prior job's
+`--worktree core.hooksPath=/` would survive the local sweep untouched,
+leave the hooks path outside the git dir, make the guard refuse the
+delete, and fire the planted hook on the next git command in this
+PAT-bearing job.
+
 <a id="af-086"></a>
 
 ### 86. issue-autofix · Stage trusted schema gate — The staged copy's trusted-base provenance holds at cp time only: RUNNER_TEMP is…
@@ -3793,6 +3814,16 @@ fills a per-run WORKDIR with API dumps that no VM teardown
 removes on the pool, so it gets a fixed autofix* per-run path
 (the age sweep can reclaim it after a hard kill), an EXIT
 trap, and an always() cleanup step mirroring issue-autofix.
+That cleanup must be the LAST step, after every reader including
+the artifact upload: nothing else removes the per-run WORKDIR, so
+on the persistent pool every run would otherwise leave its
+transcripts and decision files behind forever, and moving the
+`rm -rf "${WORKDIR}"` ahead of the upload deletes the transcript
+before its last reader — the upload's `if-no-files-found: ignore`
+then turns that into a silent no-op artifact. always() covers
+cancellation too; only a hard runner kill abandons the dir, and
+run_id never repeats, so the age sweep in Reset autofix workspace
+reclaims it.
 ```
 
 <a id="af-149"></a>
@@ -4626,6 +4657,14 @@ counted in eval markers rather than in ROUND:
   run still charges once. A run that is cancelled or dies in setup is
   NOT free: the report step runs on always() and writes its marker with
   a sentinel timestamp, so the census charges it.
+- The eval marker's fields are POSITIONAL in the scan regex
+  (`.[0]=ts .[2]=round .[3]=win .[4]=run`), so every write site must emit
+  `ts= acted= round= win= run=` in that order verbatim. Adding a field or
+  reordering them still produces a well-formed marker while the regex
+  binds the wrong captures, and the window watermark, round accounting
+  and budget census then count wrong numbers — which the consecutive and
+  cumulative caps gate on. Only the bot's own comments are trusted, so a
+  spoofed marker is ignored.
 - A breaker stop is NOT a spent budget. Three shapes reach the cap gate
   with the budget spent anyway: the consecutive-failure breaker jumps
   the round to MAX_ROUNDS with a real timestamp (no trailing sentinel),
@@ -4726,10 +4765,13 @@ zero-round engagement is what 'stop' already means (af-007).
 
 In the workflow `env:` block.
 
-The workflow file sits against this repository's own 470 KB gate
-(`.github/scripts/check-workflow-size.sh`, env-overridable, ~42 KB below
-GitHub's 512 KB start-runs limit), so the long-form commentary on the constants
-below lives here verbatim — with TWO exceptions, each marked at its entry: the
+The workflow file sits well under this repository's own gate
+(`.github/scripts/check-workflow-size.sh`, env-overridable at both ends) and
+well below GitHub's 512 KB start-runs limit; `.github/workflows/.size-baseline`
+records its current byte count, so no figure here can drift from the file. The
+gate is still close enough that the
+long-form commentary on the constants below lives here verbatim — with TWO
+exceptions, each marked at its entry: the
 `TAKEOVER_COMMAND` entry was updated to name the second parameterized form, and
 the `TRUSTED_ASSOC` entry gained the note on where the constant is read and what
 widening it would do. Neither is a byte-for-byte copy of the base block. Each
@@ -4827,4 +4869,83 @@ plus a pointer.
   # It is matched against `author_association` at every census site; widening it
   # (NONE, FIRST_TIME_CONTRIBUTOR) hands untrusted text to an agent that runs
   # with a write PAT.
+```
+
+---
+
+<a id="af-161"></a>
+
+### 161. review-address · Prepare branch and feedback — Failed-check evidence: the agent gets check NAMES only and holds no GitHub…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+New in this change, not moved from the YAML.
+
+The address agent receives check NAMES only ("Failed checks" and
+"Still-red checks" render name + conclusion) and holds no GitHub
+credentials, so "Linux unit tests (shard 3/8)" cannot tell it which
+step or assertion went red. For a locally reproducible lane that is
+survivable — the agent maps the name to the repository's own command
+and reruns it — but a shard name, a "Test" check that failed on a
+schema/lint step, or an environment-only lane each cost a full round
+of guessing. The CI Failure Patrol already distils job logs for its
+classifier (ci-flaky-rerun.mjs: redactLog + skillLog), so the
+asymmetry was a missing wire, not a missing capability.
+
+The collector (.github/scripts/autofix-check-evidence.mjs) prints the
+failed STEP NAMES plus a bounded log excerpt per failing job, reusing
+the patrol's skillLog so both automations redact secrets identically.
+Bounds: the first three distinct jobs in rollup order, skillLog's own
+~120-line selection kept whole (truncating it from the head drops the
+tail that carries the failure summary on a noisy multi-error log), an
+8 MiB execFileSync buffer past which the log is dropped rather than
+buffered. Selection mirrors the workflow's `## Still-red checks` gate
+— the same failure conclusions, the same "Qwen Autofix" self-lane
+exclusion with the review-address exception. The sibling `## Failed
+checks` list also admits CANCELLED; a cancelled job is not a failure
+to diagnose, so it is omitted here. External commit statuses carry no
+job URL and stay name-only.
+
+THE LOG FETCH NEEDS THREE PARTS, copied from autofix-pr/ci-log.ts's
+jobLog. Current gh refuses to print a response containing terminal
+escape sequences — which Actions job logs essentially always do —
+unless `--allow-escape-sequences` is passed; a bare call exits 1 with
+empty stdout, and a helper that swallows non-zero exits would silently
+render no excerpt at all. So: pass the flag; fall back to the bare
+call ONLY when stderr says `unknown flag` (older gh has neither the
+check nor the flag); and stripVTControlCharacters the result, because
+raw ANSI would otherwise reach feedback.md and step stdout, where the
+existing defang handles only `::` and `##[`. The behavioral suite's
+fake gh reproduces the refusal, so a missing flag turns it red. The
+same fix lands on the patrol's own GhClient.jobLog, which was equally
+log-blind on current gh. The excerpt fence is sized past any backtick
+run inside it, so a log line carrying backticks cannot close the fence
+early and spill the rest into feedback.md as markdown.
+
+PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
+switches the working tree to the PR branch, so the collector AND the
+patrol module it imports execute from the trusted base — the same
+position resolve-sandbox-image.mjs already runs from. Nothing here
+needs a staged copy or a digest: no branch code has executed on this
+host at that point. Moving the call below the checkout would execute
+branch-supplied code with the PAT in env, which is exactly what
+af-041/af-158 exist to prevent.
+
+Degradation is always toward LESS evidence, never a failed round: the
+script is absent from the trusted base until this merges (the node
+call is `|| true`), an unreadable rollup or a failed API read yields
+an empty or partial section, and the feedback block cats the file
+only when it is non-empty. Collector stderr rides
+WORKDIR/check-evidence.log, which the whole-WORKDIR artifact upload
+already carries, so a systematic failure is diagnosable without
+polluting the round log.
+
+The excerpt is a SNAPSHOT taken before checkout, and its preamble
+names the head it describes; the two name-only sections remain the
+authoritative list for the evaluated head. Log text is untrusted
+output: skillLog redacts credentials, headings are stripped to the
+same character class the check-name lists use, and the existing
+feedback echo defangs both workflow-command syntaxes before anything
+reaches step stdout.
 ```

@@ -22,7 +22,7 @@ export interface ImageMarker {
 }
 
 export interface ValidatedImage {
-  data: Buffer;
+  data: Buffer<ArrayBuffer>;
   fileName: string;
   mimeType: string;
 }

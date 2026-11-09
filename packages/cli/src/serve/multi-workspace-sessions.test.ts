@@ -597,6 +597,7 @@ function makeBridge(
           maxSessions: 20,
           maxPendingPromptsPerSession: 5,
           eventRingSize: 8_000,
+          eventRingMaxBytes: 8 * 1024 * 1024,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
@@ -621,6 +622,11 @@ function makeBridge(
           pendingPermissionCount: 0,
           hasActivePrompt: summary.hasActivePrompt,
           lastEventId: 0,
+          eventRingCount: 0,
+          eventRingBytes: 0,
+          eventRingEvictedEvents: 0,
+          eventRingEvictedBytes: 0,
+          availableCommandsSnapshotBytes: 0,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
         })),
@@ -1324,6 +1330,7 @@ describe('multi-workspace session dispatch', () => {
       },
     ]);
     expect(res.body.runtime.sessions.active).toBe(2);
+    expect(res.body.limits.eventRingMaxBytes).toBe(8 * 1024 * 1024);
     expect(res.body.runtime.channel.live).toBe(true);
 
     const full = await request(app)
@@ -1338,6 +1345,16 @@ describe('multi-workspace session dispatch', () => {
       '11111111-1111-4111-a111-111111111111',
       '22222222-2222-4222-a222-222222222222',
     ]);
+    for (const session of full.body.full.sessions) {
+      expect(session).toMatchObject({
+        eventRingCount: 0,
+        eventRingBytes: 0,
+        eventRingEvictedEvents: 0,
+        eventRingEvictedBytes: 0,
+        availableCommandsSnapshotBytes: 0,
+      });
+      expect(session).not.toHaveProperty('eventRingEarliestEventId');
+    }
   });
 
   it('rolls up secondary runtime channel issues in daemon status', async () => {
@@ -3194,9 +3211,11 @@ describe('multi-workspace session dispatch', () => {
       .set('Host', host())
       .send({ cwd: UNKNOWN_CWD });
 
-    expect(unknownRes.status).toBe(400);
-    expect(unknownRes.body.code).toBe('workspace_mismatch');
-    expect(unknownRes.body.workspaceCount).toBe(2);
+    // An explicit cwd with no registry entry is a permanent absence: 404
+    // workspace_not_found (the channel wake path keys Gone on it), not the
+    // reversible-state 400 workspace_mismatch.
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.body.code).toBe('workspace_not_found');
     expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
     expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);
@@ -6456,6 +6475,96 @@ describe('multi-workspace session dispatch', () => {
       ).toEqual([sessionIds[0]]);
       expect(second.body.nextCursor).toBeUndefined();
       expect(secondaryBridge.listCalls).toEqual([]);
+    });
+  });
+
+  it('lists live sessions when closed channel history fills the persisted page', async () => {
+    await withRuntimeDir(async () => {
+      const liveSessionId = '550e8400-e29b-41d4-a716-4466554401a0';
+      await writeStoredSession({
+        sessionId: liveSessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-01T00:00:00.000Z',
+        prompt: 'still live',
+        mtime: new Date('2026-07-01T00:00:00.000Z'),
+      });
+      for (let index = 0; index < 20; index += 1) {
+        const timestamp = `2026-07-08T00:${String(index).padStart(2, '0')}:00.000Z`;
+        await writeStoredSession({
+          sessionId: `550e8400-e29b-41d4-a716-4466554402${index
+            .toString(16)
+            .padStart(2, '0')}`,
+          cwd: SECONDARY_CWD,
+          timestamp,
+          prompt: `closed channel ${index}`,
+          mtime: new Date(timestamp),
+          sourceType: 'channel',
+        });
+      }
+      const { app } = makeHarness({
+        secondarySummaries: [
+          makeSummary(liveSessionId, SECONDARY_CWD, {
+            clientCount: 1,
+            updatedAt: '2026-07-01T00:01:00.000Z',
+          }),
+        ],
+      });
+
+      const persistedPage = await request(app)
+        .get('/workspaces/secondary-id/sessions?size=20')
+        .set('Host', host())
+        .expect(200);
+      expect(persistedPage.body.sessions).toHaveLength(20);
+      expect(
+        persistedPage.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).not.toContain(liveSessionId);
+
+      const livePage = await request(app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        livePage.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual([liveSessionId]);
+      expect(livePage.body.sessions[0]).toMatchObject({
+        clientCount: 1,
+        displayName: liveSessionId,
+      });
+    });
+  });
+
+  it('rejects liveOnly combined with persisted-only filters or untrusted workspaces', async () => {
+    await withRuntimeDir(async () => {
+      const trusted = makeHarness();
+      const filtered = await request(trusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1&view=organized')
+        .set('Host', host())
+        .expect(400);
+      expect(filtered.body.code).toBe('invalid_session_live_only_filter');
+
+      const questionSorted = await request(trusted.app)
+        .get(
+          '/workspaces/secondary-id/sessions?liveOnly=1&sortBy=lastUserPromptAt',
+        )
+        .set('Host', host())
+        .expect(400);
+      expect(questionSorted.body.code).toBe('invalid_session_live_only_filter');
+
+      const invalid = await request(trusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=0')
+        .set('Host', host())
+        .expect(400);
+      expect(invalid.body.code).toBe('invalid_session_live_only');
+
+      const untrusted = makeHarness({ secondaryTrusted: false });
+      await request(untrusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1')
+        .set('Host', host())
+        .expect(403);
     });
   });
 

@@ -103,6 +103,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private static final Pattern TURN_CURSOR = Pattern.compile(
             "^(0|[1-9][0-9]{0,18}):([A-Za-z0-9_-]{1,64})$");
     private static final int TURN_ID_MAX_LENGTH = 64;
+    /**
+     * How long a rename waits for a delivery the background coordinator
+     * claimed first. The coordinator scans {@code RENAME} rows a request has
+     * just admitted, so its claim can beat this request's own without any
+     * concurrent caller.
+     */
+    private static final java.time.Duration RENAME_CLAIM_SETTLE = java.time.Duration.ofSeconds(2);
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
     // "text" is the spelling that clients used before the contract.
@@ -143,7 +150,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsClose(SessionRecord session) {
-        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
             return false;
         }
         return session.workspace() == null || RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
@@ -200,6 +207,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String idempotencyKey, String agentId, String agentRevision,
             String title, Map<String, Object> metadata,
             List<InputBlock> blocks) {
+        return createSession(tenantId, actorId, idempotencyKey, agentId, agentRevision, title, metadata, blocks, null);
+    }
+
+    public CommandAdmission createSession(String tenantId, String actorId,
+            String idempotencyKey, String agentId, String agentRevision,
+            String title, Map<String, Object> metadata, List<InputBlock> blocks,
+            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = inputPolicy.input(blocks, false);
         String effectiveTitle = metadataTitle(title, metadata);
@@ -210,6 +224,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         semantic.put("title", effectiveTitle);
         semantic.put("input", input);
+        if (modelConfig != null) {
+            semantic.put("modelConfigDigest", modelConfig.digest());
+        }
         String requestDigest = digests.digest(semantic);
         // Replay before the harness gate: re-serving an already-recorded
         // command admits nothing new and must not 503 during a harness
@@ -220,6 +237,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             dispatch(tenantId, replay);
             return response(replay);
         }
+        requireModelConfiguration(modelConfig);
         if (!input.isEmpty()) {
             requireHarness();
         }
@@ -227,9 +245,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 : harnessRules.payloadDigest(input);
         Admission admission;
         try {
-            admission = store.insertSessionCommand(tenantId, actorId, CREATE,
+            admission = modelConfig == null ? store.insertSessionCommand(tenantId, actorId, CREATE,
+                    idempotencyKey, requestDigest, agentId, agentRevision, effectiveTitle, input, payloadDigest)
+                    : store.insertSessionCommand(tenantId, actorId, CREATE,
                     idempotencyKey, requestDigest, agentId, agentRevision,
-                    effectiveTitle, input, payloadDigest);
+                    effectiveTitle, input, payloadDigest, modelConfig);
         } catch (DuplicateKeyException error) {
             admission = store.replayCommand(tenantId, CREATE,
                     idempotencyKey, requestDigest);
@@ -266,7 +286,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String sessionId) {
         requireModelActor(actorId);
         SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
-        boolean supported = session.workspace() != null && store.workspaceFilesEnabled()
+        boolean supported = session.modelConfigDigest() == null && session.workspace() != null && store.workspaceFilesEnabled()
                 && !store.modelOptions().isEmpty() && harness.supportsModelSelection();
         return new WebShellSessionModels(store.modelOptions(),
                 store.findModelSelections(tenantId, List.of(sessionId)).getOrDefault(sessionId,
@@ -342,6 +362,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
     }
 
+    private void requireModelConfiguration(com.alibaba.qwen.code.managedagent.model.SessionModelConfig configuration) {
+        if (configuration != null && !harness.supportsModelConfiguration()) {
+            throw new ManagedAgentException(409, "unsupported_feature", "Session model configuration is unavailable.");
+        }
+    }
+
     public CommandAdmission createWorkspaceSession(String tenantId,
             String actorId, String idempotencyKey, String agentId,
             String agentRevision, String title, Map<String, Object> metadata,
@@ -393,7 +419,20 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             List<Map<String, Object>> skills, String modelId,
             List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
             SessionWorktreeService.Request worktree) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision, title,
+                metadata, blocks, selection, approvalMode, planMode, skills, modelId, extensionPins, worktree, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId, String actorId, String idempotencyKey,
+            String agentId, String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
+            List<Map<String, Object>> skills, String modelId,
+            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            SessionWorktreeService.Request worktree, com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
         validateIdempotencyKey(idempotencyKey);
+        if (modelId != null && modelConfig != null) {
+            throw new ManagedAgentException(400, "invalid_model_config", "Choose either a model ID or a complete configuration.");
+        }
         var additions = AgentDefinitionExtensions.sessionSkills(skills);
         if (actorId == null || actorId.isEmpty()) {
             throw new ManagedAgentException(401,
@@ -424,6 +463,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (modelId != null) {
             semantic.put("modelId", modelId);
         }
+        if (modelConfig != null) {
+            semantic.put("modelConfigDigest", modelConfig.digest());
+        }
         if (extensionPins != null) {
             semantic.put("extensionPins", extensionPins);
         }
@@ -441,6 +483,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
         }
+        requireModelConfiguration(modelConfig);
         if (modelId != null && (!"qwen-code".equals(agentId) || !harness.supportsModelSelection())) {
             throw new ManagedAgentException(409, "unsupported_feature",
                     "Initial model selection is unavailable for this Agent.");
@@ -490,6 +533,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     .extensionPins(extensionPins)
                     .extensionLifecycleProfiles(extensionLifecycleProfiles)
                     .worktree(worktreePlan)
+                    .modelConfig(modelConfig)
                     .build());
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
@@ -590,7 +634,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -885,6 +929,23 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     idempotencyKey, effectiveTitle, command.renameRevision(), 0);
             var delivery = store.claimRename(candidate, owner, renameLeaseDuration.get()).orElse(null);
             if (delivery == null) {
+                // The dispatcher can claim the row this request just admitted.
+                // Wait for that delivery to settle so one request never
+                // answers "already being delivered" for its own rename.
+                if (awaitRenameSettle(tenantId, idempotencyKey, sessionId,
+                        renameDigest(sessionId, title)) != null) {
+                    // The settle arm answers a recorded outcome through the
+                    // same TOCTOU window as the COMPLETED read-back below:
+                    // the pre-read above could not see a key the recorder
+                    // committed after it, so the creator gate re-runs here,
+                    // and the body serializes the Session as last visible.
+                    SessionRecord settled = store.requireSession(tenantId,
+                            sessionId);
+                    requireReplayActor(tenantId, RENAME, idempotencyKey,
+                            settled, actorId);
+                    return new SessionMutationResult<>(publicSession(
+                            asLastVisible(settled)), true);
+                }
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Session title is already being delivered.");
             }
@@ -948,6 +1009,35 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 actorId);
         return new SessionMutationResult<>(publicSession(
                 asLastVisible(replayed)), true);
+    }
+
+    /**
+     * Waits a bounded time for the delivery that won this rename's claim,
+     * and answers the recorded command once it completes. Returns null when
+     * the row is gone, the digest belongs to another request, or the
+     * delivery is still in flight when the wait expires.
+     */
+    private StoreModels.CommandRecord awaitRenameSettle(String tenantId, String idempotencyKey,
+            String sessionId, String digest) {
+        long deadline = System.nanoTime() + RENAME_CLAIM_SETTLE.toNanos();
+        while (System.nanoTime() < deadline) {
+            StoreModels.CommandRecord recorded = store
+                    .findCommand(tenantId, RENAME, idempotencyKey).orElse(null);
+            if (recorded == null || !recorded.sessionId().equals(sessionId)
+                    || !digest.equals(recorded.requestDigest())) {
+                return null;
+            }
+            if ("COMPLETED".equals(recorded.status())) {
+                return recorded;
+            }
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+        return null;
     }
 
     // An archived Session stays closed, so unarchive needs neither the
@@ -1468,7 +1558,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         hasActions(session), maySubmit && approvalExecutable, close, keep, keep,
                         visible && lifecycleOwner && supportsDelete(session, retention),
                         false, foregroundShell(session, worktree),
-                        visible && modelSelectionSupported && mayChangeContext,
+                        visible && session.modelConfigDigest() == null && modelSelectionSupported && mayChangeContext,
                         visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session, worktree)),
                         visible && maySubmit && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
@@ -1486,7 +1576,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
             return false;
         }
         return retention || session.workspace() != null
@@ -1500,10 +1590,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         return session.deletedAt() == null && ready(worktree) && harness.supportsPublicChildAgents()
                 && store.findChildLineage(session.tenantId(), session.sessionId()) == null;
-    }
-
-    private Boolean foregroundShell(SessionRecord session) {
-        return foregroundShell(session, store.findSessionWorktree(session.tenantId(), session.sessionId()));
     }
 
     private Boolean foregroundShell(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {

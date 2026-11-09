@@ -159,13 +159,15 @@ class ManagedAgentSessionCapabilitiesTest {
 
     @ParameterizedTest
     @CsvSource({
-        "true,ACTIVE,true,true,true", "true,CLOSED,true,true,true",
-        "false,ACTIVE,true,true,true", "false,CLOSED,true,true,true",
-        "false,ACTIVE,false,true,true", "false,ACTIVE,true,false,true",
-        "false,ACTIVE,true,true,false"
+        "csi-files-retirement/1,ACTIVE,true,true,true", "csi-files-retirement/1,CLOSED,true,true,true",
+        "csi-files-retirement/2,ACTIVE,true,true,true", "csi-files-retirement/2,CLOSED,true,true,true",
+        "hosted-workspace-files/1,ACTIVE,true,true,true", "hosted-workspace-files/1,CLOSED,true,true,true",
+        "hosted-workspace-files/1,ACTIVE,false,true,true", "hosted-workspace-files/1,ACTIVE,true,false,true",
+        "hosted-workspace-files/1,ACTIVE,true,true,false"
     })
-    void publicAndWebShellViewsUseBindingCloseSupportAndKeepPrivateCsiUnavailable(boolean csi, String status,
+    void publicAndWebShellViewsUseBindingCloseSupportAndKeepPrivateCsiUnavailable(String profile, String status,
             boolean globalSupport, boolean bindingSupport, boolean harnessSupport) {
+        boolean csi = CsiFilesRetirementProfile.isProfile(profile);
         var store = mock(AgentStateStore.class);
         var workspaces = mock(ManagedWorkspaceRegistry.class);
         var harness = mock(HarnessConnector.class);
@@ -182,7 +184,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(warmer.supportsWorkspaceClose(workspace)).thenReturn(bindingSupport);
         var session = new SessionRecord("tenant", "session", "agent", "1", "title",
                 status, null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
-                csi ? CsiFilesRetirementProfile.PROFILE : WorkspaceToolProfiles.FILES);
+                profile);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         when(store.listSessions("tenant", "actor", null, null, 10))
                 .thenReturn(new SessionPage(List.of(session), false));

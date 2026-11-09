@@ -5,6 +5,10 @@
  */
 
 import {
+  EXECUTION_DIAGNOSTICS_KIND,
+  parseManagedExecutionEvidence,
+} from './managed-execution-diagnostics.js';
+import {
   parseManagedPermissionRules,
   nonEmptyManagedPermissionRules,
   type ManagedPermissionRules,
@@ -50,6 +54,10 @@ import {
   parseHostedRecoveryResource,
 } from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import {
+  MANAGED_MODEL_STATISTICS_RESOURCE_KINDS,
+  parseManagedStatisticsEnvelope,
+} from './managed-model-statistics.js';
 import type {
   HostedHarnessPlacement,
   HostedHarnessReleaseRequest,
@@ -158,6 +166,8 @@ export interface ManagedQueuedUserMessage {
 }
 
 export interface HttpManagedSessionStores {
+  supportsModelDiagnostics(): boolean;
+  supportsExecutionDiagnostics(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -183,6 +193,7 @@ export interface HttpManagedSessionStores {
     kind?: 'legacy-close' | `configuration:${string}`,
   ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -255,6 +266,8 @@ export function createHttpManagedSessionStores(
   const client = new ManagedSessionStoreHttpClient(options, resources);
   resources.bind(client);
   return {
+    supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
+    supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -285,6 +298,8 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    modelConfig: (expectedDigest, kind) =>
+      client.modelConfig(expectedDigest, kind),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -302,7 +317,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2].includes(head.storageVersion) ||
+    ![1, 2, 3, 4].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -436,8 +451,16 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       // inspectable by dropping the dangling page ref from the walk
       // without registering it — adding it would fire the enumeration
       // check below for exactly the snapshots this keeps readable
-      // (#13930 R1-43).
-      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      // (#13930 R1-43). The same backward-compatibility applies to the
+      // extension closure's legacy kinds: a snapshot committed before that
+      // closure edge shipped recorded the bundle but never its contributions
+      // child (nor the manifest's parts), so an absent one degrades instead of
+      // condemning the whole snapshot (R3-1 / R7-1).
+      if (
+        ref.kind === MANAGED_TOOL_RESULT_KINDS.page ||
+        LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)
+      )
+        continue;
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
@@ -456,6 +479,38 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   if (resources.size !== references.size) {
     throw corrupt('snapshot resource enumeration conflicts.');
   }
+  const executionPresent = [...resources.values()].some(
+    ({ ref }) => ref.kind === EXECUTION_DIAGNOSTICS_KIND,
+  );
+  if (executionPresent && head.storageVersion < 4)
+    throw corrupt('Execution diagnostics require storage version 4.');
+  const diagnosticsPresent = [...resources.values()].some(({ ref }) =>
+    MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
+  );
+  if (diagnosticsPresent && head.storageVersion < 3)
+    throw corrupt('snapshot diagnostics require storage version 3.');
+  const definitionResource = resources.get(
+    scan.header.definitionRef.resourceId,
+  );
+  const profile =
+    definitionResource?.ref.kind === 'managed-definition'
+      ? (
+          JSON.parse(definitionResource.bytes.toString('utf8')) as {
+            toolProfile?: string;
+          }
+        ).toolProfile
+      : undefined;
+  if (
+    (profile === 'csi-files-retirement/1' &&
+      (diagnosticsPresent || head.storageVersion !== 1)) ||
+    (profile === 'csi-files-retirement/2' &&
+      (executionPresent ||
+        head.storageVersion !== (diagnosticsPresent ? 3 : 1))) ||
+    (profile === 'csi-files-retirement/3' &&
+      head.storageVersion !==
+        (executionPresent ? 4 : diagnosticsPresent ? 3 : 1))
+  )
+    throw corrupt('snapshot CSI profile storage floor conflicts.');
   for (const [resourceId, revisions] of references) {
     const actual = resourceRevisions.get(resourceId)!;
     if (actual.some((revision) => !revisions.has(revision))) {
@@ -605,6 +660,15 @@ const EXTENSION_RECORD_KINDS = new Set(
   ),
 );
 
+// Resources a pre-closure-edge snapshot may name without having staged them:
+// a bundle's contributions child and the contributions manifest's parts. The
+// inspection, native-page and commit walks degrade an absent one instead of
+// condemning the snapshot. One constant so the walks cannot drift (R7-1).
+const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
+  'managed-extension-contributions',
+  'managed-extension-contributions-part',
+]);
+
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
@@ -657,6 +721,21 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     return this.client.readResource(validated);
   }
 
+  // Existence probe for the commit-side closure walk: a staged resource is
+  // present; a persisted one is present unless the store answers 404. Any other
+  // failure stays fatal (R6-1).
+  private async has(ref: ManagedSessionDurableRef): Promise<boolean> {
+    if (this.staged.has(ref.resourceId)) return true;
+    try {
+      await this.read(ref);
+      return true;
+    } catch (error) {
+      if (error instanceof ManagedSessionStoreHttpError && error.status === 404)
+        return false;
+      throw error;
+    }
+  }
+
   async commitResources(
     refs: readonly ManagedSessionDurableRef[],
   ): Promise<CommitResource[]> {
@@ -682,16 +761,39 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
         const nested = collectNestedResourceRefs(ref, staged.bytes);
-        pending.push(
-          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+        const children =
+          ref.kind === CHECKPOINT_HISTORY_KIND
             ? nested.filter((child) => this.staged.has(child.resourceId))
-            : nested),
-        );
+            : nested;
+        for (const child of children) {
+          // A re-staged legacy bundle may name a contributions child (or part)
+          // that was never uploaded; degrade it like the persisted arm (R7-1).
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(child.kind) &&
+            !(await this.has(child))
+          )
+            continue;
+          pending.push(child);
+        }
       } else if (
         ref.kind !== CHECKPOINT_HISTORY_KIND &&
         isReferenceContainer(ref.kind)
       ) {
-        pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
+        for (const nested of collectNestedResourceRefs(
+          ref,
+          await this.read(ref),
+        )) {
+          // A legacy bundle may name a contributions child (or part) that was
+          // never staged — the commit-side counterpart of the read-side
+          // tolerance (R6-1 / R7-1). Drop only an absent one from the closure;
+          // a present or conflicting one stays fatal.
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(nested.kind) &&
+            !(await this.has(nested))
+          )
+            continue;
+          pending.push(nested);
+        }
       }
     }
     return [...closure.values()].map((ref) => {
@@ -783,6 +885,12 @@ interface TransactionDescriptor {
 }
 
 class ManagedSessionStoreHttpClient {
+  supportsExecutionDiagnostics(): boolean {
+    return (this.grant?.supportedStorageVersion ?? 1) >= 4;
+  }
+  supportsModelDiagnostics(): boolean {
+    return (this.grant?.supportedStorageVersion ?? 1) >= 3;
+  }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
   private readonly writerId: string;
@@ -892,6 +1000,72 @@ class ManagedSessionStoreHttpClient {
         input: message['input'],
       };
     });
+  }
+
+  async modelConfig(
+    expectedDigest: string,
+    kind?: 'legacy-close',
+  ): Promise<unknown> {
+    if (!/^sha256:[0-9a-f]{64}$/u.test(expectedDigest)) {
+      throw corrupt('model configuration digest is invalid.');
+    }
+    await this.assertWritable();
+    return this.withRetry(
+      true,
+      'POST',
+      '/model-config:query',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/model-config:query',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            expectedDigest,
+            ...(kind ? { kind } : {}),
+          },
+          timeoutMs,
+        );
+        const reader = response.body?.getReader();
+        if (!reader) throw corrupt('Model configuration response has no body.');
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        try {
+          while (true) {
+            let item: ReadableStreamReadResult<Uint8Array>;
+            try {
+              item = await reader.read();
+            } catch (error) {
+              if (error instanceof TypeError || error instanceof DOMException) {
+                throw new ManagedSessionStoreTransportError(
+                  'Managed Session Store model configuration response failed.',
+                );
+              }
+              throw error;
+            }
+            if (item.done) break;
+            length += item.value.byteLength;
+            if (length > 16 * 1024) {
+              await reader.cancel();
+              throw corrupt(
+                'Model configuration response exceeds its byte limit.',
+              );
+            }
+            chunks.push(item.value);
+          }
+          try {
+            return JSON.parse(
+              Buffer.concat(chunks).toString('utf8'),
+            ) as unknown;
+          } catch {
+            throw corrupt('Model configuration response is invalid JSON.');
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    );
   }
 
   async approvalSelection(): Promise<
@@ -1087,6 +1261,18 @@ class ManagedSessionStoreHttpClient {
         this.sessionKey,
       );
       requireStoredTransactionMatches(transaction, descriptor);
+      if (
+        head.storageVersion < 4 &&
+        descriptor.refs.some((ref) => ref.kind === EXECUTION_DIAGNOSTICS_KIND)
+      )
+        throw corrupt('Execution diagnostics require storage version 4.');
+      if (
+        head.storageVersion < 3 &&
+        descriptor.refs.some((ref) =>
+          MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind),
+        )
+      )
+        throw corrupt('journal diagnostics require storage version 3.');
       if (
         usesSnapshot &&
         (transaction.previousCommitDigest !== lastCommitDigest ||
@@ -1311,7 +1497,7 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2].includes(storageVersion) ||
+      ![1, 2, 3, 4].includes(storageVersion) ||
       storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
@@ -1421,11 +1607,49 @@ class ManagedSessionStoreHttpClient {
         if (transaction['journalRevision'] !== after + 1)
           throw corrupt('native snapshot transaction revision conflicts.');
         const declared = append(transaction).refs;
+        const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
-          declared.push(...collectNestedResourceRefs(resource, body));
+          if (
+            storageVersion < 4 &&
+            resource.kind === EXECUTION_DIAGNOSTICS_KIND
+          )
+            throw corrupt('Execution diagnostics require storage version 4.');
+          if (
+            storageVersion < 3 &&
+            (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
+              (resource.kind === 'managed-history_maintenance' &&
+                (
+                  JSON.parse(body.toString('utf8')) as {
+                    schemaVersion?: number;
+                  }
+                ).schemaVersion === 2))
+          )
+            throw corrupt(
+              'native snapshot diagnostics require storage version 3.',
+            );
+          nested.push(...collectNestedResourceRefs(resource, body));
         }
+        // Direct references are the transaction's own census: a missing one is
+        // corrupt, exactly like the inspection walk's direct-reference guard.
         for (const resource of declared) {
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        // Transitive refs collected from resource bodies: a bundle committed
+        // before the contributions closure edge shipped names a contributions
+        // child (and manifest parts) the snapshot never staged. Degrade only
+        // those absent legacy kinds, mirroring the inspection walk's tolerance
+        // (R3-1 / R4-6 / R7-1); a directly declared ref stays on the strict
+        // path above.
+        for (const resource of nested) {
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(resource.kind) &&
+            !resources.has(resource.resourceId)
+          )
+            continue;
           if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
             throw corrupt(
               'native resource dependency is missing or conflicting.',
@@ -1809,6 +2033,26 @@ class ManagedSessionStoreHttpClient {
       throw new ManagedSessionRecordError(
         'Managed Session Store does not support Hosted recovery storage version 2.',
       );
+    const needsVersionThree = commitResources.some(
+      (resource) =>
+        MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
+        (resource.kind === 'managed-history_maintenance' &&
+          resource.bytesBase64 &&
+          JSON.parse(
+            Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
+          ).schemaVersion === 2),
+    );
+    if (needsVersionThree && grant.supportedStorageVersion < 3)
+      throw new ManagedSessionRecordError(
+        'Managed Session Store does not support model diagnostics storage version 3.',
+      );
+    if (
+      commitResources.some(
+        (resource) => resource.kind === EXECUTION_DIAGNOSTICS_KIND,
+      ) &&
+      grant.supportedStorageVersion < 4
+    )
+      throw corrupt('Execution diagnostics require storage version 4.');
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -2086,7 +2330,7 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
+            'X-Qwen-Managed-Max-Readable-Storage-Version': '4',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -2448,6 +2692,23 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A renewal in flight may have answered after the caller saw the lease
+    // lapse; it moved the lease forward and re-armed the timer, so keep that
+    // grant. Dropping it for an acquire, which a Store holding the Session's
+    // lifecycle can delay, leaves authorizeLifecycle, and any caller that
+    // reads the grant without first waiting in ensureWriter, refusing
+    // locally until the acquire answers. Only a lease that moved past the
+    // lapsed one counts: a refused renewal leaves the lapsed lease in place,
+    // and a commit, a head adoption or a journal read copies it into a new
+    // grant; in either case a wall-clock step back could make the lapsed
+    // lease look live.
+    if (
+      expired !== undefined &&
+      this.grant !== undefined &&
+      this.grant.leaseUntil > expired.leaseUntil &&
+      this.grant.leaseUntil > Date.now()
+    )
+      return;
     this.grant = undefined;
     const acquire = (async () => {
       await this.acquireWriter();
@@ -2611,7 +2872,8 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2].includes(head.storageVersion) ||
+      ![1, 2, 3, 4].includes(head.storageVersion) ||
+      head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
@@ -2824,7 +3086,7 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
+          'X-Qwen-Managed-Max-Readable-Storage-Version': '4',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -3310,7 +3572,11 @@ export function collectNestedResourceRefs(
     // re-admits its predecessor through preparation.intentRef, which SQL's
     // activation proof reads from this transaction.
     return record['schemaVersion'] === 2 &&
-      record['profile'] === 'csi-files-retirement/1'
+      [
+        'csi-files-retirement/1',
+        'csi-files-retirement/2',
+        'csi-files-retirement/3',
+      ].includes(String(record['profile']))
       ? collectRefs([record['preparation']])
       : [];
   }
@@ -3319,8 +3585,25 @@ export function collectNestedResourceRefs(
       parseHostedRecoveryResource(bytes, undefined, ref.kind),
     );
   }
+  if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('Unsupported execution diagnostics version.');
+    parseManagedExecutionEvidence(bytes);
+    return [];
+  }
+  if (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind)) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('diagnostics resource schema is unsupported.');
+    parseManagedStatisticsEnvelope(
+      ref.kind,
+      parseManagedSessionRecordJson(bytes.toString('utf8'), 64 * 1024),
+    );
+    return [];
+  }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-extension-config-bundle' ||
+    ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
@@ -3373,6 +3656,8 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-extension-config-bundle',
+      'managed-extension-contributions',
       'managed-definition',
       'managed-checkpoint',
       CHECKPOINT_HISTORY_KIND,

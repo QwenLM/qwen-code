@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { UiTelemetryService, MAIN_SOURCE } from './uiTelemetry.js';
+import {
+  UiTelemetryService,
+  MAIN_SOURCE,
+  MAX_FAILURE_SAMPLES,
+  MAX_TIMING_SAMPLES,
+} from './uiTelemetry.js';
 import { ToolCallDecision } from './tool-call-decision.js';
 import type { ApiErrorEvent, ApiResponseEvent } from './types.js';
 import { ToolCallEvent } from './types.js';
@@ -458,6 +463,121 @@ describe('UiTelemetryService', () => {
         totalThroughputOutputTokens: 0,
       });
       expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
+    });
+
+    it('keeps a capped per-model timeline of timed responses', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(9_000);
+      try {
+        const add = (overrides: Partial<ApiResponseEvent>) =>
+          service.addEvent(timedResponse(overrides), 'session-a');
+        add({ 'event.timestamp': '2026-11-02T00:00:01.000Z' });
+        add({
+          'event.timestamp': '2026-11-02T00:00:02.000Z',
+          subagent_name: 'explorer',
+          generation_ms: 50,
+        });
+        // Untimed, internal and timestamp-less events.
+        add({ ttft_ms: undefined });
+        add({ prompt_id: 'prompt_suggestion' });
+        add({ 'event.timestamp': 'not a date', model: 'qwen-plus' });
+        // Without a session id the stats route has no model buckets.
+        service.addEvent(timedResponse());
+
+        const metrics = service.getMetricsForSession('session-a');
+        expect(metrics.statsModels?.['qwen3-coder'].timingSamples).toEqual([
+          {
+            at: Date.parse('2026-11-02T00:00:01.000Z'),
+            ttftMs: 100,
+            generationMs: 400,
+            outputTokens: 20,
+          },
+          {
+            at: Date.parse('2026-11-02T00:00:02.000Z'),
+            ttftMs: 100,
+            generationMs: 50,
+            outputTokens: 20,
+            source: 'explorer',
+          },
+        ]);
+        expect(metrics.statsModels?.['qwen-plus'].timingSamples).toEqual([
+          { at: 9_000, ttftMs: 100, generationMs: 400, outputTokens: 20 },
+        ]);
+        expect(metrics.models['qwen3-coder']).not.toHaveProperty(
+          'timingSamples',
+        );
+
+        for (let i = 0; i < MAX_TIMING_SAMPLES + 5; i++) {
+          add({ output_token_count: i });
+        }
+        const samples =
+          service.getMetricsForSession('session-a').statsModels?.['qwen3-coder']
+            .timingSamples ?? [];
+        expect(samples).toHaveLength(MAX_TIMING_SAMPLES);
+        expect(samples[0]?.outputTokens).toBe(5);
+        expect(samples.at(-1)?.outputTokens).toBe(MAX_TIMING_SAMPLES + 4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records failures per model by status code, then error type', () => {
+      const fail = (extra: Record<string, unknown>) =>
+        service.addEvent(
+          apiError('qwen3-coder', 10, 'boom', {
+            'event.timestamp': '2026-11-02T00:00:03.000Z',
+            ...extra,
+          }),
+          'session-a',
+        );
+      fail({ status_code: 429 });
+      fail({ status_code: 429, subagent_name: 'explorer' });
+      fail({ error_type: 'TimeoutError' });
+      fail({ status_code: '', error_type: '__proto__' });
+      fail({});
+
+      const model =
+        service.getMetricsForSession('session-a').statsModels?.['qwen3-coder'];
+      expect(model?.api.totalErrors).toBe(5);
+      expect({ ...model?.failures?.byKind }).toEqual({
+        '429': 2,
+        TimeoutError: 1,
+        ['__proto__']: 1,
+        unknown: 1,
+      });
+      expect(Object.getPrototypeOf(model?.failures?.byKind)).toBeNull();
+      expect(model?.failures?.recent.map((f) => [f.kind, f.source])).toEqual([
+        ['429', undefined],
+        ['429', 'explorer'],
+        ['TimeoutError', undefined],
+        ['__proto__', undefined],
+        ['unknown', undefined],
+      ]);
+      expect(model?.failures?.recent[0]?.at).toBe(
+        Date.parse('2026-11-02T00:00:03.000Z'),
+      );
+
+      for (let i = 0; i < MAX_FAILURE_SAMPLES; i++) fail({ status_code: 500 });
+      const failures =
+        service.getMetricsForSession('session-a').statsModels?.['qwen3-coder']
+          .failures;
+      expect(failures?.recent).toHaveLength(MAX_FAILURE_SAMPLES);
+      expect(failures?.byKind['500']).toBe(MAX_FAILURE_SAMPLES);
+      expect(failures?.byKind['429']).toBe(2);
+    });
+
+    it('keeps failure kinds prototype-free after snapshot restore', () => {
+      service.addEvent(
+        apiError('qwen3-coder', 10, 'boom', { status_code: 503 }),
+        'session-a',
+      );
+      service.restoreFromReplaySnapshot(service.snapshotForReplay('session-a'));
+
+      const byKind =
+        service.getMetricsForSession('session-a').statsModels?.['qwen3-coder']
+          .failures?.byKind;
+      expect(byKind?.['503']).toBe(1);
+      expect(Object.getPrototypeOf(byKind)).toBeNull();
     });
 
     it('leaves events recorded without generation_ms out of timing', () => {
@@ -1469,6 +1589,72 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     service.addEvent(response('qwen-a', 120), 'session-a');
     service.resetSession('session-a');
     expect(service.getTotalOutputTokens('session-a')).toBe(0);
+  });
+
+  it('restores fractional raw output without rounding or charging it twice', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(response('main', 11.25), 'session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 38.25);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.25);
+    service.restoreSessionOutputTokensBaseline('session-a', 38.25);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.25);
+    service.addEvent(response('main', 0.5), 'session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 38.25);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.75);
+    expect(service.getMetrics().models['main'].tokens.candidates).toBe(11.75);
+    service.resetSession('session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 38.75);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.75);
+    for (const invalid of [-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])
+      service.restoreSessionOutputTokensBaseline('session-a', invalid);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.75);
+  });
+
+  it.each([false, true])(
+    'restores replay output baselines with incoming metrics=%s',
+    (incomingMetrics) => {
+      const service = new UiTelemetryService();
+      service.addEvent(response('outgoing', 100), 'session-a');
+      service.restoreSessionOutputTokensBaseline('session-a', 1000.25);
+      if (incomingMetrics)
+        service.addEvent(response('incoming', 10), 'session-b');
+      service.restoreSessionOutputTokensBaseline('session-b', 200.5);
+      service.restoreSessionOutputTokensBaseline('unrelated', 50.75);
+      const processMetrics = structuredClone(service.getMetrics());
+      const beforeIncoming = structuredClone(
+        service.getMetricsForSession('session-b'),
+      );
+      const snapshot = service.snapshotForReplay('session-b', 'session-a');
+      service.resetSession('session-a');
+      service.resetSession('session-b');
+      service.addEvent(response('replay', 7), 'session-a');
+      service.restoreSessionOutputTokensBaseline('session-a', 9000);
+      service.restoreSessionOutputTokensBaseline('session-b', 8000);
+      service.restoreSessionOutputTokensBaseline('unrelated', 77.75);
+
+      service.restoreFromReplaySnapshot(snapshot);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getTotalOutputTokens('session-a')).toBe(1000.25);
+      expect(service.getTotalOutputTokens('session-b')).toBe(200.5);
+      expect(service.getMetricsForSession('session-b')).toEqual(beforeIncoming);
+      expect(service.getTotalOutputTokens('unrelated')).toBe(77.75);
+      expect(service.getMetrics()).toEqual(processMetrics);
+    },
+  );
+
+  it('removes output baselines created by an abandoned replay', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(response('outgoing', 12), 'session-a');
+    const snapshot = service.snapshotForReplay('session-b', 'session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 1000);
+    service.restoreSessionOutputTokensBaseline('session-b', 2000);
+
+    service.restoreFromReplaySnapshot(snapshot);
+
+    expect(service.getTotalOutputTokens('session-a')).toBe(12);
+    expect(service.getTotalOutputTokens('session-b')).toBe(0);
+    expect(service.getMetricsForSession('session-b').models).toEqual({});
   });
 
   it('restores a durable Session model ledger once without resetting warm usage or charging process totals', () => {

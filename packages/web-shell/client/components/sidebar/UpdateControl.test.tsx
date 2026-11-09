@@ -18,6 +18,13 @@ const ready: DaemonUpdateStatus = {
   state: 'ready',
   canInstall: false,
 };
+// The daemon reports `restarting` from the acknowledged restart until the
+// process is replaced. A settled state afterwards means a new process
+// answered, which is what the control distinguishes success from failure by.
+const restarting: DaemonUpdateStatus = {
+  ...ready,
+  state: 'restarting',
+};
 const manual: DaemonUpdateStatus = {
   ...available,
   canInstall: false,
@@ -156,6 +163,7 @@ describe('UpdateControl', () => {
     const container = render();
     await flushReact();
     const button = getByRole(container, 'button', { name: 'Update' });
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
     await act(async () => {
       button.click();
       button.click();
@@ -199,6 +207,7 @@ describe('UpdateControl', () => {
     }
     const container = mountReact(<Harness />);
     await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
     await act(async () =>
       getByRole(container, 'button', { name: 'Update' }).click(),
     );
@@ -218,6 +227,7 @@ describe('UpdateControl', () => {
     client.daemonUpdateStatus.mockResolvedValue(ready);
     const container = render();
     await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
     await act(async () =>
       getByRole(container, 'button', { name: 'Update' }).click(),
     );
@@ -250,11 +260,246 @@ describe('UpdateControl', () => {
     client.daemonUpdateStatus.mockResolvedValue(ready);
     const container = render();
     await flushReact();
+    // Unreachable from the click onward, so the continuous-downtime deadline
+    // starts at the click itself.
+    client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Update' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps waiting while a reachable daemon stages a newer release', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue({
+      ...restarting,
+      latestVersion: '0.24.9',
+    });
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    // Re-resolving and staging the current latest happens after the 202 and
+    // can outlast a deadline measured from the click.
+    await act(async () => vi.advanceTimersByTimeAsync(180_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(true);
+    client.daemonUpdateStatus.mockResolvedValue({
+      state: 'up-to-date',
+      currentVersion: '0.24.9',
+      canInstall: false,
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(onRestarted).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('measures the restart deadline from continuous downtime, not the click', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
     await act(async () =>
       getByRole(container, 'button', { name: 'Update' }).click(),
     );
     client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
+    await act(async () => vi.advanceTimersByTimeAsync(50_000));
+    expect(onError).not.toHaveBeenCalled();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
+    await act(async () => vi.advanceTimersByTimeAsync(50_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(onRestarted).not.toHaveBeenCalled();
+  });
+
+  it('reports failure when the daemon comes back on the same version', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    // Process replacement is not guaranteed to land on the new build: the
+    // daemon can come back reachable, settled, and unchanged. Waiting for a
+    // version change that will never arrive must not hang the control. The
+    // settled state here is one that renders an entry, so handing it back is
+    // observable rather than hidden by a state that renders nothing anyway.
+    client.daemonUpdateStatus.mockResolvedValue(manual);
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      queryByRole(container, 'button', { name: 'Restarting…' }),
+    ).toBeNull();
+    // The control offers what the daemon now reports immediately, instead of
+    // vanishing until the next idle poll a minute later.
+    expect(
+      getByRole(container, 'button', { name: 'Update' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(false);
+  });
+
+  it('publishes the settled state even when the poll right after it drops', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    // Clearing the restart re-runs the poll loop, which would normally publish
+    // the settled state itself. A daemon that just restarted can drop that
+    // very next request, so the failure path must publish what it already has
+    // rather than leave a stale restarting status rendering nothing.
+    client.daemonUpdateStatus.mockResolvedValueOnce(manual);
+    client.daemonUpdateStatus.mockRejectedValue(new Error('offline'));
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Update' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(false);
+  });
+
+  it('ignores a settled poll that lands before the restart is acknowledged', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    let acknowledge: (value: DaemonUpdateStatus) => void = () => {};
+    client.restartDaemonForUpdate.mockReturnValue(
+      new Promise<DaemonUpdateStatus>((resolve) => {
+        acknowledge = resolve;
+      }),
+    );
+    // Polling starts on the click, before the POST resolves, so a poll can
+    // still observe the pre-click state. That is not a daemon that settled
+    // after a restart, and must not be reported as a failed update.
+    client.daemonUpdateStatus.mockResolvedValue({
+      state: 'up-to-date',
+      currentVersion: '0.24.4',
+      canInstall: false,
+    });
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(true);
+    // Once acknowledged, that same settled state does mean the replacement
+    // did not land.
+    await act(async () => {
+      acknowledge(restarting);
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onRestarted).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale status response delivered after the acknowledgement', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    // The status request and the restart request are independent, so a poll
+    // started before the acknowledgement can still be in flight when the
+    // restart resolves, and deliver its pre-restart snapshot afterwards.
+    let deliverStale: (value: DaemonUpdateStatus) => void = () => {};
+    client.daemonUpdateStatus.mockReturnValueOnce(
+      new Promise<DaemonUpdateStatus>((resolve) => {
+        deliverStale = resolve;
+      }),
+    );
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    await act(async () => {
+      deliverStale(ready);
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(true);
+    // The update itself still succeeds and must still restore the task URL.
+    client.daemonUpdateStatus.mockResolvedValue({
+      state: 'up-to-date',
+      currentVersion: '0.24.6',
+      canInstall: false,
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(onRestarted).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('gives up on a reachable daemon wedged in restarting', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    // Reachable throughout, so the unreachability deadline never starts. Only
+    // the absolute backstop above the daemon's own staging chain can end this,
+    // and it must not fire during a slow but progressing update.
+    await act(async () => vi.advanceTimersByTimeAsync(19 * 60_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(
+      getByRole(container, 'button', { name: 'Restarting…' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(true);
     await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onRestarted).not.toHaveBeenCalled();
+    expect(
+      queryByRole(container, 'button', { name: 'Restarting…' }),
+    ).toBeNull();
+    // Giving up must hand back a retryable entry, not vanish: the daemon is
+    // still reporting `restarting`, which the render gate hides on its own.
+    expect(
+      getByRole(container, 'button', { name: 'Update' }).hasAttribute(
+        'disabled',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps a retryable entry when the daemon itself reports an error', async () => {
+    client.daemonUpdateStatus.mockResolvedValue(ready);
+    const container = render();
+    await flushReact();
+    client.daemonUpdateStatus.mockResolvedValue(restarting);
+    await act(async () =>
+      getByRole(container, 'button', { name: 'Update' }).click(),
+    );
+    client.daemonUpdateStatus.mockResolvedValue({
+      ...restarting,
+      state: 'error',
+      message: 'Activation failed',
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onRestarted).not.toHaveBeenCalled();
     expect(
