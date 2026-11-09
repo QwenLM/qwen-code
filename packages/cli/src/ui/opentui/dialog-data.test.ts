@@ -140,10 +140,10 @@ function stubConfig(overrides: Partial<Config>): Config {
 }
 
 describe('buildModelEntries', () => {
-  it('prioritizes authorized Qwen entries in the primary picker', () => {
+  it('keeps subscription models in gateway order in the primary picker', () => {
     const catalog = [
       { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
-      { id: 'future', label: 'Future', authType: AuthType.QWEN_SUBSCRIPTION },
+      { id: 'qwen4', label: 'Qwen4', authType: AuthType.QWEN_SUBSCRIPTION },
       {
         id: 'qwen3.8-flash',
         label: 'Flash',
@@ -158,7 +158,7 @@ describe('buildModelEntries', () => {
     });
     expect(
       buildModelEntries(config, 'primary').map(({ label }) => label),
-    ).toEqual(['Max', 'Flash', 'Future', 'API', 'API Max']);
+    ).toEqual(['Qwen4', 'Flash', 'Max', 'API', 'API Max']);
     expect(buildModelEntries(config, 'fast').map(({ label }) => label)).toEqual(
       catalog.map(({ label }) => label),
     );

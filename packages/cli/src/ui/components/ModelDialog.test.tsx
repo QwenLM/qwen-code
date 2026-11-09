@@ -273,7 +273,7 @@ describe('<ModelDialog />', () => {
     expect(props.showNumbers).toBe(true);
   });
 
-  it('puts membership Max and Flash ahead of runtime and other provider models', () => {
+  it('shows subscription models in gateway order ahead of other providers', () => {
     renderComponent(
       {},
       {
@@ -289,8 +289,8 @@ describe('<ModelDialog />', () => {
           },
           { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
           {
-            id: 'future',
-            label: 'Future',
+            id: 'qwen4',
+            label: 'Qwen4',
             authType: AuthType.QWEN_SUBSCRIPTION,
           },
           {
@@ -308,9 +308,9 @@ describe('<ModelDialog />', () => {
     );
     const select = mockedSelect.mock.calls[0][0];
     expect(select.items.map(({ value }) => value)).toEqual([
-      'qwen-subscription::qwen3.8-max',
+      'qwen-subscription::qwen4',
       'qwen-subscription::qwen3.8-flash',
-      'qwen-subscription::future',
+      'qwen-subscription::qwen3.8-max',
       '$runtime|openai|runtime',
       'openai::api',
     ]);
