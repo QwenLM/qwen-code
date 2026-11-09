@@ -8,6 +8,8 @@ import {
   validateBoundSessionConfig,
   DEFAULT_PR_WATCH_LIMIT,
   MAX_PR_WATCH_LIMIT,
+  DEFAULT_PR_WATCH_BUDGET_RESERVE,
+  MAX_PR_WATCH_BUDGET_RESERVE,
   validateRepoFilterConfig,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
@@ -188,6 +190,16 @@ export const plugin: ChannelPlugin = {
         default: String(DEFAULT_PR_WATCH_LIMIT),
         description:
           'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
+      },
+      {
+        key: 'prWatchBudgetReserve',
+        label: 'PR Watch Budget Reserve',
+        kind: 'number',
+        exclusiveMinimum: -1,
+        maximum: MAX_PR_WATCH_BUDGET_RESERVE,
+        default: String(DEFAULT_PR_WATCH_BUDGET_RESERVE),
+        description:
+          'REST requests held back for the interactive notification lane (requires Deliver To PR-Bound Sessions and PR Watch Events). When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour PAT budget. Set 0 to disable the gate. Leave empty for the default.',
       },
       {
         key: 'boundSessionActions',

@@ -190,7 +190,12 @@ describe('Managed Workspace upload bootstrap processes', () => {
       paused,
     );
     const stopped = original.finished.catch(() => undefined);
-    for (let attempt = 0; ; attempt++) {
+    // The child must boot Node, register the tsx loader and import the
+    // bootstrap before it reaches the unlink hook. A fixed iteration count
+    // races that real I/O under CI contention (#16580), so poll against a
+    // wall-clock deadline instead.
+    const cleanupDeadline = Date.now() + 30_000;
+    for (;;) {
       if (
         await fs.access(entered).then(
           () => true,
@@ -198,7 +203,7 @@ describe('Managed Workspace upload bootstrap processes', () => {
         )
       )
         break;
-      if (attempt >= 100)
+      if (Date.now() >= cleanupDeadline)
         throw new Error('Original upload did not reach cleanup.');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }

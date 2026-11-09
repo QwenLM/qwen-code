@@ -223,7 +223,7 @@ public final class CsiNativeActivationProof {
         closed(definition, Set.of("engine", "sessionId", "toolProfile"));
         require("managed".equals(text(definition, "engine"))
                 && original.getIsolationKey().equals(text(definition, "sessionId"))
-                && CsiFilesRetirementProfile.PROFILE.equals(text(definition, "toolProfile")));
+                && CsiFilesRetirementProfile.profile(original.getScope()).equals(text(definition, "toolProfile")));
         JsonNode root = readObject(reference(header.path("rootSnapshotRef"), "managed-root", resources));
         closed(root, Set.of("cwd"));
         require(original.getScope().getCanonicalCwd().equals(text(root, "cwd")));
@@ -705,7 +705,7 @@ public final class CsiNativeActivationProof {
                     .put("partIndex", call.partIndex()).put("ordinal", ordinal).put("inputDigest", intent.inputDigest())
                     .put("outcomeSource", "runtime").put("state", "in_progress").putNull("outcomeRef").put("consumed", false);
             bindings.addObject().put("executionCallId", execution).put("invocationBindingId", execution)
-                    .put("capabilityVersion", CsiFilesRetirementProfile.CAPABILITY_DIGEST)
+                    .put("capabilityVersion", original.getScope().getCapabilityDigest())
                     .put("policyVersion", CsiFilesRetirementProfile.POLICY_REF).putNull("mediaVersion")
                     .put("state", "dispatch").putNull("progressCursor");
         }
@@ -777,7 +777,7 @@ public final class CsiNativeActivationProof {
                 && (initial ? body.path("previousRecordRef").isNull()
                         : canonical(body.path("previousRecordRef")).equals(canonical(previous.fileHistory().ref())))
                 && number(body.get("schemaVersion")) == 2
-                && CsiFilesRetirementProfile.PROFILE.equals(text(body, "profile"))
+                && CsiFilesRetirementProfile.profile(original.getScope()).equals(text(body, "profile"))
                 && original.getIsolationKey().equals(id(body, "runtimeSessionId")));
         ObjectNode observation = JSON.createObjectNode();
         for (String field : List.of("state", "backupDirectory", "retainedBackups")) {
@@ -1356,7 +1356,20 @@ public final class CsiNativeActivationProof {
                     && canonical(checkpointRef).equals(canonical(previous.attempt().checkpointRef()))
                     && canonical(route).equals(canonical(previous.attempt().route()))
                     && ("output_committed".equals(stage) || "abandoned".equals(stage)));
-            usage(readObject(reference(payload.path("usageRef"), "managed-hosted-model-usage", resources)), route, stage);
+            JsonNode usageRef = payload.path("usageRef");
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.MAIN_KIND.equals(usageRef.path("kind").asText())) {
+                require(CsiFilesRetirementProfile.hasDiagnostics(original.getScope()));
+                JsonNode observed = diagnosticUsage(usageRef, resources);
+                require(id(route, "turnId").equals(id(observed, "turnId"))
+                        && text(route, "model").equals(text(observed, "model"))
+                        && canonical(route.path("budget")).equals(canonical(observed.path("budget"))));
+                if (!observed.path("context").isNull()) {
+                    require("output_committed".equals(stage)
+                            && attemptId.equals(id(observed.path("context"), "attemptId")));
+                }
+            } else {
+                usage(readObject(reference(usageRef, "managed-hosted-model-usage", resources)), route, stage);
+            }
         }
         Prefix completed = new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
                 new Attempt(attemptId, routeRef.deepCopy(), checkpointRef.deepCopy(), route.deepCopy(), stage), false,
@@ -1433,6 +1446,20 @@ public final class CsiNativeActivationProof {
         });
     }
 
+    private static JsonNode diagnosticUsage(JsonNode ref, Function<JsonNode, byte[]> resources) {
+        String kind = text(ref, "kind");
+        require(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(kind));
+        byte[] bytes = reference(ref, kind, resources);
+        require(bytes.length <= 65_536);
+        JsonNode body = readObject(bytes);
+        try {
+            com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(kind, body);
+        } catch (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException error) {
+            throw invalid();
+        }
+        return body;
+    }
+
     private static void modelMetrics(JsonNode node) {
         metrics(node.path("api"), Set.of("totalRequests", "totalErrors", "totalLatencyMs"));
         metrics(node.path("tokens"), Set.of("prompt", "candidates", "total", "cached", "thoughts"));
@@ -1461,7 +1488,15 @@ public final class CsiNativeActivationProof {
         String stopReason = completed ? "end_turn" : "error";
         require(turnId.equals(id(payload, "turnId")) && ("turn:" + turnId).equals(id(event, "eventId"))
                 && outcome.equals(text(payload, "outcome")) && stopReason.equals(text(payload, "stopReason")));
-        nullFields(payload, "usageRef", "pendingOwnersRef");
+        nullFields(payload, "pendingOwnersRef");
+        if (!payload.path("usageRef").isNull()) {
+            require(CsiFilesRetirementProfile.hasDiagnostics(original.getScope())
+                    && com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.STATS_KIND
+                            .equals(payload.path("usageRef").path("kind").asText()));
+            JsonNode usage = diagnosticUsage(payload.path("usageRef"), resources);
+            require(usage.path("budget").isNull() || original.getIsolationKey().equals(text(usage.path("budget"), "sessionId"))
+                    && turnId.equals(id(usage.path("budget"), "promptId")));
+        }
         JsonNode ref = payload.path("resultRef");
         JsonNode result = readObject(reference(ref, "managed-turn-result", resources));
         closed(result, Set.of("uuid", "parentUuid", "sessionId", "timestamp", "type", "cwd", "version",

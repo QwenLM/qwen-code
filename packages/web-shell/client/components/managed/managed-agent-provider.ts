@@ -6,6 +6,8 @@ import type {
   ManagedExtensionSettings,
   ManagedExtensionSnapshot,
   ManagedExtensionSelection,
+  ManagedExtensionImportMetadata,
+  ManagedExtensionInspection,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
@@ -13,7 +15,6 @@ import type {
   ManagedMcpManagementSnapshot,
 } from './managed-mcp-management-types';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
-
 export type ManagedAgentSessionPhase =
   | 'created'
   | 'admitted'
@@ -100,12 +101,24 @@ export function managedPermissionRulesEqual(
 }
 
 export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+export type ManagedDiagnosticContextUsage =
+  components['schemas']['ManagedDiagnosticContextUsage'];
+export type ManagedDiagnosticStats =
+  components['schemas']['ManagedDiagnosticStats'];
 export type ManagedDiagnosticResources =
   components['schemas']['ManagedDiagnosticResources'];
 export type ManagedDiagnosticAgentTrace =
   components['schemas']['ManagedDiagnosticAgentTrace'];
 
 export interface ManagedDiagnosticsProvider {
+  getContextUsage(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticContextUsage>;
+  getStatistics(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedDiagnosticStats>;
   getResources(
     sessionId: string,
     options: ManagedAgentRequestOptions,
@@ -466,6 +479,35 @@ export interface ManagedAgentProvider {
       archive: Blob,
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedExtensionPackageOperation>;
+    importPackage?(
+      workspaceId: string,
+      extensionId: string | undefined,
+      metadata: ManagedExtensionImportMetadata,
+      source: Blob,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    previewPackage?(
+      workspaceId: string,
+      metadata: ManagedExtensionImportMetadata,
+      source: Blob,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionInspection>;
+    inspect?(
+      workspaceId: string,
+      pin: ManagedExtensionPin,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionInspection>;
+    lookupPackageOperation?(
+      workspaceId: string,
+      kind: 'publish' | 'settings',
+      idempotencyKey: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
+    lookupApplyOperation?(
+      sessionId: string,
+      idempotencyKey: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedExtensionSnapshot>;
     settings(
       workspaceId: string,
       extensionId: string,
