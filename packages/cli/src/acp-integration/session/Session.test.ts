@@ -628,6 +628,7 @@ describe('Session', () => {
     getRewindDaemonPromptId: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    setLastUserPromptRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
     recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
     flush: ReturnType<typeof vi.fn>;
@@ -1038,6 +1039,7 @@ describe('Session', () => {
       getRewindDaemonPromptId: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      setLastUserPromptRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
         recordId: null,
         activeRecordCount: 0,
@@ -3234,6 +3236,32 @@ describe('Session', () => {
     ).toEqual(['wf_second']);
 
     secondSession.dispose();
+  });
+
+  it('forwards persisted user prompt time and clears the observer on disposal', async () => {
+    const callback =
+      mockChatRecordingService.setLastUserPromptRecordedCallback.mock.calls.at(
+        -1,
+      )?.[0];
+    expect(callback).toBeTypeOf('function');
+    callback('2026-11-07T02:03:04.000Z', 'test-session-id');
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/last-user-prompt',
+      {
+        v: 1,
+        sessionId: 'test-session-id',
+        timestamp: '2026-11-07T02:03:04.000Z',
+      },
+    );
+    callback(undefined, 'test-session-id');
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/last-user-prompt',
+      { v: 1, sessionId: 'test-session-id', timestamp: null },
+    );
+    session.dispose();
+    expect(
+      mockChatRecordingService.setLastUserPromptRecordedCallback,
+    ).toHaveBeenLastCalledWith(undefined);
   });
 
   it('advances the permission queue when a request is aborted without waiting for the orphaned RPC', async () => {
