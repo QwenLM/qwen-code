@@ -75,6 +75,7 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
 import { isCommandAllowed, stripShellWrapper } from '../utils/shell-utils.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
+  SHELL_PR_BINDING_DIRECTORY_NOTICE,
   SHELL_RECORD_ARTIFACT_REMINDER,
   ShellTool,
   type ShellToolInvocation,
@@ -1031,6 +1032,229 @@ describe('ShellTool', () => {
         '/test/proj/chats-archived/test-session.pr.json',
         [expect.objectContaining({ number: 77 })],
       );
+    });
+
+    // Both attribution legs must ask gh about the directory the create runs
+    // in. A model-authored `cd <worktree> && gh pr create` without the
+    // `directory` param otherwise snapshots the launch branch — which has no
+    // PR — and declines silently (live incidents: sessions d0911852 / 195215bf).
+    describe('attribution directory resolution', () => {
+      /** Asserts both gh legs ran in `dir` and the create bound. */
+      const expectAttributedIn = async (dir: string) => {
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          dir,
+          undefined,
+        );
+        expect(fetchCurrentBranchNameMock).toHaveBeenCalledWith(dir);
+        expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+          dir,
+          undefined,
+        );
+        expectBound(77);
+      };
+
+      /** Asserts fallback to the launch directory plus the model notice. */
+      const expectOpaqueFallback = (result: ToolResult) => {
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          '/test/dir',
+          undefined,
+        );
+        expect(result.llmContent).toContain(SHELL_PR_BINDING_DIRECTORY_NOTICE);
+        expect(result.returnDisplay).toMatchObject({
+          notices: expect.arrayContaining([SHELL_PR_BINDING_DIRECTORY_NOTICE]),
+        });
+      };
+
+      it('attributes a single literal cd in the directory it names', async () => {
+        mockCreatedPr(77);
+        await runShell('cd /test/dir/nested && gh pr create --fill', PR_77);
+        await expectAttributedIn('/test/dir/nested');
+      });
+
+      it('resolves a relative cd against the launch directory', async () => {
+        mockCreatedPr(77);
+        await runShell('cd nested && gh pr create --fill', PR_77);
+        await expectAttributedIn('/test/dir/nested');
+      });
+
+      it('resolves a relative cd against the directory param', async () => {
+        mockCreatedPr(77);
+        await runShell('cd nested && gh pr create --fill', PR_77, 0, {
+          directory: '/test/dir/param',
+        });
+        await expectAttributedIn('/test/dir/param/nested');
+      });
+
+      it('threads a chained cd through intervening commands, a redirect and a trailing pipe', async () => {
+        // The qwen-code-x9 incident shape verbatim: two cds, unrelated
+        // commands between them, a `>` redirect, and `| tail -5` after the
+        // create. A textual paren/operator scan would bail on the redirect.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir && tail -n +3 draft.md > /tmp/body.md && head -3 /tmp/body.md && wc -l /tmp/body.md && cd .qwen/worktrees/deflake && gh pr create --title "test(web-shell): let a retry outlast an abort storm" --body-file /tmp/body.md 2>&1 | tail -5',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir/.qwen/worktrees/deflake');
+      });
+
+      it('keeps a quoted title containing parentheses from blocking resolution', async () => {
+        // The qwen-code-x4 incident shape: `fix(managed-agent)` in the title.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/.qwen/worktrees/fix-16712 && gh pr create --repo o/r --base main --head fix/x --title "fix(managed-agent): dedupe the probe case labels" --body-file /tmp/body.md 2>&1 | tail -5',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir/.qwen/worktrees/fix-16712');
+      });
+
+      it('resolves a double-quoted literal path', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd "/test/dir/with space" && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir/with space');
+      });
+
+      it('resolves pushd like cd', async () => {
+        mockCreatedPr(77);
+        await runShell('pushd /test/dir/nested && gh pr create --fill', PR_77);
+        await expectAttributedIn('/test/dir/nested');
+      });
+
+      it('ignores a cd after the create', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create --fill && cd /elsewhere',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir/nested');
+      });
+
+      it('stops at the first create before a || retry tail', async () => {
+        mockCreatedPr(77);
+        await runShell(`cd /test/dir/nested && ${CREATE_OR_VIEW}`, PR_77);
+        await expectAttributedIn('/test/dir/nested');
+      });
+
+      it('emits no notice when the command never changes directory', async () => {
+        mockCreatedPr(77);
+        const result = await runShell('gh pr create --fill', PR_77);
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('emits no notice when the cd lands back on the launch directory', async () => {
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('emits no notice for a || branch whose left never moves', async () => {
+        // The create's execution is conditional, but its directory is not:
+        // nothing moved, so it still runs in the launch directory. Calling
+        // this opaque would claim a directory change that never happened.
+        mockCreatedPr(77);
+        const result = await runShell('false || gh pr create --fill', PR_77);
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it.each([
+        ['an expansion target', 'cd $WORKTREE && gh pr create --fill'],
+        ['a tilde target', 'cd ~/worktree && gh pr create --fill'],
+        ['a bare cd', 'cd && gh pr create --fill'],
+        ['the previous-directory form', 'cd - && gh pr create --fill'],
+        ['a glob target', 'cd /test/dir/* && gh pr create --fill'],
+        ['popd', 'cd /test/dir/nested && popd && gh pr create --fill'],
+        [
+          'a pushd stack rotation',
+          'cd /test/dir/nested && pushd +1 && gh pr create --fill',
+        ],
+        ['a subshell cd', '(cd /elsewhere) && gh pr create --fill'],
+        ['a || branch', 'cd /elsewhere || gh pr create --fill'],
+        ['an env --chdir wrapper', 'env -C /elsewhere gh pr create --fill'],
+        ['a sudo --chdir wrapper', 'sudo -D /elsewhere gh pr create --fill'],
+        [
+          'a control-flow body that moves',
+          'if true; then cd /elsewhere; fi; gh pr create --fill',
+        ],
+        // eval/source/. run code in THIS shell, so the directory can move
+        // without a target appearing anywhere in the command text. Found by
+        // the adversarial probe: the create really ran in the worktree while
+        // attribution stayed on the launch repo, with no notice at all.
+        ['an eval that moves', 'eval "cd /elsewhere" && gh pr create --fill'],
+        ['a sourced script', 'source ./move.sh && gh pr create --fill'],
+        ['a dot-sourced script', '. ./move.sh && gh pr create --fill'],
+        [
+          'a function body that evals',
+          'f() { eval "$1"; }; f "cd /elsewhere"; gh pr create --fill',
+        ],
+        // CDPATH reroutes a relative cd through its entries before the
+        // working directory, so `cd sub` need not land in ./sub.
+        [
+          'a CDPATH leading assignment',
+          'CDPATH=/elsewhere cd sub && gh pr create --fill',
+        ],
+        [
+          'a CDPATH export',
+          'export CDPATH=/elsewhere; cd sub && gh pr create --fill',
+        ],
+      ])('falls back with a notice for %s', async (_label, command) => {
+        mockCreatedPr(77);
+        const result = await runShell(command, PR_77);
+        expectOpaqueFallback(result);
+      });
+
+      it('still resolves an absolute cd when CDPATH is set', async () => {
+        // CDPATH only affects relative targets; refusing an absolute one
+        // would lose a binding the walk can still prove.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'CDPATH=/elsewhere cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir/nested');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('does not treat executing a script as moving the directory', async () => {
+        // `./move.sh` runs in a child shell and cannot move us; only sourcing
+        // it can. Flagging execution would emit a notice about a directory
+        // change that cannot happen.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir/nested && ./move.sh && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir/nested');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('emits no notice when the create failed', async () => {
+        const result = await runShell(
+          'cd $WORKTREE && gh pr create --fill',
+          'error: no commits\n',
+          1,
+        );
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
     });
   });
 

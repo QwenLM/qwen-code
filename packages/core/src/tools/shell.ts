@@ -100,7 +100,9 @@ import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import {
   isShellCommandReadOnlyASTInDirectory,
   extractCommandRules,
+  parseShellCommand,
 } from '../utils/shellAstParser.js';
+import type Parser from 'web-tree-sitter';
 import {
   applySedSubstitution,
   parseSedEditCommand,
@@ -127,6 +129,15 @@ type GitHeadBeforeCommand =
 
 export const SHELL_RECORD_ARTIFACT_REMINDER =
   'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, notebook, image, pdf, or an office document), call record_artifact for each one. workspacePath is relative to the current execution directory, and title is required. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
+
+/**
+ * Appended when a `gh pr create` command changes directory in a way the
+ * binder cannot resolve statically. Attribution then falls back to the
+ * launch directory, which usually has no PR on its branch, so the create
+ * would otherwise miss silently — the decline is only a debug log.
+ */
+export const SHELL_PR_BINDING_DIRECTORY_NOTICE =
+  'PR auto-binding fell back to the launch directory: this command\'s directory change is not statically resolvable. Set the shell tool\'s "directory" parameter to the repository you create the PR in, or register the PR on the session after creating it.';
 
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
@@ -927,6 +938,278 @@ function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
   // `-` is bash's "previous directory" — could be anywhere.
   if (target === '-') return true;
   return false;
+}
+
+type ShellSyntaxNode = Parser.SyntaxNode;
+
+/**
+ * The directory `gh pr create` attribution runs in. `launch` keeps the
+ * tool's launch directory (the `directory` param, else the target dir);
+ * `resolved` is a directory the command's own `cd` chain proved statically;
+ * `opaque` means the command changes directory in a way that cannot be
+ * proven without running it, so attribution falls back to `launch` and the
+ * tool result says so instead of missing silently.
+ */
+type GhPrCreateDirectory =
+  | { kind: 'launch' }
+  | { kind: 'resolved'; directory: string }
+  | { kind: 'opaque' };
+
+/**
+ * Programs that move the shell's directory. `cd`/`pushd` name a target the
+ * walk can try to prove; `popd` rotates a stack it does not model; and
+ * `eval`/`source`/`.` run arbitrary code in the CURRENT shell, so they can
+ * move it without naming a target anywhere in the command text. Executing a
+ * script (`./move.sh`) is deliberately absent — that runs in a child and
+ * cannot move us.
+ */
+const DIRECTORY_CHANGING_COMMANDS = new Set([
+  'cd',
+  'pushd',
+  'popd',
+  'eval',
+  'source',
+  '.',
+]);
+
+/** The program a command node invokes, basename'd like the textual walks. */
+function commandNodeProgram(node: ShellSyntaxNode): string {
+  return programBasename(node.childForFieldName('name')?.text ?? '');
+}
+
+/** Whether a subtree the walk does not model may move the directory. */
+function subtreeMayChangeDirectory(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (
+      current.type === 'command' &&
+      DIRECTORY_CHANGING_COMMANDS.has(commandNodeProgram(current))
+    ) {
+      return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * Whether the command assigns `CDPATH` anywhere, as a leading assignment
+ * (`CDPATH=/x cd sub`) or a declaration (`export CDPATH=/x`). CDPATH makes
+ * the shell search its entries before the working directory, so a RELATIVE
+ * `cd sub` can land outside the repo while looking provable; an absolute
+ * target is unaffected. Ambient CDPATH from the inherited environment is
+ * out of scope — the walk models the command, not the environment.
+ */
+function assignsCdpath(node: ShellSyntaxNode): boolean {
+  const stack: ShellSyntaxNode[] = [node];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (
+      current.type === 'variable_assignment' &&
+      current.namedChildren.some(
+        (c) => c.type === 'variable_name' && c.text === 'CDPATH',
+      )
+    ) {
+      return true;
+    }
+    stack.push(...current.namedChildren);
+  }
+  return false;
+}
+
+/**
+ * A `cd`/`pushd` target provable without running the command: a plain word
+ * or string carrying no expansion, substitution, tilde, glob, brace or
+ * escape. Returns undefined for everything else — including bare `cd`
+ * (goes to `$HOME`), `cd -` (previous directory), and any quoted form whose
+ * content tree-sitter had to split into expansion nodes.
+ */
+function literalCdTarget(node: ShellSyntaxNode): string | undefined {
+  let target: ShellSyntaxNode | undefined;
+  for (const arg of node.namedChildren) {
+    if (arg.type === 'command_name' || arg.type === 'variable_assignment') {
+      continue;
+    }
+    // `cd -L dir` / `cd -- dir`: skip option words, but `cd -` on its own
+    // is the previous-directory form and must reach the checks below.
+    if (arg.type === 'word' && arg.text.startsWith('-') && arg.text !== '-') {
+      continue;
+    }
+    target = arg;
+    break;
+  }
+  if (target === undefined) return undefined;
+  let text: string;
+  if (target.type === 'word') {
+    text = target.text;
+  } else if (target.type === 'string') {
+    // A double-quoted path is literal only when its body is plain content;
+    // `"$HOME/x"` and `"$(pwd)/x"` carry expansion children instead.
+    if (target.namedChildren.some((c) => c.type !== 'string_content')) {
+      return undefined;
+    }
+    text = target.namedChildren.map((c) => c.text).join('');
+  } else {
+    return undefined;
+  }
+  // `-` is bash's previous-directory form, not a path named "-".
+  if (text.length === 0 || text === '-' || text.startsWith('~'))
+    return undefined;
+  if (/[$`\\*?[\]{}]/.test(text)) return undefined;
+  return text;
+}
+
+/**
+ * Resolve the directory the first `gh pr create` in `command` runs in, so
+ * both attribution legs ask gh about the repo the create actually targeted.
+ * A model-authored `cd <worktree> && gh pr create` without the `directory`
+ * param otherwise resolves the launch directory's branch — which has no PR
+ * — and the binding declines silently.
+ *
+ * The walk is static and fails closed: it never runs the command, never
+ * guesses an expansion, and returns `opaque` for every directory change it
+ * cannot prove (`cd $VAR`, `cd ~`, `cd -`, `popd`, a `pushd +N` stack
+ * rotation, a `||` branch, a subshell or control-flow body that moves the
+ * directory, an `env -C`/`sudo -D` wrapper). `opaque` keeps the launch
+ * directory, so this can only add bindings, never remove one. A parse
+ * failure or an error node returns `launch`: the parser proved nothing, so
+ * behaviour is unchanged.
+ *
+ * Create recognition reuses `commandRunsGhPrCreate` verbatim rather than
+ * restating its closed grammar, and the walk stops at the first create —
+ * the gate binds one PR, so a later `cd` or a `|| gh pr view` retry tail
+ * cannot change the answer.
+ */
+async function resolveGhPrCreateDirectory(
+  command: string,
+  launchDir: string,
+): Promise<GhPrCreateDirectory> {
+  let tree: Parser.Tree;
+  try {
+    tree = await parseShellCommand(command);
+  } catch {
+    return { kind: 'launch' };
+  }
+  try {
+    const root = tree.rootNode;
+    if (root.hasError) return { kind: 'launch' };
+
+    let found: string | undefined;
+    let opaque = false;
+    const cdpathSet = assignsCdpath(root);
+
+    const visit = (node: ShellSyntaxNode, dir: string): string => {
+      if (found !== undefined || opaque) return dir;
+      switch (node.type) {
+        case 'program':
+        case 'list': {
+          const isOrBranch =
+            node.type === 'list' &&
+            node.children.some((c) => !c.isNamed && c.text === '||');
+          let current = dir;
+          const children = node.namedChildren;
+          for (let i = 0; i < children.length; i++) {
+            // The right side of `||` runs only when the left failed, so its
+            // directory depends on how far the left got. A create already
+            // found in the left is unaffected — `cd w && gh pr create || gh
+            // pr view` attributes in `w`. Only a left that actually moved
+            // the directory makes what follows unprovable: `false || gh pr
+            // create` still runs in the launch directory, and calling that
+            // opaque would emit a notice about a directory change that never
+            // happened.
+            if (isOrBranch && i > 0 && found === undefined && current !== dir) {
+              opaque = true;
+              return current;
+            }
+            current = visit(children[i]!, current);
+          }
+          return current;
+        }
+        case 'pipeline': {
+          // Bash runs pipeline elements in subshells, so a `cd` inside one
+          // does not leak; every element sees the incoming directory.
+          for (const child of node.namedChildren) visit(child, dir);
+          return dir;
+        }
+        case 'redirected_statement': {
+          let current = dir;
+          for (const child of node.namedChildren) {
+            if (child.type.endsWith('_redirect')) continue;
+            current = visit(child, current);
+          }
+          return current;
+        }
+        case 'command': {
+          if (commandRunsGhPrCreate(node.text)) {
+            const program = commandNodeProgram(node);
+            const shiftSet =
+              program === 'env'
+                ? ENV_FLAGS_SHIFT_CWD
+                : program === 'sudo'
+                  ? SUDO_FLAGS_SHIFT_CWD
+                  : undefined;
+            if (
+              shiftSet &&
+              node.namedChildren.some((c) => isShiftCwdFlag(c.text, shiftSet))
+            ) {
+              opaque = true;
+            } else {
+              found = dir;
+            }
+            return dir;
+          }
+          const program = commandNodeProgram(node);
+          // `eval`/`source`/`.` run code in this shell that can move it
+          // without naming a target here, and `popd` rotates a stack we do
+          // not model. None of them is attributable from the command text.
+          if (
+            program === 'popd' ||
+            program === 'eval' ||
+            program === 'source' ||
+            program === '.'
+          ) {
+            opaque = true;
+            return dir;
+          }
+          if (program === 'cd' || program === 'pushd') {
+            const target = literalCdTarget(node);
+            // `pushd +N` / `pushd -N` rotate the directory stack instead of
+            // naming a path; only `cd` may treat `+1` as a directory name.
+            // A command that sets CDPATH reroutes relative targets through
+            // its entries, so only an absolute target stays provable.
+            if (
+              target === undefined ||
+              (program === 'pushd' && /^[+-]\d+$/.test(target)) ||
+              (cdpathSet && !path.isAbsolute(target))
+            ) {
+              opaque = true;
+              return dir;
+            }
+            return path.resolve(dir, target);
+          }
+          return dir;
+        }
+        default: {
+          // Subshells, compound statements and control flow: a directory
+          // change inside them is not attributable from here, but a subtree
+          // that never moves the directory cannot cost us a binding either.
+          if (subtreeMayChangeDirectory(node)) opaque = true;
+          return dir;
+        }
+      }
+    };
+
+    visit(root, launchDir);
+
+    if (opaque) return { kind: 'opaque' };
+    if (found === undefined || found === launchDir) return { kind: 'launch' };
+    return { kind: 'resolved', directory: found };
+  } finally {
+    // The tree lives in WASM memory; every other parseShellCommand consumer
+    // releases it, and a daemon session outlives many creates.
+    tree.delete();
+  }
 }
 
 /**
@@ -2595,10 +2878,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let preRunBranch: string | undefined;
     let preRunRepoKeys: AttributionRepoKeys | undefined;
     let preRunGhEnv: Readonly<Record<string, string | undefined>> | undefined;
+    // Both attribution legs must ask gh about the SAME directory, and that
+    // directory is where the create runs — not necessarily where the shell
+    // started. `cd <worktree> && gh pr create` without the `directory` param
+    // otherwise snapshots the launch branch (no PR) and declines silently.
+    let attributionDir = cwd;
+    let ghPrCreateDirectory: GhPrCreateDirectory = { kind: 'launch' };
     if (
       !this.config.getShellExecutionSandbox?.() &&
       commandRunsGhPrCreate(commandToExecute)
     ) {
+      ghPrCreateDirectory = await resolveGhPrCreateDirectory(
+        commandToExecute,
+        cwd,
+      );
+      if (ghPrCreateDirectory.kind === 'resolved') {
+        attributionDir = ghPrCreateDirectory.directory;
+      }
       // The verification legs must authenticate the way the create itself
       // does (inline GH_TOKEN with no ambient gh auth), or the gate's
       // advertised token shape binds nothing. The inline record is an
@@ -2609,9 +2905,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const inlineEnv = ghPrCreateInlineEnv(commandToExecute);
       preRunGhEnv = inlineEnv ? { ...process.env, ...inlineEnv } : undefined;
       [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
-        fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
-        fetchCurrentBranchName(cwd),
-        fetchAttributionRepoKeys(cwd, preRunGhEnv),
+        fetchCurrentBranchPullRequest(attributionDir, preRunGhEnv),
+        fetchCurrentBranchName(attributionDir),
+        fetchAttributionRepoKeys(attributionDir, preRunGhEnv),
       ]);
     }
 
@@ -3027,7 +3323,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       this.bindGhPrCreate(
         commandToExecute,
         result.output,
-        cwd,
+        attributionDir,
         preRunPrSnapshot,
         preRunBranch,
         preRunRepoKeys,
@@ -3254,9 +3550,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
     ))
       ? SHELL_RECORD_ARTIFACT_REMINDER
       : null;
-    const appendedMetadata = [longRunHint, attributionWarning].filter(
-      (s): s is string => s !== null,
-    );
+    // Only a run that reached the binding gate can miss a binding; a failed
+    // or cancelled create produced no PR to register.
+    const prBindingDirectoryNotice =
+      ghPrCreateDirectory.kind === 'opaque' &&
+      (!result.aborted || wasPromoteRefused) &&
+      result.exitCode === 0
+        ? SHELL_PR_BINDING_DIRECTORY_NOTICE
+        : null;
+    const appendedMetadata = [
+      longRunHint,
+      attributionWarning,
+      prBindingDirectoryNotice,
+    ].filter((s): s is string => s !== null);
     const modelNotices = [...appendedMetadata, recordArtifactReminder].filter(
       (s): s is string => s !== null,
     );
@@ -3517,6 +3823,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * still race inside the snapshot→bind window, which this gate does not
    * serialize.
    *
+   * `cwd` is the ATTRIBUTION directory, not necessarily the launch one: the
+   * caller resolves the command's static `cd` chain first (see
+   * `resolveGhPrCreateDirectory`) and snapshots the same directory, so a
+   * `cd <worktree> && gh pr create` without the `directory` param attributes
+   * the worktree's branch rather than the launch branch's.
+   *
    * Scope (by design): only a FOREGROUND run that settled in this call —
    * an uninterrupted one, or one whose promote was refused because the
    * child had already exited — reaches this gate. A run promoted to the
@@ -3524,8 +3836,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * the background registry, whose output streams to a file and whose
    * pre-run snapshot was never taken; they are not bound live, and the
    * transcript is deliberately not a recovery source (no gh-side
-   * attribution). Such a PR binds through `/review <N>` or the worktree
-   * `pr-<N>` convention.
+   * attribution). Such a PR binds through `/review <N>`, `/verify-pr <N>`,
+   * or the worktree `pr-<N>` convention — the last only when the daemon
+   * created the worktree and wrote its sidecar; a plain `git worktree add`
+   * writes none, so backfill does NOT recover that shape.
    */
   private bindGhPrCreate(
     command: string,
@@ -3549,10 +3863,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
           );
           return;
         }
-        // The launch directory (`directory` param, else target dir), not a
-        // repo the command may have `cd`'d into: gh resolves THIS repo's
-        // branch, so an internal-`cd` create binds only when this branch's
-        // PR URL is what the output carries — backfill recovers the rest.
+        // The attribution directory the caller resolved: the launch
+        // directory (`directory` param, else target dir), or the directory
+        // the command's own static `cd` chain proved. gh resolves THAT
+        // repo's branch, and the pre-run snapshot was taken in the same
+        // directory, so the two legs compare like with like. A directory
+        // change the resolver could not prove falls back to the launch
+        // directory and is surfaced as a tool-result notice.
         const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
         if (created.status !== 'pr' || created.state !== 'open') {
           // Keep the facts distinct: `none` is gh's proved absence for this
