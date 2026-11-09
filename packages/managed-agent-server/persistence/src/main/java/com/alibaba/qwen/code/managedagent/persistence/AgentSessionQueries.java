@@ -221,6 +221,8 @@ final class AgentSessionQueries {
         arguments.add(tenantId);
         arguments.add(actorId == null ? null
                 : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        arguments.add(actorId == null ? null
+                : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
@@ -268,7 +270,8 @@ final class AgentSessionQueries {
                             + " FROM ma_workspace_access wa WHERE wa.tenant_id ="
                             + " ma_session.tenant_id AND wa.workspace_id = ma_session.workspace_id"
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
-                            + " 'OWNER')))"
+                            + " 'OWNER'))) AND (ma_session.owner_only = 0 OR"
+                            + " COALESCE(ma_session.owner_actor_key, ma_session.creator_actor_key) = ?)"
                                 + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",

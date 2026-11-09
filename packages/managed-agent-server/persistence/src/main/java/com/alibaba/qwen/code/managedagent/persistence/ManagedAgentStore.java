@@ -60,10 +60,8 @@ import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -115,23 +113,11 @@ public class ManagedAgentStore implements AgentStateStore {
             @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
             @Nullable SessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
             @Lazy @Nullable ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
-        String approvalMode =
-                properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
+        String approvalMode = properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
-        var modelIds = new HashSet<String>();
-        List<WebShellModelOption> modelCatalog = properties.getModelCatalog().stream().map(option -> {
-            String id = option.getModelId();
-            String label = option.getLabel() == null ? id : option.getLabel();
-            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
-                    || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
-                    || StringUtils.isBlank(label) || label.length() > 512
-                    || label.chars().anyMatch(Character::isISOControl)) {
-                throw new IllegalArgumentException("Invalid or duplicate Managed model catalog entry");
-            }
-            return new WebShellModelOption(id, label);
-        }).toList();
+        List<WebShellModelOption> modelCatalog = ManagedSessionModelConfigs.catalog(properties);
         boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
@@ -143,9 +129,7 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
-            throw new IllegalArgumentException(
-                    "qwen.managed-agent.agent-revision must contain 1-128"
-                            + " characters");
+            throw new IllegalArgumentException("qwen.managed-agent.agent-revision must contain 1-128 characters");
         }
 
         AgentStoreRows storeRows = new AgentStoreRows(harnessRules, jdbc, objectMapper);
@@ -176,7 +160,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, null, null);
     }
 
     @Override
@@ -185,7 +169,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
-        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
+        return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig, memoryStoreId);
     }
 
     @Override
@@ -272,8 +266,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public StoreModels.SessionLineage findChildLineage(String tenantId,
-            String sessionId) {
+    public StoreModels.SessionLineage findChildLineage(String tenantId, String sessionId) {
         return sessionQueries.findChildLineage(tenantId, sessionId);
     }
 
@@ -311,6 +304,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         return sessionPolicies.requireExtensionManagement(tenantId, actorId, sessionId, operationId, mutation);
     }
+
+    @Override
+    public boolean canApplyExtensions(SessionRecord session) { return sessionPolicies.canApplyExtensions(session); }
 
     @Override
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
@@ -479,8 +475,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Set<String> completedWorkspaceCloses(String tenantId,
-            List<String> sessionIds) {
+    public Set<String> completedWorkspaceCloses(String tenantId, List<String> sessionIds) {
         return sessionQueries.completedWorkspaceCloses(tenantId, sessionIds);
     }
 
@@ -641,8 +636,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public boolean hasExecutionRegistryFacts(String tenantId,
-            String sessionId) {
+    public boolean hasExecutionRegistryFacts(String tenantId, String sessionId) {
         return sessionQueries.hasExecutionRegistryFacts(tenantId, sessionId);
     }
 
@@ -745,8 +739,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionCommands.findCommand(tenantId, operation, idempotencyKey);
     }
 
-    public Optional<SessionRecord> findSession(String tenantId,
-            String sessionId) {
+    public Optional<SessionRecord> findSession(String tenantId, String sessionId) {
         return sessionQueries.findSession(tenantId, sessionId);
     }
 
@@ -775,13 +768,11 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionQueries.findLatestLifecycleOperations(tenantId, sessionIds);
     }
 
-    public Optional<TurnRecord> findTurn(String tenantId, String sessionId,
-            String turnId) {
+    public Optional<TurnRecord> findTurn(String tenantId, String sessionId, String turnId) {
         return sessionQueries.findTurn(tenantId, sessionId, turnId);
     }
 
-    public Map<String, TurnSummary> findActiveTurns(String tenantId,
-            List<String> sessionIds) {
+    public Map<String, TurnSummary> findActiveTurns(String tenantId, List<String> sessionIds) {
         return sessionQueries.findActiveTurns(tenantId, sessionIds);
     }
 
@@ -1034,6 +1025,11 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean bindHarness(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId) {
         return turnExecution.bindHarness(tenantId, sessionId, turnId, owner, harnessBootId);
+    }
+
+    @Transactional
+    public void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
+        sessionCommands.bindSessionHarness(tenantId, sessionId, harnessBootId);
     }
 
     @Transactional

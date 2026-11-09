@@ -1845,6 +1845,7 @@ export default {
   'Model Usage': '模型使用情況',
   'Input Tokens': '輸入 token 數',
   'Output Tokens': '輸出 token 數',
+  'Output (incl. Reasoning)': '輸出（含推理）',
   'Savings Highlight:': '節省亮點：',
   'of input tokens were served from the cache, reducing costs.':
     '從緩存載入 token ，降低了成本',

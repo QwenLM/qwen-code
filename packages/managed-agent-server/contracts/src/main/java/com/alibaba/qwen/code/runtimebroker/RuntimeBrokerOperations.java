@@ -34,6 +34,11 @@ public interface RuntimeBrokerOperations {
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority);
 
+    public default CompletionStage<HarnessSessionResolver.Capabilities> capabilitiesContext(
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return capabilities(harnessSessionId, authority).thenApply(scope -> new HarnessSessionResolver.Capabilities(scope, null));
+    }
+
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId);
 
     public CompletionStage<Map<String, Object>> extensionControl(String harnessSessionId, String expectedBindingId,

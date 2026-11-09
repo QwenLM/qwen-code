@@ -441,6 +441,10 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isZero();
                 assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))
                         .isEqualTo(coldRecovery ? 3 : 1);
+                assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(4);
+                var diagnostics = new ManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
+                assertThat(diagnostics.statistics()).isNotNull();
+                assertThat(diagnostics.statisticsSequence()).isPositive();
                 if (coldRecovery) {
                     assertThat(result.path("coldRecovery").asBoolean()).isTrue();
                     assertThat(result.path("coldRefusalChecks").asInt()).isEqualTo(9);
@@ -476,7 +480,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(39);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(41);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");

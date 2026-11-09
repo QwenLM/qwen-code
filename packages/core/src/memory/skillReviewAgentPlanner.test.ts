@@ -449,6 +449,18 @@ describe('runSkillReviewByAgent limit wiring', () => {
     const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
     expect(call?.tools).toEqual([READ_FILE, WRITE_FILE, EDIT]);
   });
+
+  it('words the stop reason instead of passing the mode token through', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
+      filesTouched: [],
+    });
+
+    await expect(review()).rejects.toThrow(
+      'Agent stopped: maximum turns reached.',
+    );
+  });
 });
 
 describe('skill-scoped shim registration-gate delegation (#10075)', () => {

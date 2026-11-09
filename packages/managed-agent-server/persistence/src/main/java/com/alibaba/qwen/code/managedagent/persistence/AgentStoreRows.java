@@ -122,7 +122,7 @@ final class AgentStoreRows {
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
                 result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
-                result.getString("model_config_digest"));
+                result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"));
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
