@@ -10,8 +10,8 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import {
-  readCachedSubscriptionModels,
-  subscriptionModelModalities,
+  readCachedSubscriptionCatalog,
+  type SubscriptionModelMetadata,
 } from '../qwen/subscription-models.js';
 import {
   type ModelConfig,
@@ -230,7 +230,8 @@ export class ModelRegistry {
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
-    this.setSubscriptionModels(readCachedSubscriptionModels());
+    const { models, modelMetadata } = readCachedSubscriptionCatalog();
+    this.setSubscriptionModels(models, modelMetadata);
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);
@@ -464,7 +465,8 @@ export class ModelRegistry {
     // the parent session's modalities instead of the agent's own.
     if (
       generationConfig.modalities === undefined ||
-      shouldUseCanonicalModalities(config.id)
+      (authType !== AuthType.QWEN_SUBSCRIPTION &&
+        shouldUseCanonicalModalities(config.id))
     ) {
       generationConfig.modalities = defaultModalities(config.id);
     }
@@ -503,15 +505,27 @@ export class ModelRegistry {
     }
   }
 
-  setSubscriptionModels(ids: string[]): void {
+  setSubscriptionModels(
+    ids: string[],
+    modelMetadata?: SubscriptionModelMetadata[],
+  ): void {
+    const metadataById = new Map(
+      modelMetadata?.map((entry) => [entry.id, entry]),
+    );
     this.modelsByAuthType.delete(AuthType.QWEN_SUBSCRIPTION);
     this.registerAuthTypeModels(
       AuthType.QWEN_SUBSCRIPTION,
-      ids.map((id) => ({
-        id,
-        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-        generationConfig: { modalities: subscriptionModelModalities(id) },
-      })),
+      ids.map((id) => {
+        const metadata = metadataById.get(id);
+        return {
+          id,
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          generationConfig: {
+            modalities: metadata?.modalities,
+            contextWindowSize: metadata?.contextWindowSize ?? tokenLimit(id),
+          },
+        };
+      }),
     );
   }
 
