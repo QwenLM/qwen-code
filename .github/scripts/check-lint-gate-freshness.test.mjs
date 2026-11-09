@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -240,25 +241,63 @@ function textFetch(baseText, headText, calls = [], file = 'eslint.config.js') {
 const PRETTIER_OPTS = { ...BASE_OPTS, gateFiles: ['.prettierignore'] };
 const ignoreFile = (lines) => `${lines.join('\n')}\n`;
 
-// Prettier's scope is .prettierignore AND .gitignore. Serve both, keyed by
-// file and ref, and pin the path so a wrong-file fetch cannot pass silently.
-function scopeFetch(byFile, calls = []) {
-  return async (path) => {
-    calls.push(path);
-    for (const [file, [baseText, headText]] of Object.entries(byFile)) {
-      const prefix = `/repos/QwenLM/qwen-code/contents/${file}?ref=`;
-      if (!path.startsWith(prefix)) continue;
-      if (path === `${prefix}${GATE_SHA}`) return baseText;
-      if (path === `${prefix}${HEAD_SHA}`) return headText;
-    }
-    throw new Error(`unexpected path: ${path}`);
+// Prettier's scope is every ignore file in the tree, read at the base TIP.
+// Serves commits/compare/trees on fetchJson and the root .prettierignore on
+// fetchText, recording every path so a wrong-ref fetch cannot pass silently.
+const BASE_REF = 'main';
+const blob = (s) => createHash('sha1').update(s).digest('hex');
+
+function prettierFetch(
+  { basePi, headPi, baseScope = {}, headScope = {}, truncated = false },
+  calls = [],
+) {
+  const treeFor = (scope, pi) => ({
+    truncated,
+    tree: [
+      { type: 'blob', path: '.prettierignore', sha: blob(ignoreFile(pi)) },
+      ...Object.entries(scope).map(([path, text]) => ({
+        type: 'blob',
+        path,
+        sha: blob(text),
+      })),
+      { type: 'blob', path: 'src/a.ts', sha: blob('unrelated') },
+    ],
+  });
+  const trees = {
+    [BASE_REF]: treeFor(baseScope, basePi),
+    [HEAD_SHA]: treeFor(headScope, headPi),
+  };
+  const piText = {
+    [BASE_REF]: ignoreFile(basePi),
+    [HEAD_SHA]: ignoreFile(headPi),
+  };
+  return {
+    fetchJson: async (path) => {
+      calls.push(path);
+      if (path.startsWith('/repos/QwenLM/qwen-code/commits?'))
+        return commitsResponse(GATE_SHA);
+      if (path.startsWith(`/repos/QwenLM/qwen-code/compare/${GATE_SHA}...`))
+        return { status: 'diverged' };
+      const t =
+        /^\/repos\/QwenLM\/qwen-code\/git\/trees\/(.+)\?recursive=1$/.exec(
+          path,
+        );
+      if (t && decodeURIComponent(t[1]) in trees)
+        return trees[decodeURIComponent(t[1])];
+      throw new Error(`unexpected json path: ${path}`);
+    },
+    fetchText: async (path) => {
+      calls.push(path);
+      const m =
+        /^\/repos\/QwenLM\/qwen-code\/contents\/\.prettierignore\?ref=(.+)$/.exec(
+          path,
+        );
+      if (m && decodeURIComponent(m[1]) in piText)
+        return piText[decodeURIComponent(m[1])];
+      throw new Error(`unexpected text path: ${path}`);
+    },
   };
 }
-
-const bothIgnoreFiles = (basePi, headPi, baseGi = [], headGi = []) => ({
-  '.prettierignore': [ignoreFile(basePi), ignoreFile(headPi)],
-  '.gitignore': [ignoreFile(baseGi), ignoreFile(headGi)],
-});
 
 test('a base-side global ignore addition does not stale the branch', async () => {
   // Mutation witness: deleting the post-filter leaves this stale. This is the
@@ -441,30 +480,30 @@ test('a base-side prettierignore addition does not stale the branch', async () =
   const calls = [];
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
-    fetchJson: divergedJson(),
-    fetchText: scopeFetch(
-      bothIgnoreFiles(
-        ['node_modules', 'packages/live-host/'],
-        ['node_modules'],
-      ),
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+      },
       calls,
     ),
   });
   assert.deepEqual(stale, []);
-  // Both scope files, both refs — and only on an already-stale verdict.
-  assert.equal(calls.length, 4);
+  // commits + compare + two trees + two root-ignore reads.
+  assert.equal(calls.length, 6);
+  assert.ok(
+    calls.some((c) => c.includes('/git/trees/main?recursive=1')),
+    'the base tree must be read at the base TIP, not at the gate commit',
+  );
 });
 
 test('a base-side prettierignore REMOVAL still stales the branch', async () => {
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
-    fetchJson: divergedJson(),
-    fetchText: scopeFetch(
-      bothIgnoreFiles(
-        ['node_modules'],
-        ['node_modules', 'packages/live-host/'],
-      ),
-    ),
+    ...prettierFetch({
+      basePi: ['node_modules'],
+      headPi: ['node_modules', 'packages/live-host/'],
+    }),
   });
   assert.equal(stale.length, 1);
 });
@@ -472,8 +511,7 @@ test('a base-side prettierignore REMOVAL still stales the branch', async () => {
 test('a negated prettierignore line blocks the narrowing', async () => {
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
-    fetchJson: divergedJson(),
-    fetchText: scopeFetch(bothIgnoreFiles(['*.md', '!keep.md'], ['*.md'])),
+    ...prettierFetch({ basePi: ['*.md', '!keep.md'], headPi: ['*.md'] }),
   });
   assert.equal(stale.length, 1);
 });
@@ -501,8 +539,7 @@ test('a leading-space prettierignore pattern is not conflated with its trimmed f
   // head excludes a file the base checks. Must stay stale.
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
-    fetchJson: divergedJson(),
-    fetchText: scopeFetch(bothIgnoreFiles([' foo.js'], ['foo.js'])),
+    ...prettierFetch({ basePi: [' foo.js'], headPi: ['foo.js'] }),
   });
   assert.equal(stale.length, 1);
 });
@@ -576,15 +613,11 @@ test('a branch-only .gitignore entry blocks the prettier narrowing', async () =>
   // alone would certify a branch whose prettier scope is smaller.
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
-    fetchJson: divergedJson(),
-    fetchText: scopeFetch(
-      bothIgnoreFiles(
-        ['node_modules', 'packages/live-host/'],
-        ['node_modules'],
-        [],
-        ['apps/host/'],
-      ),
-    ),
+    ...prettierFetch({
+      basePi: ['node_modules', 'packages/live-host/'],
+      headPi: ['node_modules'],
+      headScope: { '.gitignore': 'apps/host/\n' },
+    }),
   });
   assert.equal(stale.length, 1);
 });
@@ -596,12 +629,104 @@ test('any .gitignore difference blocks the prettier narrowing', async () => {
   // gitignore semantics.
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
-    fetchJson: divergedJson(),
-    fetchText: scopeFetch(
-      bothIgnoreFiles(['node_modules'], ['node_modules'], ['apps/host/'], []),
+    ...prettierFetch({
+      basePi: ['node_modules'],
+      headPi: ['node_modules'],
+      baseScope: { '.gitignore': 'apps/host/\n' },
+    }),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('a base-side .gitignore change after the gate commit is still seen', async () => {
+  // The Critical: .gitignore owns no gate verdict, so reading it at the
+  // .prettierignore gate commit hides any later base-side change. The tree
+  // must be read at the base TIP.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseScope: { '.gitignore': 'dist/\n' },
+        headScope: { '.gitignore': 'dist/\napps/host/\n' },
+      },
+      calls,
     ),
   });
   assert.equal(stale.length, 1);
+  assert.ok(calls.some((c) => c.includes('/git/trees/main?recursive=1')));
+});
+
+test('a nested .gitignore difference blocks the prettier narrowing', async () => {
+  // prettier discovers ignore files per directory; the lane groups by the
+  // nearest ancestor carrying one, so packages/cli/.gitignore scopes a group.
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    ...prettierFetch({
+      basePi: ['node_modules', 'packages/live-host/'],
+      headPi: ['node_modules'],
+      baseScope: { 'packages/cli/.gitignore': 'dist/\n' },
+      headScope: { 'packages/cli/.gitignore': 'dist/\nextra/\n' },
+    }),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('an ignore file added or removed on either side blocks the narrowing', async () => {
+  for (const [baseScope, headScope] of [
+    [{ 'packages/cli/.gitignore': 'dist/\n' }, {}],
+    [{}, { 'packages/cli/.gitignore': 'dist/\n' }],
+  ]) {
+    const stale = await findStaleGateFiles({
+      ...PRETTIER_OPTS,
+      ...prettierFetch({
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseScope,
+        headScope,
+      }),
+    });
+    assert.equal(stale.length, 1);
+  }
+});
+
+test('a truncated tree never narrows', async () => {
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    ...prettierFetch({
+      basePi: ['node_modules', 'packages/live-host/'],
+      headPi: ['node_modules'],
+      truncated: true,
+    }),
+  });
+  assert.equal(stale.length, 1);
+});
+
+test('an extraction miss emits the warning, not a silent false', async () => {
+  // The design promises a ::warning:: on extraction failure too. Returning
+  // false instead of throwing keeps the verdict but skips the catch that logs.
+  const logged = [];
+  const original = console.log;
+  console.log = (m) => logged.push(String(m));
+  try {
+    const stale = await findStaleGateFiles({
+      ...ESLINT_OPTS,
+      fetchJson: divergedJson(),
+      fetchText: textFetch(
+        configWith(['node_modules/*', 'dist/**']),
+        'export default tseslint.config({});',
+      ),
+    });
+    assert.equal(stale.length, 1);
+  } finally {
+    console.log = original;
+  }
+  assert.ok(
+    logged.some((m) => m.includes('could not narrow eslint.config.js')),
+    'extraction failure must annotate, not silently keep the verdict',
+  );
 });
 
 test('the real prettier scope files keep the narrowing usable', () => {
@@ -738,4 +863,37 @@ test('the extractor finds the global block in the real eslint.config.js', () => 
   // Only the first block is consumed: the config-scoped arrays stay in rest.
   assert.ok(!split.entries.includes('packages/core/src/config/config.ts'));
   assert.ok(split.rest.includes('ignores: ['));
+  // A negated or escaped entry permanently disables the eslint narrowing too,
+  // and every other eslint case injects fixtures. Same drift guard as the
+  // prettier one, which was missing here.
+  assert.deepEqual(
+    split.entries.filter((e) => e.startsWith('!') || e.includes('\\')),
+    [],
+    'the real global ignores gained a negated or escaped entry; the narrowing is permanently disabled for it — teach the parser or drop the entry',
+  );
+});
+
+test('relocating the ignores block never compares equal', async () => {
+  // The extractor takes the first block without proving it is global. Every
+  // relocation leaves a trace in the byte-compared remainder, which is what
+  // rejects it. Pin the shapes so a future loosening reddens here instead of
+  // silently certifying a narrower branch.
+  const wrap = (body) => `export default tseslint.config(\n${body});\n`;
+  const obj = (props) => `  {\n${props}  },\n`;
+  const ign = (entries) =>
+    `    ignores: [\n${entries.map((e) => `      '${e}',\n`).join('')}    ],\n`;
+  const head = wrap(obj(ign(['a'])));
+  for (const base of [
+    wrap(obj(`    files: ['x'],\n` + ign(['b'])) + obj(ign(['a']))),
+    wrap(obj(`    files: ['x'],\n` + ign(['a'])) + obj(ign(['a']))),
+    wrap(obj(ign(['a']) + `    files: ['x'],\n`)),
+    wrap(obj(ign(['a'])) + obj(ign(['a']))),
+  ]) {
+    const stale = await findStaleGateFiles({
+      ...ESLINT_OPTS,
+      fetchJson: divergedJson(),
+      fetchText: textFetch(base, head),
+    });
+    assert.equal(stale.length, 1);
+  }
 });

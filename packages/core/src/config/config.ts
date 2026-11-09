@@ -541,6 +541,7 @@ import {
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import type { ModelSwitchOptions } from '../models/modelsConfig.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
@@ -6135,7 +6136,10 @@ export class Config {
     const session = new QwenSubscriptionSession();
     const identity = session.getIdentity();
     this.subscriptionModelIdentity = undefined;
-    const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    const result = await this.modelsConfig.refreshSubscriptionModels(
+      signal,
+      this.getCliVersion(),
+    );
     if (identity && session.getIdentity() === identity) {
       this.subscriptionModelIdentity = identity;
     }
@@ -6149,14 +6153,24 @@ export class Config {
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
-  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    return this.rebuildContentGenerator(authMethod, isInitialAuth, true);
+  async refreshAuth(
+    authMethod: AuthType,
+    isInitialAuth?: boolean,
+    subscriptionFallbackModel?: string,
+  ) {
+    return this.rebuildContentGenerator(
+      authMethod,
+      isInitialAuth,
+      true,
+      subscriptionFallbackModel,
+    );
   }
 
   private async rebuildContentGenerator(
     authMethod: AuthType,
     isInitialAuth: boolean | undefined,
     refreshSubscriptionModels: boolean,
+    subscriptionFallbackModel?: string,
   ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
@@ -6182,6 +6196,7 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
+    let fallbackModel: string | undefined;
     if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
       const { models } = refreshSubscriptionModels
         ? await this.refreshSubscriptionModels()
@@ -6192,12 +6207,19 @@ export class Config {
           };
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
-        throw new Error(subscriptionModelUnavailable(selected));
+        if (
+          !isInitialAuth ||
+          !subscriptionFallbackModel ||
+          !models.includes(subscriptionFallbackModel)
+        ) {
+          throw new Error(subscriptionModelUnavailable(selected));
+        }
+        fallbackModel = subscriptionFallbackModel;
       }
     }
 
     // Sync modelsConfig state for this auth refresh.
-    const modelId = this.modelsConfig.getModel();
+    const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
     // Check and consume cached credentials flag
@@ -7762,10 +7784,11 @@ export class Config {
   private async handleModelChange(
     authType: AuthType,
     requiresRefresh: boolean,
+    initializeIfNeeded?: boolean,
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
-      if (authType === AuthType.QWEN_SUBSCRIPTION)
+      if (initializeIfNeeded || authType === AuthType.QWEN_SUBSCRIPTION)
         await this.refreshAuth(authType);
       return;
     }
@@ -7965,7 +7988,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
+    options?: ModelSwitchOptions,
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();
