@@ -10474,20 +10474,7 @@ describe('DaemonSessionProvider', () => {
         turnCompleteDelivered.resolve();
         await releaseNameOnly.promise;
         if (opts.signal?.aborted) return;
-        yield {
-          id: 2,
-          v: 1,
-          type: 'session_update',
-          data: {
-            update: {
-              sessionUpdate: 'tool_call_update',
-              toolCallId: 'tool-1',
-              _meta: {
-                toolLifecycle: { callId: 'tool-1', toolName: 'read_file' },
-              },
-            },
-          },
-        } satisfies DaemonEvent;
+        yield lifecycleFrame(2, 'started');
         nameOnlyDelivered.resolve();
         await new Promise<void>((resolve) => {
           if (opts.signal?.aborted) resolve();
