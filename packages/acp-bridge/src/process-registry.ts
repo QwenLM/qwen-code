@@ -562,6 +562,13 @@ class TrackedChild implements TrackedChildProcess {
           this.knownGroups.delete(group);
           continue;
         }
+        // EPERM does not prove the group is still ours to signal: the group may
+        // already have emptied while a reused pgid belongs to a process this
+        // child did not start. Keep the group committed and let the process
+        // table settle it — a group still alive at the deadline fails loudly in
+        // the `surviving pgids=` error below. `survivingGroups` already treats
+        // EPERM as provisional for the same reason.
+        if (isErrno(error, 'EPERM')) continue;
         this.recordCleanupProofError(
           `ACP child pid=${rootPid ?? 'unknown'} could not send ${signal} ` +
             `to pgid=${group}: ${toError(error).message}`,

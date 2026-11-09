@@ -734,7 +734,7 @@ describe('ProcessRegistry', () => {
       signal?: NodeJS.Signals | number,
     ) => {
       if (signal === 0) throw errno('ESRCH');
-      throw errno('EPERM');
+      throw errno('EIO');
     }) as typeof process.kill);
     const tracked = new ProcessRegistry()
       .reserve()
@@ -742,6 +742,56 @@ describe('ProcessRegistry', () => {
 
     await expect(tracked.terminate()).rejects.toThrow('could not send SIGTERM');
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('reports a clean exit when the group signal is refused with EPERM and the group empties', async () => {
+    setPlatform('linux');
+    setAsyncProcessTable('1234 1 1234');
+    const child = fakeChild(1234);
+    vi.mocked(child.kill).mockImplementation(() => {
+      child.emit('exit', 0, null);
+      return true;
+    });
+    vi.spyOn(process, 'kill').mockImplementation(((
+      _pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      if (signal === 0) throw errno('ESRCH');
+      throw errno('EPERM');
+    }) as typeof process.kill);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+
+    await expect(tracked.terminate()).resolves.toBeUndefined();
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('still fails at the deadline when an EPERM-refused group is verifiably alive', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    setAsyncProcessTable('1235 1 1234 S 1');
+    const child = fakeChild(1234);
+    vi.mocked(child.kill).mockImplementation(() => true);
+    vi.spyOn(process, 'kill').mockImplementation(((
+      _pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      if (signal === 0) return true;
+      throw errno('EPERM');
+    }) as typeof process.kill);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+
+    const terminating = tracked.terminate().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(terminating).resolves.toMatchObject({
+      message: expect.stringContaining(
+        'did not exit with its owned process groups within 10000ms',
+      ),
+    });
   });
 
   it.each([
