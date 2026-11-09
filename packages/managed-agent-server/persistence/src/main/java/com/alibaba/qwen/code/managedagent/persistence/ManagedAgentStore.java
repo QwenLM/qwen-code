@@ -60,10 +60,8 @@ import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -120,18 +118,7 @@ public class ManagedAgentStore implements AgentStateStore {
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
-        var modelIds = new HashSet<String>();
-        List<WebShellModelOption> modelCatalog = properties.getModelCatalog().stream().map(option -> {
-            String id = option.getModelId();
-            String label = option.getLabel() == null ? id : option.getLabel();
-            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
-                    || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
-                    || StringUtils.isBlank(label) || label.length() > 512
-                    || label.chars().anyMatch(Character::isISOControl)) {
-                throw new IllegalArgumentException("Invalid or duplicate Managed model catalog entry");
-            }
-            return new WebShellModelOption(id, label);
-        }).toList();
+        List<WebShellModelOption> modelCatalog = ManagedSessionModelConfigs.catalog(properties);
         boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
@@ -310,6 +297,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         return sessionPolicies.requireExtensionManagement(tenantId, actorId, sessionId, operationId, mutation);
     }
+
+    @Override
+    public boolean canApplyExtensions(SessionRecord session) { return sessionPolicies.canApplyExtensions(session); }
 
     @Override
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)

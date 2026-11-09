@@ -167,6 +167,8 @@ class ManagedActionsTest {
         ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
                 .withQuestions(input);
         journal.change("requested", null);
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(2);
         for (JsonNode view : inputViews(tenant, session, journal.id)) {
             boolean web = view.has("actionId");
             assertThat(view.path("kind").asText()).isEqualTo("question");
