@@ -4955,6 +4955,8 @@ reaches step stdout.
 
 ### 162. review-scan · Scan for PRs with new feedback — review-pr is excluded from STALE_BASE_REDS: a review timeout is a verdict on THIS diff, not…
 
+[中文说明](#af-162-zh)
+
 In `review-scan` · `Scan for PRs with new feedback`.
 
 ```text
@@ -4971,7 +4973,12 @@ creates a new head, which starts a FRESH review-pr run; the #8888
 review-in-flight gate then holds every scan until that run ends, and
 when it times out the stale-base gate fires again. Two base updates
 (01:14, 07:47) both cited review-pr and neither cleared it; the
-pending comment never reached a round.
+pending comment never reached a round. The exclusion breaks the
+SUSTAINED cycle, not the first update: a mixed red set that also
+carries a genuine stale-base red (the 01:14 update cited Lint & Static
+alongside review-pr) still merges main once and re-arms the in-flight
+hold before the pending feedback can be picked up. The mixed-case
+meta-test pins that boundary.
 
 The green-on-main premise is unsound for review-pr specifically: it
 reviews THIS PR's diff, so a timeout reproduces on any base — merging
@@ -4992,3 +4999,20 @@ evidence calls for it. The meta-test pins both directions: review-pr
 alone green-on-main no longer updates, and a mixed review-pr + Test
 red still updates for Test.
 ```
+
+<a id="af-162-zh"></a>
+
+<details>
+<summary>中文说明（af-162 完整中文翻译，与上方英文逐段对应）</summary>
+
+[English](#af-162)
+
+本次新增，非从 YAML 移入。
+
+在 #16408 上观测到：一条维护者反馈评论 13+ 小时无人处理，循环在「评审超时 ↔ base 更新」之间打转。机制：review-pr 在大 diff 上超时（每轮约 6 小时）后落地为 FAILURE；stale-base 门禁看到一个在 MAIN_GREEN_CHECKS 上为绿（最近合入 main 的 PR 评审通过）、且分支落后 main 的红色检查，于是经 update-branch 合入 main 并 `continue`——跳过该次扫描的反馈处理。merge 产生新 head，触发一轮全新的 review-pr 运行；#8888 review-in-flight 门禁随后扣住每次扫描直到该轮结束，超时后 stale-base 门禁再次触发。两次 base 更新（01:14、07:47）都点名 review-pr，却都没能消除它；待处理评论始终没有进入任何一轮。本排除打断的是**持续**循环，而非第一次更新：若红色集合是混合的、还包含真正的 stale-base 红（01:14 那次同时点名 Lint & Static 与 review-pr），仍会合入 main 一次，并在待处理反馈被拾取前重新武装 in-flight 扣压。混合用例的 meta-test 钉住的正是这一边界。
+
+green-on-main 前提对 review-pr 特别不成立：它评审的是本 PR 自己的 diff，超时在任何 base 上都会复现——合入 main 治不了它，只会重启计时。af-109 本就称 green-on-main 是必要非充分信号；这个检查正是其不充分性属于结构性而非偶然性的情形。因此选择器按名字丢弃 review-pr（与 NON_BLOCKING_CHECKS 使用的键相同），与既有的 Qwen Autofix 排除并列。
+
+保持不变的部分：review-pr 处于 IN_PROGRESS 时，#8888 门禁仍扣住本轮（推送会取消评审）；一旦有一轮运行，红色 review-pr 仍会出现在 feedback.md 的失败检查段；其余所有红色检查保持原有 stale-base 行为。权衡：真正由 base 过期导致的 review-pr 红不再自动合入 main——但反馈轮仍会把它列在失败检查里，address agent 可在证据支持时自行合入 main。meta-test 钉住两个方向：仅 review-pr 红且 main 上绿时不再更新；review-pr + Test 混合红时仍会为 Test 更新。
+
+</details>
