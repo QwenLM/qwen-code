@@ -547,7 +547,24 @@ jobs:
             fi
             echo "HAS_PERSISTED_SOURCE=true" >> "${GITHUB_OUTPUT}"
             echo "Pushing release branch to remote..."
-            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+            for attempt in 1 2 3; do
+              if git push --set-upstream origin "${BRANCH_NAME}" --follow-tags; then
+                break
+              fi
+              # A failed push may still have landed remotely (GitHub can time out deciding
+              # whether workflow files may be created), so reconcile before retrying.
+              if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" > /dev/null; then
+                git fetch origin "${BRANCH_NAME}"
+                if [[ "$(git rev-parse FETCH_HEAD)" == "$(git rev-parse HEAD)" ]]; then
+                  echo "::notice::Push of ${BRANCH_NAME} landed remotely despite the reported failure; continuing."
+                  break
+                fi
+                echo "::error::Remote branch ${BRANCH_NAME} diverged from local HEAD; refusing to force-push." >&2
+                exit 1
+              fi
+              [[ "${attempt}" -lt 3 ]] || { echo "::error::Failed to push release branch ${BRANCH_NAME} after 3 attempts." >&2; exit 1; }
+              sleep $((attempt * 30))
+            done
           fi
 
       - name: 'Create GitHub Release and Tag'
