@@ -748,6 +748,13 @@ export interface WebShellCustomization {
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
+  /**
+   * The host already renders its own add ("+") entry in
+   * `renderComposerToolbarStart`. Hides the built-in composer AddMenu in the
+   * main, split-pane, and managed composers so the two entries do not sit
+   * side by side. Other toolbar actions are unaffected.
+   */
+  hostOwnsAddMenu?: boolean;
   renderComposerHeader?: ComposerHeaderRenderer;
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;

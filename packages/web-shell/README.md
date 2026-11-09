@@ -846,6 +846,9 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 原方式展示。桌面菜单使用下拉形式，触屏使用抽屉。已有 `composerToolbarActions`
 等配置继续决定默认和高级模式的可选操作，`composerPlaceholders` 占位文字覆盖继续
 生效。
+宿主若已通过 `renderComposerToolbarStart` 渲染自己的附件／添加入口，传入
+`hostOwnsAddMenu: true` 可隐藏内置 ＋ 菜单（主聊天、分屏与托管会话页一致），
+避免两个加号并排；其它工具栏按钮不受影响。
 
 ### 品牌（白标）
 

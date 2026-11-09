@@ -881,6 +881,14 @@ describe('ChatEditor add menu (+)', () => {
     expect(trigger(container)).toBeNull();
   });
 
+  it('yields the add entry to the host when the host owns it', () => {
+    const container = renderChatEditor({
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'approvalMode'],
+    });
+    expect(trigger(container)).toBeNull();
+  });
+
   it('keeps session attachments available without workspace actions', async () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['addMenu'],

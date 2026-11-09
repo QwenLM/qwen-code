@@ -1699,6 +1699,7 @@ export const ChatEditor = memo(
       renderComposerToolbarStart: ToolbarStart,
       renderComposerToolbarEnd: ToolbarEnd,
       renderComposerToolbarRight: ToolbarRight,
+      hostOwnsAddMenu = false,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -2070,7 +2071,8 @@ export const ChatEditor = memo(
     ]);
     // -- Composer add menu (`+`) ---------------------------------------------
     const showAddMenuAction =
-      isSimple || visibleToolbarActions?.includes('addMenu');
+      !hostOwnsAddMenu &&
+      (isSimple || visibleToolbarActions?.includes('addMenu'));
     const getAddMenuWorkspaceActions = useCallback(
       () => core.workspaceActionsRef.current,
       [core.workspaceActionsRef],
