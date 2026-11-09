@@ -234,9 +234,12 @@ describe('isDestructiveCommand — git commit --amend', () => {
     '# git commit --amend',
     'echo ok # a note about git commit --amend',
     "cat > notes.txt <<'EOF'\ngit commit --amend\nEOF",
-  ])('routes amend text the old prover called inert to approval: %s', (command) => {
-    expectNeedsApproval(command);
-  });
+  ])(
+    'routes amend text the old prover called inert to approval: %s',
+    (command) => {
+      expectNeedsApproval(command);
+    },
+  );
 
   // `--amend` here is the value of `-m`, not an operator: it never mentioned an
   // amend invocation, so it stays allowed on both the old and the new guard.
@@ -305,7 +308,7 @@ describe('isDestructiveCommand — git commit --amend', () => {
         encoding: 'utf-8',
       }).trim();
       registerSessionCommit(head);
-      expect(isDestructiveCommand('git commit --amend', 'amend', dir)).toBeNull();
+      expect(isDestructiveCommand('git commit --amend', 'amend')).toBeNull();
       expect(amendNeedsApproval('git commit --amend', dir)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });

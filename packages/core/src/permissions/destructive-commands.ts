@@ -210,13 +210,11 @@ export function clearSessionCommits(): void {
  *
  * @param command - The raw shell command string
  * @param userPrompt - The user's most recent prompt text
- * @param cwd - Working directory for git operations (amend check)
  * @returns Block result if the command is destructive, null otherwise
  */
 export function isDestructiveCommand(
   command: string,
   userPrompt: string,
-  cwd: string = process.cwd(),
 ): DestructiveCommandResult | null {
   const expanded = command + ' ' + stripShellQuotes(command);
 

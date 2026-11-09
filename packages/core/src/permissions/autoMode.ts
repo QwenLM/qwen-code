@@ -884,18 +884,7 @@ export async function evaluateAutoMode(
         ? normalizeMonitorCommand(input.ctx.command).safetyCommand
         : input.ctx.command;
     const userPrompt = extractLastUserPrompt(input.messages) ?? '';
-    // `ctx.cwd` is only set when the call passes `directory`; otherwise the
-    // shell runs in the session's target dir, which is also where
-    // `ShellToolInvocation` registers session commits. Passing `undefined`
-    // through lands on `process.cwd()` inside `isAmendOfSessionCommit`'s
-    // `git rev-parse` — in a process hosting several sessions (ACP, daemon)
-    // or several worktrees that is a different repo, so one repo's registry
-    // could exempt an amend happening in another.
-    const destructiveResult = isDestructiveCommand(
-      command,
-      userPrompt,
-      input.ctx.cwd ?? input.config.getTargetDir?.(),
-    );
+    const destructiveResult = isDestructiveCommand(command, userPrompt);
     if (destructiveResult?.blocked) {
       return {
         via: 'blocked:destructive-command',
@@ -904,9 +893,19 @@ export async function evaluateAutoMode(
     }
     // An `git commit --amend` mention the guard cannot prove is either a
     // program or data (issue #13570) goes to the user instead of being
-    // hard-blocked: the approval path lets them decide.
+    // hard-blocked: the approval path lets them decide. `ctx.cwd` is only set
+    // when the call passes `directory`; otherwise the shell runs in the
+    // session's target dir, which is also where `ShellToolInvocation`
+    // registers session commits. Passing `undefined` through lands on
+    // `process.cwd()` inside `isAmendOfSessionCommit`'s `git rev-parse` — in a
+    // process hosting several sessions (ACP, daemon) or several worktrees that
+    // is a different repo, so one repo's registry could exempt an amend
+    // happening in another.
     if (
-      amendNeedsApproval(command, input.ctx.cwd ?? input.config.getTargetDir?.())
+      amendNeedsApproval(
+        command,
+        input.ctx.cwd ?? input.config.getTargetDir?.(),
+      )
     ) {
       return { via: 'fallback', reason: 'safety_check' };
     }
