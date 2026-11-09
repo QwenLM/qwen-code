@@ -2,7 +2,11 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonClient, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonClient,
+  DaemonSessionListPage,
+  DaemonSessionSummary,
+} from '@qwen-code/sdk/daemon';
 import { RecentSessions } from './RecentSessions';
 
 vi.mock('../../i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -77,6 +81,13 @@ async function click(button: HTMLButtonElement) {
   await act(async () => button.click());
 }
 
+async function setHidden(hidden: boolean) {
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(hidden);
+  await act(async () => {
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+}
+
 beforeEach(() => {
   stableClient = undefined;
   window.localStorage.clear();
@@ -90,10 +101,195 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
 describe('recent sessions', () => {
+  it('does not load an initially hidden page until it becomes visible', async () => {
+    vi.useFakeTimers();
+    await setHidden(true);
+    await render();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+
+    await setHidden(false);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('pauses hidden polling and refreshes immediately once when visible again', async () => {
+    vi.useFakeTimers();
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [session('chat', '2026-10-20')],
+    });
+    await render();
+    const row = buttons()[0];
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(4);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(2);
+
+    await setHidden(true);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(4);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(2);
+    expect(buttons()[0]).toBe(row);
+
+    await setHidden(false);
+    await setHidden(false);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(6);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(8);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['hidden', 'visible again'] as const)(
+    'discards an interrupted page without following its cursor when %s',
+    async (whenResolved) => {
+      vi.useFakeTimers();
+      listStandaloneSessionsPage.mockResolvedValue({
+        sessions: [session('original', '2026-10-20')],
+      });
+      await render();
+      let resolvePage!: (page: DaemonSessionListPage) => void;
+      listStandaloneSessionsPage.mockReturnValueOnce(
+        new Promise<DaemonSessionListPage>((resolve) => {
+          resolvePage = resolve;
+        }),
+      );
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(2);
+      await setHidden(true);
+      if (whenResolved === 'visible again') {
+        listStandaloneSessionsPage.mockResolvedValue({
+          sessions: [session('fresh', '2026-10-22')],
+        });
+        await setHidden(false);
+        expect(buttons()[0].textContent).toBe('fresh');
+      }
+      const calls = listStandaloneSessionsPage.mock.calls.length;
+      await act(async () => {
+        resolvePage({
+          sessions: [session('stale', '2026-10-21')],
+          nextCursor: 'interrupted-next-page',
+        });
+      });
+      expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(calls);
+      expect(buttons().map((button) => button.textContent)).toEqual([
+        whenResolved === 'hidden' ? 'original' : 'fresh',
+      ]);
+    },
+  );
+
+  it.each(['paused', 'collapsed'] as const)(
+    'does not restart a %s list when visibility returns',
+    async (state) => {
+      vi.useFakeTimers();
+      await render('standalone', state === 'paused');
+      if (state === 'collapsed') {
+        await click(container.querySelector<HTMLButtonElement>('button')!);
+      }
+      listWorkspaceSessionsPage.mockClear();
+      listStandaloneSessionsPage.mockClear();
+      await setHidden(true);
+      await setHidden(false);
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+      expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('continues through sparse pages until twenty eligible sessions are available', async () => {
+    const readExcludedParent = vi.fn(() => 'parent');
+    listWorkspaceSessionsPage.mockImplementation(
+      async (cwd: string, options: { cursor?: string }) => {
+        if (cwd !== '/project') return { sessions: [] };
+        const page = Number(options.cursor ?? 0);
+        if (page >= 20)
+          throw new Error('requested beyond twenty eligible rows');
+        return {
+          sessions: [
+            ...Array.from({ length: 49 }, (_, i) => {
+              const excluded = session(`child-${page}-${i}`, '2026-10-20');
+              Object.defineProperty(excluded, 'parentSessionId', {
+                get: readExcludedParent,
+              });
+              return excluded;
+            }),
+            session(`valid-${page}`, '2026-10-20'),
+          ],
+          nextCursor: String(page + 1),
+        };
+      },
+    );
+    await render();
+    expect(
+      listWorkspaceSessionsPage.mock.calls
+        .filter(([cwd]) => cwd === '/project')
+        .map(([, options]) => options.cursor),
+    ).toEqual([
+      undefined,
+      ...Array.from({ length: 19 }, (_, i) => String(i + 1)),
+    ]);
+    expect(readExcludedParent).toHaveBeenCalledTimes(20 * 49);
+    await click(
+      [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent === 'sidebar.showAllSessions',
+      )!,
+    );
+    expect(buttons()).toHaveLength(20);
+    expect(new Set(buttons().map((button) => button.textContent))).toEqual(
+      new Set(Array.from({ length: 20 }, (_, i) => `valid-${i}`)),
+    );
+  });
+
+  it('counts unique eligible sessions and keeps the latest duplicate payload across pages', async () => {
+    listStandaloneSessionsPage.mockImplementation(
+      async (options: { cursor?: string }) => {
+        if (!options.cursor) {
+          return {
+            sessions: Array.from({ length: 19 }, (_, i) =>
+              session(`chat-${i}`, '2026-10-20'),
+            ),
+            nextCursor: 'duplicates',
+          };
+        }
+        if (options.cursor === 'duplicates') {
+          return {
+            sessions: [
+              session('chat-0', '2026-10-21', { displayName: 'updated' }),
+              session('chat-0', '2026-10-22', { isPinned: true }),
+            ],
+            nextCursor: 'twentieth',
+          };
+        }
+        if (options.cursor === 'twentieth') {
+          return {
+            sessions: [session('chat-19', '2026-10-20')],
+            nextCursor: 'unneeded',
+          };
+        }
+        throw new Error('requested after twenty distinct eligible sessions');
+      },
+    );
+    await render();
+    expect(
+      listStandaloneSessionsPage.mock.calls.map(([options]) => options.cursor),
+    ).toEqual([undefined, 'duplicates', 'twentieth']);
+    await click(
+      [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent === 'sidebar.showAllSessions',
+      )!,
+    );
+    expect(buttons()).toHaveLength(20);
+    expect(buttons()[0].textContent).toBe('updated');
+    expect(buttons().some((button) => button.textContent === 'chat-19')).toBe(
+      true,
+    );
+  });
+
   it('merges independent workspace and standalone catalogs by activity and opens each scope', async () => {
     listWorkspaceSessionsPage.mockImplementation(async (cwd: string) => ({
       sessions: [
