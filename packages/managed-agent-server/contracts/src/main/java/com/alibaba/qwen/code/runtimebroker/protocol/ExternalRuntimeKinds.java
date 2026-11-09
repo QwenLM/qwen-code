@@ -16,17 +16,17 @@ public final class ExternalRuntimeKinds {
     }
 
     public static boolean isExternal(String provisionerKind) {
-        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH.equals(provisionerKind)
-                || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(provisionerKind);
+        return RuntimeProviderKinds.EXTERNAL_SCRATCH.equals(provisionerKind)
+                || RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(provisionerKind);
     }
 
     /** Whether the kind binds registered EXTERNAL storage. */
     public static boolean isWorkspace(String provisionerKind) {
-        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(provisionerKind);
+        return RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(provisionerKind);
     }
 
     /** The provisioner names an operator can configure today, for messages. */
     public static String supported() {
-        return com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_SCRATCH + " or " + com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE;
+        return RuntimeProviderKinds.EXTERNAL_SCRATCH + " or " + RuntimeProviderKinds.EXTERNAL_WORKSPACE;
     }
 }

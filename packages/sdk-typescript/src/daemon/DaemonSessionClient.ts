@@ -140,10 +140,11 @@ export interface DaemonSessionClientOptions {
    * in the retained window.
    */
   historyAnchorRecordId?: string;
+  /** Optional source-projection boundary from the full load snapshot. */
+  replayProjectionWatermark?: number;
   /**
-   * True when the daemon reported the replay snapshot as degraded (the
-   * compaction engine failed at least once for this session). Consumers
-   * should prefer the full transcript over the snapshot when set.
+   * True when the daemon reported publication retention or compaction failure.
+   * Consumers should prefer the full transcript over the snapshot when set.
    */
   replayDegraded?: boolean;
   /**
@@ -208,6 +209,7 @@ function createStandaloneRestoredClient(
     lifecycleReplayIncomplete,
     historyHasMore,
     historyAnchorRecordId,
+    replayProjectionWatermark,
     replayDegraded,
     partial,
     replayError,
@@ -238,6 +240,7 @@ function createStandaloneRestoredClient(
           replayError,
           historyHasMore,
           historyAnchorRecordId,
+          replayProjectionWatermark,
           replayDegraded,
         }
       : {}),
@@ -281,9 +284,11 @@ export class DaemonSessionClient {
    * could not read one from the persisted transcript.
    */
   readonly historyAnchorRecordId: string | undefined;
+  /** Snapshot observation only; not advanced with the live SSE cursor. */
+  readonly replayProjectionWatermark: number | undefined;
   /**
    * True when the load response flagged the replay snapshot as degraded
-   * (`replayDegraded` — compaction failed at least once, so
+   * (`replayDegraded` — publication retention or compaction failed, so
    * `replaySnapshot` may lag behind live events). Prefer the full
    * transcript (see `fullTranscriptAvailable`) when set.
    */
@@ -346,6 +351,7 @@ export class DaemonSessionClient {
     this.hasRunningBackgroundTasks = opts.session.hasRunningBackgroundTasks;
     this.historyHasMore = opts.historyHasMore ?? false;
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
+    this.replayProjectionWatermark = opts.replayProjectionWatermark;
     this.replayDegraded = opts.replayDegraded ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
@@ -456,6 +462,7 @@ export class DaemonSessionClient {
       lifecycleReplayIncomplete,
       historyHasMore,
       historyAnchorRecordId,
+      replayProjectionWatermark,
       replayDegraded,
       partial,
       replayError,
@@ -483,6 +490,7 @@ export class DaemonSessionClient {
       replayError,
       historyHasMore,
       historyAnchorRecordId,
+      replayProjectionWatermark,
       replayDegraded,
     });
     await result.hydrateReplaySnapshot(req.signal);

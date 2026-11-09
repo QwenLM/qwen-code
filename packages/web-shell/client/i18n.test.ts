@@ -7,6 +7,7 @@ import {
   languageSettingToWebShellLanguage,
   normalizeLanguage,
 } from './i18n';
+import type { WebShellLanguage } from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -46,7 +47,47 @@ const BROWSER_NOTIFICATION_KEYS = [
   'temporary',
 ].map((suffix) => `browserNotifications.${suffix}`);
 
+const SCHEDULED_TASK_DELIVERY_KEYS = [
+  'channel',
+  'off',
+  'hint',
+  'unavailable',
+  'discardChanges',
+  'perRun',
+  'required',
+  'whitespace',
+  'trimWhitespace',
+  'loading',
+  'loadingContacts',
+  'channelsFailed',
+  'noChannels',
+  'targetUnavailable',
+  'notObserved',
+  'suggestion',
+  'manual',
+  'contactsFailed',
+  'suggestionsHint',
+  'type',
+  'id',
+  'user',
+  'chat',
+  'cardPrefix',
+].map((suffix) => `scheduledTasks.delivery.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('keeps every scheduled-task delivery translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of SCHEDULED_TASK_DELIVERY_KEYS) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(en(key));
+    }
+    expect(zh('scheduledTasks.delivery.perRun')).toContain(
+      '每次新会话不支持频道投递',
+    );
+  });
+
   it('keeps every browser notification translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -240,6 +281,17 @@ describe('web-shell i18n catalog', () => {
         t('settings.liveSetup.modelCustom'),
       );
     }
+  });
+
+  // A locale outside the shipped union (the provider is typed, but the
+  // runtime value is not checked) must resolve from the EN table: content
+  // assertions, so a mutation of the EN entry itself is caught.
+  it('falls back to EN for a language outside the shipped union', () => {
+    const t = getTranslator('fr' as unknown as WebShellLanguage);
+    expect(t('managed.tasks.title')).toBe('Session tasks');
+    expect(t('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(t('messageDelete.selected', { count: 2 })).toBe('2 groups selected');
+    expect(t('welcome.prompt')).not.toBe('welcome.prompt');
   });
 });
 

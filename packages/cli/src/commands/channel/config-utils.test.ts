@@ -602,6 +602,23 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow(/purgeLegacySessions.*must be a boolean/);
   });
 
+  it('validates forwardBotMessages like the other optional booleans', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      forwardBotMessages: true,
+    });
+    expect(result['forwardBotMessages']).toBe(true);
+    // A stringified "true" must not silently leave bot forwarding off.
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'github',
+        token: 'ghp_test',
+        forwardBotMessages: 'true',
+      }),
+    ).rejects.toThrow(/forwardBotMessages.*must be a boolean/);
+  });
+
   it('parses owner-scoped named sessions only for user scope', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
