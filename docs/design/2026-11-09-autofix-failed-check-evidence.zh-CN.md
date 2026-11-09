@@ -89,7 +89,9 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
    退出码 1、stdout 为空，而把非零退出吞掉的辅助函数会静默地不渲染任何摘要。
    因此抓取时传该标志，仅当 stderr 含 `unknown flag` 时回退到裸调用（旧版 `gh`
    既无该检查也无该标志），并做 `stripVTControlCharacters`，使原始 ANSI 不会到达
-   `feedback.md` 或 step stdout。这与
+   `feedback.md` 或 step stdout。同时脱去裸 CR：`stripVTControlCharacters` 去掉
+   转义序列却留下 `\r`，分支付控的日志行可借它在终端里视觉覆盖某一行开头，而
+   workflow 本就以同样方式对不可信评论正文脱 CR。这与
    `packages/cli/src/commands/autofix-pr/ci-log.ts` 的 `jobLog` 形状一致，行为
    套件的假 `gh` 会复现该拒绝，因此缺标志即变红。同样的修复也落到巡逻自己的
    `GhClient.jobLog`（`.github/scripts/ci-flaky-rerun.mjs`）——它在当前 `gh` 下
@@ -124,17 +126,17 @@ job id 直接来自检查的 `detailsUrl`（`…/actions/runs/<run>/job/<job>`�
   skill 指引。
 - 变异验证：把调用移到 checkout 之后、改为 `RUNNER_TEMP` 暂存路径、去掉
   `|| true`、去掉反馈守卫、去掉任一 CI 成员条目、去掉 skill 句子，都会让
-  workflow 钉子变红；去掉标志、脱 ANSI、旧 gh 回退、把行数上限改回 60、把围栏
-  定长四反引号、把 usage 守卫收窄为 `&&`、渲染原始日志、去掉自车道排除、job
-  上限、去重，或加入 `CANCELLED`，都会让采集器测试变红；去掉巡逻的标志会让其
-  见证变红。
+  workflow 钉子变红；去掉标志、脱 ANSI、脱 CR、旧 gh 回退、把行数上限改回 60、
+  把围栏定长四反引号、把 usage 守卫收窄为 `&&`、渲染原始日志、去掉自车道排除、
+  job 上限、去重，或加入 `CANCELLED`，都会让采集器测试变红；去掉巡逻的标志会让
+  其见证变红。
 - 因为改了 `ci.yml`，复跑 `scripts/tests/ci-platform-lanes.test.js`。
 
 ## 验收标准
 
 - 红 PR 的 `feedback.md` 带有失败步骤名，以及最多三个失败 job 的已脱敏摘要；
-  摘要在当前 `gh` 下确实渲染（传了标志），且没有原始 ANSI 到达 `feedback.md`
-  或 step stdout。
+  摘要在当前 `gh` 下确实渲染（传了标志），且没有原始 ANSI 或裸 CR 到达
+  `feedback.md` 或 step stdout。
 - job 日志中的任何密钥都不会到达 `feedback.md` 或 step stdout。
 - 脚本缺失、rollup 不可读或 API 读取失败，绝不会让一轮失败。
 - 采集器及其导入的 helper 在切到 PR 分支之前、从可信 base 执行。

@@ -387,6 +387,19 @@ describe('CLI', () => {
     assert.ok(result.stdout.includes('AssertionError: boom'));
   });
 
+  it('strips bare CR so a log line cannot overwrite a terminal line', () => {
+    // stripVTControlCharacters removes escape sequences but leaves a bare \r;
+    // a fork-controlled log line could otherwise visually overwrite a line's
+    // start once the excerpt reaches step stdout. The CR strip closes it.
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      { log: '##[error]AssertionError: real failure\rOVERWRITTEN start\n' },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('real failure'));
+    assert.ok(!result.stdout.includes('\r'));
+  });
+
   it('stays silent when nothing is red', () => {
     const result = runCli({
       statusCheckRollup: [failedCheck({ conclusion: 'SUCCESS' })],

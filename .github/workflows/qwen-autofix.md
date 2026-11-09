@@ -4916,7 +4916,11 @@ render no excerpt at all. So: pass the flag; fall back to the bare
 call ONLY when stderr says `unknown flag` (older gh has neither the
 check nor the flag); and stripVTControlCharacters the result, because
 raw ANSI would otherwise reach feedback.md and step stdout, where the
-existing defang handles only `::` and `##[`. The behavioral suite's
+existing defang handles only `::` and `##[`. Strip bare CR alongside it:
+stripVTControlCharacters removes escape sequences but leaves a `\r`
+that a fork-controlled log line could use to visually overwrite a
+line's start in a terminal — the same CR strip the workflow applies to
+untrusted comment bodies one block above. The behavioral suite's
 fake gh reproduces the refusal, so a missing flag turns it red. The
 same fix lands on the patrol's own GhClient.jobLog, which was equally
 log-blind on current gh. The excerpt fence is sized past any backtick

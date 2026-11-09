@@ -109,7 +109,11 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    render no excerpt. So the fetch passes the flag, falls back to the bare call
    only when stderr says `unknown flag` (older `gh` has neither the check nor the
    flag), and applies `stripVTControlCharacters` so raw ANSI never reaches
-   `feedback.md` or step stdout. This is the same shape as
+   `feedback.md` or step stdout. It also strips bare CR: `stripVTControlCharacters`
+   removes escape sequences but leaves a `\r` that a fork-controlled log line
+   could use to visually overwrite a line's start in a terminal, and the workflow
+   already strips CR from untrusted comment bodies the same way. This is the same
+   shape as
    `packages/cli/src/commands/autofix-pr/ci-log.ts`'s `jobLog`, and the behavioral
    suite's fake `gh` reproduces the refusal so a missing flag turns it red. The
    identical fix is applied to the patrol's own `GhClient.jobLog`
@@ -155,19 +159,19 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
 - Mutation checks: moving the call below the checkout, staging it under
   `RUNNER_TEMP`, dropping `|| true`, dropping the feedback guard, dropping
   either CI membership entry, and dropping the skill sentence each turn the
-  workflow pins red; dropping the flag, the ANSI strip, the old-gh fallback,
-  reverting the line cap to 60, fixing the fence at four backticks, narrowing
-  the usage guard to `&&`, rendering the raw log, dropping the self-lane
-  exclusion, the job cap, the dedupe, or adding `CANCELLED` each turn the
-  collector tests red; dropping the patrol's flag turns its witness red.
+  workflow pins red; dropping the flag, the ANSI strip, the CR strip, the
+  old-gh fallback, reverting the line cap to 60, fixing the fence at four
+  backticks, narrowing the usage guard to `&&`, rendering the raw log, dropping
+  the self-lane exclusion, the job cap, the dedupe, or adding `CANCELLED` each
+  turn the collector tests red; dropping the patrol's flag turns its witness red.
 - `scripts/tests/ci-platform-lanes.test.js` re-runs because `ci.yml` changed.
 
 ## Acceptance criteria
 
 - A red PR's `feedback.md` carries failed step names and a redacted excerpt for
   up to three failing jobs, and the excerpt actually renders against a current
-  `gh` (the flag is passed) with no raw ANSI reaching `feedback.md` or step
-  stdout.
+  `gh` (the flag is passed) with no raw ANSI or bare CR reaching `feedback.md`
+  or step stdout.
 - No secret from a job log reaches `feedback.md` or step stdout.
 - An absent script, an unreadable rollup, or a failed API read never fails a
   round.
