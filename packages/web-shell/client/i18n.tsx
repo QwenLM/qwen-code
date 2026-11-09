@@ -4840,6 +4840,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
     'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+  'channels.editor.field.github.prCommentWatch': 'PR Comment Watch',
+  'channels.editor.field.github.prCommentWatch.description':
+    'Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it. Enabled by default; turn off to disable. Requires Deliver To PR-Bound Sessions.',
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
     'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
