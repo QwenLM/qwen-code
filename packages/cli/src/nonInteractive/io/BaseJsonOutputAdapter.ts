@@ -68,6 +68,12 @@ export interface MessageState {
 export interface ResultOptions {
   readonly isError: boolean;
   readonly errorMessage?: string;
+  /**
+   * Provider HTTP status behind `errorMessage`, when the failure came from an
+   * upstream response. Machine consumers key retry/backoff off the number
+   * instead of parsing the human-readable message.
+   */
+  readonly errorStatus?: number;
   readonly durationMs: number;
   readonly apiDurationMs: number;
   readonly numTurns: number;
@@ -1282,7 +1288,12 @@ export abstract class BaseJsonOutputAdapter {
         num_turns: options.numTurns,
         usage,
         permission_denials: [...this.permissionDenials],
-        error: { message: errorMessage },
+        error: {
+          message: errorMessage,
+          ...(options.errorStatus !== undefined
+            ? { status: options.errorStatus }
+            : {}),
+        },
       };
     } else {
       // Track presence by property existence — `runNonInteractive` may

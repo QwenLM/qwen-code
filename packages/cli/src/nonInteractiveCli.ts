@@ -602,6 +602,25 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    // A provider error mid-stream ends the turn; the terminal result keeps
+    // the provider's HTTP status so headless consumers can tell 401 from 429
+    // without parsing the formatted message. The status never becomes the
+    // exit code.
+    const throwProviderError = (
+      error: ServerLlmStreamEvent & {
+        type: LlmEventType.Error;
+      },
+    ): never => {
+      const errorText = parseAndFormatApiError(
+        error.value.error,
+        config.getContentGeneratorConfig()?.authType,
+        outputFormat === OutputFormat.TEXT ? t : undefined,
+      );
+      if (outputFormat === OutputFormat.TEXT) {
+        process.stderr.write(`${errorText}\n`);
+      }
+      throw new AlreadyReportedError(errorText, 1, error.value.error.status);
+    };
     const modSession =
       options.modSession ?? ModSession.create(config, settings, adapter);
     const ownsModSession = options.modSession === undefined;
@@ -2907,15 +2926,7 @@ export async function runNonInteractive(
                 loopDetected = true;
               }
               if (event.type === LlmEventType.Error) {
-                const errorText = parseAndFormatApiError(
-                  event.value.error,
-                  config.getContentGeneratorConfig()?.authType,
-                  outputFormat === OutputFormat.TEXT ? t : undefined,
-                );
-                if (outputFormat === OutputFormat.TEXT) {
-                  process.stderr.write(`${errorText}\n`);
-                }
-                throw new AlreadyReportedError(errorText);
+                throwProviderError(event);
               }
             },
             onRoundEnd: () => {
@@ -3336,18 +3347,10 @@ export async function runNonInteractive(
               loopDetected = true;
             }
             if (event.type === LlmEventType.Error) {
-              const errorText = parseAndFormatApiError(
-                event.value.error,
-                config.getContentGeneratorConfig()?.authType,
-                outputFormat === OutputFormat.TEXT ? t : undefined,
-              );
-              if (outputFormat === OutputFormat.TEXT) {
-                process.stderr.write(`${errorText}\n`);
-              }
               // The adapter has already captured the formatted error in JSON
-              // modes, while text mode wrote it above. Mark the throw so the
-              // terminal error result is emitted without formatting it again.
-              throw new AlreadyReportedError(errorText);
+              // modes; text mode prints it inside the helper. The throw marks
+              // it so the terminal error result reuses the formatting.
+              throwProviderError(event);
             }
           }
           captureActiveInteractionOwner();
@@ -3778,16 +3781,8 @@ export async function runNonInteractive(
                   loopDetected = true;
                 }
                 if (event.type === LlmEventType.Error) {
-                  const errorText = parseAndFormatApiError(
-                    event.value.error,
-                    config.getContentGeneratorConfig()?.authType,
-                    outputFormat === OutputFormat.TEXT ? t : undefined,
-                  );
-                  if (outputFormat === OutputFormat.TEXT) {
-                    process.stderr.write(`${errorText}\n`);
-                  }
                   // See the matching main-stream branch above.
-                  throw new AlreadyReportedError(errorText);
+                  throwProviderError(event);
                 }
               }
               captureActiveInteractionOwner();
@@ -4199,6 +4194,10 @@ export async function runNonInteractive(
             apiDurationMs: totalApiDurationMs,
             numTurns: turnCount,
             errorMessage: message,
+            ...(error instanceof AlreadyReportedError &&
+            error.status !== undefined
+              ? { errorStatus: error.status }
+              : {}),
             usage,
             stats,
           });
