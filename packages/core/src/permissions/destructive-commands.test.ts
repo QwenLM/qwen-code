@@ -217,7 +217,7 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "grep -n 'git commit --amend' CHANGELOG.md",
     'git commit -m --amend',
     '# git commit --amend',
-    "echo ok # a note about git commit --amend",
+    'echo ok # a note about git commit --amend',
     "cat > notes.txt <<'EOF'\ngit commit --amend\nEOF",
   ])('allows provably inert text that mentions amend: %s', (command) => {
     expectAllowed([command], 'write a report');
@@ -225,6 +225,40 @@ describe('isDestructiveCommand — git commit --amend', () => {
 
   it('allows git commit (without --amend)', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
+  });
+
+  it.each([
+    'git commit -m "fix" # was: --amend',
+    'git commit -a -m "x" # not --amend',
+    'git commit -m x <<< --amend',
+    'git commit -m a#b',
+  ])(
+    'does not read comments or here-strings as amend arguments: %s',
+    (command) => {
+      expectAllowed([command], 'commit changes');
+    },
+  );
+
+  it('still blocks a next-line amend after a comment', () => {
+    expectBlocked(
+      "git status # it's fine\ngit commit --amend",
+      'commit changes',
+      'amend',
+    );
+  });
+
+  it.each([
+    "echo 'git commit --amend' | sh",
+    "printf '%s\\n' 'git commit --amend' | sh",
+    "bash <(echo 'git commit --amend')",
+    "cat <<'EOF' | sh\ngit commit --amend\nEOF",
+    "cat notes.txt # <<'EOF'\ngit commit --amend",
+    "cat <<'EOF'X\ngit commit --amend\nEOFX",
+    "for echo in 'git commit --amend'; do $echo; done",
+    "$(echo 'git commit --amend')",
+    "./cat 'git commit --amend'",
+  ])('does not prove inertness for executed output: %s', (command) => {
+    expectBlocked(command, 'write a report', 'amend');
   });
 });
 

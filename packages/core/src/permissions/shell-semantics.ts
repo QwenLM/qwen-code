@@ -437,7 +437,7 @@ function extractRedirects(
     }
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (tok === '>' || tok === '1>') {
+    if (tok === '>' || tok === '1>' || tok === '>|' || tok === '1>|') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
@@ -473,7 +473,20 @@ function extractRedirects(
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') {
+    } else if (tok === '<<<') {
+      // A here-string operand feeds stdin; it is never an argument.
+      toRemove.add(i);
+      if (tokens[i + 1]) {
+        toRemove.add(i + 1);
+        i++;
+      }
+    } else if (
+      tok === '2>' ||
+      tok === '2>>' ||
+      tok === '&>' ||
+      tok === '&>>' ||
+      tok === '2>|'
+    ) {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
       if (target) {
@@ -491,10 +504,16 @@ function extractRedirects(
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
+      const m = tok.match(
+        /^(<<<|<<-?|1>\||2>\||1>>|1>|2>>|2>|&>>|&>|>\||>>|>|<)([\s\S]+)$/,
+      );
       if (m) {
         const op = m[1]!;
         const target = m[2]!;
+        if (op === '<<<') {
+          toRemove.add(i);
+          continue;
+        }
         if (op.startsWith('<<')) {
           toRemove.add(i);
           continue;
@@ -2431,11 +2450,19 @@ function getHeredocDelimiters(line: string): string[] {
       inDouble = !inDouble;
       continue;
     }
+    if (!inSingle && !inDouble && ch === '#') {
+      // A word-start comment hides the rest of the line from bash.
+      if (i === 0 || /[\s;&|(]/.test(line[i - 1]!)) break;
+    }
     if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
       continue;
     }
     if (line[i + 2] === '<') {
       i += 2;
+      continue;
+    }
+    // bash only sees a heredoc when `<<` starts a word (R16-1).
+    if (i > 0 && !/[\s;&|(<]/.test(line[i - 1]!)) {
       continue;
     }
 
@@ -2450,11 +2477,25 @@ function getHeredocDelimiters(line: string): string[] {
     if (quoted) wordStart++;
 
     let wordEnd = wordStart;
+    if (quoted) {
+      // The closing quote must end the word: `<<'EOF'X` is the delimiter
+      // `EOFX` to bash, not `EOF` (R16-1).
+      const close = line.indexOf(quote, wordEnd);
+      if (
+        close === -1 ||
+        (line[close + 1] !== undefined && !/[\s;&|<>)]/.test(line[close + 1]!))
+      ) {
+        return [];
+      }
+      if (close > wordStart) {
+        delimiters.push(line.slice(wordStart, close));
+      }
+      i = close + 1;
+      continue;
+    }
     while (wordEnd < line.length) {
       const wordCh = line[wordEnd]!;
-      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./-]/.test(wordCh)) {
-        break;
-      }
+      if (!/[A-Za-z0-9_./-]/.test(wordCh)) break;
       wordEnd++;
     }
 
@@ -2497,7 +2538,9 @@ const AMEND_PREFIX_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
 ]);
 
 const AMEND_LEADING_NOISE = new Set(
-  '! do done elif else esac fi for if in select then time until while'.split(' '),
+  '! do done elif else esac fi for if in select then time until while'.split(
+    ' ',
+  ),
 );
 
 const AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE =
@@ -2594,14 +2637,15 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
     return true;
   }
 
-  const unwrapped = stripShellWrapper(segment);
-  if (unwrapped !== segment) {
+  const uncommented = stripWordStartComments(segment);
+  const unwrapped = stripShellWrapper(uncommented);
+  if (unwrapped !== uncommented) {
     return commandContainsGitAmendAtDepth(unwrapped, depth + 1);
   }
 
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
-  const tokens = tokenize(segment, fdRedirects, fdCloses);
+  const tokens = tokenize(uncommented, fdRedirects, fdCloses);
   // Redirections can sit between the program and its arguments:
   // `git >| /dev/null commit --amend` is one git invocation.
   extractRedirects(tokens, '.', fdRedirects, fdCloses);
@@ -2613,6 +2657,48 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
   }
 
   return isGitAmendInvocation(words);
+}
+
+/**
+ * Drop quote-aware word-start `#` comments up to the newline (not the
+ * segment end): a `#` inside a word is literal, and a next-line command
+ * after the comment still parses (R19-6).
+ */
+function stripWordStartComments(segment: string): string {
+  let out = '';
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  for (let index = 0; index < segment.length; index++) {
+    const char = segment[index]!;
+    if (escaped) {
+      escaped = false;
+      out += char;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      out += char;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = '';
+      out += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === '#' && (index === 0 || /[\s;&|(]/.test(segment[index - 1]!))) {
+      const newline = segment.indexOf('\n', index);
+      if (newline === -1) break;
+      index = newline - 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
 }
 
 function commandContainsGitAmendAtDepth(
@@ -2661,6 +2747,7 @@ interface AmendHeredocBody {
   start: number;
   end: number;
   certified: boolean;
+  openerStart: number;
 }
 
 /**
@@ -2722,10 +2809,114 @@ function amendHeredocOpenerCertified(line: string): boolean {
 }
 
 /** Heredoc body ranges of the raw command, with their inert certification. */
+
+/**
+ * True when the carrying simple command's output can be executed: an
+ * unquoted pipe after the span, a `<(...)` process substitution or a
+ * `$( )` / backtick consumer anywhere in the carrying command sequence.
+ * The scan runs quote-aware from the segment start to the sequence end
+ * (newline, `;`, `&`), so a pipe inside a later quoted word does not count.
+ */
+function hasExecutingConsumer(
+  command: string,
+  segmentStart: number,
+  spanAt: number,
+): boolean {
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  for (let index = segmentStart; index < command.length; index++) {
+    const char = command[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      if (char === '\\' && quote === '"') escaped = true;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === '\n' || char === ';' || char === '&') break;
+    if (char === '`') return true;
+    if (char === '$' && command[index + 1] === '(') {
+      return true;
+    }
+    if (char === '<' && command[index + 1] === '(') return true;
+    if (char === '>' && command[index + 1] === '(') return true;
+    if (char === '|') {
+      if (command[index + 1] === '|') {
+        index++;
+        continue;
+      }
+      // Any pipe on the carrying line means the output can reach an
+      // executing consumer, before or after the span (R16-1).
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when a `$(`, `<(` or backtick opener between the segment start and
+ * the span's quote puts the span inside an executed substitution (R16-1).
+ */
+function openedBySubstitution(
+  command: string,
+  segmentStart: number,
+  spanStart: number,
+): boolean {
+  const head = command.slice(segmentStart, spanStart);
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  for (let index = 0; index < head.length; index++) {
+    const char = head[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      if (char === '\\' && quote === '"') escaped = true;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '`') return true;
+    if (char === '$' && head[index + 1] === '(') return true;
+    if ((char === '<' || char === '>') && head[index + 1] === '(') return true;
+  }
+  return false;
+}
+
+/** A `for <carrier> in …` head shadows the program word (R16-1). */
+function shadowsCarrier(command: string, carrier: string): boolean {
+  const pattern = new RegExp(
+    `\\bfor\\s+${carrier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+in\\b`,
+  );
+  return pattern.test(command);
+}
+
 function scanAmendHeredocBodies(command: string): AmendHeredocBody[] {
   const bodies: AmendHeredocBody[] = [];
-  const pending: { delimiter: string; certified: boolean; start: number }[] =
-    [];
+  const pending: {
+    delimiter: string;
+    certified: boolean;
+    start: number;
+    openerStart: number;
+  }[] = [];
   let offset = 0;
   for (const line of command.split('\n')) {
     const lineEnd = offset + line.length + 1;
@@ -2736,6 +2927,7 @@ function scanAmendHeredocBodies(command: string): AmendHeredocBody[] {
           start: active.start,
           end: offset,
           certified: active.certified,
+          openerStart: active.openerStart,
         });
         pending.shift();
         if (pending.length > 0) pending[0]!.start = lineEnd;
@@ -2745,7 +2937,12 @@ function scanAmendHeredocBodies(command: string): AmendHeredocBody[] {
       if (delimiters.length > 0) {
         const certified = amendHeredocOpenerCertified(line);
         for (const delimiter of delimiters) {
-          pending.push({ delimiter, certified, start: lineEnd });
+          pending.push({
+            delimiter,
+            certified,
+            start: lineEnd,
+            openerStart: offset,
+          });
         }
       }
     }
@@ -2756,6 +2953,7 @@ function scanAmendHeredocBodies(command: string): AmendHeredocBody[] {
       start: body.start,
       end: command.length,
       certified: body.certified,
+      openerStart: body.openerStart,
     });
   }
   return bodies;
@@ -2796,7 +2994,15 @@ export function amendMentionsProvablyInert(command: string): boolean {
       while (matchPtr < matches.length && matches[matchPtr]! < body.end) {
         const at = matches[matchPtr]!;
         const covering = bodies.filter((b) => at >= b.start && at < b.end);
-        if (!covering.every((b) => b.certified)) return false;
+        if (
+          !covering.every(
+            (b) =>
+              b.certified &&
+              !hasExecutingConsumer(command, b.openerStart, b.start),
+          )
+        ) {
+          return false;
+        }
         matchPtr++;
       }
       i = body.end - 1;
@@ -2809,13 +3015,25 @@ export function amendMentionsProvablyInert(command: string): boolean {
       let inert = false;
       if (inComment) {
         inert = true;
-      } else if (inSingle) {
+      } else if (inSingle && spanStart <= i) {
+        // Only the span's own opening may certify a mention: a mention
+        // inside a quoted heredoc body is handled by the body arm above
+        // and must not borrow the opener line's quoting state (R16-1).
         const head = skipAmendPrefixes(
           tokenize(command.slice(spanSegmentStart, spanStart)),
         );
         inert =
           head.length > 0 &&
-          AMEND_INERT_TEXT_PROGRAMS.has(amendExecutableBasename(head[0]!));
+          AMEND_INERT_TEXT_PROGRAMS.has(amendExecutableBasename(head[0]!)) &&
+          // The carrier must be the bare program word — `./cat` is a
+          // different executable — and its output must not reach an
+          // executing consumer: no unquoted pipe, process substitution or
+          // command substitution in the carrying segment, and no loop
+          // variable shadowing the carrier name (R16-1).
+          !/[\\/]/.test(head[0]!) &&
+          !hasExecutingConsumer(command, spanSegmentStart, i) &&
+          !openedBySubstitution(command, spanSegmentStart, spanStart) &&
+          !shadowsCarrier(command, head[0]!);
       }
       if (!inert) return false;
       matchPtr++;
@@ -2871,7 +3089,10 @@ export function amendMentionsProvablyInert(command: string): boolean {
       continue;
     }
     if (ch === '\n' || ch === ';' || ch === '&' || ch === '|' || ch === '(') {
-      segmentStart = i + 1;
+      // `$(`, `<(` and `>(` open an executed substitution, not a new
+      // segment: the carrier scan must keep seeing the opener (R16-1).
+      segmentStart =
+        ch === '(' && /[<$>]/.test(command[i - 1] ?? '') ? i - 1 : i + 1;
       continue;
     }
   }
