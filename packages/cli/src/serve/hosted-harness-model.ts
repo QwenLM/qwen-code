@@ -37,6 +37,7 @@ import type {
 import { filterHostedTurnHistory } from './hosted-turn-history.js';
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedMemorySession } from './hosted-memory-session.js';
 import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
 import { getSeparatedHookSettings } from '../config/hook-approvals.js';
@@ -316,6 +317,8 @@ export async function runHostedHarnessTextTurn(input: {
   agentDefinition?: HostedAgentDefinition;
   modelSelection?: HostedModelSelection;
   modelConfig?: HostedModelConfigReader;
+  memory?: Pick<HostedMemorySession, 'recall'>;
+  recallUserInput?: boolean;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
   extensionInstructions?: string;
@@ -741,6 +744,19 @@ async function runPreparedHostedHarnessTextTurn(
           queued.signal,
         );
     }
+    if (
+      input.memory &&
+      input.recallUserInput &&
+      !input.resumeFromToolResults &&
+      !input.resumeModel
+    ) {
+      const memoryContext = await input.memory.recall(
+        input.promptId,
+        input.prompt,
+        input.signal,
+      );
+      if (memoryContext) effectivePrompt += `\n${memoryContext}`;
+    }
     const textDeltas = input.hooks
       ?.getCatalog()
       ?.hooks.some(
@@ -971,7 +987,14 @@ async function runPreparedHostedHarnessTextTurn(
         if (submit?.shouldStopExecution() || submit?.isBlockingDecision())
           throw new Error('Hook blocked queued user input.');
         const updated = submit?.hookSpecificOutput?.['updatedPrompt'];
-        const context = submit?.getAdditionalContext();
+        const memoryContext = await input.memory?.recall(
+          message.id,
+          message.text,
+          input.signal,
+        );
+        const context = [submit?.getAdditionalContext(), memoryContext]
+          .filter(Boolean)
+          .join('\n');
         if (typeof updated === 'string' || context) {
           parts = [
             {

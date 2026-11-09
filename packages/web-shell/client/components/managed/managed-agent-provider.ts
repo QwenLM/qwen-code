@@ -8,6 +8,10 @@ import type {
   ManagedExtensionSelection,
   ManagedExtensionImportMetadata,
   ManagedExtensionInspection,
+  ManagedRuntimeSkillCandidates,
+  ManagedRuntimeSkillSnapshot,
+  ManagedRuntimeSkillImport,
+  ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
@@ -111,6 +115,18 @@ export type ManagedDiagnosticAgentTrace =
   components['schemas']['ManagedDiagnosticAgentTrace'];
 
 export interface ManagedDiagnosticsProvider {
+  getActivityStatistics?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<components['schemas']['ManagedDiagnosticActivityStats']>;
+  listActivity?(
+    sessionId: string,
+    options: ManagedAgentRequestOptions & {
+      kind: 'tools' | 'files' | 'skills';
+      cursor?: string;
+      limit?: number;
+    },
+  ): Promise<components['schemas']['ManagedDiagnosticActivityPage']>;
   getContextUsage(
     sessionId: string,
     options: ManagedAgentRequestOptions,
@@ -492,6 +508,25 @@ export interface ManagedAgentProvider {
       source: Blob,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedExtensionInspection>;
+    runtimeSkillCandidates?(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillCandidates>;
+    runtimeSkillSnapshot?(
+      sessionId: string,
+      input: {
+        owner: ManagedRuntimeSkillOwner;
+        path: string;
+        digest: string;
+        target: ManagedExtensionImportMetadata['target'];
+      },
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillSnapshot>;
+    importRuntimeSkill?(
+      sessionId: string,
+      input: ManagedRuntimeSkillImport & { extensionId?: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
     inspect?(
       workspaceId: string,
       pin: ManagedExtensionPin,
@@ -715,6 +750,7 @@ export interface ManagedAgentProvider {
       request: {
         agentId: string;
         modelId?: string;
+        memoryStoreId?: string;
         workspaceId: string;
         cwdRelative: string;
         approvalMode?: ManagedApprovalMode;
@@ -729,6 +765,7 @@ export interface ManagedAgentProvider {
       request: {
         agentId: string;
         modelId?: string;
+        memoryStoreId?: string;
         workspaceId: string;
         cwdRelative: string;
         text: string;
@@ -793,6 +830,7 @@ export interface ManagedAgentProvider {
     request: {
       text: string;
       input?: ManagedInputBlock[];
+      memoryStoreId?: string;
     },
     options: ManagedAgentCommandOptions,
   ): Promise<ManagedAgentTurnAdmission>;

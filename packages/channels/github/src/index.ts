@@ -172,6 +172,14 @@ export const plugin: ChannelPlugin = {
         default: 'false',
       },
       {
+        key: 'prCommentWatch',
+        label: 'PR Comment Watch',
+        kind: 'boolean',
+        description:
+          'Poll conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (including comments by the same GitHub account used by another session/agent). Requires Deliver To PR-Bound Sessions. Enabled by default; set false to disable.',
+        default: 'true',
+      },
+      {
         key: 'prWatchEvents',
         label: 'PR Watch Events',
         kind: 'string-list',

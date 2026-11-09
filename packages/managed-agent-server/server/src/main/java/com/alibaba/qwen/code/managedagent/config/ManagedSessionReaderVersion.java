@@ -19,7 +19,7 @@ public final class ManagedSessionReaderVersion implements com.alibaba.qwen.code.
             if (path.startsWith("/internal/managed-session-store/")
                     || path.startsWith("/internal/managed-tool-publications/")) {
                 String header = request.getHeader(HEADER);
-                if (header != null && !header.matches("[123]")) {
+                if (header != null && !header.matches("[1234]")) {
                     throw new ManagedAgentException(400, "invalid_managed_session_reader_version",
                             "The Managed Session reader version is invalid.");
                 }

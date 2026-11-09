@@ -192,6 +192,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   activeWorkCloseRetryDelayMs,
@@ -5657,6 +5658,15 @@ export function createSessionControlPlane(
           },
           async () => {
             await deliverRememberedUserLanguage(ci);
+            const subscriptionSelector = startupConfig?.modelServiceId;
+            const subscriptionSuffix = '(qwen-subscription)';
+            const startupSubscriptionModel =
+              engine !== 'managed' &&
+              (sourceType === 'default' || sourceType === 'vscode') &&
+              sourceId === undefined &&
+              subscriptionSelector?.endsWith(subscriptionSuffix)
+                ? subscriptionSelector.slice(0, -subscriptionSuffix.length)
+                : undefined;
             // This legacy-named helper sanitizes and injects trace metadata
             // for any ACP request, not only prompts.
             const request = telemetry.injectPromptContext({
@@ -5678,6 +5688,12 @@ export function createSessionControlPlane(
                   : {}),
                 [SESSION_INITIALIZATION_DEADLINE_META_KEY]:
                   Date.now() + initTimeoutMs,
+                ...(startupSubscriptionModel
+                  ? {
+                      [SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY]:
+                        startupSubscriptionModel,
+                    }
+                  : {}),
               },
             });
             const newSessionRequest = harness.withWorktreeInitialization(
@@ -14836,7 +14852,10 @@ export function createSessionControlPlane(
           // drift is corrected by `reconcileAfterRoundtrip`, which reads the
           // agent's authoritative selector and re-publishes if it differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
-          if (!isReservedStandaloneSessionSourceType(entry.sourceType)) {
+          if (
+            req._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] !== false &&
+            !isReservedStandaloneSessionSourceType(entry.sourceType)
+          ) {
             broadcastWorkspaceEvent({
               type: 'settings_changed',
               data: {

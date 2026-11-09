@@ -116,6 +116,7 @@ export function createJavaManagedAgentProvider(
     request: {
       agentId: string;
       modelId?: string;
+      memoryStoreId?: string;
       workspaceId: string;
       cwdRelative: string;
       text?: string;
@@ -140,6 +141,9 @@ export function createJavaManagedAgentProvider(
           ? {}
           : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
+        ...(request.memoryStoreId === undefined
+          ? {}
+          : { memoryStoreId: request.memoryStoreId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.extensionPins === undefined
           ? {}
@@ -316,6 +320,17 @@ export function createJavaManagedAgentProvider(
           source,
           request.signal,
         ),
+      runtimeSkillCandidates: (sessionId, request) =>
+        client.getRuntimeSkillCandidates(sessionId, request.signal),
+      runtimeSkillSnapshot: (sessionId, input, request) =>
+        client.snapshotRuntimeSkill(sessionId, input, request.signal),
+      importRuntimeSkill: (sessionId, input, request) =>
+        client.importRuntimeSkill(
+          sessionId,
+          input,
+          request.idempotencyKey,
+          request.signal,
+        ),
       lookupPackageOperation: (workspaceId, kind, key, request) =>
         client.lookupExtensionPackageOperation(
           workspaceId,
@@ -433,6 +448,26 @@ export function createJavaManagedAgentProvider(
       },
     },
     diagnostics: {
+      async getActivityStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getActivityStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listActivity(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listActivity(
+            {
+              sessionId,
+              kind: request.kind,
+              cursor: request.cursor,
+              limit: request.limit,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
       async getContextUsage(sessionId, request) {
         return requireDiagnosticSnapshot(
           await client.getDiagnosticContextUsage(sessionId, request.signal),
@@ -863,6 +898,7 @@ export function createJavaManagedAgentProvider(
               {
                 agentId,
                 modelId,
+                memoryStoreId,
                 workspaceId,
                 cwdRelative,
                 approvalMode,
@@ -877,6 +913,7 @@ export function createJavaManagedAgentProvider(
                 {
                   agentId,
                   modelId,
+                  memoryStoreId,
                   workspaceId,
                   cwdRelative,
                   approvalMode,
@@ -968,6 +1005,9 @@ export function createJavaManagedAgentProvider(
           idempotencyKey: command.idempotencyKey,
           agentId,
           title: titleFor(request.text),
+          ...(request.memoryStoreId === undefined
+            ? {}
+            : { memoryStoreId: request.memoryStoreId }),
           input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },

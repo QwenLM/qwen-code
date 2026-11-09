@@ -51,7 +51,11 @@ function body() {
 
 afterEach(() => vi.restoreAllMocks());
 
-it.each(['csi-files-retirement/1', 'csi-files-retirement/2'])(
+it.each([
+  'csi-files-retirement/1',
+  'csi-files-retirement/2',
+  'csi-files-retirement/3',
+])(
   'writes initial history using the admitted %s profile without reading the definition again',
   async (profile) => {
     const commitDomainRecord = vi.fn().mockResolvedValue({});

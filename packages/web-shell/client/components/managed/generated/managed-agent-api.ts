@@ -1215,6 +1215,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-activity-stats/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access. */
+        post: operations["querySessionActivityStatistics"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-activity/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access. */
+        post: operations["querySessionActivity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/workspace-extensions/imports": {
         parameters: {
             query?: never;
@@ -1294,6 +1328,57 @@ export interface paths {
         put?: never;
         /** @description Requires publishing permission. Previews validated normalized input without publishing a catalog revision or activating a Session. Retain exact input bytes, target, compiler version and source digest for the later explicit import. */
         post: operations["previewWebShellExtensionImport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/skills/candidates/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply. */
+        post: operations["webShellRuntimeSkillCandidates"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/skills/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply. */
+        post: operations["webShellRuntimeSkillSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-extensions/skills/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply. */
+        post: operations["webShellRuntimeSkillImports"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1454,6 +1539,8 @@ export interface components {
             worktree?: {
                 baseRef?: string;
             };
+            /** @description Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field. */
+            memoryStoreId?: string;
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -2781,6 +2868,7 @@ export interface components {
             selfService?: {
                 supported: boolean;
                 canApply: boolean;
+                runtimeSkillImportSupported?: boolean;
             };
         };
         WebShellExtensionSessionQuery: {
@@ -3090,6 +3178,7 @@ export interface components {
             createdAt: number;
             startedAt: number | null;
             settledAt: number | null;
+            predecessorTaskId?: string | null;
         };
         ManagedDiagnosticAgentTrace: {
             /** @constant */
@@ -3111,6 +3200,246 @@ export interface components {
             cursor?: string | null;
             limit?: number | null;
         };
+        ManagedActivityMetrics: {
+            requested: number;
+            admission: {
+                allowed: number;
+                denied: number;
+                invalid: number;
+                unknown: number;
+            };
+            execution: {
+                not_started: number;
+                running: number;
+                success: number;
+                error: number;
+                cancelled: number;
+                unknown: number;
+            };
+            delivery: {
+                pending: number;
+                complete: number;
+                partial: number;
+                unavailable: number;
+                unknown: number;
+            };
+        };
+        ManagedActivityFile: {
+            /** @enum {string} */
+            operation: "read" | "write" | "edit";
+            path: string | null;
+            cwdRelative: string | null;
+        };
+        ManagedActivitySkill: {
+            /** @enum {string} */
+            resourceKind: "skill" | "extension_command";
+            name: string;
+            pin: string;
+            /** @enum {string} */
+            origin: "user" | "model" | "unknown";
+            /** @enum {string} */
+            delivery: "complete" | "partial" | "unknown";
+        };
+        ManagedActivityInvocation: {
+            invocationId: string;
+            assistantMessageId: string;
+            ordinal: number;
+            toolName: string;
+            functionCallId: string | null;
+            providerCallId: string | null;
+            executionCallId: string | null;
+            taskId: string | null;
+            /** @enum {string} */
+            toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+            serverId: string | null;
+            /** @enum {string} */
+            admission: "allowed" | "denied" | "invalid" | "unknown";
+            /** @enum {string} */
+            execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+            /** @enum {string} */
+            delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+            /** @enum {string} */
+            capture: "complete" | "partial" | "unavailable" | "unknown";
+            file: components["schemas"]["ManagedActivityFile"] | null;
+            skill: components["schemas"]["ManagedActivitySkill"] | null;
+            requestSequence: string;
+            requestedAt: number;
+            conflictingEvidence?: boolean;
+            taskState?: string;
+            taskRuntimeState?: string | null;
+        };
+        ManagedActivityStatistics: {
+            tools: components["schemas"]["ManagedActivityMetrics"];
+            files: components["schemas"]["ManagedActivityMetrics"];
+            skills: components["schemas"]["ManagedActivityMetrics"];
+            otherTools: components["schemas"]["ManagedActivityMetrics"];
+            otherSkills: components["schemas"]["ManagedActivityMetrics"];
+            toolBuckets: {
+                key: string;
+                name: string;
+                metrics: components["schemas"]["ManagedActivityMetrics"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
+            }[];
+            skillBuckets: {
+                key: string;
+                name: string;
+                metrics: components["schemas"]["ManagedActivityMetrics"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
+            }[];
+            skillLoads: components["schemas"]["ManagedActivityMetrics"];
+            extensionCommands: components["schemas"]["ManagedActivityMetrics"];
+            fileOperations: {
+                read: components["schemas"]["ManagedActivityMetrics"];
+                write: components["schemas"]["ManagedActivityMetrics"];
+                edit: components["schemas"]["ManagedActivityMetrics"];
+            };
+        };
+        ManagedDiagnosticActivityStats: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            statistics: components["schemas"]["ManagedActivityStatistics"] | null;
+        };
+        ManagedActivityToolsPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "tools";
+            items: components["schemas"]["ManagedActivityInvocation"][];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        ManagedActivityFilesPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "files";
+            items: {
+                invocationId: string;
+                assistantMessageId: string;
+                ordinal: number;
+                toolName: string;
+                functionCallId: string | null;
+                providerCallId: string | null;
+                executionCallId: string | null;
+                taskId: string | null;
+                /** @enum {string} */
+                toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+                serverId: string | null;
+                /** @enum {string} */
+                admission: "allowed" | "denied" | "invalid" | "unknown";
+                /** @enum {string} */
+                execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+                /** @enum {string} */
+                delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+                /** @enum {string} */
+                capture: "complete" | "partial" | "unavailable" | "unknown";
+                file: components["schemas"]["ManagedActivityFile"];
+                skill: components["schemas"]["ManagedActivitySkill"] | null;
+                requestSequence: string;
+                requestedAt: number;
+                conflictingEvidence?: boolean;
+                taskState?: string;
+                taskRuntimeState?: string | null;
+            }[];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        ManagedActivitySkillsPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "skills";
+            items: {
+                invocationId: string;
+                assistantMessageId: string;
+                ordinal: number;
+                toolName: string;
+                functionCallId: string | null;
+                providerCallId: string | null;
+                executionCallId: string | null;
+                taskId: string | null;
+                /** @enum {string} */
+                toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+                serverId: string | null;
+                /** @enum {string} */
+                admission: "allowed" | "denied" | "invalid" | "unknown";
+                /** @enum {string} */
+                execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+                /** @enum {string} */
+                delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+                /** @enum {string} */
+                capture: "complete" | "partial" | "unavailable" | "unknown";
+                file: components["schemas"]["ManagedActivityFile"] | null;
+                skill: components["schemas"]["ManagedActivitySkill"];
+                requestSequence: string;
+                requestedAt: number;
+                conflictingEvidence?: boolean;
+                taskState?: string;
+                taskRuntimeState?: string | null;
+            }[];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        WebShellActivityQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            /** @enum {string} */
+            kind: "tools" | "files" | "skills";
+            cursor?: string;
+            /** @default 50 */
+            limit?: number;
+        };
+        ManagedDiagnosticActivityPage: components["schemas"]["ManagedActivityToolsPage"] | components["schemas"]["ManagedActivityFilesPage"] | components["schemas"]["ManagedActivitySkillsPage"];
         ManagedExtensionImportMetadata: {
             /** @enum {string} */
             sourceKind: "skill" | "extension" | "mcp";
@@ -3156,6 +3485,79 @@ export interface components {
         WebShellExtensionApplyLookup: {
             sessionId: string;
             idempotencyKey: string;
+        };
+        ManagedRuntimeSkillOwner: {
+            bindingId: string;
+            generation: string;
+        };
+        ManagedRuntimeSkillCandidate: {
+            name: string;
+            description: string;
+            path: string;
+            digest: string;
+            shadowed: boolean;
+            compatible: boolean;
+            error?: string;
+        };
+        ManagedRuntimeSkillCandidates: {
+            /** Format: uuid */
+            sessionId: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            candidates: components["schemas"]["ManagedRuntimeSkillCandidate"][];
+        };
+        ManagedRuntimeSkillSnapshot: {
+            /** Format: uuid */
+            sessionId: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            /** Format: uuid */
+            operationId: string;
+            /** Format: uuid */
+            preparationId: string;
+            sourceDigest: string;
+            byteLength: number;
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+            inspection: components["schemas"]["ManagedExtensionPackageInspection"];
+        };
+        WebShellRuntimeSkillQuery: {
+            /** Format: uuid */
+            sessionId: string;
+        };
+        WebShellRuntimeSkillSnapshotRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            path: string;
+            digest: string;
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+        };
+        WebShellRuntimeSkillImportRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
+            owner: components["schemas"]["ManagedRuntimeSkillOwner"];
+            /** Format: uuid */
+            operationId: string;
+            /** Format: uuid */
+            preparationId: string;
+            sourceDigest: string;
+            byteLength: number;
+            target: {
+                /** @enum {string} */
+                platform: "linux" | "darwin";
+                /** @enum {string} */
+                arch: "x64" | "arm64" | "any";
+            };
+            extensionId?: string;
         };
     };
     responses: {
@@ -5662,6 +6064,68 @@ export interface operations {
             409: components["responses"]["Conflict"];
         };
     };
+    querySessionActivityStatistics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded Session execution diagnostics with explicit coverage. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticActivityStats"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionActivity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellActivityQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded Session execution diagnostics with explicit coverage. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticActivityPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
     importWebShellExtensionPackage: {
         parameters: {
             query: {
@@ -5851,6 +6315,96 @@ export interface operations {
                 };
             };
             503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellRuntimeSkillCandidates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellRuntimeSkillQuery"];
+            };
+        };
+        responses: {
+            /** @description Verified owner-scoped result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedRuntimeSkillCandidates"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellRuntimeSkillSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellRuntimeSkillSnapshotRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified owner-scoped result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedRuntimeSkillSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellRuntimeSkillImports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellRuntimeSkillImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified owner-scoped result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedExtensionPackageOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
 }
