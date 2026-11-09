@@ -972,6 +972,65 @@ describe('decoded ANSI-C words stay data', () => {
     ).toEqual([write('/repo/~/x')]);
   });
 
+  // R3-9 (#16540 review): the marking must reach the operand and `>&` sites
+  // too, and a zero-width quoted segment quotes the word without leaving a
+  // marking character. bash opens <cwd>/~/… for all four spellings.
+  it('keeps a decoded tilde literal at operand and fd-duplication sites', () => {
+    expect(
+      extractShellOperationsAcrossCommand("cat $'\\x7e/x'", '/repo'),
+    ).toEqual([{ virtualTool: 'read_file', filePath: '/repo/~/x' }]);
+    expect(
+      extractShellOperationsAcrossCommand("cat >&'~'/out", '/repo'),
+    ).toEqual([write('/repo/~/out')]);
+    expect(extractShellOperationsAcrossCommand('cat > ""~/x', '/repo')).toEqual(
+      [write('/repo/~/x')],
+    );
+    expect(extractShellOperationsAcrossCommand('cat >~""/x', '/repo')).toEqual([
+      write('/repo/~/x'),
+    ]);
+  });
+
+  // R2-7 (#16540 review): bash concatenates adjacent `$'…'` segments at the
+  // BYTE level (`printf %s $'\xe4\xbd'$'\xa0' | xxd -p` is e4bda0), so a
+  // UTF-8 sequence split across them is 你, not two U+FFFD.
+  it('decodes a UTF-8 sequence split across adjacent ANSI-C segments', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cat > /tmp/$'\\xe4\\xbd'$'\\xa0'",
+        '/repo',
+      ),
+    ).toEqual([write('/tmp/你')]);
+  });
+
+  // R3-8 (#16540 review): the tokenizer's own NUL-truncation branch had no
+  // op-extraction test; a closing-quote-resumption regression would swallow
+  // the rest of the line with nothing red.
+  it('resumes the line after a NUL-truncated ANSI-C segment', () => {
+    expect(
+      extractShellOperationsAcrossCommand("cat $'a\\0b'c /etc/passwd", '/repo'),
+    ).toEqual([
+      { virtualTool: 'read_file', filePath: '/repo/ac' },
+      { virtualTool: 'read_file', filePath: '/etc/passwd' },
+    ]);
+    expect(
+      extractShellOperationsAcrossCommand("echo x > $'a\\0b'c", '/repo'),
+    ).toEqual([write('/repo/ac')]);
+  });
+
+  // R1-10 (#16540 review): live tokenizer branches with no pin. Each row
+  // goes red when its branch is removed.
+  it('pins the locale, continuation and NUL tokenizer branches', () => {
+    expect(
+      extractShellOperationsAcrossCommand('touch $"/etc/passwd"', '/repo'),
+    ).toEqual([write('/etc/passwd')]);
+    expect(
+      extractShellOperationsAcrossCommand('touch /tmp/fo\\\no', '/repo'),
+    ).toEqual([write('/tmp/foo')]);
+    expect(
+      extractShellOperationsAcrossCommand('touch $\\\n"/tmp/x"', '/repo'),
+    ).toEqual([write('/tmp/x')]);
+  });
+
   it('still expands an unquoted tilde', () => {
     const target = ops('cat > ~/x')[0]?.filePath ?? '';
     expect(target.startsWith('/')).toBe(true);
@@ -1021,10 +1080,6 @@ describe('fully quoted wrapper payload stays visible to op extraction', () => {
     ).toEqual([write('/etc/passwd')]);
   });
 });
-
-// R12-1 (#16075): an expanded program word is an amend only when its assigned
-// value can yield `git commit --amend` (or is genuinely unresolvable), not for
-// every assigned name.
 
 describe('round-4 lexing regressions', () => {
   // R4-1 (#16540 review): bash removes a `\`+newline before reading the next

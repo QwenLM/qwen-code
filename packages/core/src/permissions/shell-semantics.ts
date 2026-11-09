@@ -118,11 +118,19 @@ function tokenize(
    * before it removes anything).
    */
   bares?: string[],
+  /**
+   * Optional parallel output: true when the word carried ANY quoting,
+   * including a zero-width segment (`""~/x`) the per-character marking
+   * cannot show (#16540 review, R3-9).
+   */
+  wordQuotedFlags?: boolean[],
 ): string[] {
   const tokens: string[] = [];
   let current = '';
   // One char per char of `current`: '1' if typed unquoted and unescaped.
   let bare = '';
+  // Any quote touched while reading this word, zero-width segments included.
+  let wordQuoted = false;
   let inSingle = false;
   let inDouble = false;
   // `$'…'` keeps its own quote state: `\'` does not close it and `\n` is a
@@ -146,14 +154,26 @@ function tokenize(
   // it carries no redirect syntax and no braces, only the fact that bash saw an
   // argument (#16540 review, R4-2).
   const endWord = () => {
+    flushPendingAnsiC();
     if (current) {
-      pushToken(tokens, bares, current, bare, fdRedirects, fdCloses);
+      pushToken(
+        tokens,
+        bares,
+        current,
+        bare,
+        fdRedirects,
+        fdCloses,
+        wordQuotedFlags,
+        wordQuoted,
+      );
     } else {
       tokens.push('');
       bares?.push('');
+      wordQuotedFlags?.push(wordQuoted);
     }
     current = '';
     bare = '';
+    wordQuoted = false;
     wordStarted = false;
   };
   const pushAnsiCBytes = (bytes: Iterable<number>) => {
@@ -168,7 +188,15 @@ function tokenize(
     pushAnsiCBytes(Buffer.from(String.fromCodePoint(codePoint), 'utf8'));
     return codePoint > 0xffff ? 1 : 0;
   };
-  const flushAnsiC = () => {
+  // Decode the pending ANSI-C bytes into the word: bash concatenates
+  // adjacent `$'…'` segments at the BYTE level, so a UTF-8 sequence split
+  // across them (`$'\xe4\xbd'$'\xa0'` → 你) decodes once for the whole run,
+  // not per segment (#16540 review, R2-7). Called at the word boundary and
+  // wherever a NON-ANSI-C segment appends — a plain quoted span breaks the
+  // run. A segment's own closing quote and NUL do NOT flush: the next
+  // `$'…'` segment of the same word keeps appending bytes, and NUL
+  // truncation stays per segment (the scan stops pushing bytes).
+  const flushPendingAnsiC = () => {
     if (ansiCBytes === null) return;
     const text = Buffer.from(ansiCBytes).toString('utf8');
     current += text;
@@ -221,7 +249,8 @@ function tokenize(
           continue;
         }
         if (escape.text === '\0') {
-          flushAnsiC();
+          // NUL ends THIS segment's contribution; the bytes stay pending so
+          // a following concatenation segment appends (`$'a\0b'c` → `ac`).
           ansiCTruncated = true;
           i += escape.length - 1;
           continue;
@@ -245,7 +274,8 @@ function tokenize(
         continue;
       }
       if (ch === "'") {
-        flushAnsiC();
+        // Closing quote: the bytes stay pending — the next `$'…'` segment
+        // of the same word appends at the byte level (R2-7).
         inAnsiC = false;
         continue;
       }
@@ -254,6 +284,7 @@ function tokenize(
     }
 
     if (escaped) {
+      flushPendingAnsiC();
       current += ch;
       bare += '0';
       escaped = false;
@@ -288,13 +319,19 @@ function tokenize(
       const next = nextSignificantIndex(command, i + 1);
       if (command[next] === "'" && !dollarIntroducer) {
         inAnsiC = true;
-        ansiCBytes = [];
+        wordQuoted = true;
+        // Keep any bytes pending from a PREVIOUS `$'…'` segment of this
+        // word: bash concatenates the segments at the byte level, so
+        // resetting here split a UTF-8 sequence across them into U+FFFD
+        // (#16540 review, R2-7).
+        if (ansiCBytes === null) ansiCBytes = [];
         wordStarted = true;
         i = next;
         continue;
       }
       if (command[next] === '"' && !dollarIntroducer) {
         inDouble = true;
+        wordQuoted = true;
         wordStarted = true;
         i = next;
         continue;
@@ -302,11 +339,15 @@ function tokenize(
       dollarPending = !dollarIntroducer;
     }
     if (ch === "'" && !inDouble) {
+      flushPendingAnsiC();
+      wordQuoted = true;
       inSingle = !inSingle;
       wordStarted = true;
       continue;
     }
     if (ch === '"' && !inSingle) {
+      flushPendingAnsiC();
+      wordQuoted = true;
       inDouble = !inDouble;
       wordStarted = true;
       continue;
@@ -317,6 +358,7 @@ function tokenize(
       }
       continue;
     }
+    flushPendingAnsiC();
     current += ch;
     bare += inSingle || inDouble ? '0' : '1';
   }
@@ -331,6 +373,8 @@ function pushToken(
   bare: string,
   fdRedirects: Set<number> | undefined,
   fdCloses?: Set<number>,
+  wordQuotedFlags?: boolean[],
+  wordQuoted?: boolean,
 ): void {
   // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-`
   // as "close the descriptor" and starts a new word after it:
@@ -351,12 +395,14 @@ function pushToken(
     if (!fdRedirects) {
       tokens.push(normalized);
       bares?.push(normBare);
+      wordQuotedFlags?.push(wordQuoted ?? false);
       return;
     }
     const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
     if (!op || normBare.slice(op.length - 2, op.length) !== '11') {
       tokens.push(normalized);
       bares?.push(normBare);
+      wordQuotedFlags?.push(wordQuoted ?? false);
       return;
     }
     const close = op.length;
@@ -365,6 +411,7 @@ function pushToken(
       fdRedirects.add(tokens.length);
       tokens.push(normalized);
       bares?.push(normBare);
+      wordQuotedFlags?.push(wordQuoted ?? false);
       return;
     }
     if (!chained) {
@@ -372,6 +419,7 @@ function pushToken(
       fdCloses?.add(tokens.length);
       tokens.push(normalized);
       bares?.push(normBare);
+      wordQuotedFlags?.push(wordQuoted ?? false);
       chained = true;
     }
     token = normalized.slice(close + 1);
@@ -409,15 +457,37 @@ function trimShellSyntax(token: string, bare: string): string {
  * paths are consistent across platforms and compatible with picomatch / the
  * permission rule matching system.
  */
-function resolvePath(p: string, cwd: string, bare?: string): string {
+function resolvePath(
+  p: string,
+  cwd: string,
+  bare?: string,
+  wordWasQuotedOverride?: boolean,
+): string {
+  // Operand sites reach the command handlers as plain string arrays; the
+  // dispatch in extractShellOperations installs the token→marking map for
+  // the duration of the handler so a decoded or quoted tilde in an OPERAND
+  // (`cat $'\x7e/x'`) stays literal just like at a redirect site
+  // (#16540 review, R3-9).
+  const operandMarking = operandMarkings?.get(p);
+  if (bare === undefined) bare = operandMarking?.marking;
+  // A zero-width quoted segment (`""~/x`, `~""/x`) leaves no marking
+  // character but still quotes the word, so bash keeps the tilde literal
+  // (#16540 review, R3-9).
+  const wordWasQuoted =
+    (operandMarking?.quoted ?? false) || wordWasQuotedOverride === true;
   // Normalize inputs to forward slashes for consistent cross-platform handling
   const normP = p.replace(/\\/g, '/');
   const normCwd = cwd.replace(/\\/g, '/');
 
   // Only a tilde the user typed unquoted expands: `$'\x7e/x'` decodes to `~/x`
   // and bash opens `./~/x`, so expanding it invented a path under $HOME that no
-  // rule can match (#16540 review, R2-8).
-  const tildeIsBare = bare === undefined || bare.startsWith('1');
+  // rule can match (#16540 review, R2-8). The first marking character must
+  // also BELONG to the tilde: a zero-width quoted segment before it
+  // (`""~/x`) leaves the marking starting at `~`'s successor, so a marking
+  // shorter than the word means the tilde came from a quoted segment
+  // (#16540 review, R3-9).
+  const tildeIsBare =
+    !wordWasQuoted && (bare === undefined || bare.startsWith('1'));
   if (tildeIsBare && (normP === '~' || normP.startsWith('~/'))) {
     const homeDir = os.homedir().replace(/\\/g, '/');
     const rest = normP.slice(1); // '' or '/some/path'
@@ -434,6 +504,19 @@ function resolvePath(p: string, cwd: string, bare?: string): string {
 function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
 }
+
+/**
+ * Token→bare-marking map installed by extractShellOperations around a
+ * command-handler call. The handlers receive plain string arrays, so this
+ * is how an operand's quoting reaches resolvePath without rewriting every
+ * handler signature. A token spelled two ways in one command keeps the
+ * first marking — the conservative choice for tilde expansion is that ANY
+ * quoted spelling keeps the tilde literal, so first-wins is paired with
+ * marking-merge below.
+ */
+let operandMarkings:
+  | Map<string, { marking: string; quoted: boolean }>
+  | undefined;
 
 function isEnvAssignmentToken(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
@@ -516,6 +599,7 @@ function extractRedirects(
   fdRedirects: ReadonlySet<number>,
   fdCloses: ReadonlySet<number> = new Set(),
   bares?: string[],
+  wordQuotedFlags?: boolean[],
 ): RedirectResult {
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
@@ -555,7 +639,18 @@ function extractRedirects(
         ? `&${tok.slice(fdOp.length)}`
         : fdRedirectFile(tok.slice(fdOp.length));
       if (file !== undefined) {
-        (fdOp === '<&' ? readFiles : writeFiles).push(resolvePath(file, cwd));
+        // The target's quoting survives inside the same token: `>&'~'/out`
+        // opens ./~/out, not $HOME/out (#16540 review, R3-9). The `&` prefix
+        // of a close-word is syntax this parser added, so that shape keeps
+        // the pre-existing whole-word reading.
+        (fdOp === '<&' ? readFiles : writeFiles).push(
+          resolvePath(
+            file,
+            cwd,
+            fdCloses.has(i) ? undefined : tokBare?.slice(fdOp.length),
+            wordQuotedFlags?.[i],
+          ),
+        );
       }
       continue;
     }
@@ -565,7 +660,14 @@ function extractRedirects(
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          writeFiles.push(
+            resolvePath(
+              target,
+              cwd,
+              targetBare(i + 1),
+              wordQuotedFlags?.[i + 1],
+            ),
+          );
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -575,7 +677,14 @@ function extractRedirects(
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          writeFiles.push(
+            resolvePath(
+              target,
+              cwd,
+              targetBare(i + 1),
+              wordQuotedFlags?.[i + 1],
+            ),
+          );
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -591,7 +700,14 @@ function extractRedirects(
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          readFiles.push(
+            resolvePath(
+              target,
+              cwd,
+              targetBare(i + 1),
+              wordQuotedFlags?.[i + 1],
+            ),
+          );
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -609,7 +725,14 @@ function extractRedirects(
           looksLikePath(target) &&
           !isNetworkPseudoDevice(target)
         ) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          writeFiles.push(
+            resolvePath(
+              target,
+              cwd,
+              targetBare(i + 1),
+              wordQuotedFlags?.[i + 1],
+            ),
+          );
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -633,9 +756,13 @@ function extractRedirects(
           !isNetworkPseudoDevice(target)
         ) {
           if (op === '<') {
-            readFiles.push(resolvePath(target, cwd, targetMarking));
+            readFiles.push(
+              resolvePath(target, cwd, targetMarking, wordQuotedFlags?.[i]),
+            );
           } else {
-            writeFiles.push(resolvePath(target, cwd, targetMarking));
+            writeFiles.push(
+              resolvePath(target, cwd, targetMarking, wordQuotedFlags?.[i]),
+            );
           }
         }
         toRemove.add(i);
@@ -654,6 +781,13 @@ function extractRedirects(
     const filteredBares = bares.filter((_, idx) => !toRemove.has(idx));
     bares.length = 0;
     bares.push(...filteredBares);
+  }
+  if (wordQuotedFlags !== undefined) {
+    const filteredQuoted = wordQuotedFlags.filter(
+      (_, idx) => !toRemove.has(idx),
+    );
+    wordQuotedFlags.length = 0;
+    wordQuotedFlags.push(...filteredQuoted);
   }
 
   return { readFiles, writeFiles };
@@ -2261,16 +2395,25 @@ export function extractShellOperations(
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
   const bares: string[] = [];
-  const tokens = tokenize(simpleCommand, fdRedirects, fdCloses, bares);
+  const quotedFlags: boolean[] = [];
+  const tokens = tokenize(
+    simpleCommand,
+    fdRedirects,
+    fdCloses,
+    bares,
+    quotedFlags,
+  );
   if (tokens.length === 0) return [];
 
   // Extract I/O redirections before dispatching to the command handler.
   // This mutates `tokens` in-place by removing redirect tokens.
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd, fdRedirects, fdCloses, bares);
+    extractRedirects(tokens, cwd, fdRedirects, fdCloses, bares, quotedFlags);
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
+    bares.shift();
+    quotedFlags.shift();
   }
 
   const cmdName = tokens[0];
@@ -2330,7 +2473,40 @@ export function extractShellOperations(
     const handler = COMMANDS[cmdName];
     if (handler) {
       const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
+      // Install the operand markings for the handler's resolvePath calls
+      // (R3-9). Duplicate spellings merge conservatively: a position stays
+      // bare only if EVERY occurrence typed it bare.
+      const markings = new Map<string, { marking: string; quoted: boolean }>();
+      for (let t = 1; t < tokens.length; t++) {
+        const token = tokens[t]!;
+        const marking = bares[t] ?? '';
+        const quoted = quotedFlags[t] ?? false;
+        const prior = markings.get(token);
+        if (prior === undefined) {
+          markings.set(token, { marking, quoted });
+        } else {
+          let merged = '';
+          for (
+            let c = 0;
+            c < Math.max(prior.marking.length, marking.length);
+            c++
+          ) {
+            merged +=
+              prior.marking[c] === '1' && marking[c] === '1' ? '1' : '0';
+          }
+          markings.set(token, {
+            marking: merged,
+            quoted: prior.quoted || quoted,
+          });
+        }
+      }
+      const outerMarkings = operandMarkings;
+      operandMarkings = markings;
+      try {
+        ops.push(...handler(args, cwd));
+      } finally {
+        operandMarkings = outerMarkings;
+      }
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }

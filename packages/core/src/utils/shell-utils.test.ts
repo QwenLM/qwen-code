@@ -16,6 +16,7 @@ import {
   detectSelfKillCommand,
   decodeAnsiCEscape,
   decodeAnsiCWord,
+  decodeAnsiCBytes,
   doesToolInvocationMatch,
   escapeShellArg,
   getCommandRoot,
@@ -754,6 +755,15 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper("bash -c {--,'cat > /etc/motd'}")).toEqual(
       'cat > /etc/motd',
     );
+    // R1-8 / R3-13 (#16540 review): cmd.exe and PowerShell have no option
+    // parser — `--` there is the program name, and dropping it described a
+    // command the shell never runs.
+    expect(stripShellWrapper('cmd.exe /c -- dir')).toBe('-- dir');
+    expect(stripShellWrapper('powershell -Command -- dir')).toBe('-- dir');
+    expect(normalizeMonitorCommand('cmd.exe /c -- dir').safetyCommand).toBe(
+      '-- dir',
+    );
+    expect(stripShellWrapper('cmd.exe /c -- git status')).toBe('-- git status');
     // A quoted suffix cannot hide the expansion: bash expands the brace before
     // quote removal, so the empty suffix vanishes and the script still runs
     // (witnessed: `bash -c {--,'echo E-RAN'}""` prints E-RAN).
@@ -1874,9 +1884,16 @@ describe('wrapper script provability and payload operator markers', () => {
     ["sh -c $TERM 'ls -l'", true],
     [`bash -c "$X" 'cat > /etc/motd'`, true],
     [`bash -c $(echo '--') 'cat > /etc/passwd'`, true],
-    // A fully quoted payload with an expansion IS the script: word splitting
-    // cannot reach it, so the projection is faithful and stays allowable.
-    [`bash -c "tail -f $LOG &"`, false],
+    // R5-2 (#16540 review): literal text around an expansion does NOT make
+    // the script provable — the inner shell re-parses the expanded text, so
+    // `bash -c "ls ${X:=;rm -rf /tmp/victim}"` runs the rm while the
+    // projection reads as read-only. Every expansion-bearing `-c` word is
+    // unprovable, in both slots. The monitor still accepts the strippable
+    // `tail -f $LOG &` shape: that gate reads the operator markers, not this.
+    [`bash -c "tail -f $LOG &"`, true],
+    [`bash -c "ls \${X:=;rm -rf /tmp/victim}"`, true],
+    [`bash -c -- "ls -l $X"`, true],
+    [`X='rm -rf /tmp/important' sh -c "$X" 'ls -l'`, true],
     [`bash -c "cat > /etc/motd"`, false],
     [`bash -c -- 'cat > /etc/motd'`, false],
     [`bash -c $'cat > /etc/motd'`, false],
@@ -1891,6 +1908,12 @@ describe('wrapper script provability and payload operator markers', () => {
     ["bash -c $'exit 1 \\x26'", true],
     ["bash -c $'exit 1 & &'", true],
     ['bash -c "exit 1 &"&', true],
+    // R5-3 (#16540 review): the early spawnOverride return paths must set
+    // the marker too — a dynamic payload whose operator survives the strip
+    // still backgrounds, whichever path built the spawn.
+    ['bash -c "tail -f $LOG &"&', true],
+    [`bash -c "$X"$'\\x26'`, true],
+    [`bash -c -- "$X"$'\\x26'`, true],
     // The operator WAS stripped, so the monitor may run it.
     [`bash -c "tail -f $LOG &"`, false],
     [`bash -c "exit 1 &"`, false],
@@ -1898,6 +1921,28 @@ describe('wrapper script provability and payload operator markers', () => {
     ['tail -f app.log', false],
   ])('hasUnstrippablePayloadOperator(%s) === %s', (command, want) => {
     expect(hasUnstrippablePayloadOperator(command)).toBe(want);
+  });
+
+  // R5-1 (#16540 review): the per-group recursion had no depth bound, so a
+  // ~30 KB model-supplied brace word threw RangeError inside tool validation
+  // (stripShellWrapper runs before the callers' try blocks).
+  it('fails closed on a deep brace word instead of overflowing the stack', () => {
+    const deep = 'bash -c ' + '{a,b}'.repeat(6000);
+    expect(() => stripShellWrapper(deep)).not.toThrow();
+    expect(stripShellWrapper(deep)).toBe(deep);
+  });
+
+  // R5-5 (#16540 review): bash elides the empty alternative (`{,x}` is just
+  // `x`), so projecting the word AFTER the brace group read bash's `$0` as
+  // the script while bash ran the group's non-empty branch.
+  it('projects the non-empty branch of a brace group with an empty alternative', () => {
+    expect(stripShellWrapper("bash -c {,'cat > /etc/motd'} 'ls -l'")).toBe(
+      'cat > /etc/motd',
+    );
+    // The existing control stays: the terminator branch still wins.
+    expect(stripShellWrapper("bash -c {--,'cat > /etc/motd'}")).toBe(
+      'cat > /etc/motd',
+    );
   });
 });
 
@@ -1942,5 +1987,18 @@ describe('round-4 lexing regressions', () => {
   it('maps \\c? to DEL', () => {
     expect(decodeAnsiCWord('\\c?').charCodeAt(0)).toBe(0x7f);
     expect(decodeAnsiCWord('\\cA').charCodeAt(0)).toBe(0x01);
+  });
+
+  // R3-3 (#16540 review): `\xff`, `\xfe` and `\777` are DISTINCT bytes bash
+  // hands to the program (`printf %s $'\xff' | xxd -p` is ff); a UTF-8
+  // decode collapses all of them to U+FFFD, so three write targets analysed
+  // as one path. The byte-level accessor keeps them distinct.
+  it('keeps non-UTF-8 bytes distinct at the byte level', () => {
+    expect(decodeAnsiCBytes('\\xff')).toEqual([0xff]);
+    expect(decodeAnsiCBytes('\\xfe')).toEqual([0xfe]);
+    expect(decodeAnsiCBytes('a\\777')).toEqual([0x61, 0xff]);
+    expect(decodeAnsiCBytes('a\\U00110000')).toEqual([
+      0x61, 0xf4, 0x90, 0x80, 0x80,
+    ]);
   });
 });

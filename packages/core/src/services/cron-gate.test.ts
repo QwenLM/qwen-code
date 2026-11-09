@@ -659,10 +659,12 @@ describe('gateCommandError', () => {
     // The flag-only shape: for an UNQUOTED expansion `safetyCommand` equals the
     // gate, so `checked !== gate.trim()` cannot fire and only
     // `wrapperPayloadUnresolved` can tell that the shell runs a script the
-    // rules never read (#16540 review, R1-9).
+    // rules never read (#16540 review, R1-9). The message must name THAT
+    // cause, not assert a checked/written difference that does not exist
+    // (#16540 review, R3-10).
     const error = gateCommandError('bash -c $X');
-    expect(error).toContain('wrapped in a shell');
-    expect(error).toContain('bash -c $X');
+    expect(error).toContain('cannot resolve');
+    expect(error).not.toContain('not the command as written');
   });
 
   it('names a long checked command cut short, without halving a character', () => {

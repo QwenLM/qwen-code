@@ -4977,12 +4977,19 @@ describe('ShellTool', () => {
       expect(await build(command).getDefaultPermission()).toBe('ask');
     });
 
-    // A fully quoted payload is the script itself: word splitting cannot reach
-    // inside the quotes, so the projection is faithful and stays allowable.
-    it('still allows a fully quoted payload with an expansion', async () => {
-      expect(
-        await build(`bash -c "tail -f $LOG &"`).getDefaultPermission(),
-      ).toBe('allow');
+    // R5-2 (#16540 review): a fully quoted payload prevents WORD SPLITTING,
+    // but the inner shell still RE-PARSES the expanded text — a `;` or
+    // newline inside `${X:=…}` becomes an operator (`bash -c "ls
+    // ${X:=;rm -rf /tmp/victim}"` ran the rm while the projection read as
+    // read-only). Every expansion-bearing `-c` word therefore asks. The
+    // monitor's strippable `tail -f $LOG &` shape is unaffected: that gate
+    // reads the operator markers, not the provability flag.
+    it.each([
+      [`bash -c "tail -f $LOG &"`],
+      [`bash -c "ls \${X:=;rm -rf /tmp/victim}"`],
+      [`bash -c -- "ls -l $X"`],
+    ])('asks for an expansion-bearing -c script: %s', async (command) => {
+      expect(await build(command).getDefaultPermission()).toBe('ask');
     });
 
     it('asks for a read-only command only when its directory is outside the workspace', async () => {

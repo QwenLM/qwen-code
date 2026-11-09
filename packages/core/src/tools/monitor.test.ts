@@ -686,6 +686,22 @@ describe('MonitorTool', () => {
       );
     });
 
+    // R5-3 (#16540 review): the marker was computed on only one of the four
+    // spawnOverride return paths, so these dynamic shapes — whose operator
+    // survives the strip — were accepted and the tracked shell exited 0
+    // before the payload ran.
+    it('rejects a dynamic payload whose operator survives on every spawn path', () => {
+      expect(validate({ command: `bash -c "tail -f $LOG &"&` })).toMatch(
+        /must not (background the payload|contain non-final top-level background operators)/,
+      );
+      expect(validate({ command: `bash -c "$X"$'\\x26'` })).toMatch(
+        /must not background the payload/,
+      );
+      expect(validate({ command: `bash -c -- "$X"$'\\x26'` })).toMatch(
+        /must not background the payload/,
+      );
+    });
+
     // …without refusing the monitor's ordinary dynamic payloads, whose operator
     // IS stripped from the spawn (`bash -c "tail -f $LOG &"` spawns
     // `bash -c "tail -f $LOG"`).

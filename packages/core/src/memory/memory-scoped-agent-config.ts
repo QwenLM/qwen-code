@@ -17,7 +17,11 @@ import type {
 } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  hasShellSubstitution,
+  hasUnprovableWrapperScript,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
@@ -299,6 +303,17 @@ async function evaluateScopedDecision(
   switch (ctx.toolName) {
     case ToolNames.SHELL: {
       if (!opts.allowShell || !ctx.command) {
+        return 'deny';
+      }
+      // Same pre-AST refusal as ShellToolInvocation.getDefaultPermission: a
+      // substitution or an unprovable `-c` slot means the projected word is
+      // not provably the script bash runs, so a read-only projection must not
+      // allow it (`X='rm -rf …' sh -c "$X" 'ls -l'` projected `ls -l` while
+      // bash ran the expansion) (#16540 review, R5-4).
+      if (
+        hasShellSubstitution(ctx.command) ||
+        hasUnprovableWrapperScript(ctx.command)
+      ) {
         return 'deny';
       }
       const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
