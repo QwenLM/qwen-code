@@ -422,6 +422,18 @@
   opacity: 1;
 }
 
+.messageTagQuote {
+  max-width: 100%;
+}
+
+.messageTagQuote .messageTagValue {
+  max-width: none;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+}
+
 .chatContentCollapsed {
   max-height: 400px;
   overflow: hidden;

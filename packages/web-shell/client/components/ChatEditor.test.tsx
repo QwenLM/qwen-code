@@ -2557,6 +2557,84 @@ describe('ChatEditor top composer tag tooltip', () => {
     );
     expect(tag?.hasAttribute('aria-describedby')).toBe(false);
   });
+
+  it('shows the full quoted text as the default tooltip for quote tags', () => {
+    mockComposerCoreState.composerTags = [
+      {
+        id: 'quote:12345678-1',
+        kind: 'quote',
+        value: 'the full quoted fragment',
+        serialized: '<quoted-message>the full quoted fragment</quoted-message>',
+      },
+    ];
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    const portalRoot = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-trigger]',
+    )!;
+    act(() => trigger.focus());
+
+    const content = portalRoot?.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-tooltip]',
+    );
+    const accessible = content?.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(content).not.toBeNull();
+    expect(accessible?.textContent).toBe('the full quoted fragment');
+  });
+
+  it('keeps a custom quote tooltip ahead of the default quoted text', () => {
+    mockComposerCoreState.composerTags = [
+      {
+        id: 'quote:12345678-1',
+        kind: 'quote',
+        value: 'the full quoted fragment',
+        serialized: '<quoted-message>the full quoted fragment</quoted-message>',
+      },
+    ];
+    const container = renderChatEditor({
+      renderComposerTagTooltip: () => 'Custom quote details',
+      visibleToolbarActions: [],
+    });
+    const portalRoot = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-trigger]',
+    )!;
+    act(() => trigger.focus());
+
+    const content = portalRoot?.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-tooltip]',
+    );
+    const accessible = content?.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(content).not.toBeNull();
+    expect(accessible?.textContent).toBe('Custom quote details');
+  });
+
+  it('leaves file tags tooltip-less without a custom renderer', () => {
+    mockComposerCoreState.composerTags = [
+      {
+        id: 'file:README.md',
+        kind: 'file',
+        value: 'README.md',
+        serialized: '@README.md',
+      },
+    ];
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    const portalRoot = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-tag-trigger]',
+    )!;
+    act(() => trigger.focus());
+
+    expect(
+      portalRoot?.querySelector('[data-web-shell-composer-tag-tooltip]'),
+    ).toBeNull();
+  });
 });
 
 describe('ChatEditor BTW in the add menu', () => {
