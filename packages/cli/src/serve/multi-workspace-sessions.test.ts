@@ -6478,6 +6478,96 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('lists live sessions when closed channel history fills the persisted page', async () => {
+    await withRuntimeDir(async () => {
+      const liveSessionId = '550e8400-e29b-41d4-a716-4466554401a0';
+      await writeStoredSession({
+        sessionId: liveSessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-01T00:00:00.000Z',
+        prompt: 'still live',
+        mtime: new Date('2026-07-01T00:00:00.000Z'),
+      });
+      for (let index = 0; index < 20; index += 1) {
+        const timestamp = `2026-07-08T00:${String(index).padStart(2, '0')}:00.000Z`;
+        await writeStoredSession({
+          sessionId: `550e8400-e29b-41d4-a716-4466554402${index
+            .toString(16)
+            .padStart(2, '0')}`,
+          cwd: SECONDARY_CWD,
+          timestamp,
+          prompt: `closed channel ${index}`,
+          mtime: new Date(timestamp),
+          sourceType: 'channel',
+        });
+      }
+      const { app } = makeHarness({
+        secondarySummaries: [
+          makeSummary(liveSessionId, SECONDARY_CWD, {
+            clientCount: 1,
+            updatedAt: '2026-07-01T00:01:00.000Z',
+          }),
+        ],
+      });
+
+      const persistedPage = await request(app)
+        .get('/workspaces/secondary-id/sessions?size=20')
+        .set('Host', host())
+        .expect(200);
+      expect(persistedPage.body.sessions).toHaveLength(20);
+      expect(
+        persistedPage.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).not.toContain(liveSessionId);
+
+      const livePage = await request(app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        livePage.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual([liveSessionId]);
+      expect(livePage.body.sessions[0]).toMatchObject({
+        clientCount: 1,
+        displayName: liveSessionId,
+      });
+    });
+  });
+
+  it('rejects liveOnly combined with persisted-only filters or untrusted workspaces', async () => {
+    await withRuntimeDir(async () => {
+      const trusted = makeHarness();
+      const filtered = await request(trusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1&view=organized')
+        .set('Host', host())
+        .expect(400);
+      expect(filtered.body.code).toBe('invalid_session_live_only_filter');
+
+      const questionSorted = await request(trusted.app)
+        .get(
+          '/workspaces/secondary-id/sessions?liveOnly=1&sortBy=lastUserPromptAt',
+        )
+        .set('Host', host())
+        .expect(400);
+      expect(questionSorted.body.code).toBe('invalid_session_live_only_filter');
+
+      const invalid = await request(trusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=0')
+        .set('Host', host())
+        .expect(400);
+      expect(invalid.body.code).toBe('invalid_session_live_only');
+
+      const untrusted = makeHarness({ secondaryTrusted: false });
+      await request(untrusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1')
+        .set('Host', host())
+        .expect(403);
+    });
+  });
+
   it('exports the selected trusted workspace without falling back or starting ACP', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440280';

@@ -90,14 +90,14 @@ qwen serve --profile hosted-harness --port 4170 --hostname 127.0.0.1 --no-web
 
 ### 预检
 
-在第二个终端加载 `config/server.env`；不使用 bootstrap 生成的文件时，改为导出下文控制面一节列出的变量。在 Harness 运行的情况下，于首次启动前以及每次安装新产物后，用启动脚本运行 `--check`。它绑定与服务器相同的配置（`config/application.yml` 加环境变量），不启动监听，并按输入项逐行输出结果：
+在第二个终端加载 `config/server.env`；不使用 bootstrap 生成的文件时，改为导出下文控制面一节列出的变量。在 Harness 运行的情况下，于首次启动前以及每次安装新产物后，用启动脚本运行 `--check`。它按服务端的方式读取配置，因此请在发行包根目录（即服务端的工作目录）下运行：读取 `SPRING_CONFIG_ADDITIONAL_LOCATION` 指定的文件、工作目录下的 `application.yml` 和 `config/application.yml`、这些文件导入的文件及其 profile 变体，以及环境变量。由 systemd 运行服务端时，请改按 `systemd/README.zh-CN.md` 中的方式在 unit 的沙箱内运行，该沙箱会对服务端隐藏 `/home`、`/root`、`/run/user`，以及主机的 `/tmp` 和 `/var/tmp`。预检不启动监听，按输入项逐行输出结果，读到的每个文件各占一行 `config`；服务端会因配置无法启动时，只输出一行 `config` 说明原因：
 
 ```bash
 set -a; . config/server.env; set +a
 bin/qwen-managed-agent-server --check
 ```
 
-检查范围包括 JDK、服务账号、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用、上次运行遗留的 Runtime worker，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。
+检查范围包括 JDK、服务账号、每个配置文件及其权限（或服务端会因此无法启动的原因：指定的文件不存在、服务账号读不了的文件、YAML 错误及其行号（除非位于由另一个文件内部 import 的文件中，否则也给出所在文件））、服务账号能读、能进入或能列出，但运行检查的账号读不了、进不去或列不出的文件或目录（此时提示以该账号或 root 运行检查）、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用、上次运行遗留的 Runtime worker，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。含 secret 的配置文件对 group 或 others 可读时为 `WARN`。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。
 
 `harness` 行会像第一个 Session 那样与单个配置的 Harness 协商；使用 Harness pool 时，只有在 Session Store 已启用且配置了 binding key 后，才对 pool 的端点跳过，否则报 FAIL。capability digest 不一致、缺少协议或必需的 feature、或者 Harness 缺少某个已配置 Workspace profile 所需的 lifecycle 时报 FAIL；Harness 运行的 Qwen Code 版本与 `manifest.json` 写明的不同，或者 Harness 没有说明版本时报 WARN。端口检查会像服务端一样实际绑定配置地址，因此刚停止的服务端留在 `TIME_WAIT` 的端口算作空闲；`workers` 行会对仍在 Runtime 状态目录中运行的 worker 给出警告，因此应先停止服务。服务运行期间请加上 `--online`：端口相关的行改为检查是否有进程在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。该命令不校验原生 Workspace storage 注册。
 

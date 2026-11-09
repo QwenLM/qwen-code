@@ -101,8 +101,8 @@ env:
   # re-runs every suite after `npm ci`, and a push to main always classifies
   # `full` (classify_pr computes a profile only for pull_request), so what
   # the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -144,7 +144,7 @@ jobs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
       pr_test_runner: '${{ steps.pick_runner.outputs.pr_test_runner }}'
-      # Untrusted forks use hosted runners unless the disposable pool is enabled.
+      # Untrusted forks route to the disposable ARM64 pool; see pick_runner.
       lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
@@ -193,16 +193,14 @@ jobs:
       # Keep push routing aligned with the classifier above so a hosted queue
       # does not delay the downstream ECS jobs.
       #
-      # Untrusted forks opt into the disposable pool; otherwise their build,
-      # test, lint and no-AK integration jobs stay hosted.
+      # Untrusted fork build, test, lint and no-AK integration jobs use the
+      # disposable ARM64 pool without depending on repository variables.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           AUTHOR_ASSOCIATION: '${{ github.event.pull_request.author_association }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
-          EPHEMERAL_ENABLED: '${{ vars.EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED }}'
-          EPHEMERAL_ARCH: '${{ vars.EXTERNAL_PR_EPHEMERAL_ARCH }}'
           # Optional fleet selector: 'hosted' forces github.com-hosted runners,
           # 'arm64' routes to the experimental ARM64 ECS fleet, anything else
           # keeps the x64 ecs-qwen fleet. Empty/unset keeps current behavior.
@@ -240,11 +238,8 @@ jobs:
           echo "Selected Linux runner: ${ubuntu_runner}"
           pr_test_runner="${ubuntu_runner}"
           lint_runner="${ubuntu_runner}"
-          if [[ "${EPHEMERAL_ENABLED}" == "true" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
-            pr_test_runner='["self-hosted", "linux", "x64", "ecs-qwen-ephemeral"]'
-            if [[ "${EPHEMERAL_ARCH}" == "arm64" ]]; then
-              pr_test_runner='["self-hosted", "linux", "arm64", "ecs-qwen-ephemeral"]'
-            fi
+          if [[ "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
+            pr_test_runner='["self-hosted", "ecs-qwen-ephemeral"]'
             lint_runner="${pr_test_runner}"
           fi
           echo "pr_test_runner=${pr_test_runner}" >> "${GITHUB_OUTPUT}"
@@ -420,7 +415,7 @@ jobs:
   # also starts from the newest cached build and rebuilds only the
   # workspaces whose inputs changed (scripts/ci-build-cache.mjs).
   test_build:
-    name: 'Build unit-test tree (ubuntu-latest, Node 22.x)'
+    name: 'Build unit-test tree (Linux, Node 22.x)'
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || ''["ubuntu-latest"]'') }}'
@@ -1559,7 +1554,7 @@ jobs:
     # same release-sync convention: stay running on skip_ci PRs so a required
     # context still reports, with the per-step guards making it a no-op pass.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    # Shares the external-PR hosted/disposable switch with test and integration_no_ak.
+    # Shares the external-PR disposable-pool routing with test and integration_no_ak.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     # Pool-scoped like test's, not a bare constant: this lane was beheaded twice
     # running honestly on cold-cache hk3-pool runners — at 30 minutes flat
