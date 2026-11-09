@@ -154,7 +154,7 @@ import type {
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
 } from './types.js';
-import type { HookCallEvent } from './types.js';
+import { redactToolCallArgs, type HookCallEvent } from './types.js';
 import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
@@ -197,6 +197,7 @@ export function normalizeToolCallEvent(
     ...event,
     function_name:
       functionName.trim().length > 0 ? functionName : 'unknown_tool',
+    function_args: redactToolCallArgs(functionName, event.function_args),
     success: event.status === 'success',
     execution_status: event.execution_status ?? 'unknown',
   };

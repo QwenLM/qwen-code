@@ -210,6 +210,95 @@ describe('history snapshot and paging boundaries', () => {
     ).toContain('RECOVERY_KEY_12345');
   });
 
+  it.each(['text', 'call', 'response'] as const)(
+    'redacts embedded media URIs in %s while retaining surrounding evidence',
+    async (kind) => {
+      const text =
+        'BEFORE ![image](DATA:image/png;BASE64,' +
+        'YWJj'.repeat(1000) +
+        ') AFTER_ERROR <a href="data:text/plain;charset=utf-8;base64,' +
+        'YWJj'.repeat(1000) +
+        '">artifact</a> FINAL_EVIDENCE';
+      const part: Part =
+        kind === 'text'
+          ? { text }
+          : kind === 'call'
+            ? { functionCall: { name: 'read_file', args: { text } } }
+            : { functionResponse: { name: 'read_file', response: { text } } };
+      const ref = await append(kind === 'response' ? 'tool_result' : 'user', [
+        part,
+      ]);
+      for (const request of [
+        { action: 'list' as const },
+        { action: 'read' as const, ref: `${ref}:0` },
+        { action: 'search' as const, query: 'AFTER_ERROR' },
+      ]) {
+        const result = await service.query(request, signal);
+        expect(result).not.toContain('YWJj');
+        expect(result).toContain('[Recorded media omitted]');
+        if (request.action !== 'search') expect(result).toContain('BEFORE');
+        expect(result).toContain('AFTER_ERROR');
+        expect(result).toContain('FINAL_EVIDENCE');
+      }
+      expect(
+        JSON.parse(
+          await service.query({ action: 'search', query: 'YWJj' }, signal),
+        ).entries,
+      ).toEqual([]);
+    },
+  );
+
+  it('omits ambiguous raw media fields and preserves sibling evidence', async () => {
+    const raw =
+      'BEFORE data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"><svg></svg><text>RAW_MEDIA_CANARY</text></svg> AFTER';
+    const ref = await append('tool_result', [
+      {
+        functionResponse: {
+          name: 'read_file',
+          response: { raw, error: 'HTTP_500_EVIDENCE' },
+        },
+      },
+    ]);
+    const result = await service.query(
+      { action: 'read', ref: `${ref}:0` },
+      signal,
+    );
+    expect(result).not.toContain('RAW_MEDIA_CANARY');
+    expect(result).not.toContain('<svg');
+    expect(result).toContain('[Recorded media omitted]');
+    expect(result).toContain('HTTP_500_EVIDENCE');
+  });
+
+  it.each(['\n', '\r', '\t'])(
+    'omits base64 URL payloads with embedded URL whitespace %j',
+    async (separator) => {
+      const ref = await append('user', [
+        {
+          text: `BEFORE data:text/plain;base64,YWJj${separator}YWJjYWJj AFTER_ERROR`,
+        },
+      ]);
+      const result = await service.query(
+        { action: 'read', ref: `${ref}:0` },
+        signal,
+      );
+      expect(result).not.toContain('YWJj');
+      expect(result).toContain('BEFORE');
+      expect(result).toContain('AFTER_ERROR');
+    },
+  );
+
+  it('keeps large ordinary text containing repeated data prefixes searchable', async () => {
+    await append('user', [
+      { text: 'data:'.repeat(200000) + ' RECOVERY_PREFIX_KEY' },
+    ]);
+    const result = await service.query(
+      { action: 'search', query: 'RECOVERY_PREFIX_KEY' },
+      signal,
+    );
+    expect(result).toContain('RECOVERY_PREFIX_KEY');
+    expect(result).not.toContain('[Recorded media omitted]');
+  });
+
   it('rejects empty cursors and queries supplied to list', async () => {
     await append('user', [{ text: 'ordinary evidence' }]);
     await expect(

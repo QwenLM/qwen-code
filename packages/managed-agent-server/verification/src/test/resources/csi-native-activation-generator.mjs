@@ -50,6 +50,7 @@ const now = () => {
 };
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const grant = () => ({
+  supportedStorageVersion: 3,
   writerGeneration,
   leaseUntil,
   journalRevision: transactions.length,
@@ -273,7 +274,7 @@ try {
         JSON.stringify({
           engine: 'managed',
           sessionId: input.sessionKey.sessionId,
-          toolProfile: 'csi-files-retirement/1',
+          toolProfile: input.toolProfile,
         }),
       ),
     );

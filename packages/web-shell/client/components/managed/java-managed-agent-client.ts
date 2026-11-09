@@ -486,6 +486,41 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getDiagnosticContextUsage(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticContextUsage']>(
+      '/session-context-usage/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getDiagnosticStatistics(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticStats']>(
+      '/session-stats/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getDiagnosticResources(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticResources']>(
+      '/session-resources/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  listDiagnosticAgentTrace(
+    request: Schemas['WebShellDiagnosticTraceRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['ManagedDiagnosticAgentTrace']>(
+      '/session-agent-trace/query',
+      request,
+      signal,
+    );
+  }
+
   getSessionMcp(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['PublicMcpCatalog']>(
       '/session-mcp/query',

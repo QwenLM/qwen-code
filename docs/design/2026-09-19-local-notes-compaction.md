@@ -257,7 +257,14 @@ text, assistant visible text, tool names/arguments, and recorded tool results;
 omit reasoning, provider replay blobs, internal system records, and recursive
 notes/history maintenance traffic. Mark artifacts, media, truncation, and gaps.
 Reading an artifact body is a separate existing file/media operation; history
-does not expand arbitrary paths or inline base64.
+does not expand arbitrary paths or inline base64. Explicit base64 data URLs
+embedded in text are replaced without discarding adjacent ordinary evidence,
+including URL-stripped tab and line-break characters in the encoded payload.
+Standalone media strings and strings containing non-base64 media data URLs
+(such as raw SVG) are omitted as a whole: quotes, spaces, and nested markup
+make the raw payload boundary ambiguous. Other JSON fields remain available.
+Untyped alphanumeric strings are not classified as media solely by alphabet
+or length, so ordinary recovery keys remain searchable.
 
 Search previews expose a nonzero `start` as a UTF-16 offset; omitted means zero.
 Read the reference without `start` to recover the beginning before continuing

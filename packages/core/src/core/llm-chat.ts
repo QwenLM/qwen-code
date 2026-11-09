@@ -6307,8 +6307,9 @@ export class LlmChat {
         };
         const overBudget =
           onPreparedRequest.maxSnapshotBytes !== undefined &&
-          Buffer.byteLength(JSON.stringify(prepared)) >
-            onPreparedRequest.maxSnapshotBytes;
+          (onPreparedRequest.maxSnapshotBytes <= 0 ||
+            Buffer.byteLength(JSON.stringify(prepared)) >
+              onPreparedRequest.maxSnapshotBytes);
         await onPreparedRequest(
           overBudget ? prepared : structuredClone(prepared),
           continuationInFlight ||

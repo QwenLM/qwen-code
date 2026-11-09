@@ -230,7 +230,11 @@ History 使用已持久化 record UUID 作为引用；一条记录有多个 text
 省略推理、provider replay blob、内部 system record，以及递归的 notes/history
 维护调用。明确标识 artifact、媒体、截断和缺口。
 读取 artifact 正文继续由现有文件/媒体工具处理；history 不展开任意路径，
-也不内联 base64。
+也不内联 base64。文本中间带有显式 base64 编码标记的 data URL 会被替换，
+保留相邻的普通证据；编码正文中会被 URL 解析移除的制表符和换行也包含在替换范围内。
+独立媒体字符串，以及包含非 base64 媒体 data URL（例如原始 SVG）的字符串整体省略：
+引号、空格和嵌套标记让原始载荷的边界无法可靠推断。其他 JSON 字段仍可读取。
+没有类型信息的字母数字字符串不会仅因字符集或长度被认定为媒体，因此普通恢复键仍可搜索。
 
 搜索预览用非零 `start` 标明 UTF-16 偏移；省略时表示零。
 读取同一引用且不传 `start` 可以找回开头，再通过 `nextStart` 继续。

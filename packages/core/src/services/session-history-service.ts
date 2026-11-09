@@ -44,8 +44,19 @@ interface HistoryCursor {
   action: 'list' | 'search';
 }
 
-function isRecordedMediaText(text: string): boolean {
-  return /^data:(?:[^,]*;base64,|(?:image|audio|video)\/[^,]*,)/iu.test(text);
+function redactRecordedMediaText(text: string): string {
+  const omitted = '[Recorded media omitted]';
+  // Raw media (for example SVG) can contain quotes, spaces and nested markup;
+  // its boundary inside ordinary text cannot be inferred safely.
+  if (
+    /^data:(?:[^,]*;base64,|(?:image|audio|video)\/[^,]*,)/iu.test(text) ||
+    /data:(?:image|audio|video)\/(?![^,:]*;base64,)[^,:]*,/iu.test(text)
+  )
+    return omitted;
+  return text.replace(
+    /data:[^,:\s"'<>]*;base64,[a-z0-9+/_=%\t\r\n-]*/giu,
+    omitted,
+  );
 }
 
 function historyJson(value: unknown): string {
@@ -87,17 +98,13 @@ function historyJson(value: unknown): string {
         ('type' in entry && entry.type === 'base64'))
     )
       return '[Recorded media omitted]';
-    if (typeof entry === 'string' && isRecordedMediaText(entry))
-      return '[Recorded media omitted]';
+    if (typeof entry === 'string') return redactRecordedMediaText(entry);
     return entry;
   });
 }
 
 function historyPartText(part: Part): string {
-  if (typeof part.text === 'string')
-    return isRecordedMediaText(part.text)
-      ? '[Recorded media omitted]'
-      : part.text;
+  if (typeof part.text === 'string') return redactRecordedMediaText(part.text);
   if (part.functionCall) {
     return `${part.functionCall.name}\n${historyJson(part.functionCall.args ?? {})}`;
   }
