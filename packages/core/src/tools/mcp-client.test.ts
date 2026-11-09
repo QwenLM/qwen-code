@@ -70,6 +70,7 @@ import {
   removeMCPStatusChangeListener,
   updateMCPServerStatus,
 } from './mcp-client.js';
+import { isMCPServerTeardownIntent } from './mcp-status.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
 import type { ToolRegistry } from './tool-registry.js';
 
@@ -3449,6 +3450,43 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       // After an intentional disconnect, the global registry MUST reflect
       // DISCONNECTED — otherwise downstream code (failure banner, health
       // pill) treats the server as still healthy.
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+
+      // Cleanup the registry entry so this test doesn't leak.
+      removeMCPServerStatus('healthy-server');
+    });
+
+    it('disconnect() records the teardown intent before it writes DISCONNECTED', async () => {
+      // The abort repair reads this marker inside the status notification, so
+      // the ordering is the contract: writing the status first would let a
+      // listener resurrect a server the operator just stopped.
+      closableClient({ close: vi.fn().mockResolvedValue(undefined) });
+      const client = clientInWorkspace('healthy-server');
+
+      await client.connect();
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.CONNECTED,
+      );
+
+      const seen: boolean[] = [];
+      const listener = (
+        serverName: string,
+        status: MCPServerStatus | undefined,
+      ) => {
+        if (serverName !== 'healthy-server') return;
+        if (status !== MCPServerStatus.DISCONNECTED) return;
+        seen.push(isMCPServerTeardownIntent('healthy-server'));
+      };
+      addMCPStatusChangeListener(listener);
+      try {
+        await client.disconnect();
+      } finally {
+        removeMCPStatusChangeListener(listener);
+      }
+
+      expect(seen).toEqual([true]);
       expect(getMCPServerStatus('healthy-server')).toBe(
         MCPServerStatus.DISCONNECTED,
       );

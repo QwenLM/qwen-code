@@ -885,7 +885,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       };
     } catch (error) {
       if (this.onAppResult) {
-        if (signal.aborted) throw createToolCallAbortError();
+        if (signal.aborted) {
+          // The App branch classifies the abort before reaching
+          // handleReconnectOnError, so arm the same repair here or an aborted
+          // App call keeps the dead transport for the health monitor's budget.
+          this.repairConnectionOnDisconnectAfterAbort();
+          throw createToolCallAbortError();
+        }
         if (
           idleTimeoutWon ||
           isExecutionTimeoutFailure(error, this.serverName, signal)
