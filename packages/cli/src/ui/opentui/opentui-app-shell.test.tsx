@@ -4267,6 +4267,103 @@ describe('OpenTuiApp shell wiring', () => {
       });
       expect(order).toEqual(['/compress', 'mod']);
     });
+
+    it('waits while a dialog is open, and runs once it closes', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      renderApp({ onRunModPrompt, initialDialog: { dialog: 'help' } });
+      await settle();
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        (mocks.state.dialogProps?.['onClose'] as () => void)();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command and waits while it runs", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let release!: () => void;
+      const shellDone = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.state.executeUserShell.mockReturnValue(shellDone);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      renderApp({ onRunModPrompt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('sleep 1');
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command the turn held back when it runs", async () => {
+      const { mods } = installMods(0);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        streaming: true,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('ls');
+      expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for the person's submission while the command stack loads", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let load!: () => void;
+      const loaded = new Promise<readonly unknown[]>((resolve) => {
+        load = () => resolve([]);
+      });
+      mocks.state.loadCommandsOverride = () => loaded;
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ commands: undefined, onRunModPrompt, onSubmitPrompt });
+      await settle();
+      // The dispatch waits for the command stack before the gateway is busy.
+      await submit('hello');
+      await queue();
+      expect(onSubmitPrompt).not.toHaveBeenCalled();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        load();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('replays held commands in submission order, pausing behind a submit_prompt', async () => {

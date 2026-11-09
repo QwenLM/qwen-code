@@ -2351,7 +2351,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
   );
 
   it('hears a retry as a turn with no typed prompt', async () => {
-    const { startTurn } = installMods();
+    const { startTurn, mods } = installMods();
     const { result } = renderHook(() =>
       useOpenTuiLiveTurn({ config: {} as Config }),
     );
@@ -2363,11 +2363,28 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     });
     options(1).onPromptAdmitted?.();
     await settle(result);
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
     live.holds.add(2);
     await act(async () => result.current.retryLastPrompt());
     expect(options(2).retry).toBeDefined();
     options(2).onPromptAdmitted?.();
     expect(startTurn.mock.calls.map(([text]) => text)).toEqual(['Fix it', '']);
+    // A retry resends the person's prompt; it is no new one of theirs, so it
+    // neither resets the Mods' count nor lifts a stop.
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+    await settle(result);
+  });
+
+  it("leaves the Mods' count alone on a tool-call turn", async () => {
+    const { mods } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    await act(async () => {
+      expect(result.current.scheduleTool('test_tool', {})).toBe(true);
+    });
+    expect(live.turns).toHaveLength(1);
+    expect(mods.notePersonPrompt).not.toHaveBeenCalled();
     await settle(result);
   });
 

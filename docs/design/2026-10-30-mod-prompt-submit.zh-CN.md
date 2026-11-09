@@ -178,9 +178,9 @@ OpenTUI 终端在两处触发该事件。实时回合（`useOpenTuiLiveTurn`）�
   - 两条循环下的 headless 测试：用户的回合结束时排队的提示在其后运行，带框文、上下文和提交的提示，`asUser` 的提示原样读取，每个回合都有 `turn.start`，Mod 命令的提示在其回复之后运行、命令本身不占回合；
   - Ink 流测试：排队的提示在空闲后作为 `UserQuery` 运行，带框文、提交的提示、Mod 名字、召回查询和上下文，`turn.start` 听到它的文本，显示为通知行而没有用户行，不经过 `prompt.submit` hook，不写入输入历史，不读取 `@`；`asUser` 的提示原样发送，不运行其中的命令；排队的提示一个回合接一个回合运行；等待用户排队的提示和掌管回合的 Goal；用户的提示而不是 Mod 的提示重新计数；Esc 和拒绝全部工具会停下队列，`$.turn.abort` 保留队列；处于间隔内的 Monitor 更新不拦住提示，此刻能运行的通知先运行；回合无法开始时提示被放回，并在抢先的提交结束后运行；dual output 旁路收到 Mod 的文本和名字；所有者的声明及队列的通知；
   - 恢复：`mod_prompt` 记录恢复为 Mod 的通知行，`asUser` 也一样；
-  - OpenTUI 实时回合测试：排队的提示作为回合运行，带框文、提交的提示、上下文和 Mod，显示在 Mod 的行下，没有用户行，不写入输入日志，`turn.start` 听到它的文本；斜杠形式的 `asUser` 提示原样发送，不作为命令；一次一个回合；Goal 掌管回合期间不取出提示；Esc 和拒绝全部工具会停下队列并把被停下的提示移出对话，`$.turn.abort` 保留队列，没有回合时按 Esc 不停下任何东西；
+  - OpenTUI 实时回合测试：排队的提示作为回合运行，带框文、提交的提示、上下文和 Mod，显示在 Mod 的行下，没有用户行，不写入输入日志，`turn.start` 听到它的文本；斜杠形式的 `asUser` 提示原样发送，不作为命令；一次一个回合；Goal 掌管回合期间不取出提示；Esc 和拒绝全部工具会停下队列并把被停下的提示移出对话，`$.turn.abort` 保留队列，没有回合时按 Esc 不停下任何东西；重试和工具调用回合不改变计数；
   - OpenTUI 发送测试：Mod 的名字、`asUser` 和召回查询只随首次发送，不读取 `@`，旁路收到 Mod 的文本和名字；
-  - OpenTUI shell 测试：回合结束后运行一条提示，排入下一条时再运行；等待用户发出、仍在运行的命令，该命令重新计数；在回合期间暂缓的命令之后运行；Goal 掌管回合期间等待，Goal 放开后运行；
+  - OpenTUI shell 测试：回合结束后运行一条提示，排入下一条时再运行；等待用户发出、仍在运行的命令，该命令重新计数；在回合期间暂缓的命令之后运行；Goal 掌管回合期间等待，Goal 放开后运行；对话框打开、`!` 命令运行、以及提交仍在等待命令栈加载期间等待；`!` 命令无论立即运行还是在回合暂缓后运行，都会重新计数；
   - OpenTUI 恢复：`mod_prompt` 记录恢复为 Mod 的 info 行且没有用户行，通知项画成 info 行；
   - 构建后的 CLI 在真实终端（Ink 和 OpenTUI）中对接 fixture 服务器（`integration-tests/interactive/mods-prompt-submit.test.ts`）：`turn.complete` hook 提交的提示在用户的回合之后运行，显示在注明 Mod 的行下，第二个请求带框文，transcript 把它记为 Mod 的提示；每回合都提交的 hook 在上限处停止；
   - 构建后的 CLI 对接 fixture 服务器（`integration-tests/cli/mods-prompt-submit.test.ts`）：`turn.complete` hook 提交提示，第二个请求带框文和 hook 附加的上下文，transcript 把它记为 Mod 的提示，`asUser` 的提示原样读取，每回合都提交的 hook 在上限处停止。
