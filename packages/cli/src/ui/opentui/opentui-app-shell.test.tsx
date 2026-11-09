@@ -4120,6 +4120,43 @@ describe('OpenTuiApp shell wiring', () => {
       expect(mods.notePersonPrompt).not.toHaveBeenCalled();
     });
 
+    it('waits while a Goal owns the turns, and runs once it lets go', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      const goalListeners = new Set<() => void>();
+      let goalStatus: 'active' | 'complete' = 'active';
+      const goalRuntime = {
+        getSnapshot: () => ({
+          v: 2,
+          goal: { status: goalStatus },
+          activity: 'idle',
+        }),
+        subscribe: (listener: () => void) => {
+          goalListeners.add(listener);
+          return () => goalListeners.delete(listener);
+        },
+      };
+      renderApp({
+        config: {
+          ...CONFIG,
+          getGoalRuntime: () => goalRuntime,
+        } as unknown as Config,
+        onRunModPrompt,
+      });
+      await settle();
+      await queue();
+      // Core would run it as the person's Goal turn.
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      goalStatus = 'complete';
+      await act(async () => {
+        for (const listener of goalListeners) listener();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(mods.waiting).toBe(0);
+    });
+
     it("waits for the person's command still being routed, which resets the count", async () => {
       const { mods, queue } = installMods(0);
       const onRunModPrompt = runner(mods);

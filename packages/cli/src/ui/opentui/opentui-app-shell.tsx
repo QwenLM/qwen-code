@@ -82,10 +82,11 @@ import {
   selectAutoApprovals,
   type WaitingCallInfo,
 } from './live-session.js';
-import type {
-  ForegroundShellOwner,
-  OpenTuiLiveTurn,
-  OpenTuiSubmitOptions,
+import {
+  goalOwnsSessionTurns,
+  type ForegroundShellOwner,
+  type OpenTuiLiveTurn,
+  type OpenTuiSubmitOptions,
 } from './live-turn.js';
 import {
   restoreInputSubmissions,
@@ -1598,8 +1599,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   // A Mod's own prompts (`$.prompt.submit`) run each as a turn of its own
   // once the session is idle: after the person's queued input, and not
-  // while a dialog owns the UI, a `!` command runs, or a submission or
-  // command is still being routed.
+  // while a dialog owns the UI, a `!` command runs, a submission or command
+  // is still being routed, or a Goal owns the session's turns.
   useEffect(
     () =>
       getInteractiveModSession(config)?.subscribePrompts(() =>
@@ -1607,6 +1608,20 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       ),
     [config],
   );
+  // A Goal lets go of the session's turns on its own schedule, after the
+  // session is already idle, so the drain hears the Goal too.
+  const goalSessionId = config.getSessionId();
+  useEffect(() => {
+    try {
+      return config.getGoalRuntime().subscribe(() => {
+        if (getInteractiveModSession(config)?.hasSubmittedPrompts)
+          setModPromptRevision((revision) => revision + 1);
+      });
+    } catch {
+      // The Goal runtime is optional (early initialization, persistence off).
+      return undefined;
+    }
+  }, [config, goalSessionId]);
   useEffect(() => {
     if (
       !onRunModPrompt ||
@@ -1618,7 +1633,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       drainingRef.current ||
       submittingRef.current > 0 ||
       gateway.isBusy() ||
-      !getInteractiveModSession(config)?.hasSubmittedPrompts
+      !getInteractiveModSession(config)?.hasSubmittedPrompts ||
+      goalOwnsSessionTurns(config)
     )
       return;
     onRunModPrompt();

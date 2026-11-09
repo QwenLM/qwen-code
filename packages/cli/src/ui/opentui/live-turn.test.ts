@@ -2381,6 +2381,33 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     };
   };
 
+  it("leaves a Mod's prompt queued while a Goal owns the turns", () => {
+    const { mods, submitted } = installMods();
+    let goalStatus: 'active' | 'complete' = 'active';
+    const config = {
+      ...modConfig().config,
+      getGoalRuntime: () => ({
+        getSnapshot: () => ({
+          v: 2,
+          goal: { status: goalStatus },
+          activity: 'idle',
+        }),
+      }),
+    } as unknown as Config;
+    const { result } = renderHook(() => useOpenTuiLiveTurn({ config }));
+    submitted.push({ plugin: 'followup-mod', text: 'next step' });
+    act(() => expect(result.current.runModPrompt()).toBe(false));
+    expect(mods.takeSubmittedPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toHaveLength(0);
+
+    goalStatus = 'complete';
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    expect(options(1).modPrompt).toEqual({
+      plugin: 'followup-mod',
+      text: 'next step',
+    });
+  });
+
   it("runs a Mod's prompt framed, under a line naming the Mod", async () => {
     const { startTurn, mods, submitted } = installMods();
     const logger = { logMessage: vi.fn(async () => {}) };

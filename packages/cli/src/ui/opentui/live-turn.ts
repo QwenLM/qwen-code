@@ -53,6 +53,7 @@ import {
   normalizeParts,
 } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { goalRequiresExactPermit } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import type { Part, PartListUnion } from '@google/genai';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
@@ -299,6 +300,20 @@ export function foldBatch(
   let items: readonly LiveHistoryItem[] = [];
   for (const ev of events) items = foldLiveEvent(items, ev);
   return items;
+}
+
+/**
+ * True while a Goal owns the session's turns: core would run any
+ * `UserQuery` sent now as the person's Goal turn, so a Mod's prompt, which
+ * is neither the person's words nor a turn the Goal asked for, waits.
+ */
+export function goalOwnsSessionTurns(config: Config): boolean {
+  try {
+    return goalRequiresExactPermit(config.getGoalRuntime().getSnapshot());
+  } catch {
+    // The Goal runtime is optional (early initialization, persistence off).
+    return false;
+  }
 }
 
 export function useOpenTuiLiveTurn(
@@ -1176,7 +1191,12 @@ export function useOpenTuiLiveTurn(
   );
 
   const runModPrompt = useCallback((): boolean => {
-    if (!mountedRef.current || streamingRef.current || modPromptHeldRef.current)
+    if (
+      !mountedRef.current ||
+      streamingRef.current ||
+      modPromptHeldRef.current ||
+      goalOwnsSessionTurns(config)
+    )
       return false;
     const prompt = getInteractiveModSession(config)?.takeSubmittedPrompt();
     if (!prompt) return false;
