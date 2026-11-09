@@ -25608,14 +25608,22 @@ describe('Hosted Harness tool approvals', () => {
     expect(releasedOwners.has(ownerFor(1))).toBe(false);
   });
 
-  it.each([
-    { arm: 'v2 close', terminal: false, protocol: 2 },
-    { arm: 'v2 delete', terminal: true, protocol: 2 },
-    { arm: 'legacy detach', terminal: false, protocol: 1 },
-    { arm: 'legacy delete', terminal: true, protocol: 1 },
-  ])(
+  it.each(
+    [
+      { arm: 'v2 close', terminal: false, protocol: 2 },
+      { arm: 'v2 delete', terminal: true, protocol: 2 },
+      { arm: 'legacy detach', terminal: false, protocol: 1 },
+      { arm: 'legacy delete', terminal: true, protocol: 1 },
+    ].flatMap((route) =>
+      (['held turn', 'mcp', 'lease'] as const).map((carrier) => ({
+        ...route,
+        carrier,
+        arm: `${route.arm}, owner carried by ${carrier}`,
+      })),
+    ),
+  )(
     'stops only what it may stop with a restored config-scoped owner ($arm)',
-    async ({ terminal, protocol }) => {
+    async ({ terminal, protocol, carrier }) => {
       // R28-1 on a Session that really owns the id: the owner is derived from
       // (sessionKey, configRevision) by an active extension bundle, not typed
       // as a literal. Three ids ride the restore — the owner, an ordinary turn,
@@ -25776,9 +25784,15 @@ describe('Hosted Harness tool approvals', () => {
         .set('X-Qwen-Client-Id', clientId)
         .expect(204);
       releasedOwners.clear();
+      // The lease arm keeps the owner out of the hold rows: there the only
+      // thing that could release it is the lease handback (R3-1).
       const activeHolds = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
-        .mockResolvedValue([owner, ordinary, lookalike]);
+        .mockResolvedValue(
+          carrier === 'lease'
+            ? [ordinary, lookalike]
+            : [owner, ordinary, lookalike],
+        );
       // A bare load carries no lifecycle authority, so the restore runs and
       // seeds the hold rows; the same Session can then settle under either
       // protocol (R28-1).
@@ -25793,6 +25807,16 @@ describe('Hosted Harness tool approvals', () => {
           session: {
             heldRuntimeTurns: Set<string>;
             hooks?: HostedHookSession;
+            mcp?: {
+              broker: { runtimeSessionId: string };
+              recoveryBlocked: boolean;
+              hasPendingOperations: () => boolean;
+              close: (options: { terminal: boolean }) => Promise<void>;
+              closeResources: (options: { terminal: boolean }) => Promise<void>;
+              reconcileEffects: () => Promise<void>;
+            };
+            runtimeLeaseHeld?: { promptId: string; runtimeSessionId: string };
+            toolProfile?: string;
             shell?: {
               monitorLoops?: Map<
                 string,
@@ -25808,7 +25832,32 @@ describe('Hosted Harness tool approvals', () => {
       // Ownership control: without a real owner the exemption has nothing to
       // match, and every assertion below would pass for the wrong reason.
       expect(resident.hooks?.broker.runtimeSessionId).toBe(owner);
-      expect(resident.heldRuntimeTurns.has(owner)).toBe(true);
+      expect(resident.heldRuntimeTurns.has(owner)).toBe(carrier !== 'lease');
+      if (carrier === 'mcp') {
+        // Hooks no longer names the owner, so a drain reduced to
+        // `reloadStableOwnerIds({ hooks })` loses the exemption here (R3-4).
+        resident.hooks = undefined;
+        resident.mcp = {
+          broker: { runtimeSessionId: owner },
+          recoveryBlocked: false,
+          hasPendingOperations: () => false,
+          close: async () => {},
+          closeResources: async () => {},
+          reconcileEffects: async () => {},
+        };
+        // The legacy close refuses an MCP-carrying Shell resident outright
+        // (hosted_lifecycle_required), so the legacy arms run the shape whose
+        // legacy close admits MCP. The v2 arms stay on the Shell profile,
+        // the only one this contract admits to lifecycle v2.
+        if (protocol !== 2) resident.toolProfile = 'hosted-workspace-mcp/1';
+      } else if (carrier === 'lease') {
+        // A recovery load adopts the unsettled Turn's Runtime under the
+        // owner id; the close hands that lease back (R3-1).
+        resident.runtimeLeaseHeld = {
+          promptId: ordinary,
+          runtimeSessionId: owner,
+        };
+      }
       const stop = vi.fn(async () => {});
       resident.shell ??= {};
       resident.shell.monitorLoops = new Map([
@@ -25844,10 +25893,13 @@ describe('Hosted Harness tool approvals', () => {
       expect(releasedOwners.has(hostedRuntimeSessionId(ordinary))).toBe(true);
       expect(releasedOwners.has(lookalike)).toBe(true);
       expect(releasedOwners.has(owner)).toBe(terminal);
-      // Skipping is not discharging: the obligation stays owed, which is what
-      // keeps the handback refusing busy and lets a later terminal close in
-      // this resident still release the owner (R2-6).
-      expect(resident.heldRuntimeTurns.has(owner)).toBe(!terminal);
+      // Skipping is not discharging: the obligation stays owed. What finally
+      // releases the owner is a terminal close on a successor resident after
+      // a reload — this resident cannot offer one, because the v2 close pins
+      // lifecycleKind and every later kind conflicts (R2-6/R3-5).
+      expect(resident.heldRuntimeTurns.has(owner)).toBe(
+        carrier === 'lease' ? false : !terminal,
+      );
       // A skipped owner is a Runtime this close never stopped, so the loop
       // must not certify stop_requested for it (R1-1). The spy is reached on
       // every arm, so a wrong settle is a failure, not a silent pass.
@@ -25900,13 +25952,28 @@ describe('Hosted Harness tool approvals', () => {
       mcpId: `extensions-components-${'c'.repeat(64)}`,
       exempt: true,
     },
+    {
+      shape: 'a broker shared with Hooks carrying a durable mcp-<digest> owner',
+      shared: true,
+      hooksId: 'mcp-def456',
+      mcpId: 'mcp-def456',
+      exempt: true,
+    },
+    {
+      shape: 'MCP alone holding a per-load activation owner',
+      shared: false,
+      hooksId: undefined,
+      mcpId: 'hooks-activation-1',
+      exempt: false,
+    },
   ])('exempts only reload-stable owners: $shape', (c) => {
     // The route fixtures cannot drive every owner shape — a Session carrying
     // MCP on a workspace profile must settle through v2 and does not release
     // its writer for a reload — so the decision itself is pinned here. The
-    // shared-broker rows are why the MCP element is admitted by identity only
-    // when MCP owns the broker: the same object under Hooks can carry the
-    // per-load id a successor never recomputes (R14-1/R2-5/R2-7).
+    // shared-broker rows pin that sharing is irrelevant: the load hands MCP's
+    // broker to Hooks, so deciding by object identity exempted the durable
+    // id when MCP owned the broker and tombstoned the very same id when
+    // Hooks merely shared it (R14-1/R2-5/R2-7).
     const hooksBroker = c.hooksId ? { runtimeSessionId: c.hooksId } : undefined;
     const mcpBroker = c.mcpId
       ? c.shared

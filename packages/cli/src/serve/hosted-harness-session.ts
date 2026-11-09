@@ -396,6 +396,7 @@ import {
   HostedMcpRecoveryRequiredError,
   HostedMcpConflictError,
   HostedMcpConnectionQuotaError,
+  isHostedDurableMcpOwner,
   parseHostedMcpServers,
   type HostedMcpServerPin,
 } from './hosted-mcp-session.js';
@@ -675,24 +676,25 @@ function blockRecovery(
  * client-chosen and only length-bounded, so a turn can carry the same prefix
  * without being an owner, and that turn's Runtime is still owed a drain.
  *
- * The MCP owner qualifies by identity: `mcp-<digest>` comes from the durable
- * configuration ids and is just as reload-stable (R2-7). Only when MCP owns
- * its broker, though — a broker shared with Hooks can carry the per-load
- * `hooks-activation-*` id, which no successor recomputes and which must stay
- * releasable (R14-1).
+ * Both durable families qualify: the config-scoped `extensions-components-*`
+ * owner and the `mcp-<digest>` owner named after the durable configuration ids
+ * (R2-7). The per-load `hooks-activation-*` owner is the one a successor never
+ * recomputes, so it stays releasable (R14-1). Which object references the id
+ * says nothing about this — the load hands MCP's broker to Hooks, so a shared
+ * broker carrying a durable id must be exempt exactly as an owned one is.
  */
 export function reloadStableOwnerIds(session: {
   hooks?: { broker: { runtimeSessionId: string } };
   mcp?: { broker: { runtimeSessionId: string } };
 }): Set<string> {
-  const mcpOwner =
-    session.mcp && session.mcp.broker !== session.hooks?.broker
-      ? session.mcp.broker.runtimeSessionId
-      : undefined;
   return new Set(
-    [session.hooks?.broker.runtimeSessionId, mcpOwner].filter(
+    [
+      session.hooks?.broker.runtimeSessionId,
+      session.mcp?.broker.runtimeSessionId,
+    ].filter(
       (id): id is string =>
-        id !== undefined && (id === mcpOwner || isHostedConfigScopedOwner(id)),
+        id !== undefined &&
+        (isHostedConfigScopedOwner(id) || isHostedDurableMcpOwner(id)),
     ),
   );
 }
@@ -8474,7 +8476,7 @@ export function registerHostedHarnessSessionRoutes(
                 // rather than certifying a stop_requested it never issued.
                 heldDrainUnproven = true;
                 writeStderrLineSafe(
-                  `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (R28-1).`,
+                  `qwen serve: Hosted Harness detach keeps reload-stable owner ${hostedRuntimeSessionId(heldTurn)} running: release deferred, obligation still owed (#16579).`,
                 );
                 continue;
               }
@@ -8515,7 +8517,9 @@ export function registerHostedHarnessSessionRoutes(
           // Only a delete is terminal; a close keeps the deterministic owner
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });
-          await releaseLeaseNow(session);
+          heldDrainUnproven =
+            (await releaseLeaseNow(session, kind === 'delete')) ||
+            heldDrainUnproven;
           // An unprovable drain, an owner this detach deliberately left
           // running, and a Session whose own settlement already failed all
           // proved nothing stopped, so they settle on the runtime_lost line —
@@ -10087,7 +10091,7 @@ export function registerHostedHarnessSessionRoutes(
     options: HostedWorkspaceBrokerOptions,
     lease: NonNullable<HostedSession['runtimeLeaseHeld']>,
     drain = false,
-  ): Promise<'released' | 'held' | 'pending'> => {
+  ): Promise<'released' | 'held' | 'pending' | 'deferred'> => {
     const { promptId, runtimeSessionId } = lease;
     session.cleanupHolds?.delete(promptId);
     const result = await reconcileHostedTurnCleanup(
@@ -10099,9 +10103,17 @@ export function registerHostedHarnessSessionRoutes(
     retainHostedCleanupHolds(session, result);
     if (result.held.has(promptId)) return 'held';
     if (result.states.get(promptId) === 'owed') return 'pending';
+    // A lease is a Turn's obligation; a reload-stable owner outlives the Turn.
+    // Releasing it here persists RELEASED under the id the next load
+    // recomputes — the tombstone the held-Runtime drains also refuse (R3-1).
+    // The owner's own close is its only terminal releaser, and a delete runs
+    // that close, so declining here strands nothing. It still proved no stop,
+    // which the close reports rather than certifying one.
+    const deferred = reloadStableOwnerIds(session).has(runtimeSessionId);
     if (
-      runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
-      !result.states.has(promptId)
+      !deferred &&
+      (runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
+        !result.states.has(promptId))
     ) {
       try {
         await new HostedWorkspaceBroker(
@@ -10120,7 +10132,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (!hasHostedCleanupDebt(session.managed))
       await retryHostedCleanup(session, options);
-    return 'released';
+    return deferred ? 'deferred' : 'released';
   };
 
   // A recovery load may hold the Runtime Session. On the cancellation
@@ -10166,16 +10178,22 @@ export function registerHostedHarnessSessionRoutes(
   // the owed-lease comment at the blocked cancel refusal. The close drains:
   // a recovered Runtime can hold live background runs (#13856), and only
   // the drain arm may stop them. This exit swallows a refused release, so
-  // the owed file-history retirement must go first.
-  const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
+  // the owed file-history retirement must go first. Answers whether it left a
+  // reload-stable owner running, which a non-terminal close must report as an
+  // unproven stop rather than certify (R3-1).
+  const releaseLeaseNow = async (
+    session: HostedSession,
+    terminal: boolean,
+  ): Promise<boolean> => {
     await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
-    if (lease === undefined || !brokerOptions) return;
+    if (lease === undefined || !brokerOptions) return false;
     if (
       session.mcp &&
       lease.runtimeSessionId !== hostedRuntimeSessionId(lease.promptId)
     )
-      return;
+      return false;
+    let unproven = false;
     await releaseHeldRuntime(
       session,
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
@@ -10183,8 +10201,11 @@ export function registerHostedHarnessSessionRoutes(
       true,
     ).then(
       (outcome) => {
-        if (outcome !== 'released')
+        if (outcome !== 'released' && outcome !== 'deferred')
           throw new Error('Original Runtime cleanup is still owed.');
+        // A delete releases the owner through its own close above, so the
+        // deferred handback certifies nothing false there.
+        unproven = outcome === 'deferred' && !terminal;
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
           session.runtimeLeaseOwedByTerminalRoute = false;
@@ -10196,6 +10217,7 @@ export function registerHostedHarnessSessionRoutes(
         );
       },
     );
+    return unproven;
   };
 
   /**
@@ -13270,7 +13292,9 @@ export function registerHostedHarnessSessionRoutes(
         // release retires a settled Turn's owed file-history marker first,
         // ahead of the unguarded loop stop below so that a throw there
         // cannot strand the retirement.
-        await releaseLeaseNow(session);
+        heldDrainUnproven =
+          (await releaseLeaseNow(session, req.method === 'DELETE')) ||
+          heldDrainUnproven;
         // A registered observation loop outlives its turn: only the Session
         // close ends it. Stop every live loop here, ahead of the publisher
         // close and the log close, so its settle write can still reach the

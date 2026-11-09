@@ -30,6 +30,8 @@ import {
 import {
   HostedMcpSession,
   HostedMcpRecoveryRequiredError,
+  hostedDurableMcpOwnerId,
+  isHostedDurableMcpOwner,
   parseHostedMcpServers,
 } from './hosted-mcp-session.js';
 import { parseManagedRuntimeProviderRequest } from './managed-runtime-provider-protocol.js';
@@ -219,6 +221,31 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await session?.close();
   if (root) await rm(root, { recursive: true, force: true });
+});
+
+it('names its durable owner through the one builder the predicate recognises (R2-7)', () => {
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  // No configuration rows exist yet, so the constructor takes the durable
+  // `mcp-<digest>` arm. A reload of the same records recomputes this id, so a
+  // terminal release of it is the tombstone the detach guards refuse.
+  expect(mcp.broker.runtimeSessionId).toBe(
+    hostedDurableMcpOwnerId(
+      session.authority.sessionHeader.sessionKey,
+      undefined,
+    ),
+  );
+  expect(isHostedDurableMcpOwner(mcp.broker.runtimeSessionId)).toBe(true);
+  // The round trip moves builder and predicate together; only a literal sees
+  // a reordered tuple or a renamed prefix (R3-3).
+  expect(hostedDurableMcpOwnerId(sessionKey, undefined)).toBe(
+    'mcp-9aeabdf172eb0e06d87765245fa51542c67f148886b0592dbb747c167dbd28e0',
+  );
+  expect(isHostedDurableMcpOwner('hooks-activation-1')).toBe(false);
+  expect(isHostedDurableMcpOwner('extension-mcp-1')).toBe(false);
 });
 
 it('keeps a server send_message in the MCP namespace and its overflow fatal (#14062)', async () => {

@@ -334,6 +334,13 @@ it('recognises every owner id its own builder produces (R1-6)', () => {
         hostedConfigScopedOwnerId(sessionKey, revision),
       ),
     ).toBe(true);
+  // The round trip above moves builder and predicate together, so it cannot
+  // see a reordered tuple or a renamed prefix — while every id already
+  // persisted under the old derivation stops matching what a reload
+  // computes. One literal pins the derivation itself (R3-3).
+  expect(hostedConfigScopedOwnerId(sessionKey, 1)).toBe(
+    'extensions-components-ce4d6156e1132eef477c4c5a8cb8f1813945abdfe281612862d3575d8efc2de4',
+  );
   expect(isHostedConfigScopedOwner('hooks-activation-1')).toBe(false);
   expect(isHostedConfigScopedOwner('turn-ordinary')).toBe(false);
 });
