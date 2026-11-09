@@ -869,6 +869,28 @@ describe('ChannelEventsPage', () => {
     expect(rows[0]?.textContent).toContain('watch_reconcile_recovered');
   });
 
+  it('labels the watch-budget recovery edge as recovered, not degraded', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'poll',
+          outcome: 'degraded',
+          reason: 'watch_budget_recovered',
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows[0]?.textContent).toContain('Recovered');
+    expect(rows[0]?.textContent).not.toContain('Degraded');
+    expect(rows[0]?.textContent).toContain('watch_budget_recovered');
+  });
+
   it('shows which session a private delivery reached', async () => {
     eventsState.current.data = {
       truncated: false,

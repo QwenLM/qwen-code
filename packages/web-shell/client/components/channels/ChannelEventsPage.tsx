@@ -151,11 +151,15 @@ export function ChannelEventsPage({
     [language],
   );
 
-  // The watch-guard recovery edge keeps `degraded` on the wire (the outcome
-  // vocabulary is unchanged); labeling it "Degraded" would read as an ongoing
-  // failure, so the reason names the label instead.
+  // Recovery edges keep `degraded` on the wire (the outcome vocabulary is
+  // unchanged); labeling them "Degraded" would read as an ongoing failure, so
+  // the reason names the label instead.
+  const RECOVERY_REASONS = new Set([
+    'watch_reconcile_recovered',
+    'watch_budget_recovered',
+  ]);
   const outcomeLabel = (outcome: string, reason?: string) =>
-    reason === 'watch_reconcile_recovered'
+    RECOVERY_REASONS.has(reason ?? '')
       ? t('channelEvents.outcome.recovered')
       : KNOWN_OUTCOMES.has(outcome)
         ? t(`channelEvents.outcome.${outcome}`)

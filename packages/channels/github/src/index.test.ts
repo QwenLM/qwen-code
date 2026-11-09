@@ -53,6 +53,15 @@ describe('github plugin validateConfig', () => {
     );
   });
 
+  it('requires deliverToBoundSessions for the watch budget reserve', () => {
+    expect(validate({ prWatchBudgetReserve: 300 })).toContain(
+      'prWatchBudgetReserve',
+    );
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 300 }),
+    ).toBeUndefined();
+  });
+
   it('accepts the full watch vocabulary, case-insensitively', () => {
     expect(
       validate({
