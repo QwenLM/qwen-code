@@ -94,6 +94,10 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
 } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import type {
+  PromptLedgerRecord,
+  PromptLedgerTerminalRecord,
+} from '@qwen-code/acp-bridge/promptLedger';
 import { DAEMON_INPUT_ANNOTATIONS_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
@@ -10319,6 +10323,152 @@ describe('Session', () => {
       expect(await session.continueLastTurn()).toEqual({
         accepted: true,
         interruption: 'interrupted_prompt',
+      });
+    });
+
+    describe('settled closed tool-result tail (recovery banner false positive)', () => {
+      // A turn that settles `end_turn` on a final tool call (e.g.
+      // `todo_write`) leaves the history tail as a `user`
+      // `functionResponse` with no trailing model text. The tail
+      // classifier cannot tell that from a crash after the tool run, so it
+      // reads it as an interrupted tool-result submission — the only
+      // witness that the turn settled is the prompt terminal ledger.
+      const closedToolTail: Content[] = [
+        { role: 'user', parts: [{ text: 'pin the turn prompt' }] },
+        { role: 'model', parts: [{ text: 'working on it' }] },
+        {
+          role: 'model',
+          parts: [
+            { thought: true, text: 'Desktop is still running, pn=1.' },
+            {
+              functionCall: {
+                id: 'call-settled-1',
+                name: 'todo_write',
+                args: { todos: [] },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-settled-1',
+                name: 'todo_write',
+                response: { output: { error: false } },
+              },
+            },
+          ],
+        },
+      ];
+
+      const completedTerminal = (
+        overrides: Partial<PromptLedgerTerminalRecord> = {},
+      ): PromptLedgerRecord => ({
+        v: 1,
+        promptId: 'prompt-1',
+        terminal: 'completed',
+        stopReason: 'end_turn',
+        at: 1,
+        ...overrides,
+      });
+
+      function createSessionWithLedger(
+        lastRecord?: () => PromptLedgerRecord | undefined,
+        history: typeof closedToolTail = closedToolTail,
+      ): void {
+        session.dispose();
+        vi.mocked(mockChat.getHistory).mockReturnValue(history);
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+          undefined,
+          undefined,
+          [],
+          () => false,
+          lastRecord,
+        );
+      }
+
+      it('reports clean for a turn that settled end_turn on a closed tool pair', async () => {
+        createSessionWithLedger(() => completedTerminal());
+
+        // The conservative synchronous classification is unchanged...
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: true,
+        });
+        // ...and the ledger-backed client view certifies the tail.
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'clean',
+          canContinue: false,
+        });
+        expect(await session.continueLastTurn()).toEqual({
+          accepted: false,
+          interruption: 'none',
+        });
+      });
+
+      it('keeps the banner when the ledger has no witness', async () => {
+        const witnesses: Array<
+          (() => PromptLedgerRecord | undefined) | undefined
+        > = [
+          undefined,
+          () => undefined,
+          () => {
+            throw new Error('I/O error');
+          },
+          () => ({ v: 1, promptId: 'prompt-1', state: 'in_flight', at: 2 }),
+          () => completedTerminal({ terminal: 'cancelled' }),
+          () => completedTerminal({ terminal: 'error' }),
+          () => completedTerminal({ stopReason: 'max_tokens' }),
+        ];
+        for (const witness of witnesses) {
+          createSessionWithLedger(witness);
+          expect(await session.getRecoveryStatusForClient()).toEqual({
+            kind: 'interrupted_prompt',
+            canContinue: true,
+          });
+        }
+      });
+
+      it('keeps the banner when the tail carries a real prompt, not tool results', async () => {
+        createSessionWithLedger(
+          () => completedTerminal(),
+          [{ role: 'user', parts: [{ text: 'unanswered prompt' }] }],
+        );
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'interrupted_prompt',
+          canContinue: true,
+        });
+      });
+
+      it('leaves a genuinely interrupted tool turn classified', async () => {
+        createSessionWithLedger(
+          () => completedTerminal(),
+          [
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-dangling',
+                    name: 'run_shell_command',
+                    args: { command: 'ls' },
+                  },
+                },
+              ],
+            },
+          ],
+        );
+        expect(await session.getRecoveryStatusForClient()).toEqual({
+          kind: 'interrupted_turn',
+          canContinue: true,
+        });
       });
     });
   });
