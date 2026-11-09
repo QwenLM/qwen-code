@@ -2775,7 +2775,7 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"prepare", "prepared-archive", "inspect", "preview"})
+    @ValueSource(strings = {"prepare", "prepared-archive", "inspect", "preview", "candidates", "snapshot", "archive"})
     void selfServiceGenerationMismatchAdoptsWithoutRedispatchOrRuntimeReplacement(String method) {
         HostedHarnessClient oldClient = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
@@ -2808,6 +2808,20 @@ class QwenHostedHarnessConnectorTest {
             case "preview" -> {
                 doThrow(mismatch).when(oldClient).previewManagedPackage(any(), any());
                 operation = () -> connector.previewPackage(Map.of(), source);
+            }
+            case "candidates" -> {
+                doThrow(mismatch).when(oldClient).runtimeSkillCandidates(any());
+                operation = () -> connector.runtimeSkillCandidates("tenant-a", SESSION_ID);
+            }
+            case "snapshot" -> {
+                doThrow(mismatch).when(oldClient).runtimeSkillSnapshot(any(), any());
+                operation = () -> connector.runtimeSkillSnapshot("tenant-a", SESSION_ID, Map.of());
+            }
+            case "archive" -> {
+                doThrow(mismatch).when(oldClient).runtimeSkillArchive(any(), any(), any(), any(), any(), anyLong());
+                operation = () -> connector.runtimeSkillArchive("tenant-a", SESSION_ID,
+                        Map.of("operationId", SESSION_ID, "preparationId", SESSION_ID, "offset", 0L,
+                                "owner", Map.of("bindingId", "binding", "generation", "1")));
             }
             default -> throw new AssertionError(method);
         }
