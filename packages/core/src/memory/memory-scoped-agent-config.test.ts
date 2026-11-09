@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { evaluatePermissionRules } from '../core/permission-helpers.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -117,6 +118,13 @@ describe('createMemoryScopedAgentConfig', () => {
     const restricted = scopedPm({ restrictReadsToMemoryPaths: true });
     await evalIs(restricted, READ_FILE, transcript, 'deny');
     await evalIs(restricted, GLOB, transcript, 'deny');
+    // The scheduler reaches evaluate only when hasRelevantRules claims glob.
+    await expect(
+      evaluatePermissionRules(restricted, 'allow', {
+        toolName: GLOB,
+        filePath: transcript,
+      }),
+    ).resolves.toMatchObject({ finalPermission: 'deny' });
     await evalIs(restricted, GREP, getAutoMemoryRoot(projectRoot), 'allow');
     await evalIs(restricted, LS, getUserAutoMemoryRoot(), 'allow');
   });
