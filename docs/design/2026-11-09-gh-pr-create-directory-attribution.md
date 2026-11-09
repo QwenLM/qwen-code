@@ -359,6 +359,65 @@ diff-reading passes and a 38-shape probe, and was caught only by a reviewer
 comparing binding outcomes against the parent commit. The probe's shapes all
 used `&&`, so none of them exercised a non-guaranteed separator.
 
+### Review round 3 (2026-11-09, re-review of `062a15ada7d`)
+
+The re-review confirmed two round-2 findings fully fixed (single-quoted paths,
+quoted-argument and assignment forgery) and reported four remaining P2 issues —
+**two of them regressions introduced by the round-2 follow-up itself**. All four
+were reproduced against the head before fixing, three by AST dump and one by
+`path.win32` simulation.
+
+1. **Regression — an OR-list's success was taken as proof its `cd` ran.**
+   `true || cd w && gh pr create` parses as `list(list(true || cd w) && create)`.
+   The round-2 rule only asked whether the _left_ of `||` had moved, so the
+   skipped right-hand `cd` was visited and its directory returned to the outer
+   `&&`. Bash succeeds through `true` and never runs the `cd`. `||` is now
+   ambiguous in **both** directions: either side being able to move the
+   directory makes the outcome unprovable.
+2. **Regression — sanitising an expanded credential destroyed the assignment.**
+   Replacing a whole `variable_assignment` with a bare token turned
+   `GH_TOKEN=$TOK gh pr create` into `X gh pr create`, which the gate no longer
+   recognises, so a binding the unsanitised text used to make was lost. Only the
+   _value_ is now replaced; the assignment shape survives as `NAME=X`, which
+   still satisfies the gate's leading-assignment grammar and still cannot carry
+   a forged separator.
+3. **Regression — a comment consumed the pending separator.** tree-sitter keeps
+   a comment as a _named_ child between `&&` and the following command, so
+   `cd w && # note` + newline + `gh pr create` visited the comment as a
+   statement and cleared the operator, making a proven chain look unprovable.
+   Comment nodes are now skipped without consuming the pending separator.
+4. **Incomplete fix — the same-directory comparison was still spelling-sensitive.**
+   `cd /test/dir` from a launch dir of `/test/dir` is a no-op, but `path.resolve`
+   spells it with platform separators, so the raw `found === launchDir` test
+   reported `resolved` on Windows. The comparison now normalises both sides,
+   which fixes the semantics rather than adjusting the expectation.
+
+Round-3 verification: **434 passed** (425 in the existing file, including 46
+directory-resolution tests, plus 9 real-filesystem tests), core typecheck exit 0,
+ESLint and Prettier clean. Mutation witnesses K (drop the OR-list right-branch
+check), L (revert to a bare assignment token) and M (drop the comment skip) each
+kill exactly their own two cases — unit and real-filesystem — with 432 still
+passing. Finding 4 has **no Linux-observable mutation**: `path.resolve` is
+identity there, so it was verified by `path.win32` simulation instead (raw
+comparison reports `resolved`, normalised reports `launch`), and is not claimed
+as mutation-witnessed.
+
+The real-filesystem suite gained two cases: an OR-list-skipped worktree that must
+still bind the launch branch's PR with the worktree marker unwritten, and a
+comment-interleaved AND chain that must bind the worktree's PR.
+
+**CI gate freshness.** `Lint & Static` failed `Check lint gate freshness` on this
+head. The script's own remedy is to merge or rebase the base, and the incoming
+main carries `#16706 fix(ci): stop staling branches for eslint ignores they never
+excluded` — a fix to that very gate. This is a stale-gate signal, not a defect in
+this change, and is addressed by merging current main rather than editing code.
+
+Fifteen defects have now been found and fixed. Three of them were introduced by
+this design's own follow-up fixes, which is the pattern worth recording: each
+round-2 fix narrowed one hole and opened an adjacent one, and only a reviewer
+re-running binding outcomes against both the parent and the previous head caught
+them. The design's own probe and diff reading did not.
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

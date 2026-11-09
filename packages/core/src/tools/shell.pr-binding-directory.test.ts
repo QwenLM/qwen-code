@@ -276,6 +276,36 @@ describe.skipIf(process.platform === 'win32')(
       ).toBe(false);
     });
 
+    it('does not bind a worktree skipped by an OR-list', async () => {
+      // `true || cd w` succeeds through `true`, so the cd never runs and the
+      // outer `&&` creates on the launch branch. Carrying the right-hand cd
+      // out of the OR-list would query the worktree and bind nothing.
+      const result = await run(
+        `true || cd '${worktree}' && gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+      expect(
+        fs.existsSync(
+          path.join(tmp, 'gh-state', WORKTREE_BRANCH.replace(/\//g, '_')),
+        ),
+      ).toBe(false);
+    });
+
+    it('binds through a comment between the cd and the create', async () => {
+      // The comment sits between `&&` and the command in the AST. Consuming
+      // the pending operator there made a proven chain look unproven.
+      const result = await run(
+        `cd '${worktree}' && # create the PR below\ngh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
     it('falls back with a notice when the cd target is an expansion', async () => {
       // The create really runs and really creates the worktree's PR; only the
       // attribution is unprovable, because the resolver refuses to guess what

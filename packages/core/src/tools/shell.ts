@@ -997,8 +997,16 @@ function createCandidateText(node: ShellSyntaxNode): string {
       parts.push(child.text);
       continue;
     }
-    // Assignments are sanitised too: `X='; gh pr create' printf hi` would
-    // otherwise forge a segment through the assignment's own quoted value.
+    if (child.type === 'variable_assignment') {
+      // Sanitise the VALUE but keep the assignment shape. Replacing the whole
+      // node with a bare token turns `GH_TOKEN=$TOK gh pr create` into
+      // `X gh pr create`, which the gate no longer recognises — losing a
+      // binding the unsanitised text used to make. Only the value can carry
+      // a forged separator, so only the value is replaced.
+      const name = child.namedChildren.find((c) => c.type === 'variable_name');
+      parts.push(name ? `${name.text}=X` : 'X');
+      continue;
+    }
     parts.push(/[;&|`$\n]/.test(child.text) ? 'X' : child.text);
   }
   return parts.join(' ');
@@ -1149,9 +1157,13 @@ async function resolveGhPrCreateDirectory(
           // statement runs regardless, so a `cd` that failed (missing
           // target), was skipped (`false && cd w`), or ran in a background
           // subshell (`cd w &`) never moved us — and carrying it anyway
-          // would query a directory the create never ran in. `||` is the
-          // mirror image: the right side runs only when the left FAILED.
-          // A create already found is unaffected, so
+          // would query a directory the create never ran in.
+          //
+          // `||` is ambiguous in BOTH directions: the right branch runs only
+          // when the left failed, so a cd on the right may never execute
+          // (`true || cd w` skips it), and a cd on the left may have failed.
+          // Either side being able to move the directory makes the outcome
+          // unprovable. A create already found is unaffected, so
           // `cd w && gh pr create || gh pr view` still attributes in `w`.
           let current = dir;
           let separator: string | undefined;
@@ -1160,8 +1172,17 @@ async function resolveGhPrCreateDirectory(
               separator = child.text;
               continue;
             }
+            // A comment is not a statement. Skipping it must not consume the
+            // pending operator, or `cd w && # note` + newline + `gh pr
+            // create` loses the `&&` that proves the cd succeeded.
+            if (child.type === 'comment') continue;
             if (found !== undefined || opaque) return current;
-            if (separator !== '&&' && current !== dir) {
+            if (separator === '||') {
+              if (current !== dir || subtreeMayChangeDirectory(child)) {
+                opaque = true;
+                return current;
+              }
+            } else if (separator !== '&&' && current !== dir) {
               opaque = true;
               return current;
             }
@@ -1247,7 +1268,16 @@ async function resolveGhPrCreateDirectory(
     visit(root, launchDir);
 
     if (opaque) return { kind: 'opaque' };
-    if (found === undefined || found === launchDir) return { kind: 'launch' };
+    // Compare resolved forms: `cd /test/dir` from a launch dir of `/test/dir`
+    // is a no-op, but path.resolve spells it with the platform's separators
+    // (and a drive on Windows), so a raw string comparison would report a
+    // resolved directory that is really the launch one.
+    if (
+      found === undefined ||
+      path.resolve(found) === path.resolve(launchDir)
+    ) {
+      return { kind: 'launch' };
+    }
     return { kind: 'resolved', directory: found };
   } finally {
     // The tree lives in WASM memory; every other parseShellCommand consumer

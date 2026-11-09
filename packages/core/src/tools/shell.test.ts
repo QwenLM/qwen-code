@@ -1189,6 +1189,36 @@ describe('ShellTool', () => {
         expectBound(77);
       });
 
+      it('still recognises a create carrying an expanded credential', async () => {
+        // Sanitising the assignment to a bare token produced `X gh pr
+        // create`, which the gate no longer recognises — so an expanded
+        // credential lost a binding the unsanitised text used to make. The
+        // assignment shape has to survive; only its value is replaced.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && GH_TOKEN=$PR_REVIEW_TEST_TOKEN gh pr create --fill',
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir', 'nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('resolves through a comment between the cd and the create', async () => {
+        // tree-sitter keeps the comment as a named child between `&&` and
+        // the command. Treating it as a statement consumed the pending
+        // operator, so the create looked unproven even though bash runs it
+        // under the successful cd.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && # create the PR below\ngh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
       it('resolves pushd like cd', async () => {
         mockCreatedPr(77);
         await runShell('pushd /test/dir/nested && gh pr create --fill', PR_77);
@@ -1305,6 +1335,15 @@ describe('ShellTool', () => {
           'cd /test/dir/nested; gh pr create --fill',
         ],
         ['a newline-separated cd', 'cd /test/dir/nested\ngh pr create --fill'],
+        // `||` is ambiguous in both directions: the right branch runs only
+        // when the left failed, so a cd there may never execute. The inner
+        // OR-list succeeds through `true`, the outer `&&` then runs the
+        // create in the launch directory, and carrying the skipped cd would
+        // query the worktree.
+        [
+          'a cd in the right branch of an OR-list',
+          'true || cd /test/dir/nested && gh pr create --fill',
+        ],
       ])('falls back with a notice for %s', async (_label, command) => {
         mockCreatedPr(77);
         const result = await runShell(command, PR_77);

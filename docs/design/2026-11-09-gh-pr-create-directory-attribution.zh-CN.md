@@ -178,6 +178,23 @@ const attributionDir =
 
 至此跨实现、自审、对抗探针与本轮评审共发现并修掉十二个缺陷。其中回归最值得记：它由本设计自己的第一版实现引入，躲过了两遍干净的读 diff 和一个 38 形状探针，只有评审者把绑定结果与父提交对比才抓到。探针的形状全都用 `&&`，因此没有一个覆盖到非保证成功的分隔符。
 
+### 第三轮评审（2026-11-09，复评 `062a15ada7d`）
+
+复评确认第二轮的两条已完全修好（单引号路径、引号参数与赋值伪造），并报出四条仍存的 P2——**其中两条是第二轮跟进修复自己引入的回归**。四条都先对 head 复现再修：三条靠 dump AST，一条靠 `path.win32` 模拟。
+
+1. **回归——把 OR-list 的成功当成其 `cd` 已执行的证明。** `true || cd w && gh pr create` 解析为 `list(list(true || cd w) && create)`。第二轮的规则只问 `||` 的**左侧**是否移动过，于是被跳过的右侧 `cd` 仍被访问、其目录被返回给外层 `&&`。而 bash 经 `true` 成功、根本不跑那个 `cd`。现在 `||` 在**两个方向**上都是歧义的：任一侧可能移动目录，结果就不可证明。
+2. **回归——净化展开凭据时毁掉了赋值本身。** 把整个 `variable_assignment` 替换成裸 token，会把 `GH_TOKEN=$TOK gh pr create` 变成 `X gh pr create`，闸门不再识别，于是丢掉了未净化文本本来能做出的绑定。现在只替换**值**，赋值形状以 `NAME=X` 保留——既仍满足闸门的前置赋值语法，也仍无法携带伪造的分隔符。
+3. **回归——注释消费掉了待用的分隔符。** tree-sitter 把注释作为**具名**子节点放在 `&&` 与后续命令之间，于是 `cd w && # note` + 换行 + `gh pr create` 把注释当语句访问并清掉了操作符，让一条已证明的链看起来不可证明。现在跳过 comment 节点且不消费待用分隔符。
+4. **修复不完整——同目录比较仍对拼写敏感。** 从启动目录 `/test/dir` 执行 `cd /test/dir` 是空操作，但 `path.resolve` 会用平台分隔符拼写它，因此裸的 `found === launchDir` 在 Windows 上判为 `resolved`。现在比较前把两侧都规范化——这是修语义，而不是改期望值。
+
+第三轮验证：**434 passed**（既有文件 425 条，含 46 条目录解析用例；真实文件系统 9 条），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 K（去掉 OR-list 右支检查）、L（退回裸赋值 token）、M（去掉 comment 跳过）各自恰好杀掉自己的两条用例——单测与真实文件系统各一——432 条仍绿。第 4 条**在 Linux 上没有可观测的变异**：`path.resolve` 在那里是恒等，因此改用 `path.win32` 模拟验证（裸比较判 `resolved`、规范化后判 `launch`），不声称它有变异见证。
+
+真实文件系统套件新增两条：被 OR-list 跳过的 worktree 必须仍绑定启动分支的 PR 且 worktree marker 未写入；插入注释的 AND 链必须绑定 worktree 的 PR。
+
+**CI gate freshness。** 本 head 上 `Lint & Static` 的 `Check lint gate freshness` 失败。脚本自己给出的 remedy 是合并或 rebase 基线，而 incoming main 带着 `#16706 fix(ci): stop staling branches for eslint ignores they never excluded`——正是对该 gate 本身的修复。这是 gate 过期信号，不是本改动的缺陷，处置是合入当前 main 而非改代码。
+
+至此共发现并修掉十五个缺陷。其中三个由本设计自己的跟进修复引入，这是值得记录的模式：第二轮的每个修复都收窄了一个洞、同时打开了相邻的另一个，只有评审者把绑定结果同时对父提交与上一个 head 重跑才抓到。本设计自己的探针与读 diff 都没抓到。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。
