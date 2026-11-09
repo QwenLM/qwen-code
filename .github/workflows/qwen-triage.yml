@@ -1524,9 +1524,13 @@ jobs:
             # that way, the next host-user job (e.g. PR review) cannot rm it
             # and dies writing settings.json (PR #16610 incident). Hand it
             # back too, not just the workspace — same for the draft/result
-            # dirs the context step chowned to node.
+            # dirs the context step chowned to node. The quarantine names are
+            # this container's only chance to reclaim them: a review renames a
+            # foreign-owned home instead of failing, and that copy keeps the
+            # owner that made it unremovable, so nothing unprivileged can
+            # delete it later. An unmatched glob fails the -d guard below.
             QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
-            for handback in "$QWEN_HOME" "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results" "$RUNNER_TEMP/triage-context"; do
+            for handback in "$QWEN_HOME" "$RUNNER_TEMP"/qwen-home.stale-* "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results" "$RUNNER_TEMP/triage-context"; do
               if [ -d "$handback" ]; then
                 chown -R "$RUNNER_UID:$RUNNER_GID" "$handback" 2>/dev/null || echo "::warning::could not restore ownership of $handback; the next job on this runner may fail on EACCES"
               fi
