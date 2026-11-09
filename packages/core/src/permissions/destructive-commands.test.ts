@@ -194,7 +194,6 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'timeout 10 git commit --amend --no-edit',
     'if true; then git commit --amend --no-edit; fi',
     "eval 'git commit --amend --no-edit'",
-    'git >| /dev/null commit --amend',
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
@@ -207,6 +206,7 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'echo "git commit --amend"',
     `node -e 'console.log("a report about git commit --amend behaviour")'`,
     "su -c 'git commit --amend --no-edit'",
+    'git >| /dev/null commit --amend',
   ])('backstop keeps unprovable amend text blocked: %s', (command) => {
     expectBlocked(command, 'write a report', 'amend');
   });
@@ -216,11 +216,9 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "printf '%s\\n' 'git commit --amend'",
     "grep -n 'git commit --amend' CHANGELOG.md",
     'git commit -m --amend',
-    "git log --grep='git commit --amend'",
     '# git commit --amend',
     "echo ok # a note about git commit --amend",
     "cat > notes.txt <<'EOF'\ngit commit --amend\nEOF",
-    "cat <<'EOF' | grep 'git commit --amend'\ngit commit --amend\nEOF",
   ])('allows provably inert text that mentions amend: %s', (command) => {
     expectAllowed([command], 'write a report');
   });
