@@ -2234,10 +2234,19 @@ describe('startSessionPrRefreshTimer', () => {
     });
     try {
       await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-      await vi.waitFor(() => {
-        expect(view).toHaveBeenCalled();
-      });
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+      // Wait for BOTH: the refresh runs after the observation in the same tick,
+      // so asserting it outside the wait races the awaits in between on a
+      // saturated runner. The ordering is still pinned by the clock — were the
+      // refresh first, its 40s would pass the 30s deadline and `view` would
+      // never be called. The explicit timeout replaces waitFor's 1s default,
+      // which also expired under load.
+      await vi.waitFor(
+        () => {
+          expect(view).toHaveBeenCalled();
+          expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+        },
+        { timeout: 10_000 },
+      );
     } finally {
       handle?.dispose();
       await removeTempTree(watchDir);
