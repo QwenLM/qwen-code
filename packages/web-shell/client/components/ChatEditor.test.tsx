@@ -4303,6 +4303,16 @@ describe('ChatEditor toolbar popovers', () => {
           ?.click(),
       );
       expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('max');
+      rerenderChatEditor(container, {
+        ...props,
+        reasoning: { ...props.reasoning!, effort: 'max' },
+      });
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')

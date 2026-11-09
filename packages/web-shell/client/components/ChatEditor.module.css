@@ -1830,11 +1830,6 @@
 
 .reasoningEffortRowActive {
   background: var(--accent);
-  color: var(--foreground);
-}
-
-.reasoningEffortRowActive .dropdownItemCheck {
-  color: var(--secondary-foreground);
 }
 
 .reasoningEffortRow:disabled {
