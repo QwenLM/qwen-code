@@ -110,7 +110,7 @@ class WorkspaceCsiSessionMainTest {
         assertThat(first.replayed()).isFalse();
         assertThat(UUID.fromString(first.sessionId()).toString()).isEqualTo(first.sessionId());
         var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session");
-        assertThat(row.get("tool_profile")).isEqualTo(CsiFilesRetirementProfile.PROFILE);
+        assertThat(row.get("tool_profile")).isEqualTo(CsiFilesRetirementProfile.ACTIVITY_PROFILE);
         assertThat(row.get("runtime_request_key")).isEqualTo(first.runtimeRequestKey());
         assertThat(row.get("workspace_generation")).isEqualTo(3L);
         assertThat(row.get("workspace_storage_id")).isEqualTo("storage");
@@ -479,8 +479,10 @@ class WorkspaceCsiSessionMainTest {
         var before = allTables();
         assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter("tenant", original.sessionId(),
                 "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60000L)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("CSI mutation requires its original transaction connection");
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, refusal -> {
+                    assertThat(refusal.getStatusCode()).isEqualTo(409);
+                    assertThat(refusal.getCode()).isEqualTo("csi_original_binding_unavailable");
+                });
         assertThat(allTables()).isEqualTo(before);
     }
 
@@ -644,7 +646,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(39);
+        assertThat(result).hasSize(41);
         return result;
     }
 

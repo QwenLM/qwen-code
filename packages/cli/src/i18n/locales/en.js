@@ -1850,10 +1850,10 @@ export default {
   'Signed in successfully · {{email}}': 'Signed in successfully · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     'Current plan: Qwen {{plan}}. Qwen Code is ready.',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    'Common commands: /usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    'Common commands: /usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     'Signed in as {{email}} (Qwen {{plan}})',
   'Qwen {{plan}} is active · usage is included with your plan':
@@ -2142,6 +2142,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Input Tokens',
   'Output Tokens': 'Output Tokens',
+  'Output (incl. Reasoning)': 'Output (incl. Reasoning)',
   'Savings Highlight:': 'Savings Highlight:',
   'of input tokens were served from the cache, reducing costs.':
     'of input tokens were served from the cache, reducing costs.',
