@@ -169,12 +169,26 @@ export function registerSessionCommit(sha: string): void {
  * a hook that could auto-allow it would restore exactly the bypass the guard
  * is for.
  */
+/**
+ * Spellings that can move the amend away from `cwd`: a directory change, the
+ * git relocation options, or the relocation environment prefixes. Deliberately
+ * a shape test, not an attempt to resolve the real target.
+ */
+const REPOSITORY_RELOCATION =
+  /(?:^|[\s;&|(])(?:cd|pushd)\s|\bgit\b[^\n]*?\s(?:-C|--git-dir|--work-tree)(?=[\s=])|\bGIT_DIR=|\bGIT_WORK_TREE=/;
+
 export function amendNeedsApproval(
   command: string,
   cwd: string = process.cwd(),
 ): boolean {
   const expanded = command + ' ' + stripShellQuotes(command);
-  return GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd);
+  if (!GIT_AMEND_PATTERN.test(expanded)) return false;
+  // The exemption is resolved against `cwd` (R14-1). A command that changes
+  // directory first or relocates the repository makes the amend's target
+  // unattributable, so fail closed instead of certifying another repository's
+  // commit with this one's registered HEAD.
+  if (REPOSITORY_RELOCATION.test(expanded)) return true;
+  return !isAmendOfSessionCommit(cwd);
 }
 
 /**

@@ -295,6 +295,38 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectNeedsApproval(command);
   });
 
+  it('needs approval when the command relocates the repository', () => {
+    // R14-1: the exemption reads `cwd`'s HEAD, so an amend aimed at another
+    // repository must not inherit it.
+    const a = mkdtempSync(join(tmpdir(), 'amend-repo-a-'));
+    const b = mkdtempSync(join(tmpdir(), 'amend-repo-b-'));
+    try {
+      for (const dir of [a, b]) {
+        execSync(
+          'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m one',
+          { cwd: dir, stdio: 'ignore' },
+        );
+      }
+      const headA = execSync('git rev-parse HEAD', {
+        cwd: a,
+        encoding: 'utf-8',
+      }).trim();
+      registerSessionCommit(headA);
+      expect(amendNeedsApproval('git commit --amend', a)).toBe(false);
+      expect(amendNeedsApproval('git commit --amend', b)).toBe(true);
+      for (const command of [
+        `cd ${b} && git commit --amend --no-edit`,
+        `git -C ${b} commit --amend --no-edit`,
+        `git --git-dir=${b}/.git --work-tree=${b} commit --amend`,
+      ]) {
+        expect(amendNeedsApproval(command, a)).toBe(true);
+      }
+    } finally {
+      rmSync(a, { recursive: true, force: true });
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+
   it('allows an amend of a commit this session created', () => {
     // The registry is keyed by HEAD, so this needs a real repository.
     const dir = mkdtempSync(join(tmpdir(), 'amend-session-'));
