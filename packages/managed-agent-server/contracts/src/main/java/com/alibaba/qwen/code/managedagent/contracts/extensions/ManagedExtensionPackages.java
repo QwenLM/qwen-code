@@ -49,7 +49,18 @@ public final class ManagedExtensionPackages {
     public record Package(Pin pin, Manifest manifest, long byteLength) {
     }
 
-    public record Catalog(boolean supported, List<Package> extensions) {
+    public record SelfService(boolean supported, boolean canPublish) { }
+
+    public record Catalog(boolean supported, List<Package> extensions, SelfService selfService) {
+        public Catalog(boolean supported, List<Package> extensions) { this(supported, extensions, new SelfService(false, false)); }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record ImportMetadata(String sourceKind, Target target, String sourceDigest, int compilerVersion, String packageName) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown extension import field");
+        }
     }
 
     public record Settings(long settingsRevision, List<String> configuredKeys) {
