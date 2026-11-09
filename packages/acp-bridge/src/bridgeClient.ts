@@ -2816,6 +2816,10 @@ export class BridgeClient implements Client {
         });
         return;
       }
+      if (record['type'] === 'reset') {
+        this.onGenerationEvent?.(sessionId, { type: 'reset', requestId });
+        return;
+      }
       if (record['type'] === 'delta') {
         const seq = record['seq'];
         const text = record['text'];

@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -48,7 +50,7 @@ class ManagedActionStoreTest {
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
     private StoreLockTrace trace;
-    private ManagedActionStore actions;
+    private JdbcManagedActionStore actions;
     private AgentStateStore agents;
     private TransactionTemplate transactions;
     private String scope;
@@ -62,7 +64,7 @@ class ManagedActionStoreTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
-        scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
+        scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,gmt_create,gmt_modified)"
                 + " VALUES (?,?,'agent','ACTIVE','manual',0,0)", TENANT, SESSION);
         agents = mock(AgentStateStore.class);
@@ -75,7 +77,7 @@ class ManagedActionStoreTest {
                         row.getString("failure_code"), row.getInt("lifecycle_protocol_version")),
                 call.getArgument(0), call.getArgument(1), call.getArgument(2)).stream().findFirst());
         when(agents.hasExecutionRegistryFacts(anyString(), anyString())).thenReturn(true);
-        actions = new ManagedActionStore(jdbc, agents);
+        actions = new JdbcManagedActionStore(jdbc, agents);
     }
 
     @AfterEach
@@ -574,13 +576,13 @@ class ManagedActionStoreTest {
                         + " context_revision = 1, workspace_config_ref = 'config',"
                         + " workspace_policy_ref = 'policy', owner_actor_key = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "owner"), TENANT, SESSION);
+                ManagedWorkspaceRegistry.actorKey(TENANT, "owner"), TENANT, SESSION);
     }
 
     private void grantRole(String actor, String role) {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id,"
                         + " actor_id, role) VALUES (?, 'workspace', ?, ?)",
-                TENANT, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, actor), role);
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, actor), role);
     }
 
     private String stringColumn(String name, String operationId) {

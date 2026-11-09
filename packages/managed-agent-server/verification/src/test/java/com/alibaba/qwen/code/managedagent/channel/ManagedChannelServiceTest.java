@@ -17,11 +17,12 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
-import com.alibaba.qwen.code.managedagent.persistence.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -73,13 +74,13 @@ class ManagedChannelServiceTest {
     private String channel;
 
     @Autowired
-    private ChannelInstanceStore instances;
+    private JdbcChannelInstanceStore instances;
 
     @Autowired
     private ManagedAgentService sessions;
 
     @Autowired
-    private ManagedWorkspaceRegistry workspaces;
+    private JdbcManagedWorkspaceRegistry workspaces;
 
     @Autowired
     private ObjectMapper mapper;
@@ -504,17 +505,17 @@ class ManagedChannelServiceTest {
                 });
         // The refusal changed nothing: the connection keeps its owner.
         assertThat(instances.findInstance(TENANT, channel)).get()
-                .extracting(ChannelInstanceStore.ChannelInstance::workspaceId)
+                .extracting(JdbcChannelInstanceStore.ChannelInstance::workspaceId)
                 .isEqualTo(WORKSPACE);
         assertThat(instances.findInstance(TENANT, channel)).get()
-                .extracting(ChannelInstanceStore.ChannelInstance::actorId)
+                .extracting(JdbcChannelInstanceStore.ChannelInstance::actorId)
                 .isEqualTo(ACTOR);
         // With no binding yet, the same move class is ordinary
         // re-registration.
         String fresh = "mail-" + UUID.randomUUID();
         service.register(TENANT, fresh, moved);
         assertThat(instances.findInstance(TENANT, fresh)).get()
-                .extracting(ChannelInstanceStore.ChannelInstance::workspaceId)
+                .extracting(JdbcChannelInstanceStore.ChannelInstance::workspaceId)
                 .isEqualTo("other-workspace");
     }
 
@@ -524,19 +525,19 @@ class ManagedChannelServiceTest {
         // row that moved forward — the monotonic check rides in the UPDATE
         // (R8 P2). Simulate the stale read with a store whose findInstance
         // answers the just-slipped snapshot.
-        ChannelInstanceStore.ChannelInstance snapshot = instances
+        JdbcChannelInstanceStore.ChannelInstance snapshot = instances
                 .findInstance(TENANT, channel).orElseThrow();
         assertThat(snapshot.accountGeneration()).isEqualTo(1);
         jdbc.update("UPDATE ma_channel_instance"
                         + " SET account_generation = 3"
                         + " WHERE tenant_id = ? AND channel_id = ?",
                 TENANT, channel);
-        ChannelInstanceStore racing = new ChannelInstanceStore(jdbc) {
+        JdbcChannelInstanceStore racing = new JdbcChannelInstanceStore(jdbc) {
             @Override
-            public java.util.Optional<ChannelInstanceStore.ChannelInstance>
+            public java.util.Optional<JdbcChannelInstanceStore.ChannelInstance>
                     findInstance(String tenantId, String channelId) {
                 return java.util.Optional.of(
-                        new ChannelInstanceStore.ChannelInstance(
+                        new JdbcChannelInstanceStore.ChannelInstance(
                                 snapshot.tenantId(), snapshot.channelId(),
                                 snapshot.platform(), snapshot.accountId(), 1L,
                                 snapshot.state(), snapshot.actorId(),
@@ -546,7 +547,7 @@ class ManagedChannelServiceTest {
             }
         };
         assertThatThrownBy(() -> racing.register(
-                        new ChannelInstanceStore.ChannelInstance(TENANT,
+                        new JdbcChannelInstanceStore.ChannelInstance(TENANT,
                                 channel, "email", "agent@example.com", 2,
                                 "connected", ACTOR, WORKSPACE, ".",
                                 snapshot.policyJson(), 0, 0)))
@@ -556,7 +557,7 @@ class ManagedChannelServiceTest {
         // The stored row never regressed.
         assertThat(instances.findInstance(TENANT, channel)).get()
                 .extracting(
-                        ChannelInstanceStore.ChannelInstance::accountGeneration)
+                        JdbcChannelInstanceStore.ChannelInstance::accountGeneration)
                 .isEqualTo(3L);
     }
 
@@ -590,13 +591,13 @@ class ManagedChannelServiceTest {
                 return value;
             }
         };
-        ChannelInstanceStore.ChannelInstance snapshot = instances
+        JdbcChannelInstanceStore.ChannelInstance snapshot = instances
                 .findInstance(TENANT, channel).orElseThrow();
-        ChannelInstanceStore racingStore = new ChannelInstanceStore(latching);
+        JdbcChannelInstanceStore racingStore = new JdbcChannelInstanceStore(latching);
         Thread binder = new Thread(() -> {
             try {
                 atCount.await();
-                instances.bind(new ChannelInstanceStore.ChannelBinding(TENANT,
+                instances.bind(new JdbcChannelInstanceStore.ChannelBinding(TENANT,
                         channel, "chrt-race", "sess-race", "chat_thread",
                         null, "alice@example.com", "thread-1",
                         instances.databaseNow()));
@@ -610,7 +611,7 @@ class ManagedChannelServiceTest {
         try {
             IllegalStateException error = assertThrows(IllegalStateException.class,
                     () -> racingStore.register(
-                            new ChannelInstanceStore.ChannelInstance(TENANT,
+                            new JdbcChannelInstanceStore.ChannelInstance(TENANT,
                                     channel, "email", "agent@example.com", 1,
                                     "connected", "other-actor", WORKSPACE, ".",
                                     snapshot.policyJson(), 0, 0)));
@@ -622,7 +623,7 @@ class ManagedChannelServiceTest {
         // The bind raced in mid-check, and the stored connection still
         // names its original owner.
         assertThat(instances.findInstance(TENANT, channel)).get()
-                .extracting(ChannelInstanceStore.ChannelInstance::actorId)
+                .extracting(JdbcChannelInstanceStore.ChannelInstance::actorId)
                 .isEqualTo(ACTOR);
     }
 
@@ -811,7 +812,7 @@ class ManagedChannelServiceTest {
                             + " VALUES (?, ?, 'qwen-code', 'mail thread',"
                             + " 'ACTIVE', 1, 1)",
                     TENANT, crowdSession);
-            instances.bind(new ChannelInstanceStore.ChannelBinding(TENANT,
+            instances.bind(new JdbcChannelInstanceStore.ChannelBinding(TENANT,
                     channel, "chrt-crowd-" + i, crowdSession, "chat_thread",
                     "alice@example.com", "chat-" + i, "thread-" + i, 0));
         }
@@ -980,7 +981,7 @@ class ManagedChannelServiceTest {
     }
 
     private static String scopeKey(String sessionId) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        return ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
     }
 
     /** Answers the channel operations the way the hosted funnel does. */

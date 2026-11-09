@@ -29,8 +29,6 @@ import {
   resolveModelSelectionAuthType,
   hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
-  buildBtwCacheSafeParams,
-  buildBtwPrompt,
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
@@ -50,7 +48,6 @@ import {
   resolveBaseUrl,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
-  runForkedAgent,
   SessionIdCaseConflictError,
   SessionService,
   SESSION_WRITER_RPC_CODES,
@@ -255,12 +252,15 @@ import {
 import { readBackgroundShellOutputTail } from '@qwen-code/qwen-code-core/services/backgroundShellRegistry.js';
 import { sampleProcessTreeRssBytes } from '@qwen-code/qwen-code-core/utils/process-resources.js';
 import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
+import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
+import { getSubscriptionStartupFallbackModel } from '../config/modelProvidersScope.js';
 import {
   getOperatorTrustSettings,
   loadSettings,
@@ -528,6 +528,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
+  SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
@@ -6020,6 +6021,31 @@ class QwenAgent implements Agent {
           const settings = profiler.timeSync('settings_load', () =>
             loadSettingsCached(cwd),
           );
+          const startupModel =
+            params._meta?.[SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY];
+          const allowSubscriptionStartupFallback =
+            this.canUseSubscriptionStartupFallback(
+              executionEngine,
+              sessionSource,
+            );
+          const startupSubscriptionModel =
+            typeof startupModel === 'string' &&
+            this.isTrustedManagedParent() &&
+            settings.isTrusted &&
+            allowSubscriptionStartupFallback
+              ? startupModel
+              : undefined;
+          const enforcedAuth = settings.merged.security?.auth?.enforcedType;
+          if (
+            startupSubscriptionModel &&
+            enforcedAuth &&
+            enforcedAuth !== AuthType.QWEN_SUBSCRIPTION
+          ) {
+            throw RequestError.invalidParams(
+              { errorKind: 'auth_type_enforced' },
+              'Authentication is restricted by policy.',
+            );
+          }
           this.settings = settings;
           const deferMcpDiscovery = shouldDeferMcpDiscovery(params);
           const configProviderRevision = this.modelProviderReloadRevision;
@@ -6042,6 +6068,7 @@ class QwenAgent implements Agent {
               undefined,
               undefined,
               executionEngine,
+              startupSubscriptionModel,
             ),
           );
           let session: Session;
@@ -6049,7 +6076,11 @@ class QwenAgent implements Agent {
             initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
-                this.ensureAuthenticated(config, settings),
+                this.ensureAuthenticated(
+                  config,
+                  settings,
+                  !startupSubscriptionModel && allowSubscriptionStartupFallback,
+                ),
               );
               initializationDeadline?.signal.throwIfAborted();
               profiler.timeSync('file_system_setup', () =>
@@ -6410,12 +6441,23 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const allowSubscriptionStartupFallback =
+        this.canUseSubscriptionStartupFallback(executionEngine, sessionSource);
       const restoreModel = () =>
         profiler.time('restore_session_model', () =>
-          this.restoreSessionModel(config, settings, projection, () =>
-            profiler.time('auth', () =>
-              this.ensureAuthenticated(config, settings),
-            ),
+          this.restoreSessionModel(
+            config,
+            settings,
+            projection,
+            () =>
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(
+                  config,
+                  settings,
+                  allowSubscriptionStartupFallback,
+                ),
+              ),
+            allowSubscriptionStartupFallback,
           ),
         );
       const fileDerivedApprovalMode = config.getApprovalMode();
@@ -6848,12 +6890,23 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const allowSubscriptionStartupFallback =
+        this.canUseSubscriptionStartupFallback(executionEngine, sessionSource);
       const restoreModel = () =>
         profiler.time('restore_session_model', () =>
-          this.restoreSessionModel(config, settings, projection, () =>
-            profiler.time('auth', () =>
-              this.ensureAuthenticated(config, settings),
-            ),
+          this.restoreSessionModel(
+            config,
+            settings,
+            projection,
+            () =>
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(
+                  config,
+                  settings,
+                  allowSubscriptionStartupFallback,
+                ),
+              ),
+            allowSubscriptionStartupFallback,
           ),
         );
       const fileDerivedApprovalMode = config.getApprovalMode();
@@ -13724,31 +13777,30 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const config = session.getConfig();
-        const cacheSafeParams = buildBtwCacheSafeParams(config);
-        if (!cacheSafeParams) {
-          debugLogger.debug(`btw: no cacheSafeParams for session=${sessionId}`);
-          return { sessionId, answer: null };
-        }
         const childSignal = AbortSignal.timeout(BTW_CHILD_TIMEOUT_MS);
-        let result;
-        try {
-          result = await runForkedAgent({
-            config,
-            userMessage: buildBtwPrompt(question.trim()),
-            cacheSafeParams,
-            abortSignal: childSignal,
-          });
-        } catch (err) {
-          if (childSignal.aborted) {
-            throw RequestError.internalError(
-              undefined,
-              'Side question timed out after 55s',
-            );
-          }
-          throw err;
+        const result = await getBtwSession(session.getConfig()).ask(
+          question.trim(),
+          { signal: childSignal },
+        ).done;
+        if (result.kind === 'cancelled' && childSignal.aborted) {
+          throw RequestError.internalError(
+            undefined,
+            'Side question timed out after 55s',
+          );
         }
-        return { sessionId, answer: result.text || null };
+        if (result.kind === 'failed') throw result.cause;
+        if (result.kind === 'unavailable') {
+          debugLogger.debug(`btw: no cacheSafeParams for session=${sessionId}`);
+        }
+        return {
+          sessionId,
+          answer:
+            result.kind === 'answered'
+              ? result.response
+              : result.kind === 'tool-call'
+                ? formatBtwToolCallNotice(result.toolName)
+                : null,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
         if (
@@ -16506,6 +16558,7 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
     executionEngine?: SessionExecutionEngine,
+    startupSubscriptionModel?: string,
   ): Promise<Config> {
     // Transcript replay is the only recording-disabled Config and must remain
     // id-less; it borrows the validated target session context from extMethod.
@@ -16543,6 +16596,7 @@ class QwenAgent implements Agent {
             restoreOptions,
             sessionIdGenerated,
             executionEngine,
+            startupSubscriptionModel,
           );
         }),
       );
@@ -16583,6 +16637,7 @@ class QwenAgent implements Agent {
     restoreOptions?: SelectiveSessionRestoreOptions,
     sessionIdGenerated?: boolean,
     executionEngine?: SessionExecutionEngine,
+    startupSubscriptionModel?: string,
   ): Promise<Config> {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -16669,6 +16724,12 @@ class QwenAgent implements Agent {
           };
     const argvForSession = {
       ...this.argv,
+      ...(startupSubscriptionModel
+        ? {
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: startupSubscriptionModel,
+          }
+        : {}),
       ...(provisionalWorkspace || agentHostReadOnly
         ? { experimentalLsp: false }
         : {}),
@@ -17132,8 +17193,17 @@ class QwenAgent implements Agent {
     authType: AuthType,
     isInitialAuth?: boolean,
     sessionSelection?: ReasoningSelection,
+    subscriptionFallbackModel?: string,
   ): Promise<void> {
-    await config.refreshAuth(authType, isInitialAuth);
+    if (subscriptionFallbackModel === undefined) {
+      await config.refreshAuth(authType, isInitialAuth);
+    } else {
+      await config.refreshAuth(
+        authType,
+        isInitialAuth,
+        subscriptionFallbackModel,
+      );
+    }
     const selection =
       sessionSelection ??
       parseReasoningSelection(settings.merged.model?.reasoningEffort);
@@ -17174,12 +17244,21 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
     projection: SessionRestoreProjection | undefined,
     authenticate: () => Promise<void>,
+    allowSubscriptionStartupFallback = false,
   ): Promise<void> {
+    const subscriptionFallbackModel = allowSubscriptionStartupFallback
+      ? getSubscriptionStartupFallbackModel(
+          settings,
+          config.getModelsConfig().getCurrentAuthType(),
+          config,
+        )
+      : undefined;
     try {
       await restoreSessionModelThenAuthenticate(
         config,
         projection,
         authenticate,
+        subscriptionFallbackModel,
       );
     } catch (error) {
       const auth = settings.merged.security?.auth;
@@ -17230,9 +17309,24 @@ class QwenAgent implements Agent {
     }
   }
 
+  private canUseSubscriptionStartupFallback(
+    executionEngine: SessionExecutionEngine | undefined,
+    sessionSource: SessionSource | undefined,
+  ): boolean {
+    return (
+      executionEngine !== 'managed' &&
+      sessionSource?.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+      sessionSource?.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+      !isReservedStandaloneSessionSourceType(sessionSource?.sourceType) &&
+      this.argv.model === undefined &&
+      this.argv.authType === undefined
+    );
+  }
+
   private async ensureAuthenticated(
     config: Config,
     settings: LoadedSettings,
+    allowSubscriptionStartupFallback = false,
   ): Promise<void> {
     const selectedType = config.getModelsConfig().getCurrentAuthType();
     if (!selectedType) {
@@ -17248,6 +17342,10 @@ class QwenAgent implements Agent {
         settings,
         selectedType,
         true,
+        undefined,
+        allowSubscriptionStartupFallback
+          ? getSubscriptionStartupFallbackModel(settings, selectedType, config)
+          : undefined,
       );
     } catch (e) {
       debugLogger.error(`Authentication failed: ${e}`);

@@ -2193,6 +2193,8 @@ export default {
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
     '沒有可供 /advisor 使用的對話上下文',
+  'No conversation context available for /btw':
+    '沒有可供 /btw 使用的對話上下文',
   'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一個操作正在進行中，請等待其完成後再執行 /advisor',
@@ -2598,10 +2600,10 @@ export default {
   'Signed in successfully · {{email}}': '登入成功 · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     '目前方案：Qwen {{plan}}，已可使用 Qwen Code',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型。',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    '常用指令：/usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型，/effort 修改思考強度。',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    '常用指令：/usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
   'The network request failed or timed out.': '網路請求失敗或逾時。',
   'The service returned an invalid response.': '服務回傳的資料格式無效。',
@@ -2641,4 +2643,17 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已登出 Qwen，請使用 /auth 登入其他帳號。',
   'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
+  'Copied to clipboard': '已複製到剪貼簿',
+  'Copy failed': '複製失敗',
+  '(API error: {{error}})': '（API 錯誤：{{error}}）',
+  'API error': 'API 錯誤',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒後重試 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 瀏覽先前的回答',
+  'c copy': 'c 複製',
+  'x clear history': 'x 清除歷史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 順帶問一個旁路問題，不打斷目前的工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型嘗試呼叫 {{tool}}，而沒有直接回答。請換個問法，或在主對話中提問。）',
 };
