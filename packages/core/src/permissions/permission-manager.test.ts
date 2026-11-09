@@ -3473,6 +3473,9 @@ describe('PermissionManager — compound shell write attribution', () => {
   // fd duplication (`2>&1`, `>&2`) writes nothing and must not be denied.
   it.each<[command: string, expected: 'allow' | 'deny']>([
     ['printf TXT > protected.txt', 'deny'],
+    ['printf TXT 3>protected.txt', 'deny'],
+    ['printf TXT >|protected.txt', 'deny'],
+    ['cd .qwen>protected.txt', 'deny'],
     ['printf TXT &>protected.txt', 'deny'],
     ['printf TXT >&protected.txt', 'deny'],
     ['printf TXT 1>&protected.txt', 'deny'],
