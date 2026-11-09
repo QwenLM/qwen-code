@@ -182,8 +182,11 @@ public class SessionWorktreeStore
         if (!access.canRead() || write && !access.canCreate()) {
             throw notFound();
         }
-        List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.workspace_id = ? AND w.worktree_id = ?",
-                SessionWorktreeStore::row, tenant, workspace, id);
+        List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.workspace_id = ? AND w.worktree_id = ?"
+                        + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = w.tenant_id"
+                        + " AND s.session_id = w.session_id AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?))",
+                SessionWorktreeStore::row, tenant, workspace, id,
+                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor));
         if (rows.size() != 1) {
             throw notFound();
         }
@@ -198,8 +201,12 @@ public class SessionWorktreeStore
         if (!registry.accessOf(tenant, actor, workspace).canRead()) {
             throw notFound();
         }
-        List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.workspace_id = ? AND w.state <> 'REMOVED' ORDER BY w.gmt_create DESC",
-                SessionWorktreeStore::row, tenant, workspace);
+        List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.workspace_id = ? AND w.state <> 'REMOVED'"
+                        + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = w.tenant_id"
+                        + " AND s.session_id = w.session_id AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?))"
+                        + " ORDER BY w.gmt_create DESC",
+                SessionWorktreeStore::row, tenant, workspace,
+                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor));
         var descriptions = descriptors(worktreeFiles, jdbc, tenant, rows.stream().map(Row::sessionId).toList());
         return rows.stream().map(row -> descriptions.get(row.sessionId())).toList();
     }

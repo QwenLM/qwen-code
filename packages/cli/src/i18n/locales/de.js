@@ -1497,6 +1497,7 @@ export default {
   Reqs: 'Anfragen',
   'Input Tokens': 'Eingabe-Token',
   'Output Tokens': 'Ausgabe-Token',
+  'Output (incl. Reasoning)': 'Ausgabe (inkl. Reasoning)',
   'Savings Highlight:': 'Einsparungen:',
   'of input tokens were served from the cache, reducing costs.':
     'der Eingabe-Token wurden aus dem Cache bedient, was die Kosten reduziert.',

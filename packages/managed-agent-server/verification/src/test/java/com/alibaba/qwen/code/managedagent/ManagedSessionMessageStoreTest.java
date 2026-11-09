@@ -277,6 +277,29 @@ class ManagedSessionMessageStoreTest {
     }
 
     @Test
+    void privateChildMessagesCannotEnterSharedOrOtherOwnerSessions() {
+        String parent = session();
+        String child = session();
+        byte[] owner = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "memory-owner");
+        jdbc.update("UPDATE ma_session SET parent_session_id=?,root_session_id=?,parent_child_run_id='run-x',"
+                        + " child_depth=1,owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
+                parent, parent, owner, TENANT, child);
+        ExtensionRecordJournal journal = journal(child);
+        assertRefused("private context into shared parent", child,
+                "Personal Session context must remain", () -> commit(journal, "message-2:1",
+                        toParent(child, parent, "planned"), null));
+        jdbc.update("UPDATE ma_session SET owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
+                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "another-owner"),
+                TENANT, parent);
+        assertRefused("private context into another owner's parent", child,
+                "Personal Session context must remain", () -> commit(journal, "message-2:1",
+                        toParent(child, parent, "planned"), null));
+        jdbc.update("UPDATE ma_session SET owner_actor_key=? WHERE tenant_id=? AND session_id=?", owner, TENANT, parent);
+        commit(journal, "message-2:1", toParent(child, parent, "planned"), null);
+        assertThat(records.listRecords(TENANT, child, "session_message")).hasSize(1);
+    }
+
+    @Test
     void bindsAChildsOwnRoutesToItsLineage() {
         String parent = UUID.randomUUID().toString();
         String child = session();
