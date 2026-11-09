@@ -630,9 +630,33 @@ describe('extractPostedCommentIds', () => {
   });
 
   it('counts a trailing set -o as a stdout producer (it lists the options)', () => {
+    // Two commands: the URL is the creation's own stdout, `allexport off` is
+    // what `set -o` adds. `set -o` alone could never emit a comment URL.
     const entry = shellResult(
       'gh pr comment 42 --body hi; set -o',
       'https://github.com/o/r/pull/42#issuecomment-111\nallexport off',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes an ANSI-C quoted assignment (S1)', () => {
+    // `$'FOO=1'` is unquoted by the shell to the literal word `FOO=1`; without
+    // the ANSI-C branch the `$` would look like an unquoted expansion and the
+    // operand would be refused.
+    const entry = shellResult(
+      "export $'FOO=1'\ngh pr comment 42 --body hi",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('refuses a set cluster containing p as a deliberate over-count (S2)', () => {
+    // bash `set -p` is privileged mode and prints nothing, so this costs one
+    // attribution. The margin is kept on purpose rather than assuming every
+    // shell treats `-p` the same way; the direction is fail-open.
+    const entry = shellResult(
+      'set -p\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
