@@ -76,7 +76,8 @@ import {
   resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../core/tokenLimits.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
@@ -1245,16 +1246,37 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockResolvedValueOnce({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        modelMetadata: [
+          { id: 'qwen3.8-flash', modalities: {}, contextWindowSize: 262144 },
+        ],
+        cached: false,
+      });
       const config = await subscriptionConfig();
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(
+        config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+      ).toContainEqual(
+        expect.objectContaining({
+          id: 'qwen3.8-flash',
+          modalities: {},
+          contextWindowSize: 262144,
+        }),
+      );
       expect(config.getContentGeneratorConfig()).toMatchObject({
         model: 'qwen3.8-flash',
-        modalities: { image: true, video: true },
-        contextWindowSize: config
-          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
-          .find((model) => model.id === 'qwen3.8-flash')?.contextWindowSize,
+        contextWindowSize: 262144,
         reasoning: { effort: 'high' },
       });
+      expect(config.getContentGeneratorConfig()?.modalities).toEqual({});
+      expect(
+        buildAgentContentGeneratorConfig(config, 'qwen3.8-max', {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        }).contextWindowSize,
+      ).toBe(tokenLimit('qwen3.8-max'));
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
 

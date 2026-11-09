@@ -29,7 +29,11 @@ import { fetchWithPolicy } from '../utils/fetch.js';
 import { subscriptionHttpError } from './subscription-errors.js';
 import {
   subscriptionModelIdsSchema,
+  subscriptionModelMetadataSchema,
+  subscriptionModelsResponseSchema,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
+  type SubscriptionModelCatalog,
+  type SubscriptionModelMetadata,
 } from './subscription-models.js';
 import {
   QwenSubscriptionOAuthClient,
@@ -46,6 +50,7 @@ const credentialSchema = z.object({
   baseUrl: z.string(),
   clientId: z.string(),
   models: subscriptionModelIdsSchema.optional(),
+  modelMetadata: subscriptionModelMetadataSchema,
   tokens: z
     .object({
       access_token: z.string().min(1),
@@ -351,6 +356,7 @@ export class QwenSubscriptionSession {
         if (credentials.signInAttempt) {
           delete credentials.tokens;
           delete credentials.models;
+          delete credentials.modelMetadata;
           await this.write(credentials, assertCanCommit);
         } else {
           assertCanCommit();
@@ -410,7 +416,7 @@ export class QwenSubscriptionSession {
   async getModels(
     signal?: AbortSignal,
     cliVersion?: string,
-  ): Promise<{ models: string[]; cached: boolean }> {
+  ): Promise<SubscriptionModelCatalog & { cached: boolean }> {
     const snapshot = await this.locked(async (assertCanCommit) => {
       const credentials = await this.read();
       if (!credentials?.tokens || !this.matches(credentials))
@@ -469,20 +475,40 @@ export class QwenSubscriptionSession {
         }
         throw subscriptionHttpError(response.status, body, response.retryAfter);
       }
-      const body = z
-        .object({ data: z.array(z.object({ id: z.string() })) })
-        .parse(JSON.parse(response.body.toString('utf8')));
-      const models = [
-        ...new Set(
-          subscriptionModelIdsSchema.parse(body.data.map((model) => model.id)),
-        ),
-      ];
+      const { data } = subscriptionModelsResponseSchema.parse(
+        JSON.parse(response.body.toString('utf8')),
+      );
+      const ids = new Set<string>();
+      const metadata: SubscriptionModelMetadata[] = [];
+      for (const { id, input_modalities, context_window_tokens } of data) {
+        if (ids.has(id)) continue;
+        ids.add(id);
+        const entry: SubscriptionModelMetadata = { id };
+        if (input_modalities !== undefined) {
+          entry.modalities = {};
+          for (const modality of input_modalities) {
+            if (modality !== 'text') entry.modalities[modality] = true;
+          }
+        }
+        if (context_window_tokens !== undefined) {
+          entry.contextWindowSize = context_window_tokens;
+        }
+        if (
+          entry.modalities !== undefined ||
+          entry.contextWindowSize !== undefined
+        ) {
+          metadata.push(entry);
+        }
+      }
+      const models = [...ids];
+      const modelMetadata = metadata.length ? metadata : undefined;
       await this.locked(async (assertCanCommit) => {
         const credentials = await current();
         credentials.models = models;
+        credentials.modelMetadata = modelMetadata;
         await this.write(credentials, assertCanCommit);
       }, signal);
-      return { models, cached: false };
+      return { models, cached: false, ...(modelMetadata && { modelMetadata }) };
     } catch (error) {
       signal?.throwIfAborted();
       if (
@@ -490,15 +516,12 @@ export class QwenSubscriptionSession {
         (error.stage || !error.status || error.status < 500)
       )
         throw error;
-      const cachedModels = await this.locked(async () => {
-        const credentials = await current();
-        return credentials.models;
-      }, signal);
-      if (!cachedModels?.length)
+      const { models, modelMetadata } = await this.locked(current, signal);
+      if (!models?.length)
         throw error instanceof SubscriptionOAuthError
           ? error
           : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
-      return { models: cachedModels, cached: true };
+      return { models, cached: true, ...(modelMetadata && { modelMetadata }) };
     }
   }
 }

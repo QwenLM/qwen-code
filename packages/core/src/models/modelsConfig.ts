@@ -307,7 +307,10 @@ export class ModelsConfig {
       signal,
       cliVersion,
     );
-    this.modelRegistry.setSubscriptionModels(result.models);
+    this.modelRegistry.setSubscriptionModels(
+      result.models,
+      result.modelMetadata,
+    );
     return result;
   }
 

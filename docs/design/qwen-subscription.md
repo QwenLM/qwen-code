@@ -39,7 +39,9 @@ Model catalog requests send `User-Agent` in the same format as subscription chat
 
 Within an authenticated Config, subscription model switches reuse the model catalog loaded for the same persisted login revision. Rebuild the model client normally so modalities, context limits and reasoning settings stay synchronized. Read the current login revision locally before reuse; token rotation preserves it, while logout and new authorization invalidate reuse. Startup, explicit authentication/catalog refresh and switching back from another provider still load the catalog. A failed explicit refresh or a login change during refresh must not authorize later reuse of that catalog. CLI, Desktop and VS Code share this Core behavior.
 
-Subscription `qwen3.8-max` and `qwen3.8-flash` explicitly support image and video inputs in both the model registry and request configuration. Other server-returned IDs remain available with conservative text-only modalities until their gateway capabilities are confirmed.
+Each model in the subscription gateway's `data` array can include two optional fields. `input_modalities` lists the input types the gateway accepts (`text`, `image`, `video`, `audio`, `pdf`). An explicit `["text"]` makes the model text-only, even if its ID normally enables other inputs. `context_window_tokens` is the positive integer total window in tokens, including input and output.
+
+Core validates the two fields independently and stores accepted values with the account's ordered model list. The subscription registry uses these values for both the model picker and the request configuration. For each missing or invalid field, keep the existing model-ID defaults from the shared catalog and model-name rules. A successful refresh replaces the previous values, and a transient catalog failure can reuse both IDs and metadata from the same account cache. Older ID-only responses and caches continue to work. Gateway metadata applies only to subscription authentication.
 
 ### Model picker order
 
