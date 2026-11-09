@@ -11,6 +11,7 @@ import {
   truncateToolOutput,
   truncateLlmContent,
   isAlreadyTruncated,
+  isPersistedOutputStub,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   PREVIEW_SIZE_CHARS,
   persistAndTruncateToolResult,
@@ -943,4 +944,33 @@ it('does not emit persisted events for skips and correlates an actual saved file
     writable,
     expect.objectContaining({ prompt_id: 'p', bytes_written: 60000 }),
   );
+});
+
+describe('isPersistedOutputStub', () => {
+  it('recognizes both spill shapes and rejects envelopes without a path', () => {
+    const stub = `<persisted-output>
+Output too large (12 KB). Full output saved to: /tmp/tool-results/a.txt
+</persisted-output>`;
+    const saved = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+The full output has been saved to: /tmp/tool-results/b.output
+Total characters: 300000; total lines: 5000.`;
+    const unsaved = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+[Note: Full output could not be saved: session disk budget exhausted]
+Total characters: 300000; total lines: 5000.`;
+    const writeFailed = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+[Note: Could not save full output to file]
+Total characters: 300000; total lines: 5000.`;
+    // The phrase inside the preview is not the header; a body that merely
+    // quotes it stays clearable.
+    const quoted = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+The truncated output below shows the beginning and end of the content.
+The full output has been saved to: not a header, just text`;
+
+    expect(isPersistedOutputStub(stub)).toBe(true);
+    expect(isPersistedOutputStub(saved)).toBe(true);
+    expect(isPersistedOutputStub(unsaved)).toBe(false);
+    expect(isPersistedOutputStub(writeFailed)).toBe(false);
+    expect(isPersistedOutputStub(quoted)).toBe(false);
+    expect(isPersistedOutputStub('ordinary tool output')).toBe(false);
+  });
 });

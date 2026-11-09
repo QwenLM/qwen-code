@@ -10,7 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
-import { PERSISTED_OUTPUT_STUB_PREFIX } from '../../tools/truncation.js';
+import { isPersistedOutputStub } from '../../tools/truncation.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -510,13 +510,14 @@ function getClearableToolOutput(
   }
   const output = part.functionResponse?.response?.['output'];
   if (typeof output !== 'string') return { chars: 0, persisted: false };
-  // A `<persisted-output>` stub has already had its oversized content moved to
+  // A persisted-output stub has already had its oversized content moved to
   // a file; the model keeps recovering it by paging that file back in. Clearing
   // the stub would trade a preview for nothing (it is already preview-sized)
   // and destroy the only reference to the saved bytes, so it is never
   // clearable. Truncations without a saved file keep no such reference and
-  // stay clearable.
-  if (output.startsWith(PERSISTED_OUTPUT_STUB_PREFIX)) {
+  // stay clearable. Both producers count: the `<persisted-output>` tag and the
+  // `Tool output was too large...` envelope `run_shell_command` emits.
+  if (isPersistedOutputStub(output)) {
     return { chars: 0, persisted: true };
   }
   return { chars: output.length, persisted: false };
