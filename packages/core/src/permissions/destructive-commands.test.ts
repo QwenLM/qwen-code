@@ -301,16 +301,30 @@ describe('isDestructiveCommand — git commit --amend', () => {
     const a = mkdtempSync(join(tmpdir(), 'amend-repo-a-'));
     const b = mkdtempSync(join(tmpdir(), 'amend-repo-b-'));
     try {
-      for (const dir of [a, b]) {
-        execSync(
-          'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m one',
-          { cwd: dir, stdio: 'ignore' },
-        );
-      }
+      // Distinct messages, not distinct timestamps: two commits with the same
+      // author, time and message are the same object, so the SHAs would collide
+      // whenever both land in the same second (CI does, a slow local run may
+      // not) and the control below would certify B with A's registration.
+      execSync(
+        'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m repo-a',
+        { cwd: a, stdio: 'ignore' },
+      );
+      execSync(
+        'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m repo-b',
+        { cwd: b, stdio: 'ignore' },
+      );
       const headA = execSync('git rev-parse HEAD', {
         cwd: a,
         encoding: 'utf-8',
       }).trim();
+      const headB = execSync('git rev-parse HEAD', {
+        cwd: b,
+        encoding: 'utf-8',
+      }).trim();
+      // The premise, asserted: this case is meaningless if the two repos share
+      // a HEAD, and a collision must fail loudly rather than look like a
+      // product regression.
+      expect(headA).not.toBe(headB);
       registerSessionCommit(headA);
       expect(amendNeedsApproval('git commit --amend', a)).toBe(false);
       expect(amendNeedsApproval('git commit --amend', b)).toBe(true);
