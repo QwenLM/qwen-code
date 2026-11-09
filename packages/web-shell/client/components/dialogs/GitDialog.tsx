@@ -823,15 +823,7 @@ export function GitDialog({
                       />
                       <span
                         className={styles.commitFileStatus}
-                        aria-label={
-                          file.isUntracked
-                            ? t('gitCommit.fileAdded')
-                            : file.isDeleted
-                              ? t('gitCommit.fileDeleted')
-                              : file.oldPath
-                                ? t('gitCommit.fileRenamed')
-                                : t('gitCommit.fileModified')
-                        }
+                        aria-hidden="true"
                       >
                         {file.isUntracked
                           ? 'A'
@@ -840,6 +832,15 @@ export function GitDialog({
                             : file.oldPath
                               ? 'R'
                               : 'M'}
+                      </span>
+                      <span className="sr-only">
+                        {file.isUntracked
+                          ? t('gitCommit.fileAdded')
+                          : file.isDeleted
+                            ? t('gitCommit.fileDeleted')
+                            : file.oldPath
+                              ? t('gitCommit.fileRenamed')
+                              : t('gitCommit.fileModified')}
                       </span>
                       <span className={styles.commitFilePath}>
                         {file.oldPath
