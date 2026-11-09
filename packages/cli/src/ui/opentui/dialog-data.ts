@@ -67,7 +67,11 @@ import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
-import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  DISCONTINUED_QWEN_OAUTH_MESSAGE,
+  isDiscontinuedQwenOAuthSelectionKey,
+  publicProviderBaseUrl,
+} from '../../utils/acpModelUtils.js';
 import {
   filterModelEntriesForDisplay,
   sortModelEntriesForDisplay,
@@ -584,22 +588,12 @@ export async function applyModelSelection(
     };
   }
 
-  // Primary mode. Block selection of discontinued qwen-oauth models
-  // (only block non-runtime OAuth; runtime OAuth models from existing
-  // cached tokens are still allowed to work until the server rejects them).
-  const isQwenOAuthSelection =
-    selectionKey.startsWith(`${AuthType.QWEN_OAUTH}::`) ||
-    (selectionKey.startsWith('$runtime|') &&
-      selectionKey.split('|')[1] === AuthType.QWEN_OAUTH);
-  const isRuntimeOAuthSelection = selectionKey.startsWith(
-    `$runtime|${AuthType.QWEN_OAUTH}|`,
-  );
-  if (isQwenOAuthSelection && !isRuntimeOAuthSelection) {
+  // Primary mode. Block selection of discontinued qwen-oauth models — the rule
+  // lives in one place now, and runtime snapshots stay allowed.
+  if (isDiscontinuedQwenOAuthSelectionKey(selectionKey)) {
     return {
       ok: false,
-      error: t(
-        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
-      ),
+      error: t(DISCONTINUED_QWEN_OAUTH_MESSAGE),
     };
   }
 
