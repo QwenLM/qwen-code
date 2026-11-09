@@ -6818,18 +6818,35 @@ export class DaemonClient {
    * Switch the active model for a session. Backed by ACP's currently-unstable
    * `unstable_setSessionModel`; the daemon also publishes a `model_switched`
    * event so cross-client UIs can update.
+   * `persistDefault: false` requires `session_set_model_transient` and keeps
+   * user/workspace defaults unchanged while retaining the session selection.
    */
   async setSessionModel(
     sessionId: string,
     modelId: string,
-    clientId?: string,
+    clientOrOptions?: string | { clientId?: string; persistDefault?: boolean },
   ): Promise<SetModelResult> {
+    const options =
+      typeof clientOrOptions === 'string'
+        ? { clientId: clientOrOptions }
+        : clientOrOptions;
+    if (options?.persistDefault === false) {
+      await this.requireCapability('session_set_model_transient');
+    }
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/model`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ modelId }),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          options?.clientId,
+        ),
+        body: JSON.stringify({
+          modelId,
+          ...(options?.persistDefault !== undefined
+            ? { persistDefault: options.persistDefault }
+            : {}),
+        }),
       },
       async (res) => {
         if (!res.ok) {

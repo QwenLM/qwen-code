@@ -415,6 +415,7 @@ describe('qwen serve — capabilities envelope', () => {
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
+      'session_set_model_transient',
       'client_identity',
       'client_heartbeat',
       'session_permission_vote',
