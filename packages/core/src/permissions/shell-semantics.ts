@@ -525,7 +525,12 @@ function extractRedirects(
     }
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (syntax === '>' || syntax === '1>') {
+    if (
+      syntax === '>' ||
+      syntax === '1>' ||
+      syntax === '>|' ||
+      syntax === '1>|'
+    ) {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
@@ -561,11 +566,19 @@ function extractRedirects(
         toRemove.add(i + 1);
         i++;
       }
+    } else if (syntax === '<<<') {
+      // A here-string operand feeds stdin; it is never an argument.
+      toRemove.add(i);
+      if (tokens[i + 1]) {
+        toRemove.add(i + 1);
+        i++;
+      }
     } else if (
       syntax === '2>' ||
       syntax === '2>>' ||
       syntax === '&>' ||
-      syntax === '&>>'
+      syntax === '&>>' ||
+      syntax === '2>|'
     ) {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
@@ -601,7 +614,7 @@ function extractRedirects(
       }
       const matchText = split > 0 ? redirectText : syntax;
       const m = matchText.match(
-        /^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+        /^(<<<|<<-?|1>\||2>\||1>>|1>|2>>|2>|&>>|&>|>\||>>|>|<)([\s\S]+)$/,
       );
       if (m) {
         const op = m[1]!;
@@ -2656,9 +2669,6 @@ function getHeredocDelimiters(line: string): string[] {
   }
   return delimiters;
 }
-
-
-
 
 function walkCompoundCommand(
   command: string,

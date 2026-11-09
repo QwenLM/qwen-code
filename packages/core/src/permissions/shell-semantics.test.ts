@@ -1054,3 +1054,36 @@ describe('quoted and decoded tilde targets', () => {
     ]);
   });
 });
+
+// `>|` is a clobber-override redirect that writes its target exactly like `>`,
+// and `<<<` feeds a here-string to stdin, so its operand is never a file. When
+// either reading is lost the operand becomes a file path (`/repo/|`) or a
+// phantom read, and permission rules match the wrong target.
+describe('clobber-override and here-string redirects', () => {
+  it('writes the target of a separate-token clobber override', () => {
+    expect(across("echo '{}' >| x/settings.json")).toEqual([
+      write('/repo/x/settings.json'),
+    ]);
+  });
+
+  it('keeps /dev/null as the clobber-override target', () => {
+    expect(across('git >| /dev/null commit --amend')).toEqual([
+      write('/dev/null'),
+    ]);
+  });
+
+  it('writes the target of a stderr clobber override', () => {
+    expect(across('cmd 2>| out.log')).toEqual([write('/repo/out.log')]);
+  });
+
+  it('treats a here-string operand as stdin, never a file', () => {
+    expect(across('cat <<< /etc/passwd')).toEqual([]);
+    expect(across('cat <<<file')).toEqual([]);
+  });
+
+  it('still reports a write that follows a here-string', () => {
+    expect(across("cat <<< '{}' > .qwen/settings.json")).toEqual([
+      write('/repo/.qwen/settings.json'),
+    ]);
+  });
+});
