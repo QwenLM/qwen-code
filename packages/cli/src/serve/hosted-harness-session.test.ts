@@ -25615,11 +25615,13 @@ describe('Hosted Harness tool approvals', () => {
       { arm: 'legacy detach', terminal: false, protocol: 1 },
       { arm: 'legacy delete', terminal: true, protocol: 1 },
     ].flatMap((route) =>
-      (['held turn', 'mcp', 'lease'] as const).map((carrier) => ({
-        ...route,
-        carrier,
-        arm: `${route.arm}, owner carried by ${carrier}`,
-      })),
+      (['held turn', 'mcp', 'lease', 'ordinary lease'] as const).map(
+        (carrier) => ({
+          ...route,
+          carrier,
+          arm: `${route.arm}, owner carried by ${carrier}`,
+        }),
+      ),
     ),
   )(
     'stops only what it may stop with a restored config-scoped owner ($arm)',
@@ -25748,6 +25750,9 @@ describe('Hosted Harness tool approvals', () => {
       // It is not an owner and its Runtime is still owed a drain.
       const lookalike = `extensions-components-${'f'.repeat(64)}`;
       expect(lookalike).not.toBe(owner);
+      // A wake turn's mapped id: not reload-stable, and not in the hold rows,
+      // so only the lease handback can release it.
+      const ordinaryLease = `wake-${'d'.repeat(64)}`;
       const definition = {
         managedSessionStore: store(),
         toolProfile: 'hosted-workspace-shell/1',
@@ -25789,7 +25794,7 @@ describe('Hosted Harness tool approvals', () => {
       const activeHolds = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
         .mockResolvedValue(
-          carrier === 'lease'
+          carrier === 'lease' || carrier === 'ordinary lease'
             ? [ordinary, lookalike]
             : [owner, ordinary, lookalike],
         );
@@ -25832,7 +25837,9 @@ describe('Hosted Harness tool approvals', () => {
       // Ownership control: without a real owner the exemption has nothing to
       // match, and every assertion below would pass for the wrong reason.
       expect(resident.hooks?.broker.runtimeSessionId).toBe(owner);
-      expect(resident.heldRuntimeTurns.has(owner)).toBe(carrier !== 'lease');
+      expect(resident.heldRuntimeTurns.has(owner)).toBe(
+        carrier !== 'lease' && carrier !== 'ordinary lease',
+      );
       if (carrier === 'mcp') {
         // Hooks no longer names the owner, so a drain reduced to
         // `reloadStableOwnerIds({ hooks })` loses the exemption here (R3-4).
@@ -25857,12 +25864,23 @@ describe('Hosted Harness tool approvals', () => {
           promptId: ordinary,
           runtimeSessionId: owner,
         };
+      } else if (carrier === 'ordinary lease') {
+        // The other direction of the same decision: a lease that is NOT a
+        // reload-stable owner must still be handed back, or the Workspace
+        // stays pinned. Without this arm "always defer" survives (M06).
+        resident.runtimeLeaseHeld = {
+          promptId: ordinary,
+          runtimeSessionId: ordinaryLease,
+        };
       }
       const stop = vi.fn(async () => {});
       resident.shell ??= {};
       resident.shell.monitorLoops = new Map([
         ['watch', { prepareLifecycle: () => {}, stop }],
       ]);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
       const response =
         protocol === 2
           ? await headers(
@@ -25898,13 +25916,32 @@ describe('Hosted Harness tool approvals', () => {
       // a reload — this resident cannot offer one, because the v2 close pins
       // lifecycleKind and every later kind conflicts (R2-6/R3-5).
       expect(resident.heldRuntimeTurns.has(owner)).toBe(
-        carrier === 'lease' ? false : !terminal,
+        carrier === 'lease' || carrier === 'ordinary lease' ? false : !terminal,
       );
-      // A skipped owner is a Runtime this close never stopped, so the loop
-      // must not certify stop_requested for it (R1-1). The spy is reached on
-      // every arm, so a wrong settle is a failure, not a silent pass.
+      if (carrier === 'ordinary lease') {
+        // M06: the deferral must not swallow an ordinary recovered lease.
+        expect(releasedOwners.has(ordinaryLease)).toBe(true);
+        expect(resident.runtimeLeaseHeld).toBeUndefined();
+      }
+      if (carrier === 'lease' && !terminal) {
+        // R4-1: the lease path names the id it left running, like the drains.
+        expect(
+          stderr.mock.calls.some(([line]) =>
+            String(line).includes(
+              `keeps reload-stable owner ${owner} running: release deferred`,
+            ),
+          ),
+        ).toBe(true);
+      }
+      // The settle argument is reached on every arm, so a wrong one fails
+      // rather than passing silently. A skipped owner proved no stop (R1-1);
+      // an ordinary lease that was really handed back did prove one, so that
+      // carrier settles stop_requested even on a detach. The stderr spy is
+      // restored by this describe's afterEach, which also runs on a throw.
       expect(stop).toHaveBeenCalledWith(
-        terminal ? 'stop_requested' : 'runtime_lost',
+        terminal || carrier === 'ordinary lease'
+          ? 'stop_requested'
+          : 'runtime_lost',
       );
     },
   );

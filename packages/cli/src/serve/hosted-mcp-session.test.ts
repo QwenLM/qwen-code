@@ -248,6 +248,46 @@ it('names its durable owner through the one builder the predicate recognises (R2
   expect(isHostedDurableMcpOwner('extension-mcp-1')).toBe(false);
 });
 
+it('derives the durable owner from the released configuration ids (R4-3)', async () => {
+  // The arm a reload actually takes: rows exist but are all released, so
+  // `previous` is defined. The literal below is computed outside the repo, so
+  // it pins the id tuple and the 32-char slice that the undefined-arm literal
+  // above cannot see (R4-3). One row does not exercise the sort itself.
+  const configurationId = '11111111-1111-4111-8111-111111111111';
+  await (
+    mcp as unknown as {
+      install: (
+        server: typeof pin,
+        previous: undefined,
+        id: string,
+        revision: number,
+      ) => Promise<void>;
+    }
+  ).install(pin, undefined, configurationId, 1);
+  await mcp.close({ terminal: true });
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  const rows = session.authority
+    .extensionRecordsInDomain('mcp_configuration')
+    .map((entry) => parseMcpConfiguration(entry.record));
+  // The arm control: rows exist and every one is released, so the constructor
+  // falls through to the durable builder with `previous` defined.
+  expect(rows.map((row) => row.configurationId)).toEqual([configurationId]);
+  expect(rows.map((row) => row.releaseState)).toEqual(['released']);
+  // sha256(JSON.stringify([configurationId])).slice(0, 32), computed outside
+  // the repo. The session key is a fresh UUID per run, so the literal pins
+  // `previous` — which is where the sorted-id tuple and the slice live.
+  expect(reloaded.broker.runtimeSessionId).toBe(
+    hostedDurableMcpOwnerId(
+      session.authority.sessionHeader.sessionKey,
+      'c2e1405db2f9b352ad9c28f5337c92b9',
+    ),
+  );
+});
+
 it('keeps a server send_message in the MCP namespace and its overflow fatal (#14062)', async () => {
   discoveredToolName = 'send_message';
   await mcp.refresh(new AbortController().signal);
