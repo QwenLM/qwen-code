@@ -2668,6 +2668,15 @@ class HostedAutomationFaultGatesIT {
         if (Files.exists(log)) {
             Files.copy(log, cases.resolve("harness.log"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         }
+        if ("fg11f".equals(letter) && jdbc != null) {
+            Files.writeString(cases.resolve("publication-state.json"), json.writeValueAsString(Map.of(
+                    "resources", jdbc.queryForList("SELECT session_id, resource_id, kind, byte_length, sha256, storage_kind, state, capture_state, OCTET_LENGTH(inline_bytes) AS inline_byte_length"
+                            + " FROM ma_resource WHERE tenant_id = ? AND kind = 'managed-tool-outcome' ORDER BY resource_id LIMIT 16", tenant),
+                    "publications", jdbc.queryForList("SELECT session_id, publication_id, producer_phase, is_quarantined, admission_resource_id"
+                            + " FROM ma_output_capture WHERE tenant_id = ? ORDER BY publication_id LIMIT 16", tenant),
+                    "heads", jdbc.queryForList("SELECT session_id, storage_version, journal_revision, committed_sequence, recovery_status, recovery_detail_code"
+                            + " FROM ma_session_head WHERE tenant_id = ? AND head_kind = 'MANAGED_SESSION' ORDER BY session_id LIMIT 16", tenant))));
+        }
     }
 
     // Awaitility ignores the interrupt a @Timeout sends, so every wait fails on it.

@@ -53,6 +53,36 @@ describe('github plugin validateConfig', () => {
     );
   });
 
+  it('requires deliverToBoundSessions for the watch budget reserve', () => {
+    expect(validate({ prWatchBudgetReserve: 300 })).toContain(
+      'prWatchBudgetReserve',
+    );
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 300 }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a reserve the descriptor admits but the getter would silently default', () => {
+    // exclusiveMinimum: -1 lets 0 disable the gate, but it also admits
+    // (-1, 0); those must be refused rather than becoming the default 200.
+    for (const reserve of [-0.5, -1, 'abc', Number.NaN]) {
+      expect(
+        validate({
+          deliverToBoundSessions: true,
+          prWatchBudgetReserve: reserve,
+        }),
+      ).toContain('must be a non-negative number');
+    }
+    // 0 disables, and a positive fraction is rounded up by the getter — both
+    // stay legal.
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 0 }),
+    ).toBeUndefined();
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 200.5 }),
+    ).toBeUndefined();
+  });
+
   it('accepts the full watch vocabulary, case-insensitively', () => {
     expect(
       validate({
@@ -69,6 +99,30 @@ describe('github plugin validateConfig', () => {
 
   it('accepts an empty watch list without delivery', () => {
     expect(validate({ prWatchEvents: [] })).toBeUndefined();
+  });
+
+  it('accepts the default-on prCommentWatch without bound delivery', () => {
+    // The editor emits the descriptor default (true) even for channels that
+    // never enable bound delivery; it is inert there, not a validation error.
+    expect(validate({ prCommentWatch: true })).toBeUndefined();
+    expect(validate({ prCommentWatch: false })).toBeUndefined();
+    expect(
+      validate({ deliverToBoundSessions: true, prCommentWatch: true }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a non-boolean prCommentWatch', () => {
+    expect(validate({ prCommentWatch: 'yes' })).toContain(
+      'prCommentWatch must be a boolean',
+    );
+  });
+
+  it('defaults prCommentWatch to enabled in the management descriptor', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'prCommentWatch',
+    );
+    expect(field?.kind).toBe('boolean');
+    expect(field?.default).toBe('true');
   });
 
   it('builds the prWatchEvents UI options from the adapter vocabulary (R2-18)', () => {
