@@ -140,5 +140,4 @@ public class ContextCompressionService {
         String outcome = record.path("outcome").textValue();
         return "failed".equals(outcome) ? null : outcome;
     }
-
 }

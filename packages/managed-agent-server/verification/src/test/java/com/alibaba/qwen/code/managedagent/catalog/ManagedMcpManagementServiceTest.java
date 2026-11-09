@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -44,7 +45,14 @@ class ManagedMcpManagementServiceTest {
         // readable Workspace Session every call NPEs on the unstubbed return.
         when(session.workspace()).thenReturn(new ContextBinding("tenant", "workspace", 1,
                 "workspace", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
-        when(sessions.requireReadableSession(any(), eq("session"))).thenReturn(session);
+        when(sessions.requireReadableSession(
+                any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class),
+                eq("session"))).thenReturn(session);
+        when(sessions.requireReadableSession(eq("tenant"),
+                any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class),
+                eq("session"))).thenReturn(session);
+        when(sessions.requireReadableSession(eq("tenant"), nullable(String.class),
+                eq("session"))).thenReturn(session);
         when(store.requireMcpManagement(eq("tenant"), anyString(), eq("session"), any())).thenReturn(session);
         when(harness.supportsMcpManagement()).thenReturn(true);
         when(harness.supportsLifecycle("hosted-workspace-shell/1")).thenReturn(true);

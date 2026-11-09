@@ -203,6 +203,22 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void rawActorUnarchiveKeepsTheOwnersAuthority() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(SessionPrincipal.ofUser("tenant", "user"), "create");
+            f.jdbc.update("UPDATE ma_session SET status='ARCHIVED' WHERE session_id=?", id);
+            // R8-5: the production raw-actor entry passes principal=null;
+            // the unbound arm must authorise with the raw actor, not the
+            // null principal, or the Session's own owner reads 404.
+            assertThat(f.service.unarchiveSession("tenant", "user", "unarchive", id)
+                    .replayed()).isFalse();
+            assertThat(f.jdbc.queryForObject("SELECT status FROM ma_session WHERE session_id=?",
+                    String.class, id)).isNotEqualTo("ARCHIVED");
+        });
+    }
+
+    @Test
     void renameAndUnarchiveCheckReceiptSessionInsideAdmission() {
         var f = new Fixture();
         f.tx.executeWithoutResult(status -> {

@@ -1418,10 +1418,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             return store.unarchiveWorkspaceSession(tenantId, sessionId, rawActorId,
                     scopedKey, lifecycleDigest(sessionId, UNARCHIVE));
         }
-        inputPolicy.requireLegacyWorkspace(tenantId, principal, sessionId);
+        if (principal == null) {
+            inputPolicy.requireLegacyWorkspace(tenantId, rawActorId, sessionId);
+        } else {
+            inputPolicy.requireLegacyWorkspace(tenantId, principal, sessionId);
+        }
         store.findCommand(tenantId, UNARCHIVE, idempotencyKey)
                 .ifPresent(command -> requireRecordedSessionGrant(command,
-                        target, principal));
+                        target, principal, rawActorId));
         String requestDigest = lifecycleDigest(sessionId, UNARCHIVE);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 UNARCHIVE, idempotencyKey, requestDigest, sessionId,

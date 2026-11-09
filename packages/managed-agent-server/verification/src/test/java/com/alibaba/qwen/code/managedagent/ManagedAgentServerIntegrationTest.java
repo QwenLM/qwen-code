@@ -2486,7 +2486,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
-                        legacyState(tenant, sessionId);
+        legacyState(tenant, sessionId);
         String submit = """
                 {"idempotencyKey":"unavailable-turn","sessionId":"%s",
                  "input":[{"type":"text","text":"hold"}]}
@@ -2578,7 +2578,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
-                        legacyState(tenant, sessionId);
+        legacyState(tenant, sessionId);
 
         harness.setAvailable(false);
         try {
@@ -2771,7 +2771,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
-                        legacyState(tenant, sessionId);
+        legacyState(tenant, sessionId);
         String deleteId = objectMapper.readTree(lifecycle(
                         delete("/v1/agents/sessions/{id}", sessionId), tenant,
                         "ws-replay-delete")
@@ -3030,7 +3030,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
-                        legacyState(tenant, sessionId);
+        legacyState(tenant, sessionId);
         String chunk = "x".repeat(1_000_000);
         StringBuilder oversized = new StringBuilder(
                 "{\"idempotencyKey\":\"budget-submit\",\"sessionId\":\""
@@ -3147,7 +3147,7 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
-                        legacyState(tenant, sessionId);
+        legacyState(tenant, sessionId);
         mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)

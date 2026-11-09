@@ -3084,6 +3084,24 @@ class ManagedWorkspaceAdmissionTest {
                         .principal(actor(tenant, longActor)))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+        // R7-1 (round 8): the Workspace-only management routes keep the raw
+        // actor too — requirePrincipal() here answered 400 invalid_actor.
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/extensions", session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/agent/web-shell/v1/session-skills/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/agent/web-shell/v1/session-mcp/query")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isOk());
     }
 
     private ManagedAgentService boundService(boolean workspaceFiles) {

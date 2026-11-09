@@ -25,6 +25,31 @@ public final class ManagedSessionPrincipal {
             String actorSubjectId) {
     }
 
+    /**
+     * The authority columns fetched alongside the Session read (R6-6): the
+     * ownership row (null when none) plus the legacy-creation exclusion
+     * count. Scoped to the reading thread and consumed once by the grant,
+     * so the hot unbound read costs no extra statement.
+     */
+    public record ReadAuthority(String tenantId, String sessionId, Row row,
+            int principalCreated) {
+    }
+
+    private static final ThreadLocal<ReadAuthority> READ_AUTHORITY =
+            new ThreadLocal<>();
+
+    public static void stashReadAuthority(ReadAuthority authority) {
+        READ_AUTHORITY.set(authority);
+    }
+
+    public static ReadAuthority takeReadAuthority(String tenantId,
+            String sessionId) {
+        ReadAuthority authority = READ_AUTHORITY.get();
+        READ_AUTHORITY.remove();
+        return authority != null && authority.tenantId().equals(tenantId)
+                && authority.sessionId().equals(sessionId) ? authority : null;
+    }
+
     /** Writes the version-1 ownership row; rolls back with the creating tx. */
     public static void insert(JdbcTemplate jdbc, String tenantId,
             String sessionId, SessionPrincipal principal, long now) {
@@ -124,10 +149,55 @@ public final class ManagedSessionPrincipal {
     public static void requireReadAuthority(JdbcTemplate jdbc, String tenantId,
             String sessionId, SessionPrincipal principal) {
         if (principal != null && !principal.tenantId().equals(tenantId)) {
+            READ_AUTHORITY.remove();
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }
-        Row row = find(jdbc, tenantId, sessionId);
+        ReadAuthority stashed = takeReadAuthority(tenantId, sessionId);
+        if (stashed != null) {
+            requireFetched(tenantId, stashed.row(), stashed.principalCreated(),
+                    principal);
+            return;
+        }
+        // One statement for the whole authority question (R6-6): the row
+        // left-joined with the legacy-creation mark. A present row is the
+        // sole authority; only a row-less Session consults the mark, so the
+        // hot unbound read no longer pays a second round trip.
+        List<AuthorityRow> rows = jdbc.query(
+                "SELECT p.version, p.user_id, p.actor_present,"
+                        + " p.actor_subject_id, (SELECT COUNT(*) FROM"
+                        + " ma_request_receipt r JOIN ma_session s ON"
+                        + " s.tenant_id = r.tenant_id AND s.session_id ="
+                        + " r.session_id WHERE r.tenant_id = ? AND"
+                        + " r.session_id = ? AND r.namespace ="
+                        + " 'SESSION_COMMAND' AND r.operation ="
+                        + " 'CREATE_SESSION' AND s.workspace_id IS NULL"
+                        + " AND r.actor_id IS NOT NULL AND"
+                        + " LENGTH(r.actor_id) > 0 AND"
+                        + " (s.creator_actor_key IS NULL OR"
+                        + " r.actor_id <> s.creator_actor_key))"
+                        + " FROM ma_session ms LEFT JOIN ma_session_principal p"
+                        + " ON p.tenant_id = ms.tenant_id AND"
+                        + " p.session_id = ms.session_id"
+                        + " WHERE ms.tenant_id = ? AND ms.session_id = ?",
+                (result, index) -> new AuthorityRow(
+                        result.getObject(1) == null ? null
+                                : new Row(result.getInt(1),
+                                        result.getString(2),
+                                        result.getBoolean(3),
+                                        result.getString(4)),
+                        result.getInt(5)),
+                tenantId, sessionId, tenantId, sessionId);
+        if (rows.isEmpty()) {
+            return;
+        }
+        AuthorityRow authority = rows.getFirst();
+        requireFetched(tenantId, authority.row(), authority.principalCreated(),
+                principal);
+    }
+
+    private static void requireFetched(String tenantId, Row row,
+            int principalCreated, SessionPrincipal principal) {
         if (row != null) {
             if (!matches(row, principal)) {
                 throw new ManagedAgentException(404,
@@ -135,34 +205,13 @@ public final class ManagedSessionPrincipal {
             }
             return;
         }
-        if (!legacyCreation(jdbc, tenantId, sessionId)) {
+        if (principalCreated != 0) {
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }
     }
 
-    /**
-     * Whether the Session was created without a principal (legacy). The
-     * CREATE_SESSION receipt is an exclusion mark, not a required one: a
-     * principal-created Session stamps the structured principal key, which is
-     * non-empty and never equals the Session's raw creator_actor_key, a durable
-     * mark that survives deletion of the ownership row. A legacy create (raw
-     * creator key or empty UNATTRIBUTED key) and the oldest rows that predate
-     * the receipt altogether carry no such mark and stay tenant-wide. The same
-     * predicate filters the Session list.
-     */
-    private static boolean legacyCreation(JdbcTemplate jdbc, String tenantId,
-            String sessionId) {
-        Integer principalCreated = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_request_receipt r JOIN ma_session s"
-                        + " ON s.tenant_id = r.tenant_id AND"
-                        + " s.session_id = r.session_id WHERE r.tenant_id = ?"
-                        + " AND r.session_id = ? AND r.namespace ="
-                        + " 'SESSION_COMMAND' AND r.operation = 'CREATE_SESSION'"
-                        + " AND r.actor_id IS NOT NULL AND LENGTH(r.actor_id) > 0"
-                        + " AND r.actor_id <> s.creator_actor_key",
-                Integer.class, tenantId, sessionId);
-        return principalCreated == null || principalCreated == 0;
+    private record AuthorityRow(Row row, int principalCreated) {
     }
 
     /**

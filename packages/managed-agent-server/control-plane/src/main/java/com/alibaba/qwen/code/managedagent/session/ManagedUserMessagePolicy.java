@@ -221,31 +221,31 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     private void requireBoundLegacyWorkspace(SessionRecord session,
             String actorId) {
-            // A tombstone is invisible to every actor shape, as the reads
-            // answer: the fence stands above the role split, whose 403/409
-            // codes are live-Session answers. An unbound tombstone needs no
-            // fence here — its 404 stands below the replay in
-            // beginSessionMutation, and a recorded lifecycle outcome must
-            // keep answering above it.
-            if ("DELETED".equals(session.status())) {
-                throw new ManagedAgentException(404,
-                        "session_not_found", "The Session was not found.");
-            }
-            String workspaceId = session.workspace().getWorkspaceId();
-            WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
-                    actorId, workspaceId);
-            if (!access.canRead()) {
-                throw new ManagedAgentException(404,
-                        "session_not_found", "The Session was not found.");
-            }
-            if (access.atLeast(WorkspaceAccess.OPERATOR)) {
-                throw new ManagedAgentException(409,
-                        "workspace_unavailable",
-                        "Hosted Workspace execution is not available.");
-            }
-            throw new ManagedAgentException(403,
-                    "session_operation_forbidden",
-                    "Only a Workspace operator may use the Session.");
+        // A tombstone is invisible to every actor shape, as the reads
+        // answer: the fence stands above the role split, whose 403/409
+        // codes are live-Session answers. An unbound tombstone needs no
+        // fence here — its 404 stands below the replay in
+        // beginSessionMutation, and a recorded lifecycle outcome must
+        // keep answering above it.
+        if ("DELETED".equals(session.status())) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
+        String workspaceId = session.workspace().getWorkspaceId();
+        WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
+                actorId, workspaceId);
+        if (!access.canRead()) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
+        if (access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(409,
+                    "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        throw new ManagedAgentException(403,
+                "session_operation_forbidden",
+                "Only a Workspace operator may use the Session.");
     }
 
     SessionRecord requireVisibleSession(String tenantId,

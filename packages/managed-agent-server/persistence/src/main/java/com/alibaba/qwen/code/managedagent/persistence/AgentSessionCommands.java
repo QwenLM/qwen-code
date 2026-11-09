@@ -607,20 +607,20 @@ final class AgentSessionCommands {
             SessionPrincipal principal) {
         if (command.sessionId().equals(requested.sessionId())) {
             if (requested.workspace() == null) {
-                ManagedSessionPrincipal.requireAuthority(jdbc, tenantId,
-                        requested.sessionId(), principal);
+                ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, requested.sessionId(), principal);
             }
             return;
         }
         // Cross-Session reuse of a tenant-global key, matching the service
-        // pre-read (requireRecordedSessionGrant) so the answer does not depend
-        // on whether the receipt was visible before the insert.
+        // pre-read so the answer never depends on receipt visibility.
         if (requested.workspace() == null) {
-            // Unbound Sessions are private: gate on the recorded Session's
-            // authority to hide a foreign key's existence (404); the owner's
-            // own collision falls through to idempotency_conflict.
-            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId,
-                    command.sessionId(), principal);
+            // Unbound Sessions are private: the recorded Session's authority
+            // hides a foreign key (404); the owner's collision falls through.
+            // R3-7: a bound recorded Session must 404, not leak the key.
+            if (storeRows.findSession(tenantId, command.sessionId()).map(recorded -> recorded.workspace() != null).orElse(false)) {
+                throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
+            }
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, command.sessionId(), principal);
         } else if (!workspaces.createdSession(tenantId, actorId,
                 requested.sessionId())) {
             // Bound Workspace Sessions gate on the caller's own requested
