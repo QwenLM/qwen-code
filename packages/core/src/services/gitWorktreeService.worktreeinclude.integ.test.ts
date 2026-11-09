@@ -213,6 +213,12 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
       path.join(repoRoot, WORKTREE_INCLUDE_FILE),
       'README.md\n',
     );
+    // Change the tracked file on disk without letting git report it as
+    // dirty, so the overlay that carries the source's dirty state has
+    // nothing to deliver and only the include step can bring 'dirty\n'
+    // across. Without this the assertion holds whichever step copied it.
+    gitIn(repoRoot, 'update-index', '--assume-unchanged', 'README.md');
+    await fs.writeFile(path.join(repoRoot, 'README.md'), 'dirty\n');
 
     const wt = await setup();
 
