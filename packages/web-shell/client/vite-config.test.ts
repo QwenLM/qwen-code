@@ -318,6 +318,26 @@ describe('Web Shell launcher-supplied open path', () => {
   });
 });
 
+describe('Web Shell daemon target fallback', () => {
+  // daemonTarget is bound at module evaluation, so observing an env change
+  // needs a fresh module registry, not just another call to the factory.
+  it('falls back to the default daemon target for an empty QWEN_DAEMON_URL', async () => {
+    vi.stubEnv('QWEN_DAEMON_URL', '');
+    onTestFinished(() => vi.unstubAllEnvs());
+    vi.resetModules();
+
+    const { default: config } = await import('../vite.config');
+    const options = (config as (env: ConfigEnv) => UserConfig)({
+      command: 'serve',
+      mode: 'test',
+      isSsrBuild: false,
+      isPreview: false,
+    }).server?.proxy?.['/session'] as ProxyOptions;
+
+    expect(options.target).toBe('http://127.0.0.1:4170');
+  });
+});
+
 describe('Web Shell daemon proxy failure', () => {
   function emitProxyError(res: unknown) {
     const options = loadConfig().server?.proxy?.['/session'] as ProxyOptions;
@@ -325,7 +345,7 @@ describe('Web Shell daemon proxy failure', () => {
     (options.configure as (proxy: EventEmitter) => void)(proxy);
     proxy.emit(
       'error',
-      new Error('connect ECONNREFUSED 127.0.0.1:44170'),
+      new Error('connect ECONNREFUSED 127.0.0.1:59999'),
       {} as IncomingMessage,
       res,
     );
@@ -349,7 +369,9 @@ describe('Web Shell daemon proxy failure', () => {
     // readDaemonError surfaces `error` to the operator; the sentence with
     // the target and errno must live there, not under a machine token.
     expect(body.error).toContain('ECONNREFUSED');
-    expect(body.error).toContain('4170');
+    // The fixture port deliberately avoids the substring `4170`, so this
+    // pins the daemon target sentence rather than the injected errno text.
+    expect(body.error).toContain('No daemon answered at http://127.0.0.1:4170');
   });
 
   it('leaves an already-answered response alone', () => {
