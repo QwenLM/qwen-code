@@ -28,6 +28,24 @@ describe('TurnOutputs helpers', () => {
     expect(isArtifactPreviewable(artifact, true)).toBe(true);
   });
 
+  it('only promises published previews for web-preview snapshots', () => {
+    const published = {
+      id: 'published-html',
+      kind: 'html',
+      storage: 'published',
+      mimeType: 'text/html',
+      metadata: { artifactType: 'web_preview_snapshot' },
+    } as DaemonSessionArtifact;
+    const publishedDocument = {
+      ...published,
+      id: 'published-document',
+      metadata: { artifactType: 'document' },
+    } as DaemonSessionArtifact;
+
+    expect(isArtifactPreviewable(published)).toBe(true);
+    expect(isArtifactPreviewable(publishedDocument)).toBe(false);
+  });
+
   it('caps collapsed turn outputs at three items', () => {
     const items = [1, 2, 3, 4, 5];
     expect(visibleTurnOutputs(items, false)).toEqual([1, 2, 3]);

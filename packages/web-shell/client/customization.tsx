@@ -755,8 +755,10 @@ export interface WebShellCustomization {
   hostOwnsEditDiffPreview?: boolean;
   /**
    * Whether the embedding host can render managed artifacts when a card is
-   * opened. Defaults to false so the built-in panel does not promise a preview
-   * it cannot render.
+   * opened. Set this only when the host also claims artifact open requests via
+   * onRightPanelOpen/onOpenRequest; this flag only controls the card label.
+   * Defaults to false so the built-in panel does not promise a preview it
+   * cannot render.
    */
   hostOwnsArtifactPreview?: boolean;
   /**

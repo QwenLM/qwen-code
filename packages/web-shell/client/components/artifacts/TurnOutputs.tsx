@@ -688,8 +688,9 @@ export function isArtifactPreviewable(
 ) {
   return (
     isRenderedArtifact(artifact) &&
-    artifact.storage !== 'external_url' &&
-    (artifact.storage !== 'managed' || hostOwnsArtifactPreview)
+    (artifact.storage === 'workspace' ||
+      artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+      (artifact.storage === 'managed' && hostOwnsArtifactPreview))
   );
 }
 

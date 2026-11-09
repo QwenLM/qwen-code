@@ -1742,7 +1742,11 @@ export interface WebShellProps {
   compactThinking?: boolean;
   /** Let the host own pending Edit diff previews instead of the inline tool row. */
   hostOwnsEditDiffPreview?: boolean;
-  /** Let the host render managed artifact previews instead of the built-in panel. */
+  /**
+   * Let the host render managed artifact previews instead of the built-in
+   * panel. Set this only when the host also claims artifact open requests via
+   * onRightPanelOpen/onOpenRequest; this flag only controls the card label.
+   */
   hostOwnsArtifactPreview?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
@@ -4069,6 +4073,10 @@ export function App({
       hostOwnsArtifactPreview,
     }),
     [customization, hostOwnsEditDiffPreview, hostOwnsArtifactPreview],
+  );
+  const appCustomization = useMemo(
+    () => ({ ...customization, hostOwnsArtifactPreview }),
+    [customization, hostOwnsArtifactPreview],
   );
   const CustomFooter = renderFooter;
   const CustomComposerHeader = renderComposerHeader;
@@ -25053,7 +25061,7 @@ export function App({
                       markdown/tool-headers/thinking the same way the single-
                       session chat does (todo contexts stay chat-only — they
                       belong to the outer session, not the panes). */}
-                  <WebShellCustomizationProvider value={customization}>
+                  <WebShellCustomizationProvider value={appCustomization}>
                     <McpAppVisibilityContext.Provider value={!activePanel && !artifactPanelFullscreen}>
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
@@ -25119,7 +25127,7 @@ export function App({
                   aria-hidden={!managedChatVisible || undefined}
                   data-testid="managed-home"
                 >
-                  <WebShellCustomizationProvider value={customization}>
+                  <WebShellCustomizationProvider value={appCustomization}>
                     <ManagedSessionsPage
                       key={managedAgentProvider.storageKey}
                       sessionId={managedSessionId}
