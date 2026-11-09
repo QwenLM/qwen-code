@@ -111,7 +111,7 @@ export function useManagedSideQueries(
 
   useEffect(() => {
     const api = provider.sideQueries;
-    if (!api || !sessionId) {
+    if (!api || !sessionId || !(options.btw || options.recap)) {
       controller.current = undefined;
       return;
     }
@@ -570,7 +570,15 @@ export function useManagedSideQueries(
       window.removeEventListener('focus', returned);
       window.removeEventListener('storage', storage);
     };
-  }, [provider, clientId, sessionId, identity, epoch]);
+  }, [
+    provider,
+    clientId,
+    sessionId,
+    identity,
+    epoch,
+    options.btw,
+    options.recap,
+  ]);
 
   useEffect(
     () => controller.current?.tick(),

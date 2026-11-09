@@ -80,6 +80,26 @@ describe('useManagedSideQueries', () => {
     vi.useRealTimers();
   });
 
+  it('issues no context or list request when neither btw nor recap is capable', async () => {
+    options = { ...options, btw: false, recap: false };
+    await render();
+    await advance(30_000);
+    expect(api.context).not.toHaveBeenCalled();
+    expect(api.list).not.toHaveBeenCalled();
+    expect(current.available('btw')).toBe(false);
+    expect(current.available('recap')).toBe(false);
+  });
+
+  it('starts fetching once a capability becomes available', async () => {
+    options = { ...options, btw: false, recap: false };
+    await render();
+    await advance(10_000);
+    expect(api.context).not.toHaveBeenCalled();
+    options = { ...options, recap: true };
+    await render();
+    expect(api.context).toHaveBeenCalled();
+  });
+
   it('replays the original payload and key after an unknown admission without storing answer bodies', async () => {
     vi.mocked(api.create).mockRejectedValueOnce(new Error('lost response'));
     await render();
