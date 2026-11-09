@@ -272,6 +272,20 @@ function isUncertainStoreFailure(error: unknown): boolean {
   );
 }
 
+/**
+ * True when the Store refused this seal, with a 4xx other than 429, so it
+ * did not land. Any other failure, including one raised after a 2xx answer,
+ * may have left the head sealed.
+ */
+function sealRefused(error: unknown): boolean {
+  return (
+    error instanceof ManagedSessionStoreHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 429
+  );
+}
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -940,6 +954,14 @@ class ManagedSessionStoreHttpClient {
     preparedCommitSha256: string;
   };
   private sealed = false;
+  /** Settles once every seal started so far has answered. */
+  private sealsAnswered?: Promise<void>;
+  /**
+   * The last failure of a seal that may have landed; acquireWriter refuses
+   * while it is set. A writer-conflict refusal clears it, and once a seal
+   * succeeds `sealed` refuses first.
+   */
+  private uncertainSeal?: Error;
   private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
   /**
@@ -1257,6 +1279,11 @@ class ManagedSessionStoreHttpClient {
         'the HTTP Managed Session writer is already opened or sealed.',
       );
     }
+    // A seal that failed without the Store refusing it may have landed, and
+    // the Store gives a sealed head a new writer generation on acquire. Stay
+    // unsettled until a later seal succeeds or meets a writer conflict.
+    if (this.uncertainSeal !== undefined)
+      throw new ManagedSessionAppendUnsettledError(this.uncertainSeal);
     const grant = parseWriterGrant(
       await this.json('/writers:acquire', 'POST', {
         workspaceId: this.sessionKey.workspaceId,
@@ -2567,8 +2594,31 @@ class ManagedSessionStoreHttpClient {
   async seal(): Promise<void> {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
-    await this.acquirePromise?.catch(() => undefined);
-    return this.sealGrant();
+    // The seal joins sealsAnswered before it waits on acquirePromise, so a
+    // reacquire that starts meanwhile still waits for it.
+    const sealing = (async () => {
+      await this.acquirePromise?.catch(() => undefined);
+      await this.sealGrant();
+    })();
+    const answered = sealing.then(
+      () => undefined,
+      (error: unknown) => {
+        if (!sealRefused(error)) this.uncertainSeal = asError(error);
+        // Most refusals come before the Store replays a seal that landed, so
+        // they say nothing about an earlier one. A writer conflict comes
+        // after that replay: the head has left this writer generation, so no
+        // seal of it can still decide the Session.
+        else if (
+          error instanceof ManagedSessionStoreHttpError &&
+          error.remoteCode === 'managed_session_writer_conflict'
+        )
+          this.uncertainSeal = undefined;
+      },
+    );
+    this.sealsAnswered = Promise.all([this.sealsAnswered, answered]).then(
+      () => undefined,
+    );
+    return sealing;
   }
 
   private async sealGrant(): Promise<void> {
@@ -2754,6 +2804,19 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A seal on its way to the Store decides this writer's end first. The
+    // Store gives a sealed head a new writer generation on acquire, so an
+    // acquire that lands after the seal would reopen the Session behind it,
+    // and one that lands first would make the seal meet a newer writer. A
+    // seal that starts during this wait replaces sealsAnswered, so wait
+    // again until none has. Then acquireWriter refuses a sealed client, and
+    // one whose seal may have landed.
+    let answered = this.sealsAnswered;
+    while (answered !== undefined) {
+      await answered;
+      answered =
+        answered === this.sealsAnswered ? undefined : this.sealsAnswered;
+    }
     // A renewal in flight may have answered after the caller saw the lease
     // lapse; it moved the lease forward and re-armed the timer, so keep that
     // grant. Dropping it for an acquire, which a Store holding the Session's
