@@ -70,6 +70,10 @@ describe('executeGeneration', () => {
     expect(generateContentStream.mock.calls[0]?.[0].config).not.toHaveProperty(
       'maxOutputTokens',
     );
+    // #12928: no hard-coded temperature reaches the draft-classification wire.
+    expect(
+      generateContentStream.mock.calls[0]?.[0].config,
+    ).not.toHaveProperty('temperature');
     expect(events).toEqual([
       { type: 'started', model: 'fast-model', modelSource: 'fast' },
       { type: 'thinking' },
