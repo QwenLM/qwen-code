@@ -11,20 +11,24 @@ import {
   blocksAllMemoryWritesForConfig,
 } from './write-access.js';
 
-const denyEntry = (raw: string) => ({
+const denyEntry = (raw: string, type: 'deny' | 'allow' | 'ask' = 'deny') => ({
   rule: { raw } as never,
-  type: 'deny' as const,
+  type,
   scope: 'user' as const,
 });
 
 const configWith = (opts: {
   snapshot?: string[];
   denyRules?: string[];
+  allowRules?: string[];
 }): Config =>
   ({
     getPermissionsDeny: () => opts.snapshot ?? [],
     getPermissionManager: () => ({
-      listRules: () => (opts.denyRules ?? []).map((raw) => denyEntry(raw)),
+      listRules: () => [
+        ...(opts.denyRules ?? []).map((raw) => denyEntry(raw)),
+        ...(opts.allowRules ?? []).map((raw) => denyEntry(raw, 'allow')),
+      ],
     }),
   }) as unknown as Config;
 
@@ -94,5 +98,18 @@ describe('blocksAllMemoryWritesForConfig', () => {
   it('falls back to the snapshot when no manager exists', () => {
     const config = { getPermissionsDeny: () => ['edit'] } as unknown as Config;
     expect(blocksAllMemoryWritesForConfig(config)).toBe(true);
+  });
+
+  it('ignores allow entries for the write tools', () => {
+    // A manager lists every rule it holds, so an auto-edit user's
+    // `allow: ['Edit', 'WriteFile']` arrives here too. Reading those as
+    // denials would report `writes_denied` on every turn and silently stop
+    // managed auto-memory for someone who denied nothing.
+    const config = configWith({
+      snapshot: [],
+      denyRules: [],
+      allowRules: ['Edit', 'WriteFile'],
+    });
+    expect(blocksAllMemoryWritesForConfig(config)).toBe(false);
   });
 });
