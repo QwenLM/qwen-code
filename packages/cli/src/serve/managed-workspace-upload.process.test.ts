@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createSettleTimeout } from '../test-utils/settle-timeout.js';
 
 const api = pathToFileURL(
   createRequire(import.meta.url).resolve('tsx/esm/api'),
@@ -172,7 +173,9 @@ describe('Managed Workspace upload bootstrap processes', () => {
     expect(await fs.readdir(root)).toEqual([]);
   });
 
-  it('keeps a live writer pending and recovers the original path after its process dies', async () => {
+  it('keeps a live writer pending and recovers the original path after its process dies', async ({
+    task,
+  }) => {
     const bytes = Buffer.from([0, 0xff, 0x80, 10]);
     const info = metadata(bytes);
     const entered = path.join(temporary, 'before-cleanup');
@@ -193,8 +196,10 @@ describe('Managed Workspace upload bootstrap processes', () => {
     // The child must boot Node, register the tsx loader and import the
     // bootstrap before it reaches the unlink hook. A fixed iteration count
     // races that real I/O under CI contention (#16580), so poll against a
-    // wall-clock deadline instead.
-    const cleanupDeadline = Date.now() + 30_000;
+    // wall-clock budget instead. Deriving it from the lane's test timeout
+    // reserves a second for the assertion, so a 15s-ceiling runner reports
+    // the descriptive error rather than a bare vitest timeout.
+    const remainingCleanupMs = createSettleTimeout(task.timeout, 30_000);
     for (;;) {
       if (
         await fs.access(entered).then(
@@ -203,7 +208,7 @@ describe('Managed Workspace upload bootstrap processes', () => {
         )
       )
         break;
-      if (Date.now() >= cleanupDeadline)
+      if (remainingCleanupMs() <= 1)
         throw new Error('Original upload did not reach cleanup.');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
