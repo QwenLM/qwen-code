@@ -914,7 +914,7 @@ interface ReconcileRestoredSessionWorktreeInput {
  * marks the session `persisted-v1` except in the one shape explained at
  * `hasUnlocatedRestoredPrompt`. Without a sidecar the session is untouched.
  *
- * The caller owns three things, as `restoreSessionHandler` does:
+ * The caller owns three things, as `restoreSession` does:
  * - The worktree ownership lock (`acquireWorktreeOwnershipOp`), taken when
  *   its own read before the bridge restore finds a sidecar that records
  *   its workspace, and held across the bridge restore and this call. Its
@@ -1059,7 +1059,7 @@ async function reconcileRestoredSessionWorktree({
         ownershipLockKeyForWorktree(sidecar.worktreePath),
       );
       // For a Channel restore whose earlier read found a sidecar that
-      // records its workspace, restoreSessionHandler already refused a
+      // records its workspace, restoreSession already refused a
       // superseded sidecar under the ownership lock; every other restore
       // relies on this check. A superseded session is released and never
       // handed back, whatever path raced us here.
@@ -1236,6 +1236,53 @@ async function reconcileRestoredSessionWorktree({
     }
   }
 }
+
+/**
+ * A parsed load/resume request for `restoreSession`, the restore behind
+ * `POST /session/:id/load` and `/resume`.
+ *
+ * The caller resolves the runtime and captures `assertRuntimeGenerationOpen`
+ * right after, before any further await, so a runtime recycled while the
+ * request was being prepared is caught. `isCallerConnected` is polled at the
+ * restore's two disconnect checks: a caller that has gone away gets the
+ * restored session released and the `abandoned` outcome. `onRestored` runs
+ * after the last validation, while the session-id reservation and the
+ * worktree ownership lock (when the restore took it) are still held; the
+ * route sends its response there. An error thrown by `onRestored` propagates
+ * as is, without releasing the restored session.
+ *
+ * Failures are thrown as the existing error classes: the route maps
+ * `RequestedSessionIdAdmissionError` with
+ * `sendRequestedSessionIdAdmissionError` and everything else with
+ * `sendBridgeError`.
+ */
+interface RestoreSessionRequest {
+  action: 'load' | 'resume';
+  sessionId: string;
+  runtime: WorkspaceRuntime;
+  workspaceCwd: string;
+  assertRuntimeGenerationOpen: (() => void) | undefined;
+  clientId: string | undefined;
+  approvalMode: ApprovalMode | undefined;
+  historyPageSize: number | undefined;
+  liveReplayMode: 'full' | 'summary' | undefined;
+  compactedReplayMode: 'full' | 'summary' | undefined;
+  restoreSource: { sourceType?: string; sourceId?: string };
+  isCallerConnected: () => boolean;
+  /** Called once an internal runtime's restore has reserved its id. */
+  onTelemetryWorkspace?: (workspaceCwd: string) => void;
+  onRestored?: (session: BridgeRestoredSession) => void | Promise<void>;
+}
+
+/**
+ * `restored` hands the caller the session with its client registration held,
+ * once the reservation and the worktree lock have been released. `abandoned`
+ * means the caller disconnected and the release of the restored session has
+ * started; it is awaited only at the second disconnect check.
+ */
+type RestoreSessionOutcome =
+  | { kind: 'restored'; session: BridgeRestoredSession }
+  | { kind: 'abandoned' };
 
 export type ResolveSubagentSessionRuntime = (
   res: Response,
@@ -4270,6 +4317,443 @@ export function registerSessionRoutes(
     }
   });
 
+  // The restore behind `POST /session/:id/load` and `/resume`, after the
+  // request is parsed and its runtime resolved. See RestoreSessionRequest
+  // for what the caller provides and owns.
+  const restoreSession = async ({
+    action,
+    sessionId,
+    runtime,
+    workspaceCwd,
+    assertRuntimeGenerationOpen,
+    clientId,
+    approvalMode,
+    historyPageSize,
+    liveReplayMode,
+    compactedReplayMode,
+    restoreSource,
+    isCallerConnected,
+    onTelemetryWorkspace,
+    onRestored,
+  }: RestoreSessionRequest): Promise<RestoreSessionOutcome> => {
+    let sessionIdReservation: RequestedSessionIdReservation | undefined;
+    if (!isInternalWorkspaceRuntime(runtime)) {
+      sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
+        sessionId,
+        {
+          bridge: runtime.bridge,
+          workspaceCwd,
+          workspaceId: runtime.workspaceId,
+        },
+      );
+    }
+    let restoredStorageSessionId = sessionId;
+    let suppressWorktreeContextRestore = false;
+    let deferRestoreAskUserQuestionPrompt = false;
+    let releaseWorktreeRestore: (() => void) | undefined;
+    let heldWorktreeOwnershipLockKey: string | undefined;
+    try {
+      // The coordinator canonicalizes lock keys (every case variant of a
+      // caller id contends on one key), so the request spelling alone
+      // covers the raw-spelled batch delete/archive/unarchive locks.
+      const session = await runWithWorkspaceRuntimeStorage(runtime, () =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          const persistedSessionId = await resolveSessionIdForRestore(
+            sessionService,
+            sessionId,
+          );
+          if (persistedSessionId) {
+            restoredStorageSessionId = persistedSessionId;
+          } else if (isInternalWorkspaceRuntime(runtime)) {
+            throw new SessionNotFoundError(sessionId);
+          }
+          const location = await assertSessionRestorable(
+            workspaceCwd,
+            restoredStorageSessionId,
+            sessionId,
+            runtime.sessionRuntimeBaseDir,
+          );
+          if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
+            throw new SessionNotFoundError(sessionId);
+          }
+          // Recover the persisted parent lineage so the restored live entry
+          // reports it (the bridge otherwise creates the entry without it, and
+          // status calls would show a restored sub-session as top-level).
+          const metadata =
+            runtime.provenance === 'live-conversation'
+              ? await readLoadableLiveConversationMetadata(
+                  restoredStorageSessionId,
+                  sessionService,
+                )
+              : await sessionService.readCreationMetadata(
+                  restoredStorageSessionId,
+                );
+          // The reserved standalone source is hidden only on the internal
+          // Conversations runtime. Ordinary workspace restores keep
+          // loading legacy transcripts that happen to carry the reserved
+          // source string — create-side admission already blocks new ones,
+          // so every such transcript on an ordinary store predates the
+          // gate and must not become unreachable.
+          if (
+            metadata === undefined ||
+            (isInternalWorkspaceRuntime(runtime) &&
+              isReservedStandaloneSessionSource(metadata))
+          ) {
+            throw new SessionNotFoundError(sessionId);
+          }
+          const {
+            sourceType: _reservedSourceType,
+            sourceId: _reservedSourceId,
+            ...metadataWithoutSource
+          } = metadata;
+          // Agent-source sessions strip their source on restore as well:
+          // the restore is a person reading history, and the admission gate
+          // in acpAgent refuses `sourceType: 'agent'` materialisation with
+          // no live run behind it — keeping the source would make a finished
+          // agent's transcript unopenable while it stays listed.
+          const restoreMetadata =
+            (!isInternalWorkspaceRuntime(runtime) &&
+              isReservedStandaloneSessionSource(metadata)) ||
+            metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
+              ? metadataWithoutSource
+              : metadata;
+          const hasPersistedSource =
+            'sourceType' in restoreMetadata &&
+            restoreMetadata.sourceType !== undefined;
+          const restoreRequestMetadata = {
+            ...restoreMetadata,
+            ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
+              ? {}
+              : restoreSource),
+          };
+          const isChannelRestore =
+            restoreRequestMetadata.sourceType === 'channel';
+          let isPart4AWorktreeRestore = false;
+          let part4AWorktreeKey: string | undefined;
+          if (runtime.provenance !== 'live-conversation') {
+            const sidecarBeforeRestore = await readWorktreeSessionStrict(
+              sessionService.getWorktreeSessionPath(restoredStorageSessionId),
+            );
+            if (isChannelRestore) {
+              // The superseded decision is deliberately NOT taken here:
+              // this pre-read only supplies the ownership lock's key, and a
+              // transfer that rolls back between the two would make this
+              // route redirect the caller to a replacement the same daemon
+              // is about to delete. It is re-read under the lock below.
+              suppressWorktreeContextRestore = !(
+                sidecarBeforeRestore.state === 'valid' &&
+                sidecarBeforeRestore.session.workspaceCwd === undefined
+              );
+            }
+            // The ownership validation in reconcileRestoredSessionWorktree
+            // runs for every non-live restore, and the reset route is
+            // public, so the lock cannot be Channel-only: a source-less
+            // restore would otherwise attest exclusive ownership while a
+            // transfer moves it. Legacy sidecars (no recorded workspace)
+            // validate on the legacy path and stay lock-free.
+            isPart4AWorktreeRestore =
+              sidecarBeforeRestore.state === 'valid' &&
+              sidecarBeforeRestore.session.workspaceCwd !== undefined;
+            if (
+              isPart4AWorktreeRestore &&
+              sidecarBeforeRestore.state === 'valid'
+            ) {
+              part4AWorktreeKey = ownershipLockKeyForWorktree(
+                sidecarBeforeRestore.session.worktreePath,
+              );
+            }
+          } else {
+            suppressWorktreeContextRestore = isChannelRestore;
+          }
+          deferRestoreAskUserQuestionPrompt =
+            suppressWorktreeContextRestore &&
+            runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
+              undefined &&
+            runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
+              undefined;
+          if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
+            releaseWorktreeRestore =
+              await acquireWorktreeOwnershipOp(part4AWorktreeKey);
+            heldWorktreeOwnershipLockKey = part4AWorktreeKey;
+            if (isChannelRestore) {
+              // A reset moved this session's worktree ownership to a
+              // replacement: never restore the superseded session — tell
+              // the caller where the ownership went so it can redirect (and
+              // self-heal its registry). Decided on the locked read, so a
+              // transfer that rolled back while this request waited cannot
+              // make it redirect to a replacement that no longer exists.
+              const sidecarUnderLock = await readWorktreeSessionStrict(
+                sessionService.getWorktreeSessionPath(restoredStorageSessionId),
+              );
+              if (
+                sidecarUnderLock.state === 'valid' &&
+                sidecarUnderLock.session.workspaceCwd !== undefined
+              ) {
+                assertWorktreeOwnershipLockHeld(
+                  heldWorktreeOwnershipLockKey,
+                  ownershipLockKeyForWorktree(
+                    sidecarUnderLock.session.worktreePath,
+                  ),
+                );
+              }
+              if (
+                sidecarUnderLock.state === 'valid' &&
+                sidecarUnderLock.session.supersededBy !== undefined
+              ) {
+                throw new WorktreeSessionSupersededError(
+                  restoredStorageSessionId,
+                  sidecarUnderLock.session.supersededBy,
+                );
+              }
+            }
+          }
+          assertRuntimeGenerationOpen?.();
+          if (isInternalWorkspaceRuntime(runtime)) {
+            sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
+              sessionId,
+              {
+                bridge: runtime.bridge,
+                workspaceCwd,
+                workspaceId: runtime.workspaceId,
+              },
+            );
+            onTelemetryWorkspace?.(runtime.workspaceCwd);
+          }
+          let liveConversationCwd: string | undefined;
+          if (runtime.provenance === 'live-conversation') {
+            const materialize = deps.materializeLiveConversationDirectory;
+            if (!materialize) {
+              throw new Error('Live conversation workspace is unavailable.');
+            }
+            // Keyed on the canonical id, not the persisted spelling: the
+            // bridge registers the live entry under the canonical id, and
+            // every later materialize/discard call derives the directory
+            // from that same id.
+            liveConversationCwd = await materialize(sessionId);
+          }
+          assertRuntimeGenerationOpen?.();
+          const restored =
+            action === 'load'
+              ? await runtime.bridge.loadSession({
+                  sessionId,
+                  workspaceCwd,
+                  ...(suppressWorktreeContextRestore
+                    ? {
+                        suppressWorktreeContextRestore: true,
+                        ...(deferRestoreAskUserQuestionPrompt
+                          ? { deferRestoreAskUserQuestionPrompt: true }
+                          : {}),
+                      }
+                    : {}),
+                  historyReplay: 'response',
+                  ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+                  ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+                  ...(compactedReplayMode !== undefined
+                    ? { compactedReplayMode }
+                    : {}),
+                  ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
+                  ...restoreRequestMetadata,
+                })
+              : await runtime.bridge.resumeSession({
+                  sessionId,
+                  workspaceCwd,
+                  ...(suppressWorktreeContextRestore
+                    ? {
+                        suppressWorktreeContextRestore: true,
+                        ...(deferRestoreAskUserQuestionPrompt
+                          ? { deferRestoreAskUserQuestionPrompt: true }
+                          : {}),
+                      }
+                    : {}),
+                  ...(clientId !== undefined ? { clientId } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
+                  ...restoreRequestMetadata,
+                });
+          // Every path that can register a Live entry relocates it before a
+          // prompt can start. Re-queuing cd for an active entry would block
+          // this load behind the prompt it is meant to observe.
+          if (liveConversationCwd !== undefined) {
+            if (restored.hasActivePrompt) {
+              if (restored.currentCwd === liveConversationCwd) {
+                return restored;
+              }
+              try {
+                if (restored.clientId) {
+                  await runtime.bridge.detachClient(
+                    restored.sessionId,
+                    restored.clientId,
+                  );
+                }
+              } catch {
+                // Preserve the isolation error. Never kill an active owner.
+              }
+              throw new Error(
+                'Active Live session is outside its isolated conversation directory.',
+              );
+            }
+            try {
+              const changed = await runtime.bridge.changeSessionCwd(sessionId, {
+                path: liveConversationCwd,
+                allowedRoots: [runtime.workspaceCwd],
+                managedRelocation: 'live-conversation',
+              });
+              if (changed.newCwd !== liveConversationCwd) {
+                throw new Error(
+                  'Live conversation directory relocation was rejected.',
+                );
+              }
+              restored.currentCwd = changed.newCwd;
+            } catch (error) {
+              try {
+                if (restored.attached) {
+                  if (restored.clientId) {
+                    await runtime.bridge.detachClient(
+                      restored.sessionId,
+                      restored.clientId,
+                    );
+                  }
+                } else {
+                  await runtime.bridge.killSession(restored.sessionId, {
+                    requireZeroAttaches: true,
+                  });
+                }
+              } catch {
+                // Preserve the relocation error.
+              }
+              throw error;
+            }
+          }
+          // Prompt terminal ledger: reconcile prompts left in_flight by
+          // a dead previous daemon before responding. Only the cold path
+          // (no live entry attached and no active prompt on a live entry)
+          // is eligible — an attached load has a live owner that will
+          // publish the real terminal itself, and live-conversation
+          // workspaces store transcripts outside the runtime layout this
+          // reconciliation reads. Gated on `action === 'load'` to match
+          // the load-mediation contract (resume keeps its exact
+          // pre-existing response shape).
+          if (
+            action === 'load' &&
+            !restored.attached &&
+            !restored.hasActivePrompt &&
+            !deferRestoreAskUserQuestionPrompt &&
+            runtime.provenance !== 'live-conversation'
+          ) {
+            try {
+              await reconcileDanglingPromptTerminals(sessionService, sessionId);
+            } catch {
+              // Best-effort: a failure leaves dangling prompts unknown
+              // (fail-closed) and must never fail the load itself.
+            }
+          }
+          return restored;
+        }),
+      );
+      const cleanupRestoredSession = async (): Promise<void> => {
+        if (deferRestoreAskUserQuestionPrompt) {
+          runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+            session.sessionId,
+            session.clientId,
+          );
+        }
+        if (session.attached) {
+          await runtime.bridge
+            .detachClient(session.sessionId, session.clientId)
+            .catch(() => {});
+        } else {
+          await runtime.bridge
+            .killSession(session.sessionId, { requireZeroAttaches: true })
+            .catch(() => {});
+        }
+      };
+      try {
+        assertRuntimeGenerationOpen?.();
+      } catch (error) {
+        await cleanupRestoredSession();
+        throw error;
+      }
+      // Mirror the `POST /session` disconnect-cleanup path (see the
+      // long comment above the matching `if (!res.writable)` there
+      // for the rationale around `res.writable` vs `req.aborted` /
+      // `req.destroyed`, plus the `requireZeroAttaches` race
+      // and the attach-rollback case). Restore needs the
+      // same cleanup because a client that disconnects during a
+      // multi-second `session/load` would otherwise leave a freshly
+      // restored session in `byId` with no client holding its id.
+      if (!isCallerConnected()) {
+        void cleanupRestoredSession();
+        return { kind: 'abandoned' };
+      }
+      if (runtime.provenance !== 'live-conversation') {
+        await reconcileRestoredSessionWorktree({
+          runtime,
+          workspaceCwd,
+          sessionId,
+          restoredStorageSessionId,
+          session,
+          deferRestoreAskUserQuestionPrompt,
+          heldWorktreeOwnershipLockKey,
+          assertRuntimeGenerationOpen,
+          cleanupRestoredSession,
+          daemonLog,
+        });
+      }
+      if (!isCallerConnected()) {
+        await cleanupRestoredSession();
+        return { kind: 'abandoned' };
+      }
+      try {
+        assertRuntimeGenerationOpen?.();
+      } catch (error) {
+        await cleanupRestoredSession();
+        throw error;
+      }
+      const deferredRestorePromptAdmitted =
+        deferRestoreAskUserQuestionPrompt &&
+        (runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          session.sessionId,
+          session.clientId,
+        ) ??
+          false);
+      if (deferredRestorePromptAdmitted) {
+        session.hasActivePrompt = true;
+      } else if (
+        deferRestoreAskUserQuestionPrompt &&
+        action === 'load' &&
+        !session.attached &&
+        !session.hasActivePrompt &&
+        runtime.provenance !== 'live-conversation'
+      ) {
+        try {
+          await reconcileDanglingPromptTerminals(
+            createWorkspaceRuntimeSessionService(runtime),
+            sessionId,
+          );
+        } catch {
+          // Best-effort: a failure leaves dangling prompts unknown
+          // (fail-closed) and must never fail the load itself.
+        }
+      }
+      try {
+        assertRuntimeGenerationOpen?.();
+      } catch (error) {
+        await cleanupRestoredSession();
+        throw error;
+      }
+      daemonLog?.info(
+        `session ${action}${session.attached ? ' (attached)' : ''}`,
+        { sessionId: session.sessionId, clientId: session.clientId },
+      );
+      await onRestored?.(session);
+      return { kind: 'restored', session };
+    } finally {
+      sessionIdReservation?.release();
+      releaseWorktreeRestore?.();
+    }
+  };
+
   const restoreSessionHandler =
     (action: 'load' | 'resume') => async (req: Request, res: Response) => {
       const sessionId = requireSessionId(req, res);
@@ -4466,449 +4950,38 @@ export function registerSessionRoutes(
           }
         }
       }
-      let sessionIdReservation: RequestedSessionIdReservation | undefined;
-      if (!isInternalWorkspaceRuntime(runtime)) {
-        try {
-          sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
-            sessionId,
-            {
-              bridge: runtime.bridge,
-              workspaceCwd,
-              workspaceId: runtime.workspaceId,
-            },
-          );
-        } catch (error) {
-          if (error instanceof RequestedSessionIdAdmissionError) {
-            sendRequestedSessionIdAdmissionError(res, error, route);
-            return;
-          }
-          throw error;
-        }
-      }
-      let restoredStorageSessionId = sessionId;
-      let suppressWorktreeContextRestore = false;
-      let deferRestoreAskUserQuestionPrompt = false;
-      let releaseWorktreeRestore: (() => void) | undefined;
-      let heldWorktreeOwnershipLockKey: string | undefined;
       try {
-        // The coordinator canonicalizes lock keys (every case variant of a
-        // caller id contends on one key), so the request spelling alone
-        // covers the raw-spelled batch delete/archive/unarchive locks.
-        const session = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          archiveCoordinator.runSharedMany([sessionId], async () => {
-            const sessionService =
-              createWorkspaceRuntimeSessionService(runtime);
-            const persistedSessionId = await resolveSessionIdForRestore(
-              sessionService,
-              sessionId,
-            );
-            if (persistedSessionId) {
-              restoredStorageSessionId = persistedSessionId;
-            } else if (isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            const location = await assertSessionRestorable(
-              workspaceCwd,
-              restoredStorageSessionId,
-              sessionId,
-              runtime.sessionRuntimeBaseDir,
-            );
-            if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            // Recover the persisted parent lineage so the restored live entry
-            // reports it (the bridge otherwise creates the entry without it, and
-            // status calls would show a restored sub-session as top-level).
-            const metadata =
-              runtime.provenance === 'live-conversation'
-                ? await readLoadableLiveConversationMetadata(
-                    restoredStorageSessionId,
-                    sessionService,
-                  )
-                : await sessionService.readCreationMetadata(
-                    restoredStorageSessionId,
-                  );
-            // The reserved standalone source is hidden only on the internal
-            // Conversations runtime. Ordinary workspace restores keep
-            // loading legacy transcripts that happen to carry the reserved
-            // source string — create-side admission already blocks new ones,
-            // so every such transcript on an ordinary store predates the
-            // gate and must not become unreachable.
-            if (
-              metadata === undefined ||
-              (isInternalWorkspaceRuntime(runtime) &&
-                isReservedStandaloneSessionSource(metadata))
-            ) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            const {
-              sourceType: _reservedSourceType,
-              sourceId: _reservedSourceId,
-              ...metadataWithoutSource
-            } = metadata;
-            // Agent-source sessions strip their source on restore as well:
-            // the restore is a person reading history, and the admission gate
-            // in acpAgent refuses `sourceType: 'agent'` materialisation with
-            // no live run behind it — keeping the source would make a finished
-            // agent's transcript unopenable while it stays listed.
-            const restoreMetadata =
-              (!isInternalWorkspaceRuntime(runtime) &&
-                isReservedStandaloneSessionSource(metadata)) ||
-              metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
-                ? metadataWithoutSource
-                : metadata;
-            const hasPersistedSource =
-              'sourceType' in restoreMetadata &&
-              restoreMetadata.sourceType !== undefined;
-            const restoreRequestMetadata = {
-              ...restoreMetadata,
-              ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
-                ? {}
-                : restoreSource),
-            };
-            const isChannelRestore =
-              restoreRequestMetadata.sourceType === 'channel';
-            let isPart4AWorktreeRestore = false;
-            let part4AWorktreeKey: string | undefined;
-            if (runtime.provenance !== 'live-conversation') {
-              const sidecarBeforeRestore = await readWorktreeSessionStrict(
-                sessionService.getWorktreeSessionPath(restoredStorageSessionId),
-              );
-              if (isChannelRestore) {
-                // The superseded decision is deliberately NOT taken here:
-                // this pre-read only supplies the ownership lock's key, and a
-                // transfer that rolls back between the two would make this
-                // route redirect the caller to a replacement the same daemon
-                // is about to delete. It is re-read under the lock below.
-                suppressWorktreeContextRestore = !(
-                  sidecarBeforeRestore.state === 'valid' &&
-                  sidecarBeforeRestore.session.workspaceCwd === undefined
-                );
-              }
-              // The ownership validation in reconcileRestoredSessionWorktree
-              // runs for every non-live restore, and the reset route is
-              // public, so the lock cannot be Channel-only: a source-less
-              // restore would otherwise attest exclusive ownership while a
-              // transfer moves it. Legacy sidecars (no recorded workspace)
-              // validate on the legacy path and stay lock-free.
-              isPart4AWorktreeRestore =
-                sidecarBeforeRestore.state === 'valid' &&
-                sidecarBeforeRestore.session.workspaceCwd !== undefined;
-              if (
-                isPart4AWorktreeRestore &&
-                sidecarBeforeRestore.state === 'valid'
-              ) {
-                part4AWorktreeKey = ownershipLockKeyForWorktree(
-                  sidecarBeforeRestore.session.worktreePath,
-                );
-              }
-            } else {
-              suppressWorktreeContextRestore = isChannelRestore;
-            }
-            deferRestoreAskUserQuestionPrompt =
-              suppressWorktreeContextRestore &&
-              runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
-                undefined &&
-              runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
-                undefined;
-            if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
-              releaseWorktreeRestore =
-                await acquireWorktreeOwnershipOp(part4AWorktreeKey);
-              heldWorktreeOwnershipLockKey = part4AWorktreeKey;
-              if (isChannelRestore) {
-                // A reset moved this session's worktree ownership to a
-                // replacement: never restore the superseded session — tell
-                // the caller where the ownership went so it can redirect (and
-                // self-heal its registry). Decided on the locked read, so a
-                // transfer that rolled back while this request waited cannot
-                // make it redirect to a replacement that no longer exists.
-                const sidecarUnderLock = await readWorktreeSessionStrict(
-                  sessionService.getWorktreeSessionPath(
-                    restoredStorageSessionId,
-                  ),
-                );
-                if (
-                  sidecarUnderLock.state === 'valid' &&
-                  sidecarUnderLock.session.workspaceCwd !== undefined
-                ) {
-                  assertWorktreeOwnershipLockHeld(
-                    heldWorktreeOwnershipLockKey,
-                    ownershipLockKeyForWorktree(
-                      sidecarUnderLock.session.worktreePath,
-                    ),
-                  );
-                }
-                if (
-                  sidecarUnderLock.state === 'valid' &&
-                  sidecarUnderLock.session.supersededBy !== undefined
-                ) {
-                  throw new WorktreeSessionSupersededError(
-                    restoredStorageSessionId,
-                    sidecarUnderLock.session.supersededBy,
-                  );
-                }
-              }
-            }
-            assertRuntimeGenerationOpen?.();
-            if (isInternalWorkspaceRuntime(runtime)) {
-              sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
-                sessionId,
-                {
-                  bridge: runtime.bridge,
-                  workspaceCwd,
-                  workspaceId: runtime.workspaceId,
-                },
-              );
-              setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
-            }
-            let liveConversationCwd: string | undefined;
-            if (runtime.provenance === 'live-conversation') {
-              const materialize = deps.materializeLiveConversationDirectory;
-              if (!materialize) {
-                throw new Error('Live conversation workspace is unavailable.');
-              }
-              // Keyed on the canonical id, not the persisted spelling: the
-              // bridge registers the live entry under the canonical id, and
-              // every later materialize/discard call derives the directory
-              // from that same id.
-              liveConversationCwd = await materialize(sessionId);
-            }
-            assertRuntimeGenerationOpen?.();
-            const restored =
+        await restoreSession({
+          action,
+          sessionId,
+          runtime,
+          workspaceCwd,
+          assertRuntimeGenerationOpen,
+          clientId,
+          approvalMode,
+          historyPageSize,
+          liveReplayMode,
+          compactedReplayMode,
+          restoreSource,
+          isCallerConnected: () => res.writable,
+          onTelemetryWorkspace: (cwd) => setDaemonTelemetryWorkspace(res, cwd),
+          onRestored: (session) => {
+            // The load response embeds the replay snapshot inline; redact the
+            // skill bodies there just like the SSE egress does (#9234).
+            const responseSession = withPromptTerminals(
+              session,
               action === 'load'
-                ? await runtime.bridge.loadSession({
+                ? readRecentPromptTerminals(
+                    createWorkspaceRuntimeSessionService(runtime),
                     sessionId,
-                    workspaceCwd,
-                    ...(suppressWorktreeContextRestore
-                      ? {
-                          suppressWorktreeContextRestore: true,
-                          ...(deferRestoreAskUserQuestionPrompt
-                            ? { deferRestoreAskUserQuestionPrompt: true }
-                            : {}),
-                        }
-                      : {}),
-                    historyReplay: 'response',
-                    ...(historyPageSize !== undefined
-                      ? { historyPageSize }
-                      : {}),
-                    ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
-                    ...(compactedReplayMode !== undefined
-                      ? { compactedReplayMode }
-                      : {}),
-                    ...(clientId !== undefined ? { clientId } : {}),
-                    ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreRequestMetadata,
-                  })
-                : await runtime.bridge.resumeSession({
-                    sessionId,
-                    workspaceCwd,
-                    ...(suppressWorktreeContextRestore
-                      ? {
-                          suppressWorktreeContextRestore: true,
-                          ...(deferRestoreAskUserQuestionPrompt
-                            ? { deferRestoreAskUserQuestionPrompt: true }
-                            : {}),
-                        }
-                      : {}),
-                    ...(clientId !== undefined ? { clientId } : {}),
-                    ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreRequestMetadata,
-                  });
-            // Every path that can register a Live entry relocates it before a
-            // prompt can start. Re-queuing cd for an active entry would block
-            // this load behind the prompt it is meant to observe.
-            if (liveConversationCwd !== undefined) {
-              if (restored.hasActivePrompt) {
-                if (restored.currentCwd === liveConversationCwd) {
-                  return restored;
-                }
-                try {
-                  if (restored.clientId) {
-                    await runtime.bridge.detachClient(
-                      restored.sessionId,
-                      restored.clientId,
-                    );
-                  }
-                } catch {
-                  // Preserve the isolation error. Never kill an active owner.
-                }
-                throw new Error(
-                  'Active Live session is outside its isolated conversation directory.',
-                );
-              }
-              try {
-                const changed = await runtime.bridge.changeSessionCwd(
-                  sessionId,
-                  {
-                    path: liveConversationCwd,
-                    allowedRoots: [runtime.workspaceCwd],
-                    managedRelocation: 'live-conversation',
-                  },
-                );
-                if (changed.newCwd !== liveConversationCwd) {
-                  throw new Error(
-                    'Live conversation directory relocation was rejected.',
-                  );
-                }
-                restored.currentCwd = changed.newCwd;
-              } catch (error) {
-                try {
-                  if (restored.attached) {
-                    if (restored.clientId) {
-                      await runtime.bridge.detachClient(
-                        restored.sessionId,
-                        restored.clientId,
-                      );
-                    }
-                  } else {
-                    await runtime.bridge.killSession(restored.sessionId, {
-                      requireZeroAttaches: true,
-                    });
-                  }
-                } catch {
-                  // Preserve the relocation error.
-                }
-                throw error;
-              }
-            }
-            // Prompt terminal ledger: reconcile prompts left in_flight by
-            // a dead previous daemon before responding. Only the cold path
-            // (no live entry attached and no active prompt on a live entry)
-            // is eligible — an attached load has a live owner that will
-            // publish the real terminal itself, and live-conversation
-            // workspaces store transcripts outside the runtime layout this
-            // reconciliation reads. Gated on `action === 'load'` to match
-            // the load-mediation contract (resume keeps its exact
-            // pre-existing response shape).
-            if (
-              action === 'load' &&
-              !restored.attached &&
-              !restored.hasActivePrompt &&
-              !deferRestoreAskUserQuestionPrompt &&
-              runtime.provenance !== 'live-conversation'
-            ) {
-              try {
-                await reconcileDanglingPromptTerminals(
-                  sessionService,
-                  sessionId,
-                );
-              } catch {
-                // Best-effort: a failure leaves dangling prompts unknown
-                // (fail-closed) and must never fail the load itself.
-              }
-            }
-            return restored;
-          }),
-        );
-        const cleanupRestoredSession = async (): Promise<void> => {
-          if (deferRestoreAskUserQuestionPrompt) {
-            runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
-              session.sessionId,
-              session.clientId,
+                  )
+                : undefined,
             );
-          }
-          if (session.attached) {
-            await runtime.bridge
-              .detachClient(session.sessionId, session.clientId)
-              .catch(() => {});
-          } else {
-            await runtime.bridge
-              .killSession(session.sessionId, { requireZeroAttaches: true })
-              .catch(() => {});
-          }
-        };
-        try {
-          assertRuntimeGenerationOpen?.();
-        } catch (error) {
-          await cleanupRestoredSession();
-          throw error;
-        }
-        // Mirror the `POST /session` disconnect-cleanup path (see the
-        // long comment above the matching `if (!res.writable)` there
-        // for the rationale around `res.writable` vs `req.aborted` /
-        // `req.destroyed`, plus the `requireZeroAttaches` race
-        // and the attach-rollback case). Restore needs the
-        // same cleanup because a client that disconnects during a
-        // multi-second `session/load` would otherwise leave a freshly
-        // restored session in `byId` with no client holding its id.
-        if (!res.writable) {
-          void cleanupRestoredSession();
-          return;
-        }
-        if (runtime.provenance !== 'live-conversation') {
-          await reconcileRestoredSessionWorktree({
-            runtime,
-            workspaceCwd,
-            sessionId,
-            restoredStorageSessionId,
-            session,
-            deferRestoreAskUserQuestionPrompt,
-            heldWorktreeOwnershipLockKey,
-            assertRuntimeGenerationOpen,
-            cleanupRestoredSession,
-            daemonLog,
-          });
-        }
-        if (!res.writable) {
-          await cleanupRestoredSession();
-          return;
-        }
-        try {
-          assertRuntimeGenerationOpen?.();
-        } catch (error) {
-          await cleanupRestoredSession();
-          throw error;
-        }
-        const deferredRestorePromptAdmitted =
-          deferRestoreAskUserQuestionPrompt &&
-          (runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
-            session.sessionId,
-            session.clientId,
-          ) ??
-            false);
-        if (deferredRestorePromptAdmitted) {
-          session.hasActivePrompt = true;
-        } else if (
-          deferRestoreAskUserQuestionPrompt &&
-          action === 'load' &&
-          !session.attached &&
-          !session.hasActivePrompt &&
-          runtime.provenance !== 'live-conversation'
-        ) {
-          try {
-            await reconcileDanglingPromptTerminals(
-              createWorkspaceRuntimeSessionService(runtime),
-              sessionId,
-            );
-          } catch {
-            // Best-effort: a failure leaves dangling prompts unknown
-            // (fail-closed) and must never fail the load itself.
-          }
-        }
-        try {
-          assertRuntimeGenerationOpen?.();
-        } catch (error) {
-          await cleanupRestoredSession();
-          throw error;
-        }
-        daemonLog?.info(
-          `session ${action}${session.attached ? ' (attached)' : ''}`,
-          { sessionId: session.sessionId, clientId: session.clientId },
-        );
-        // The load response embeds the replay snapshot inline; redact the
-        // skill bodies there just like the SSE egress does (#9234).
-        const responseSession = withPromptTerminals(
-          session,
-          action === 'load'
-            ? readRecentPromptTerminals(
-                createWorkspaceRuntimeSessionService(runtime),
-                sessionId,
-              )
-            : undefined,
-        );
-        res
-          .status(200)
-          .json(redactSdkSurfaceReplay(responseSession, runtime.trusted));
+            res
+              .status(200)
+              .json(redactSdkSurfaceReplay(responseSession, runtime.trusted));
+          },
+        });
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
@@ -4918,9 +4991,6 @@ export function registerSessionRoutes(
           route,
           sessionId,
         });
-      } finally {
-        sessionIdReservation?.release();
-        releaseWorktreeRestore?.();
       }
     };
 

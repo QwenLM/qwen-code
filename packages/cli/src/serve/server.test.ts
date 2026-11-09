@@ -18884,15 +18884,15 @@ describe('createServeApp', () => {
       },
     );
 
-    // The restore handler's `!res.writable` cleanup branch (kill on
-    // !attached, detach on attached) is line-for-line identical to
-    // the matching branch on `POST /session`; routing-side
-    // disconnect tests for that handler weren't added when the
-    // cleanup was originally introduced because the supertest +
-    // Node http close-event timing makes the assertion flaky in
-    // CI. The same constraint applies here. The cleanup behavior
-    // is exercised manually via the route handler closure shared
-    // between both routes in `restoreSessionHandler`.
+    // The restore's disconnect cleanup branch (kill on !attached,
+    // detach on attached; `restoreSession` asks the route's
+    // `isCallerConnected`, i.e. `res.writable`) mirrors the matching
+    // branch on `POST /session`; routing-side disconnect tests for
+    // that handler weren't added when the cleanup was originally
+    // introduced because the supertest + Node http close-event timing
+    // makes the assertion flaky in CI. The same constraint applies
+    // here. `/load` and `/resume` share the cleanup through
+    // `restoreSession`.
 
     it('restores worktree isolation on load when sidecar exists', async () => {
       const bridge = fakeBridge();
