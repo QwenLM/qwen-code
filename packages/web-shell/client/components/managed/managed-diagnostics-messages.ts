@@ -1,0 +1,133 @@
+import { useI18n } from '../../i18n';
+
+const messages = {
+  title: ['Session diagnostics', '会话诊断'],
+  resources: ['Resources', '资源'],
+  agents: ['Child agents', '子代理'],
+  description: [
+    'Persisted observations for this Session.',
+    '此会话已保存的观测数据。',
+  ],
+  refresh: ['Refresh', '刷新'],
+  loading: ['Loading…', '加载中…'],
+  failed: [
+    'Could not read diagnostics. Refresh to retry.',
+    '读取诊断失败，请刷新重试。',
+  ],
+  not_recorded: [
+    'No observation has been saved yet.',
+    '尚无已保存的观测数据。',
+  ],
+  unsupported: [
+    'This Session has no supported diagnostic records.',
+    '此会话暂无支持的诊断记录。',
+  ],
+  partial: [
+    'Some observations are unavailable or incomplete.',
+    '部分观测缺失或不完整。',
+  ],
+  unknown: ['Unknown', '未知'],
+  skills: ['Skills', 'Skills'],
+  details: ['Details', '明细'],
+  modelInvocable: ['Model invocation', '模型可调用'],
+  userInvocable: ['User invocation', '用户可调用'],
+  yes: ['Yes', '是'],
+  no: ['No', '否'],
+  base: ['Base configuration', '基础配置'],
+  extension: ['Extension', '扩展'],
+  independent: ['Independent server', '独立服务器'],
+  skill: ['Skill', 'Skill'],
+  command: ['Command', '命令'],
+  enabled: ['Selected', '已选用'],
+  disabled: ['Disabled', '已禁用'],
+  removed: ['Removed', '已移除'],
+  historical: ['Historical discovery', '历史发现结果'],
+  activeConfig: ['Last activated configuration', '上次激活的配置'],
+  pendingConfig: [
+    'The latest configuration change has not been activated.',
+    '最近一次配置变更尚未激活。',
+  ],
+  selectedRevision: ['Selected server revision', '选中的服务器版本'],
+  catalogServerRevision: [
+    'Discovered server revision',
+    '发现结果对应的服务器版本',
+  ],
+  lastAttempt: ['Last saved attempt', '上次保存的操作状态'],
+  attemptServerRevision: ['Attempt server revision', '上次操作的服务定义版本'],
+  lastExecution: ['Last saved execution evidence', '上次保存的执行状态'],
+  release: ['Release state', '释放状态'],
+  offlineRead: [
+    'Configuration and saved discovery do not prove that a server is currently connected.',
+    '配置及已保存的发现结果不代表服务器当前在线。',
+  ],
+  tools: ['Tools', '工具'],
+  prompts: ['Prompts', '提示模板'],
+  complete: ['Complete', '完整'],
+  discoveryFailed: ['Discovery failed', '发现失败'],
+  discoveryStale: ['Stale', '已过期'],
+  discoveryPartial: ['Partial', '部分结果'],
+  resourceTruncated: [
+    'Some resource entries were omitted to fit this snapshot.',
+    '部分快照资源条目因大小限制被省略。',
+  ],
+  resourceReadLimit: [
+    'The resource read limit was reached.',
+    '已达到资源读取上限。',
+  ],
+  configurationHistoryLimit: [
+    'Configuration history was limited.',
+    '配置历史超过读取上限。',
+  ],
+  mcpHistoryLimit: [
+    'MCP discovery history was limited.',
+    'MCP 发现历史超过读取上限。',
+  ],
+  extensionAttributionUnavailable: [
+    'Extension attribution is unavailable.',
+    '扩展归属信息不可用。',
+  ],
+  invalidResource: [
+    'A saved resource could not be validated.',
+    '部分已保存资源未通过校验。',
+  ],
+  resourceUnavailable: [
+    'A saved resource is unavailable.',
+    '部分已保存资源不可读取。',
+  ],
+  publicOutputLimit: [
+    'The response size limit was reached.',
+    '已达到响应大小上限。',
+  ],
+  childUnavailable: [
+    'Some child Sessions are unavailable to this viewer.',
+    '部分子会话对当前用户不可用。',
+  ],
+  descriptionUnavailable: [
+    'Some invocation descriptions are unavailable.',
+    '部分调用描述不可用。',
+  ],
+  invocationUnavailable: [
+    'Some invocation details are unavailable.',
+    '部分调用详情不可用。',
+  ],
+  unknownCoverage: [
+    'Additional observations are incomplete.',
+    '另有观测数据不完整。',
+  ],
+  empty: ['No entries in this snapshot.', '此快照没有条目。'],
+  openChild: ['Open child Session', '打开子会话'],
+  state: ['State', '状态'],
+  createdAt: ['Created', '创建时间'],
+  previous: ['Previous page', '上一页'],
+  next: ['Next page', '下一页'],
+  directOnly: [
+    'Direct invocations from this Session.',
+    '当前会话发起的直接调用。',
+  ],
+} as const;
+
+export function useManagedDiagnosticsText() {
+  const { language } = useI18n();
+  return (key: keyof typeof messages) =>
+    messages[key][language === 'zh-CN' ? 1 : 0];
+}
