@@ -3,7 +3,10 @@ import { ArrowLeftIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
-import type { ManagedExtensionsManagerPageProps } from '../managed/ManagedExtensionsManagerPage';
+import {
+  ManagedExtensionsManagerPage,
+  type ManagedExtensionsManagerPageProps,
+} from '../managed/ManagedExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
 import {
   ManagedMcpManagerPage,
@@ -205,7 +208,7 @@ export function PluginManagerPage({
       ) : null}
 
       <TabsContent value={activeTab} className="mt-0">
-        {activeTab === 'skills' && managedSkills && (
+        {activeTab === 'skills' && managedSkills && !managedExtensions && (
           <p className="my-2 text-sm text-muted-foreground">
             {t('managed.creationSkillsFromSettings')}
           </p>
@@ -216,6 +219,12 @@ export function PluginManagerPage({
             managed={managedExtensions}
             onClose={onClose}
             embedded={embedded}
+          />
+        ) : activeTab === 'skills' && managedExtensions ? (
+          <ManagedExtensionsManagerPage
+            {...managedExtensions}
+            view="skills"
+            onClose={onClose}
           />
         ) : activeTab === 'skills' ? (
           <SkillsManagerPage
@@ -233,7 +242,14 @@ export function PluginManagerPage({
             embedded={embedded}
           />
         ) : managedMcp ? (
-          <ManagedMcpManagerPage {...managedMcp} />
+          <ManagedMcpManagerPage
+            {...managedMcp}
+            onOpenExtensions={
+              managedExtensions
+                ? () => setActiveTab('extensions')
+                : managedMcp.onOpenExtensions
+            }
+          />
         ) : (
           <McpManagerPage
             key={`mcp-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}

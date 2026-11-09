@@ -298,6 +298,40 @@ export function createJavaManagedAgentProvider(
           request.idempotencyKey,
           request.signal,
         ),
+      importPackage: (workspaceId, extensionId, metadata, source, request) =>
+        client.importExtensionPackage(
+          workspaceId,
+          extensionId,
+          metadata,
+          source,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      inspect: (workspaceId, pin, request) =>
+        client.inspectExtensionPackage(workspaceId, pin, request.signal),
+      previewPackage: (workspaceId, metadata, source, request) =>
+        client.previewExtensionPackage(
+          workspaceId,
+          metadata,
+          source,
+          request.signal,
+        ),
+      lookupPackageOperation: (workspaceId, kind, key, request) =>
+        client.lookupExtensionPackageOperation(
+          workspaceId,
+          kind,
+          key,
+          request.signal,
+        ),
+      lookupApplyOperation: async (sessionId, key, request) =>
+        requireExtensionSnapshot(
+          await client.lookupExtensionApplyOperation(
+            sessionId,
+            key,
+            request.signal,
+          ),
+          sessionId,
+        ),
       settings: (workspaceId, extensionId, request) =>
         client.getExtensionSettings(workspaceId, extensionId, request.signal),
       saveSettings: (workspaceId, extensionId, revision, values, request) =>
@@ -399,6 +433,26 @@ export function createJavaManagedAgentProvider(
       },
     },
     diagnostics: {
+      async getActivityStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getActivityStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listActivity(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listActivity(
+            {
+              sessionId,
+              kind: request.kind,
+              cursor: request.cursor,
+              limit: request.limit,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
       async getContextUsage(sessionId, request) {
         return requireDiagnosticSnapshot(
           await client.getDiagnosticContextUsage(sessionId, request.signal),

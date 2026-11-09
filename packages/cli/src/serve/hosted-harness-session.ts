@@ -6,6 +6,10 @@
 
 import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import {
+  enableManagedExecutionDiagnostics,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import {
   parsePublicChildModelRoute,
   type PublicChildExtensionAgent,
   type PublicChildModelRoute,
@@ -173,7 +177,14 @@ import {
   parseToolResultManifestBytes,
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
+  MANAGED_MESSAGE_KIND,
+  readManagedMessageBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
+  HostedRestoreKeptBytes,
+  readerWithVerified,
+} from './hosted-restore-kept-bytes.js';
 import {
   isChildSessionRun,
   parseChildRun,
@@ -199,6 +210,7 @@ import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   isChildNotificationSource,
+  managedSessionDurableRefsEqual,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionCommitRejectedError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -2686,8 +2698,52 @@ async function verifyWorkspaceRestore(
   toolResults: DurableToolResultResourceStore,
   throughSequence: number,
 ): Promise<boolean> {
-  const { authority, resources, sink } = session.managed;
-  const segmentStore = new ResourceToolResultSegmentStore(toolResults);
+  const { incomplete, messages } = await checkWorkspaceRestore(
+    session,
+    preverified,
+    toolResults,
+    throughSequence,
+  );
+  // Every check passed. The message bodies the checks kept go to the
+  // projection's cache, so projecting the history does not read them again.
+  for (const { ref, bytes } of messages.entries())
+    session.managed.sink.rememberMessageBody(ref, bytes);
+  messages.clear();
+  await session.managed.sink.project(throughSequence);
+  return incomplete;
+}
+
+/**
+ * The checks of `verifyWorkspaceRestore`. Returns whether a publication is
+ * incomplete, and the verified message bodies it kept for the projection.
+ * Everything else the checks hold, the kept manifests among it, is released
+ * when they return, before the projection fills the shared body cache.
+ */
+async function checkWorkspaceRestore(
+  session: HostedSession,
+  preverified: ReadonlyMap<string, ManagedSessionDurableRef>,
+  toolResults: DurableToolResultResourceStore,
+  throughSequence: number,
+): Promise<{ incomplete: boolean; messages: HostedRestoreKeptBytes }> {
+  const { authority, resources } = session.managed;
+  // Checkpoints are parsed from the bytes their verification read. The
+  // verified bytes of manifests and of message bodies are kept, each within
+  // its own budget: the manifests serve the manifest loop and the manifest
+  // reads of the content checks below, and the message bodies are returned
+  // for the projection.
+  const keptManifests = new HostedRestoreKeptBytes();
+  const keptMessages = new HostedRestoreKeptBytes();
+  const segmentStore = new ResourceToolResultSegmentStore({
+    // The checks only read through it.
+    publish: () =>
+      Promise.reject(new Error('The restore verification publishes nothing.')),
+    read: (ref) => {
+      const bytes = keptManifests.get(ref);
+      return bytes !== undefined
+        ? Promise.resolve(bytes)
+        : toolResults.read(ref);
+    },
+  });
   const manifests = new Map<string, ManagedSessionDurableRef>();
   // What opening the Session verified is checked for conflicting references
   // but not read again, except the kinds this verification descends into,
@@ -2706,12 +2762,7 @@ async function verifyWorkspaceRestore(
   function readRef(ref: ManagedSessionDurableRef): Promise<void> {
     const previous = verified.get(ref.resourceId);
     if (previous) {
-      if (
-        previous.ref.kind !== ref.kind ||
-        previous.ref.schemaVersion !== ref.schemaVersion ||
-        previous.ref.byteLength !== ref.byteLength ||
-        previous.ref.digest !== ref.digest
-      )
+      if (!managedSessionDurableRefsEqual(previous.ref, ref))
         return Promise.reject(
           new Error('Hosted resource references conflict.'),
         );
@@ -2723,8 +2774,11 @@ async function verifyWorkspaceRestore(
   }
   async function verifyRef(ref: ManagedSessionDurableRef): Promise<void> {
     const bytes = await resources.read(ref);
-    if (ref.kind === 'managed-tool-result-manifest')
+    if (ref.kind === MANAGED_MESSAGE_KIND) keptMessages.keep(ref, bytes);
+    if (ref.kind === 'managed-tool-result-manifest') {
       manifests.set(ref.resourceId, ref);
+      keptManifests.keep(ref, bytes);
+    }
     if (ref.kind === 'managed-todo_state') {
       parseHostedTodoState(bytes);
       const previous = object(JSON.parse(bytes.toString('utf8')))?.[
@@ -2806,7 +2860,12 @@ async function verifyWorkspaceRestore(
         );
     }
     if (ref.kind === 'managed-checkpoint') {
-      const checkpoint = await readHarnessCheckpoint(resources, ref);
+      // The checkpoint itself comes from the bytes just read; only its
+      // history pages, if any, are read through the Store.
+      const checkpoint = await readHarnessCheckpoint(
+        readerWithVerified(resources, ref, bytes),
+        ref,
+      );
       refs.push(...collectNestedResourceRefs(ref, bytes));
       if (
         checkpoint.resume.fileHistoryRef ||
@@ -3040,7 +3099,9 @@ async function verifyWorkspaceRestore(
     Array<{ ref: ManagedSessionDurableRef; manifest: ToolResultManifest }>
   >();
   for (const ref of manifests.values()) {
-    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
+    const manifest = parseToolResultManifestBytes(
+      keptManifests.get(ref) ?? (await toolResults.read(ref)),
+    );
     if (detached.get(manifest.executionCallId) !== undefined) {
       let members = lineages.get(manifest.executionCallId);
       if (members === undefined) {
@@ -3091,8 +3152,7 @@ async function verifyWorkspaceRestore(
     if (terminal.manifest.captureStatus === 'complete')
       await verifyContents(terminal.ref, terminal.manifest);
   }
-  await sink.project(throughSequence);
-  return incomplete;
+  return { incomplete, messages: keptMessages };
 }
 
 /**
@@ -3943,13 +4003,14 @@ async function executeHostedTurn(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant' && deltas) {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -4345,7 +4406,11 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): { owns: (id: string) => boolean } {
+): {
+  owns: (id: string) => boolean;
+  accepting: () => boolean;
+  beginOperation?: () => () => void;
+} {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
   // daemon owns them and stops them at shutdown.
@@ -6022,6 +6087,8 @@ export function registerHostedHarnessSessionRoutes(
       });
       if (stores.supportsModelDiagnostics?.())
         await enableManagedSessionDiagnostics(managed);
+      if (stores.supportsExecutionDiagnostics?.())
+        await enableManagedExecutionDiagnostics(managed);
       if (!acceptingWork()) {
         await managed.close();
         error(res, 409, 'hosted_harness_quiescing');
@@ -11277,13 +11344,14 @@ export function registerHostedHarnessSessionRoutes(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant') {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -13582,6 +13650,8 @@ export function registerHostedHarnessSessionRoutes(
     void close(req, res, true);
   });
   return {
+    accepting: acceptingWork,
+    beginOperation: instance?.beginOperation,
     owns: (id) =>
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),
