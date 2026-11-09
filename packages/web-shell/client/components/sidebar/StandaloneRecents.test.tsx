@@ -127,6 +127,7 @@ describe('StandaloneRecents', () => {
       currentSessionReady?: boolean;
       refreshKey?: number;
       searchQuery?: string;
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       onError?: (error: unknown, message: string) => void;
       onRenameSession?: (sessionId: string, displayName: string) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
@@ -171,6 +172,7 @@ describe('StandaloneRecents', () => {
           currentSessionReady={options.currentSessionReady}
           refreshKey={options.refreshKey}
           searchQuery={options.searchQuery}
+          sortBy={options.sortBy}
           onNewSession={options.onNewSession}
           renderSession={renderSession}
           onLoadSession={options.onLoadSession ?? vi.fn()}
@@ -236,6 +238,55 @@ describe('StandaloneRecents', () => {
       archiveState: 'active',
       pageSize: 50,
     });
+  });
+
+  it('never pages with a cursor minted under the previous sort', async () => {
+    let release: (() => void) | undefined;
+    let cursor = 'cursor-from-updated-at';
+    list.mockImplementation(
+      async (options: { sortBy?: string; cursor?: string }) => {
+        if (options.sortBy !== 'lastUserPromptAt')
+          return {
+            sessions: [summary('active', 'Active chat')],
+            nextCursor: cursor,
+          };
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return {
+          sessions: [summary('question', 'Question chat')],
+          nextCursor: cursor,
+        };
+      },
+    );
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showAllSessions',
+      );
+    const stalePageCalls = () =>
+      list.mock.calls.filter(
+        ([options]) =>
+          options.cursor !== undefined && options.sortBy === 'lastUserPromptAt',
+      );
+
+    await render();
+    expect(showMore()).toBeDefined();
+
+    await render({ sortBy: 'lastUserPromptAt' });
+    expect(showMore()).toBeUndefined();
+    await act(async () => showMore()?.click());
+    expect(stalePageCalls()).toHaveLength(0);
+    await act(async () => release?.());
+
+    // A refresh keeps the loaded pages, so the cursor survives the round trip
+    // and only the in-flight guard can hold the button.
+    cursor = 'cursor-from-last-user-prompt-at';
+    await render({ sortBy: 'lastUserPromptAt', refreshKey: 1 });
+    expect(showMore()?.disabled).toBe(true);
+    const beforeClick = list.mock.calls.length;
+    await act(async () => showMore()?.click());
+    expect(list.mock.calls).toHaveLength(beforeClick);
+    await act(async () => release?.());
   });
 
   it.each(['active', 'archived'] as const)(
