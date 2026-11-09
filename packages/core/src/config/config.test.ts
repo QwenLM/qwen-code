@@ -77,7 +77,8 @@ import {
   resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../core/tokenLimits.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
@@ -1206,6 +1207,7 @@ describe('Server Config (config.ts)', () => {
 
     const subscriptionConfig = async () => {
       const config = makeConfig({
+        cliVersion: '0.0.0-test',
         model: 'qwen3.8-max',
         generationConfig: { reasoning: { effort: 'high' } },
         modelProvidersConfig: { openai: [{ id: 'other-model' }] },
@@ -1214,22 +1216,109 @@ describe('Server Config (config.ts)', () => {
       return config;
     };
 
+    it.each([
+      ['old-project-model', 'qwen3.8-flash', 'qwen3.8-flash'],
+      ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.8-max'],
+      ['old-project-model', 'removed-user-model', undefined],
+    ])(
+      'resolves startup model %s with saved user fallback %s',
+      async (projectModel, fallback, expectedModel) => {
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: projectModel,
+        });
+        const refresh = config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+        );
+        if (expectedModel) {
+          await refresh;
+          expect(config.getContentGeneratorConfig()?.model).toBe(expectedModel);
+          expect(config.getWarnings()).toEqual([]);
+        } else {
+          await expect(refresh).rejects.toThrow(
+            `The selected model, ${projectModel}, is no longer available. Run /model to choose another model.`,
+          );
+          expect(config.getModel()).toBe(projectModel);
+        }
+        expect(
+          QwenSubscriptionSession.prototype.getModels,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('initializes an API model when switching from a signed-out subscription', async () => {
+      const config = makeConfig({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'api-model',
+              generationConfig: { contextWindowSize: 64000 },
+            },
+          ],
+        },
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeUndefined();
+
+      await config.switchModel(AuthType.USE_OPENAI, 'api-model', {
+        initializeIfNeeded: true,
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeDefined();
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.USE_OPENAI,
+        model: 'api-model',
+        contextWindowSize: 64000,
+      });
+    });
+
     it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockResolvedValueOnce({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        modelMetadata: [
+          { id: 'qwen3.8-flash', modalities: {}, contextWindowSize: 262144 },
+        ],
+        cached: false,
+      });
       const config = await subscriptionConfig();
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(
+        config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+      ).toContainEqual(
+        expect.objectContaining({
+          id: 'qwen3.8-flash',
+          modalities: {},
+          contextWindowSize: 262144,
+        }),
+      );
       expect(config.getContentGeneratorConfig()).toMatchObject({
         model: 'qwen3.8-flash',
-        modalities: { image: true, video: true },
-        contextWindowSize: config
-          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
-          .find((model) => model.id === 'qwen3.8-flash')?.contextWindowSize,
+        contextWindowSize: 262144,
         reasoning: { effort: 'high' },
       });
+      expect(config.getContentGeneratorConfig()?.modalities).toEqual({});
+      expect(
+        buildAgentContentGeneratorConfig(config, 'qwen3.8-max', {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        }).contextWindowSize,
+      ).toBe(tokenLimit('qwen3.8-max'));
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
 
       expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
         1,
+      );
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledWith(
+        undefined,
+        '0.0.0-test',
       );
       expect(createContentGenerator).toHaveBeenCalledTimes(4);
       expect(config.getContentGeneratorConfig()).toMatchObject({
