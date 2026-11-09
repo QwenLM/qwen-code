@@ -85,7 +85,10 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
 // The patched Zod 4 upgrade (#16434) measures 2,078,173 bytes. Rebuilding
 // the same candidate with Zod 3 alone measures 2,034,679 (+43,494 bytes);
 // the forbidden-input guard still passes. Leave less than 3 KB of headroom.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_081_000;
+// Merged main d32faa247d (personal memory #16488 and the transcript work
+// since the last measurement) grows the same candidate to 2,108,024 bytes;
+// the forbidden-input guard still passes. Keep under 3 KB of headroom.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_111_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
