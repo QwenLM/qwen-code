@@ -56,6 +56,23 @@ async function fixture(t) {
   let rejectFirstDelete = false;
   let jitFailure = null;
   let listFailure = null;
+  const layerlessContainers = new Set();
+  const goneContainers = new Set();
+  const dockerError = (message, stderr) =>
+    Object.assign(new Error(message), { exitCode: 1, status: 0, stderr });
+  const storageFailure = (id) => {
+    if (goneContainers.has(id))
+      return dockerError(
+        'docker failed (exit 1)',
+        `Error response from daemon: No such container: ${id}`,
+      );
+    if (layerlessContainers.has(id))
+      return dockerError(
+        'docker failed (exit 1)',
+        `Error response from daemon: RWLayer of container ${id} is unexpectedly nil`,
+      );
+    return null;
+  };
   const labelsFromArgs = (args) => {
     const labels = {};
     for (let i = 0; i < args.length; i += 1) {
@@ -151,8 +168,24 @@ async function fixture(t) {
       containers.set(id, { labels: labelsFromArgs(args) });
       return id;
     }
-    if (args[0] === 'logs') return 'runner log';
+    if (args[0] === 'logs') {
+      const failure = storageFailure(args[args.length - 1]);
+      if (failure) throw failure;
+      return 'runner log';
+    }
+    if (args[0] === 'cp') {
+      const failure = storageFailure(String(args[1]).split(':')[0]);
+      if (failure) throw failure;
+      return '';
+    }
     if (args[0] === 'rm') {
+      const failure = storageFailure(args[args.length - 1]);
+      if (failure) {
+        // A daemon-dropped container also disappears from later ps calls.
+        if (goneContainers.has(args[args.length - 1]))
+          containers.delete(args[args.length - 1]);
+        throw failure;
+      }
       if (failRemove) throw new Error('docker unavailable');
       if (!keepContainerAfterRemove) containers.delete(args[args.length - 1]);
       return '';
@@ -222,6 +255,15 @@ async function fixture(t) {
       const id = `container-orphan-${containers.size}`;
       containers.set(id, { labels });
       return id;
+    },
+    setLayerless: (id) => {
+      layerlessContainers.add(id);
+    },
+    setGone: (id) => {
+      goneContainers.add(id);
+    },
+    removeContainerRecord: (id) => {
+      containers.delete(id);
     },
   };
 }
@@ -2066,4 +2108,78 @@ test('a changed failure message re-arms the stall alert for the new episode', as
   );
   assert.match(found[0], /docker unavailable/);
   assert.match(found[1], /network unreachable/);
+});
+
+test('a layerless container skips diagnostics and defers removal with a clear reason', async (t) => {
+  // hz4 incident: after a dockerd restart some containers lost their
+  // RWLayer, so logs/cp/rm all failed with the same opaque `docker failed
+  // (exit 1)` every cycle. Cleanup must not waste the diagnostic calls on
+  // a container that can never yield them, and the retry message must
+  // name the real condition instead of a bare exit code.
+  const f = await fixture(t);
+  const orphan = f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setLayerless(orphan);
+  await assert.rejects(
+    createManager(f.config, { command: f.command }).cycle(1),
+    /has no storage layer; removal deferred/,
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'cp').length,
+    0,
+    'the _diag archive is not attempted once the layer is known lost',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+    'removal is still attempted once per cycle',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    0,
+    'no replacement while the wedged record remains',
+  );
+});
+
+test('a layerless container self-heals once Docker drops the record', async (t) => {
+  const f = await fixture(t);
+  const orphan = f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  f.setLayerless(orphan);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /has no storage layer/);
+  // containerd finishes the task deletion and dockerd drops the record.
+  f.removeContainerRecord(orphan);
+  await manager.cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenished once the wedged record is gone',
+  );
+});
+
+test('a container the daemon already dropped is treated as removed, not a failure', async (t) => {
+  const f = await fixture(t);
+  const orphan = f.addOrphanContainer({
+    'qwen.pool': 'trial',
+    'qwen.slot': '1',
+    'qwen.instance': 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+  });
+  // A stale ps listing: every follow-up call reports the container gone.
+  f.setGone(orphan);
+  await createManager(f.config, { command: f.command }).cycle(1);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+    'slot replenished in the same cycle',
+  );
 });

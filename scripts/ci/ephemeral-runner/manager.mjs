@@ -57,6 +57,7 @@ export function command(
         );
         error.status = status;
         error.exitCode = code;
+        error.stderr = stderr.slice(0, 8192);
         reject(error);
       }
     });
@@ -486,7 +487,16 @@ export function createManager(config, dependencies = {}) {
         }
       }
     }
+    // A container whose storage layer is gone (dockerd restart left
+    // `RWLayer ... is unexpectedly nil`) can never yield logs or a `_diag`
+    // archive, and it may vanish from under us mid-cleanup. Detect that
+    // from stderr instead of retrying every diagnostic call each cycle.
+    const layerless = (error) =>
+      /RWLayer of container .* is unexpectedly nil/.test(error?.stderr || '');
+    const alreadyGone = (error) =>
+      /No such container/i.test(error?.stderr || '');
     for (const id of containers) {
+      let diagnosticsPossible = true;
       try {
         const logs = await run('docker', ['logs', '--tail', '10000', id]);
         await writeFile(
@@ -498,30 +508,52 @@ export function createManager(config, dependencies = {}) {
           { mode: 0o600 },
         );
         await pruneLogs();
-      } catch {
-        log(`slot ${slot}: container logs unavailable`);
+      } catch (error) {
+        if (layerless(error) || alreadyGone(error)) {
+          diagnosticsPossible = false;
+          log(
+            `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+          );
+        } else log(`slot ${slot}: container logs unavailable`);
+      }
+      if (diagnosticsPossible) {
+        try {
+          const archive = await run(
+            'docker',
+            ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
+            { binary: true },
+          );
+          await writeFile(
+            join(
+              logDir,
+              `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
+            ),
+            archive,
+            { mode: 0o600 },
+          );
+          await pruneLogs();
+        } catch (error) {
+          if (layerless(error) || alreadyGone(error))
+            log(
+              `slot ${slot}: container ${id.slice(0, 12)} lost its storage layer or is already gone; skipping diagnostics`,
+            );
+          else
+            log(
+              `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
+            );
+        }
       }
       try {
-        const archive = await run(
-          'docker',
-          ['cp', `${id}:/home/node/actions-runner/_diag`, '-'],
-          { binary: true },
-        );
-        await writeFile(
-          join(
-            logDir,
-            `${state?.name || `qwen-${config.poolId}-${slot}-orphan`}-${id.slice(0, 12)}.tar`,
-          ),
-          archive,
-          { mode: 0o600 },
-        );
-        await pruneLogs();
-      } catch {
-        log(
-          `slot ${slot}: runner diagnostics unavailable or larger than 4 MiB`,
-        );
+        await run('docker', ['rm', '-f', '-v', id]);
+      } catch (error) {
+        if (alreadyGone(error)) continue;
+        if (layerless(error))
+          throw new Error(
+            `container ${id.slice(0, 12)} has no storage layer; removal deferred until Docker drops the record`,
+            { cause: error },
+          );
+        throw error;
       }
-      await run('docker', ['rm', '-f', '-v', id]);
     }
     if ((await listContainers(slot)).length)
       throw new Error('Container cleanup failed');
