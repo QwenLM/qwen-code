@@ -325,6 +325,9 @@ describe('standalone runtime cache wiring', () => {
     expect(script.indexOf('sweepRuntimeCache(cacheDir, used)')).toBeGreaterThan(
       script.lastIndexOf('await fetchArchive('),
     );
+    expect(script).toMatch(
+      /spawnSync\(node, \[script\], \{\s*env: \{\s*\.\.\.process\.env,\s*PINNED_NODE: node,\s*PINNED_BUN: bun,\s*NODE_USE_ENV_PROXY: '0',\s*\}/,
+    );
   });
 });
 

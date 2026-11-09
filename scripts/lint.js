@@ -403,11 +403,15 @@ export function runYamllint() {
 // enforcing them. `npm run format` remains the way to fix what this
 // reports.
 // The experimental CLI defaults to host cores, oversubscribing CI containers.
-// Keep both the full and incremental lanes within the pool's four-CPU budget.
+// In CI, keep both lanes within the pool's four-CPU budget.
 export function runPrettier() {
   console.log('\nRunning Prettier...');
   if (
-    !runCommand('prettier --experimental-cli --check . --parallel-workers 4')
+    !runCommand(
+      process.env['CI']
+        ? 'prettier --experimental-cli --check . --parallel-workers 4'
+        : 'prettier --experimental-cli --check .',
+    )
   ) {
     process.exit(1);
   }
@@ -578,8 +582,7 @@ async function main() {
               '--experimental-cli',
               '--check',
               '--ignore-unknown',
-              '--parallel-workers',
-              '4',
+              ...(process.env['CI'] ? ['--parallel-workers', '4'] : []),
             ],
             scope.prettier,
           ),

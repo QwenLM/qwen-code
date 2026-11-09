@@ -101,7 +101,8 @@ side_threads="$(half_cap "${VITEST_MAX_THREADS:-}")"
   standalone_rc=0
   # A sharded run skips it on every shard but one.
   if [ -z "${QWEN_CI_SKIP_STANDALONE_RUNTIMES:-}" ]; then
-    npm run test:standalone:runtimes:ci
+    # Node fetch does not use the runner's HTTP(S)_PROXY unless opted in.
+    NODE_USE_ENV_PROXY=1 npm run test:standalone:runtimes:ci
     standalone_rc=$?
   fi
   VITEST_MAX_FORKS="$side_forks" VITEST_MAX_THREADS="$side_threads" \

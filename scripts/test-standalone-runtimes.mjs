@@ -1054,7 +1054,12 @@ async function ci() {
     // if neither had been used for a week.
     if (cacheDir) sweepRuntimeCache(cacheDir, used);
     const result = spawnSync(node, [script], {
-      env: { ...process.env, PINNED_NODE: node, PINNED_BUN: bun },
+      env: {
+        ...process.env,
+        PINNED_NODE: node,
+        PINNED_BUN: bun,
+        NODE_USE_ENV_PROXY: '0',
+      },
       stdio: 'inherit',
       timeout: CI_TIMEOUT_MS,
     });

@@ -1321,6 +1321,13 @@ jobs:
             console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
           '
 
+      - name: 'Prepare terminal fonts for unit tests'
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        timeout-minutes: 3
+        env:
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+        run: 'bash .github/scripts/ecs-runner/install-qwen-font-baseline.sh --user-terminal'
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"

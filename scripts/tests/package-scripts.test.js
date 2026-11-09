@@ -1252,6 +1252,9 @@ describe('package scripts', () => {
     );
     expect(lanes).toContain('npm run test:ci "${side_workspaces[@]}" -- "$@"');
     expect(lanes).toContain('npm run test:scripts:unit -- "$@"');
+    expect(lanes).toContain(
+      'NODE_USE_ENV_PROXY=1 npm run test:standalone:runtimes:ci',
+    );
   });
 
   it('prints the side lane of a test step killed before its replay', () => {
@@ -1282,6 +1285,29 @@ describe('package scripts', () => {
     ).toBeLessThan(
       job.indexOf("- name: 'Print the side lane of a killed test step'"),
     );
+  });
+
+  it('prepares terminal fonts in the isolated unit-test HOME', () => {
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
+    );
+    const prepare = getWorkflowStep(
+      job,
+      'Prepare terminal fonts for unit tests',
+    );
+    const tests = getWorkflowStep(job, 'Run tests and generate reports');
+    const isolatedHome = "HOME: '${{ runner.temp }}/qwen-ci-home'";
+    expect(prepare).toContain(isolatedHome);
+    expect(tests).toContain(isolatedHome);
+    expect(prepare).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
+    expect(prepare).toContain("runner.environment == 'self-hosted'");
+    expect(prepare).toContain(
+      'bash .github/scripts/ecs-runner/install-qwen-font-baseline.sh --user-terminal',
+    );
+    expect(prepare).not.toContain('continue-on-error');
+    expect(prepare).not.toContain('sudo');
+    expect(job.indexOf(prepare)).toBeLessThan(job.indexOf(tests));
   });
 
   it('drops DAC capabilities for root unit tests on every CI command', () => {
@@ -1357,6 +1383,9 @@ describe('package scripts', () => {
             '  printf "%s" "$STUB_WORKSPACES"; exit "$STUB_PKG_GET_RC"',
             'fi',
             'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
+            'if [ "$1 $2" = "run test:standalone:runtimes:ci" ]; then',
+            '  printf "%s" "$NODE_USE_ENV_PROXY" > "$STUB_CALLS.standalone-proxy"',
+            'elif [ -n "$NODE_USE_ENV_PROXY" ]; then exit 8; fi',
             // The main lane's suites and the side lane's workspaces each wait
             // for the other to start, so a side lane run before or after the
             // main lane, rather than beside it, fails here.
@@ -1432,6 +1461,7 @@ describe('package scripts', () => {
               // The script sets the heap cap itself where it wants one; the
               // other commands run with no NODE_OPTIONS, not the caller's.
               NODE_OPTIONS: '',
+              NODE_USE_ENV_PROXY: '',
               VITEST_MAX_FORKS: forks,
               VITEST_MAX_THREADS: threads,
               // In CI this suite runs inside the side lane, whose own log
@@ -1474,6 +1504,12 @@ describe('package scripts', () => {
         // The two lanes run at once, so only the side lane's order is fixed.
         const passing = run('passing');
         expect(passing.rc).toBe('0');
+        expect(
+          readFileSync(
+            path.join(dir, 'passing.calls.standalone-proxy'),
+            'utf8',
+          ),
+        ).toBe('1');
         expect([...passing.calls].sort()).toEqual(
           [mainSuites, sideWorkspaces, standalone, scriptsUnit].sort(),
         );

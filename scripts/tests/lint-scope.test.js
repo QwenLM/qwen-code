@@ -369,6 +369,7 @@ describe.skipIf(process.platform === 'win32')(
             GITHUB_RUN_ID: '1',
             GITHUB_RUN_ATTEMPT: '1',
             GITHUB_JOB: 'lint-scope-test',
+            CI: 'true',
             LINT_BASE_SHA: baseSha,
             LINT_LOG: log,
             FAIL_LINTER: fail,
@@ -783,22 +784,44 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.calls).toEqual([{ name: 'npm', args: ['run', 'lint:ci'] }]);
     });
 
-    it('bounds full Prettier worker count when no opt-in is supplied', () => {
+    it.each([
+      ['CI', 'true', ['--parallel-workers', '4']],
+      ['developer', undefined, []],
+    ])('uses the %s worker pool for full Prettier', (_name, ci, workers) => {
       baseSha = '';
-      const result = run(['prettier']);
+      const result = run(['prettier'], '', lintScript, { env: { CI: ci } });
       expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toEqual([
         {
           name: 'prettier',
-          args: [
-            '--experimental-cli',
-            '--check',
-            '.',
-            '--parallel-workers',
-            '4',
-          ],
+          args: ['--experimental-cli', '--check', '.', ...workers],
         },
       ]);
     });
+
+    it.each([
+      ['CI', 'true', ['--parallel-workers', '4']],
+      ['developer', undefined, []],
+    ])(
+      'uses the %s worker pool for incremental Prettier',
+      (_name, ci, workers) => {
+        put('changed.ts');
+        commit();
+        const result = run(['prettier'], '', lintScript, { env: { CI: ci } });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.calls).toEqual([
+          {
+            name: 'prettier',
+            args: [
+              '--experimental-cli',
+              '--check',
+              '--ignore-unknown',
+              ...workers,
+              './changed.ts',
+            ],
+          },
+        ]);
+      },
+    );
   },
 );

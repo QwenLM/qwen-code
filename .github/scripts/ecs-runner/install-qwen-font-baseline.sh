@@ -9,9 +9,53 @@
 #
 # Idempotent: re-running installs nothing and only re-verifies.
 #
-# Usage: install-qwen-font-baseline.sh [--with-metrics]
+# Usage: install-qwen-font-baseline.sh [--with-metrics | --user-terminal]
 # Exit: 0 = host is at the baseline, 1 = setup or verification failed.
 set -euo pipefail
+
+# The unit job uses an isolated HOME, and slim containers may have neither
+# fonts nor fontconfig's CLI tools. Give sharp both weights without elevation.
+if [ "${1:-}" = --user-terminal ]; then
+  font_dir="${HOME}/.local/share/fonts/qwen-ci-terminal"
+  config_dir="${HOME}/.config/qwen-ci-terminal"
+  mkdir -p "$font_dir" "$config_dir"
+  system_fonts=/usr/share/fonts/truetype/dejavu
+  if [ -s "$system_fonts/DejaVuSansMono.ttf" ] && [ -s "$system_fonts/DejaVuSansMono-Bold.ttf" ]; then
+    cp "$system_fonts/DejaVuSansMono.ttf" "$system_fonts/DejaVuSansMono-Bold.ttf" "$font_dir/"
+  elif [ ! -s "$font_dir/DejaVuSansMono.ttf" ] || [ ! -s "$font_dir/DejaVuSansMono-Bold.ttf" ]; then
+    font_stage="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-terminal-fonts.XXXXXX")"
+    trap 'rm -rf -- "$font_stage"' EXIT
+    mkdir -p "$font_stage/lists/partial" "$font_stage/packages"
+    apt-get -o "Dir::State::lists=$font_stage/lists" update -qq
+    # Bookworm includes Mono in core; newer Debian/Ubuntu split it out.
+    package=fonts-dejavu-core
+    if apt-cache -o "Dir::State::lists=$font_stage/lists" show fonts-dejavu-mono >/dev/null 2>&1; then
+      package=fonts-dejavu-mono
+    fi
+    (
+      cd "$font_stage/packages"
+      apt-get -o "Dir::State::lists=$font_stage/lists" download "$package"
+    )
+    for archive in "$font_stage"/packages/*.deb; do
+      dpkg-deb --extract "$archive" "$font_stage/extracted"
+    done
+    cp "$font_stage/extracted/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf" \
+      "$font_stage/extracted/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf" "$font_dir/"
+  fi
+  # Relative XML paths also handle spaces and XML metacharacters in HOME.
+  cat > "$config_dir/fonts.conf" <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <dir prefix="relative">../../.local/share/fonts/qwen-ci-terminal</dir>
+  <cachedir prefix="xdg">fontconfig</cachedir>
+</fontconfig>
+EOF
+  printf 'FONTCONFIG_FILE=%s\n' "$config_dir/fonts.conf" >> "${GITHUB_ENV:?}"
+  echo 'Terminal fonts ready: DejaVu Sans Mono regular and bold'
+  exit 0
+fi
 
 packages=(fonts-dejavu-core fonts-dejavu-mono)
 
