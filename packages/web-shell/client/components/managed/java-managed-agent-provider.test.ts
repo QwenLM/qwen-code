@@ -1113,7 +1113,7 @@ describe('createJavaManagedAgentProvider', () => {
     ).toThrow('productScope');
   });
 
-  it('preserves model, worktree and extension pins on both creation paths', async () => {
+  it('preserves explicit memory, model, worktree and extension pins on both creation paths', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockImplementation(async () =>
@@ -1128,6 +1128,7 @@ describe('createJavaManagedAgentProvider', () => {
     const request = {
       agentId: 'qwen-code',
       modelId: 'model-b',
+      memoryStoreId: 'memstore_personal',
       workspaceId: 'ws',
       cwdRelative: '.',
       approvalMode: 'yolo' as const,
@@ -1151,6 +1152,7 @@ describe('createJavaManagedAgentProvider', () => {
         expect.objectContaining({
           agentId: 'qwen-code',
           modelId: 'model-b',
+          memoryStoreId: 'memstore_personal',
           approvalMode: 'yolo',
           worktree: request.worktree,
           extensionPins: request.extensionPins,
@@ -1536,6 +1538,34 @@ describe('createJavaManagedAgentProvider', () => {
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('forwards personal memory only when explicitly selected', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ sessionId: 's', turnId: 't' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await provider.createSession(
+      { text: 'hello', memoryStoreId: 'memstore_personal' },
+      { clientId: 'client', idempotencyKey: 'with-memory' },
+    );
+    await provider.createSession(
+      { text: 'hello' },
+      { clientId: 'client', idempotencyKey: 'without-memory' },
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body))).toMatchObject(
+      {
+        memoryStoreId: 'memstore_personal',
+      },
+    );
+    expect(
+      JSON.parse(String(fetchImpl.mock.calls[1]![1]?.body)),
+    ).not.toHaveProperty('memoryStoreId');
+  });
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi

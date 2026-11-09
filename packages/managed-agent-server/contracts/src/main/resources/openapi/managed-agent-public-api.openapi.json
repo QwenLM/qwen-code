@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.104.0",
+    "version": "1.105.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
   },
   "servers": [
@@ -7527,6 +7527,79 @@
         "summary": "Read recent current Session Items and page toward older Items"
       }
     },
+    "/v1/agents/memory-stores": {
+      "post": {
+        "tags": ["Personal Memory"],
+        "operationId": "createPersonalMemoryStore",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Creates or returns the trusted actor's one personal Store. Requires memory enablement. The request cannot select an owner or tenant.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current authenticated user's personal memory resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryStore"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "get": {
+        "tags": ["Personal Memory"],
+        "operationId": "listPersonalMemoryStores",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists only the trusted actor's personal Store (zero or one).",
+        "responses": {
+          "200": {
+            "description": "Current authenticated user's personal memory resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryStoreList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/v1/agents/sessions/{sessionId}/context-usage": {
       "parameters": [
         {
@@ -9501,6 +9574,12 @@
             },
             "required": [],
             "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
+          },
+          "memory_store_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
           }
         }
       },
@@ -9746,6 +9825,14 @@
                 "type": "null"
               }
             ]
+          },
+          "memory_store_id": {
+            "type": "string",
+            "description": "The personal MemoryStore selected at creation; absent when memory is disabled."
+          },
+          "owner_only": {
+            "type": "boolean",
+            "description": "When true, only the owning actor with existing Workspace grants may access this Session. Private children inherit visibility without inheriting the Store binding."
           }
         }
       },
@@ -10541,6 +10628,12 @@
             },
             "required": [],
             "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
+          },
+          "memoryStoreId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
           }
         }
       },
@@ -18380,6 +18473,38 @@
           }
         },
         "required": ["workspaceId", "worktreeId", "idempotencyKey"]
+      },
+      "MemoryStore": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "created_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "description": "One personal MemoryStore per authenticated tenant and actor. Provider credentials and namespace are not exposed."
+      },
+      "MemoryStoreList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/MemoryStore"
+            }
+          }
+        }
       },
       "ManagedModelStatisticsBucket": {
         "type": "object",
