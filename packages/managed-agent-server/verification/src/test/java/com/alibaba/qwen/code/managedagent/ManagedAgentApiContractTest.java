@@ -514,7 +514,7 @@ class ManagedAgentApiContractTest {
             }
         });
         assertThat(uncovered)
-                .as("every public controller route must satisfy PublicSurface.covers")
+                .as("every public route must satisfy PublicSurface.covers")
                 .isEmpty();
     }
 
@@ -3441,6 +3441,35 @@ class ManagedAgentApiContractTest {
                 query + ",\"idempotencyKey\":\"extension-apply-web\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}");
         exchange(drift, "webShellSessionExtensionsContinue", 409, post(WEB_SHELL + "/session-extensions/continue").header(TENANT, tenant).principal(actor), control);
         exchange(drift, "webShellSessionExtensionsRecoverPrevious", 409, post(WEB_SHELL + "/session-extensions/recover-previous").header(TENANT, tenant).principal(actor), control);
+        String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest + "\",\"compilerVersion\":1,"
+                        + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}")
+                        .getBytes(StandardCharsets.UTF_8));
+        exchange(drift, "importWorkspaceExtensionPackage", 401, post(base + "/imports")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "import").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "previewWorkspaceExtensionImport", 401, post(base + "/imports/preview")
+                .header(TENANT, tenant).param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "importWebShellExtensionPackage", 401, post(web + "/imports")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "web-import")
+                .param("workspaceId", "ws-default").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "previewWebShellExtensionImport", 401, post(web + "/imports/preview")
+                .header(TENANT, tenant).param("workspaceId", "ws-default").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "inspectWorkspaceExtensionPackage", 401, get(base + "/" + id + "/packages/1/inspection")
+                .header(TENANT, tenant).param("packageDigest", digest), null);
+        exchange(drift, "inspectWebShellExtensionPackage", 401, post(web + "/inspection/query").header(TENANT, tenant),
+                workspace + ",\"pin\":{\"extensionId\":\"" + id + "\",\"packageRevision\":1,\"packageDigest\":\"" + digest + "\"}}");
+        exchange(drift, "lookupWorkspaceExtensionOperation", 401, post(base + "/operations/lookup").header(TENANT, tenant),
+                "{\"kind\":\"publish\",\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupWebShellExtensionOperation", 401, post(web + "/operations/lookup").header(TENANT, tenant),
+                workspace + ",\"kind\":\"publish\",\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupSessionExtensionOperation", 401, post(session + "/operations/lookup").header(TENANT, tenant),
+                "{\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupWebShellSessionExtensionOperation", 401, post(WEB_SHELL + "/session-extensions/operations/lookup").header(TENANT, tenant),
+                query + ",\"idempotencyKey\":\"lookup\"}");
     }
 
     private String exchange(Map<String, String> drift, String operationId,

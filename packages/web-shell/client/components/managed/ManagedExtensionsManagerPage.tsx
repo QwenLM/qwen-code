@@ -23,25 +23,29 @@ import {
   DialogFooter,
 } from '../ui/dialog';
 import type { ManagedAgentProvider } from './managed-agent-provider';
-import { JavaManagedAgentHttpError } from './java-managed-agent-client';
+import type { ManagedSessionSkills } from './managed-agent-provider';
+import { isManagedExtensionApplyRejected } from './managed-extension-install';
 import type {
   ManagedExtensionCatalog,
   ManagedExtensionPin,
   ManagedExtensionSelection,
   ManagedExtensionSnapshot,
   ManagedExtensionManifest,
+  ManagedExtensionInspection,
 } from './managed-extension-types';
 import { isManagedExtensionPins } from './managed-extension-types';
 import {
   getManagedClientId,
   managedRequestId,
 } from './managed-session-storage';
+import { ManagedExtensionInstaller } from './ManagedExtensionInstaller';
 
 export interface ManagedExtensionsManagerPageProps {
   provider: ManagedAgentProvider;
   workspaceId?: string;
   sessionId?: string;
   onClose: () => void;
+  view?: 'extensions' | 'skills';
 }
 
 function samePin(a: ManagedExtensionPin, b: ManagedExtensionPin) {
@@ -57,6 +61,7 @@ export function ManagedExtensionsManagerPage({
   workspaceId,
   sessionId,
   onClose,
+  view = 'extensions',
 }: ManagedExtensionsManagerPageProps) {
   const { t } = useI18n();
   const daemon = useOptionalWorkspace();
@@ -64,6 +69,7 @@ export function ManagedExtensionsManagerPage({
   const [catalog, setCatalog] = useState<ManagedExtensionCatalog>();
   const [snapshot, setSnapshot] = useState<ManagedExtensionSnapshot>();
   const [selection, setSelection] = useState<ManagedExtensionPin[]>([]);
+  const [staticSkills, setStaticSkills] = useState<ManagedSessionSkills>();
   const [pending, setPending] = useState<PendingApply>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
@@ -75,6 +81,14 @@ export function ManagedExtensionsManagerPage({
     id: string;
     revision: number;
     entries: Array<{ key: string; value: string }>;
+  }>();
+  const [inspection, setInspection] = useState<{
+    extensionId: string;
+    value: ManagedExtensionInspection;
+  }>();
+  const [editing, setEditing] = useState<{
+    extensionId: string;
+    inspection: ManagedExtensionInspection;
   }>();
   const generation = useRef(0);
   const request = useRef<AbortController | undefined>(undefined);
@@ -99,21 +113,29 @@ export function ManagedExtensionsManagerPage({
 
   const load = useCallback(
     async (signal: AbortSignal, current: number) => {
-      if (!management || !workspaceId || !sessionId) return;
-      const [nextCatalog, nextSnapshot] = await Promise.all([
-        management.list(workspaceId, { clientId, signal }),
-        management.query(sessionId, { clientId, signal }),
+      if (!workspaceId || !sessionId) return;
+      const [nextCatalog, nextSnapshot, nextSkills] = await Promise.all([
+        management?.list(workspaceId, { clientId, signal }),
+        management?.query(sessionId, { clientId, signal }),
+        view === 'skills' && provider.skills
+          ? provider.skills.list(sessionId, { clientId, signal }).then(
+              (value) => ({ value }),
+              () => ({ failed: true as const }),
+            )
+          : Promise.resolve(undefined),
       ]);
       if (current !== generation.current || signal.aborted) return;
       setCatalog(nextCatalog);
       setSnapshot(nextSnapshot);
+      if (nextSkills && 'failed' in nextSkills) setError(true);
+      else setStaticSkills(nextSkills?.value);
       setSelection(
-        nextSnapshot.operation
+        nextSnapshot?.operation
           ? nextSnapshot.requestedExtensions
-          : nextSnapshot.extensions,
+          : (nextSnapshot?.extensions ?? []),
       );
     },
-    [management, workspaceId, sessionId, clientId],
+    [management, workspaceId, sessionId, clientId, provider, view],
   );
 
   useEffect(() => {
@@ -122,8 +144,11 @@ export function ManagedExtensionsManagerPage({
     request.current = controller;
     setCatalog(undefined);
     setSnapshot(undefined);
+    setStaticSkills(undefined);
     setSelection([]);
     setSettings(undefined);
+    setInspection(undefined);
+    setEditing(undefined);
     setPending(undefined);
     setError(false);
     publication.current = undefined;
@@ -226,9 +251,7 @@ export function ManagedExtensionsManagerPage({
         if (
           !signal.aborted &&
           current === generation.current &&
-          cause instanceof JavaManagedAgentHttpError &&
-          cause.status === 409 &&
-          cause.code === 'extension_config_revision_conflict'
+          isManagedExtensionApplyRejected(cause)
         ) {
           clearPending();
           await load(signal, current);
@@ -241,12 +264,20 @@ export function ManagedExtensionsManagerPage({
   return (
     <section
       className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-4"
-      aria-label={t('managed.extensions.title')}
+      aria-label={t(
+        view === 'skills'
+          ? 'managed.install.skillsTitle'
+          : 'managed.extensions.title',
+      )}
     >
       <header className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">
-            {t('managed.extensions.title')}
+            {t(
+              view === 'skills'
+                ? 'managed.install.skillsTitle'
+                : 'managed.extensions.title',
+            )}
           </h2>
           <p className="text-sm text-muted-foreground">
             {t('managed.extensions.description')}
@@ -279,6 +310,24 @@ export function ManagedExtensionsManagerPage({
           </AlertDescription>
         </Alert>
       )}
+      {view === 'skills' && (
+        <>
+          <p className="text-sm text-muted-foreground">
+            {t('managed.install.staticHelp')}
+          </p>
+          {staticSkills?.skills.map((skill) => (
+            <Card key={skill.name}>
+              <CardContent className="grid gap-2 pt-4 text-sm">
+                <strong>{skill.name}</strong>
+                <Badge variant="outline">
+                  {t('managed.install.staticSource')}
+                </Badge>
+                <p>{skill.description}</p>
+              </CardContent>
+            </Card>
+          ))}
+        </>
+      )}
       {!workspaceId || !sessionId ? (
         <p>{t('managed.extensions.selectSession')}</p>
       ) : !management ||
@@ -287,6 +336,26 @@ export function ManagedExtensionsManagerPage({
         <p>{t('managed.extensions.unsupported')}</p>
       ) : (
         <>
+          {catalog && snapshot && (
+            <ManagedExtensionInstaller
+              key={`${management.storageScope ?? clientId}:${workspaceId}:${sessionId}:${editing?.extensionId ?? 'new'}`}
+              provider={provider}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              catalog={catalog}
+              snapshot={snapshot}
+              editing={editing}
+              skillsOnly={view === 'skills'}
+              onChanged={() => void run(async () => {})}
+              onInstalled={() => setEditing(undefined)}
+              onExitEdit={() => setEditing(undefined)}
+            />
+          )}
+          {view !== 'skills' && (
+            <p className="text-sm text-muted-foreground">
+              {t('managed.install.staticHelp')}
+            </p>
+          )}
           {snapshot?.operation && (
             <div role="status">
               <Badge>
@@ -337,128 +406,164 @@ export function ManagedExtensionsManagerPage({
                 {t('managed.extensions.empty')}
               </p>
             )}
-            {catalog?.extensions.map((entry) => {
-              const chosen = selection.find(
-                (pin) => pin.extensionId === entry.pin.extensionId,
-              );
-              const active = snapshot?.extensions.find(
-                (pin) => pin.extensionId === entry.pin.extensionId,
-              );
-              return (
-                <Card key={entry.pin.extensionId}>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-3">
-                      <input
-                        type="checkbox"
-                        aria-label={entry.manifest.name}
-                        checked={!!chosen}
-                        disabled={
-                          busy ||
-                          blocked ||
-                          !!pending ||
-                          (!chosen && selection.length >= 32)
-                        }
-                        onChange={(event) =>
-                          setSelection((old) =>
-                            event.target.checked &&
-                            (old.length < 32 ||
-                              old.some(
-                                (pin) =>
-                                  pin.extensionId === entry.pin.extensionId,
-                              ))
-                              ? [
-                                  ...old.filter(
-                                    (pin) =>
-                                      pin.extensionId !== entry.pin.extensionId,
-                                  ),
-                                  entry.pin,
-                                ]
-                              : event.target.checked
-                                ? old
-                                : old.filter(
-                                    (pin) =>
-                                      pin.extensionId !== entry.pin.extensionId,
-                                  ),
-                          )
-                        }
-                      />
-                      {entry.manifest.name}
-                      <Badge variant="secondary">
-                        {active && chosen && samePin(active, chosen)
-                          ? t('managed.extensions.active')
-                          : chosen
-                            ? t('managed.extensions.pending')
-                            : t('managed.extensions.installed')}
+            {catalog?.extensions
+              .filter(
+                (entry) =>
+                  view !== 'skills' ||
+                  entry.manifest.components.includes('skills'),
+              )
+              .map((entry) => {
+                const chosen = selection.find(
+                  (pin) => pin.extensionId === entry.pin.extensionId,
+                );
+                const active = snapshot?.extensions.find(
+                  (pin) => pin.extensionId === entry.pin.extensionId,
+                );
+                return (
+                  <Card key={entry.pin.extensionId}>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          aria-label={entry.manifest.name}
+                          checked={!!chosen}
+                          disabled={
+                            busy ||
+                            blocked ||
+                            !!pending ||
+                            (!chosen && selection.length >= 32)
+                          }
+                          onChange={(event) =>
+                            setSelection((old) =>
+                              event.target.checked &&
+                              (old.length < 32 ||
+                                old.some(
+                                  (pin) =>
+                                    pin.extensionId === entry.pin.extensionId,
+                                ))
+                                ? [
+                                    ...old.filter(
+                                      (pin) =>
+                                        pin.extensionId !==
+                                        entry.pin.extensionId,
+                                    ),
+                                    entry.pin,
+                                  ]
+                                : event.target.checked
+                                  ? old
+                                  : old.filter(
+                                      (pin) =>
+                                        pin.extensionId !==
+                                        entry.pin.extensionId,
+                                    ),
+                            )
+                          }
+                        />
+                        {entry.manifest.name}
+                        <Badge variant="secondary">
+                          {active && chosen && samePin(active, chosen)
+                            ? t('managed.extensions.active')
+                            : chosen
+                              ? t('managed.extensions.pending')
+                              : t('managed.extensions.installed')}
+                        </Badge>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="grid gap-2 text-sm">
+                      <p>
+                        {entry.manifest.version} ·{' '}
+                        {entry.manifest.target.platform}/
+                        {entry.manifest.target.arch} ·{' '}
+                        {entry.manifest.components.join(', ')}
+                      </p>
+                      <Badge variant="outline">
+                        {t('managed.install.packageSource')}
                       </Badge>
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="grid gap-2 text-sm">
-                    <p>
-                      {entry.manifest.version} ·{' '}
-                      {entry.manifest.target.platform}/
-                      {entry.manifest.target.arch} ·{' '}
-                      {entry.manifest.components.join(', ')}
-                    </p>
-                    <code className="break-all text-xs text-muted-foreground">
-                      {entry.pin.packageDigest}
-                    </code>
-                    <div className="flex gap-2">
-                      {chosen &&
-                        chosen.packageRevision !==
-                          entry.pin.packageRevision && (
-                          <Button
-                            disabled={busy || blocked || !!pending}
-                            variant="outline"
-                            onClick={() =>
-                              setSelection((old) =>
-                                old.map((pin) =>
-                                  pin.extensionId === entry.pin.extensionId
-                                    ? {
-                                        ...entry.pin,
-                                        ...(pin.settingsRevision === undefined
-                                          ? {}
-                                          : {
-                                              settingsRevision:
-                                                pin.settingsRevision,
-                                            }),
-                                      }
-                                    : pin,
-                                ),
-                              )
-                            }
-                          >
-                            {t('managed.extensions.update')}
-                          </Button>
-                        )}
-                      <Button
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() =>
-                          void run(async (signal) => {
-                            const current = await management.settings(
-                              workspaceId,
-                              entry.pin.extensionId,
-                              { clientId, signal },
-                            );
-                            if (!signal.aborted)
-                              setSettings({
-                                id: entry.pin.extensionId,
-                                revision: current.settingsRevision,
-                                entries: current.configuredKeys.map((key) => ({
-                                  key,
-                                  value: '',
-                                })),
-                              });
-                          }, false)
-                        }
-                      >
-                        {t('managed.extensions.settings')}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
+                      <code className="break-all text-xs text-muted-foreground">
+                        {entry.pin.packageDigest}
+                      </code>
+                      <div className="flex gap-2">
+                        {management.inspect &&
+                          catalog.selfService?.canPublish && (
+                            <Button
+                              variant="outline"
+                              disabled={busy}
+                              onClick={() =>
+                                void run(async (signal) => {
+                                  const value = await management.inspect!(
+                                    workspaceId,
+                                    entry.pin,
+                                    { clientId, signal },
+                                  );
+                                  if (!signal.aborted)
+                                    setInspection({
+                                      extensionId: entry.pin.extensionId,
+                                      value,
+                                    });
+                                }, false)
+                              }
+                            >
+                              {t('managed.install.inspect')}
+                            </Button>
+                          )}
+                        {chosen &&
+                          chosen.packageRevision !==
+                            entry.pin.packageRevision && (
+                            <Button
+                              disabled={busy || blocked || !!pending}
+                              variant="outline"
+                              onClick={() =>
+                                setSelection((old) =>
+                                  old.map((pin) =>
+                                    pin.extensionId === entry.pin.extensionId
+                                      ? {
+                                          ...entry.pin,
+                                          ...(pin.settingsRevision === undefined
+                                            ? {}
+                                            : {
+                                                settingsRevision:
+                                                  pin.settingsRevision,
+                                              }),
+                                        }
+                                      : pin,
+                                  ),
+                                )
+                              }
+                            >
+                              {t('managed.extensions.update')}
+                            </Button>
+                          )}
+                        <Button
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() =>
+                            void run(async (signal) => {
+                              const current = await management.settings(
+                                workspaceId,
+                                entry.pin.extensionId,
+                                { clientId, signal },
+                              );
+                              if (!signal.aborted)
+                                setSettings({
+                                  id: entry.pin.extensionId,
+                                  revision: current.settingsRevision,
+                                  entries: current.configuredKeys.map(
+                                    (key) => ({
+                                      key,
+                                      value: '',
+                                    }),
+                                  ),
+                                });
+                            }, false)
+                          }
+                        >
+                          {t('managed.extensions.settings')}
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
           </div>
           <Button
             disabled={busy || !snapshot || blocked || !snapshot.supported}
@@ -739,6 +844,60 @@ export function ManagedExtensionsManagerPage({
                 }
               >
                 {t('managed.extensions.saveSettings')}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+      {inspection && (
+        <Dialog open onOpenChange={(open) => !open && setInspection(undefined)}>
+          <DialogContent className="max-h-[80vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>{inspection.value.manifest.name}</DialogTitle>
+              <DialogDescription>
+                {inspection.value.manifest.components.join(', ')}
+              </DialogDescription>
+            </DialogHeader>
+            {inspection.value.skills.map((skill) => (
+              <p key={skill.name}>
+                <strong>{skill.name}</strong> {skill.description}
+              </p>
+            ))}
+            <h3 className="text-sm font-medium">
+              {t('managed.install.files')}
+            </h3>
+            <ul className="max-h-60 overflow-auto text-xs">
+              {inspection.value.files.map((file) => (
+                <li key={file}>
+                  <code>{file}</code>
+                </li>
+              ))}
+            </ul>
+            {inspection.value.fileCount > inspection.value.files.length && (
+              <p>{t('managed.install.truncated')}</p>
+            )}
+            <DialogFooter>
+              {inspection.value.mcpServers.length === 1 &&
+                inspection.value.manifest.components.every((component) =>
+                  ['mcp', 'settings'].includes(component),
+                ) && (
+                  <Button
+                    onClick={() => {
+                      setEditing({
+                        extensionId: inspection.extensionId,
+                        inspection: inspection.value,
+                      });
+                      setInspection(undefined);
+                    }}
+                  >
+                    {t('managed.install.editMcp')}
+                  </Button>
+                )}
+              <Button
+                variant="outline"
+                onClick={() => setInspection(undefined)}
+              >
+                {t('common.close')}
               </Button>
             </DialogFooter>
           </DialogContent>
