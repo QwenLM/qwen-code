@@ -11,7 +11,7 @@ import type { SubscriptionUserInfo } from '@qwen-code/qwen-code-core/qwen/subscr
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { selectSubscriptionModel } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 
 export async function activateSubscription(
@@ -47,12 +47,7 @@ export async function activateSubscription(
       },
     },
     {
-      settings: createLoadedSettingsAdapter(
-        settings,
-        settings.workspaceSettingsActive
-          ? SettingScope.Workspace
-          : SettingScope.User,
-      ),
+      settings: createLoadedSettingsAdapter(settings),
       syncAuthState: (authType, modelId, baseUrl) => {
         config.syncModelSelection(authType, modelId, baseUrl);
       },

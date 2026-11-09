@@ -27,7 +27,6 @@ import {
   QWEN_SUBSCRIPTION_MODEL,
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
 } from '../qwen/oauth-config.js';
-import { subscriptionModelModalities } from '../qwen/subscription-models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
@@ -180,7 +179,7 @@ export function resolveModelConfig(
       model,
       baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
       apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
-      modalities: subscriptionModelModalities(model),
+      modalities: defaultModalities(model),
       proxy,
     };
     for (const field of [

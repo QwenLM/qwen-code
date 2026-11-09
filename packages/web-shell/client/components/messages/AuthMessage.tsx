@@ -65,6 +65,7 @@ interface AuthMessageProps {
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onModelActivated?: (modelId: string) => void;
+  onChatProviderConfigured?: () => void;
   getWorkspaceCwd?: () => string | undefined;
   activateSessionSubscriptionModel: (
     workspaceCwd: string | undefined,
@@ -162,6 +163,7 @@ function normalizeModelIds(value: string): string[] {
 export function AuthMessage({
   onMessage,
   onModelActivated,
+  onChatProviderConfigured,
   getWorkspaceCwd,
   activateSessionSubscriptionModel,
   onClose,
@@ -569,6 +571,7 @@ export function AuthMessage({
           }
         }
         if (!isCurrent()) return;
+        if (!syncFailed && purpose === 'chat') onChatProviderConfigured?.();
         onMessage(
           syncFailed
             ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
@@ -592,10 +595,12 @@ export function AuthMessage({
     advancedConfig,
     validateAdvanced,
     models,
+    onChatProviderConfigured,
     onClose,
     onMessage,
     protocol,
     provider,
+    purpose,
     saving,
     sessionActions,
     t,
@@ -1364,10 +1369,19 @@ export function AuthMessage({
               );
           };
           assertTarget();
+          const desktop = isDesktopShell();
           if (standalone) {
-            const { modelId } =
-              await workspaceActions.getSubscriptionDefaultModel({ signal });
+            const { modelId, runtimeSync } =
+              await workspaceActions.getSubscriptionDefaultModel({
+                signal,
+                ...(desktop ? { settingsScope: 'provider' } : {}),
+              });
             assertTarget();
+            if (desktop) {
+              onSettingsSaved();
+              if (runtimeSync?.status === 'failed')
+                throw new Error('Subscription runtime activation failed.');
+            }
             const selector = `${modelId}(qwen-subscription)`;
             if (sessionId) {
               await activateSessionSubscriptionModel(
@@ -1386,6 +1400,7 @@ export function AuthMessage({
           const result = await workspaceActions.activateSubscription({
             workspaceCwd,
             signal,
+            ...(desktop ? { settingsScope: 'provider' } : {}),
           });
           assertTarget();
           onSettingsSaved();
