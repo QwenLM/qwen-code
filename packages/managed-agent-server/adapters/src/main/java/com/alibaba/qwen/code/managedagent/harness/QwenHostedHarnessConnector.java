@@ -807,6 +807,52 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsRuntimeSkillImport() {
+        try {
+            return client().capabilities().getFeatures().contains("managed-runtime-skill-import/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            return client().runtimeSkillCandidates(extensionAttachment(tenant, session, false));
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            return client().runtimeSkillSnapshot(extensionAttachment(tenant, session, false), request);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            Map<String, Object> owner = (Map<String, Object>) request.get("owner");
+            return client().runtimeSkillArchive(extensionAttachment(tenant, session, false), (String) request.get("operationId"),
+                    (String) request.get("preparationId"), (String) owner.get("bindingId"), (String) owner.get("generation"),
+                    ((Number) request.get("offset")).longValue());
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         try {
             requireReadyForNewWork(tenantId, sessionId, false);

@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -39,8 +41,8 @@ import java.util.function.Supplier;
  * joins Artifacts and events without duplication.
  */
 @Repository
-public class ManagedTaskEventStore
-        implements com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore {
+public class JdbcManagedTaskEventStore
+        implements ManagedTaskEventStore {
     /** The newest unique references a task view lists; the 101st refuses. */
 
     /** The expiry pass keeps this many retained rows behind every append. */
@@ -55,7 +57,7 @@ public class ManagedTaskEventStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
-    public ManagedTaskEventStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcManagedTaskEventStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(
                 java.util.Objects.requireNonNull(jdbc.getDataSource(), "dataSource")));
@@ -88,7 +90,7 @@ public class ManagedTaskEventStore
                         + " first_ordinal, end_ordinal, is_archived FROM ma_public_event WHERE tenant_id = ?"
                         + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?"
                         + " AND sequence_id > ? ORDER BY sequence_id LIMIT ?",
-                ManagedTaskEventStore::eventRow, tenantId, sessionId, taskId, after, limit + 1);
+                JdbcManagedTaskEventStore::eventRow, tenantId, sessionId, taskId, after, limit + 1);
         return new EventPage(events.size() > limit ? events.subList(0, limit) : events, events.size() > limit);
     }
 
@@ -306,7 +308,7 @@ public class ManagedTaskEventStore
                     } catch (java.io.IOException exception) {
                         throw new IllegalStateException("The task cursor resource is corrupt", exception);
                     }
-                }, resourceKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, "task-artifact-refs/1")
+                }, resourceKey, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, "task-artifact-refs/1")
                 .stream().findFirst().orElseThrow(() -> new IllegalStateException("The task cursor resource is missing"));
     }
 
@@ -318,7 +320,7 @@ public class ManagedTaskEventStore
             body.putArray("artifactRefs");
         }
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String digest = ToolPublicationContract.sha256(bytes);
         String resourceId = "task-cursor:" + ManagedSchemaKeys.key(taskId, digest);
         String resourceKey = ManagedSchemaKeys.key(scope, resourceId);

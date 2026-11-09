@@ -431,6 +431,32 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsRuntimeSkillImport() { return feature("managed-runtime-skill-import/1"); }
+
+    private <T> T existingRuntimeSkillOwner(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
+        Selected selected = select(tenant, session, false);
+        if (selected == null) {
+            throw new ManagedAgentException(409, "managed_extension_owner_unavailable", "The original Runtime owner is unavailable.");
+        }
+        return call(selected, action);
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillCandidates(tenant, session));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillSnapshot(tenant, session, request));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillArchive(tenant, session, request));
+    }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenant, String session, Map<String, Object> command) {
         return call(tenant, session, leaf -> leaf.applyExtensions(tenant, session, command));
     }

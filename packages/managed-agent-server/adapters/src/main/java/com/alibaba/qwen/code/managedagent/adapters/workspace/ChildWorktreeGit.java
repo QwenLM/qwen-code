@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.adapters.workspace;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
@@ -48,7 +49,7 @@ import java.util.regex.Pattern;
  * repository's own config was read as data and found free of keys that
  * name a program (docs/design/2026-10-09-managed-child-workspace.md).
  */
-public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit {
+public final class ChildWorktreeGit implements ChildWorktreeOperations {
     /** The reserved directory below the storage root that holds every child Workspace. */
 
     private static final int MIN_MAJOR = 2;

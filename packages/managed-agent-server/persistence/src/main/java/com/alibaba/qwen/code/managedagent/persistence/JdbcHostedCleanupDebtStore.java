@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.HostedCleanupDebtStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,8 +31,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * the cursor back to the start once a page comes up short.
  */
 @Component
-public class HostedCleanupDebtStore implements com.alibaba.qwen.code.managedagent.repository.HostedCleanupDebtStore {
-    private static final Logger LOG = LoggerFactory.getLogger(HostedCleanupDebtStore.class);
+public class JdbcHostedCleanupDebtStore implements HostedCleanupDebtStore {
+    private static final Logger LOG = LoggerFactory.getLogger(JdbcHostedCleanupDebtStore.class);
 
     private static final String OWED =
             "SELECT r.tenant_id, r.workspace_id, r.session_id, r.owner_key, r.gmt_create,"
@@ -47,7 +49,7 @@ public class HostedCleanupDebtStore implements com.alibaba.qwen.code.managedagen
     private final JdbcTemplate jdbc;
     private final Set<String> warned = ConcurrentHashMap.newKeySet();
 
-    public HostedCleanupDebtStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+    public JdbcHostedCleanupDebtStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
@@ -82,7 +84,7 @@ public class HostedCleanupDebtStore implements com.alibaba.qwen.code.managedagen
     private String promptId(String tenant, String workspace, String session,
             String owner, byte[] bytes) {
         JsonNode body = bytes == null ? null
-                : com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+                : ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
         JsonNode key = body == null ? null : body.path("sessionKey");
         String promptId = body == null ? null : body.path("promptId").asText(null);
         if (body == null || body.path("v").asInt() != 1 || promptId == null || key == null
