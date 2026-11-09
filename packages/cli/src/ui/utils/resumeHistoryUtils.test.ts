@@ -14,6 +14,7 @@ import {
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
+import { formatPeerEnvelope } from '@qwen-code/qwen-code-core/ipc/peer-envelope.js';
 import { computeApiTruncationIndex } from './historyMapping.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
@@ -250,6 +251,66 @@ describe('resumeHistoryUtils', () => {
         100,
       ),
     ).toMatchObject([{ type: 'user', text: 'real user prompt' }]);
+  });
+
+  it('marks a restored peer notification as peer and not the control', () => {
+    // Live, the drain renders a peer line with display.peer; the marker is
+    // not persisted, so on /resume it would render with the plain info
+    // bullet — indistinguishable from system chatter, unlike which it
+    // carries none of the user's authority. Detection reads the recorded
+    // raw parts, not the projection.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          subtype: 'notification',
+          uuid: 'peer-note',
+          message: {
+            parts: [
+              // The part text comes from the real producer — the function
+              // whose output the journal writers record verbatim — so the
+              // detector's prefix match is tied to `formatPeerEnvelope`
+              // itself, not to a literal that can drift from it.
+              {
+                text: formatPeerEnvelope({
+                  from: '/tmp/a.sock',
+                  fromName: 'a',
+                  content: 'ping',
+                }),
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: 'Message from another session (a): ping',
+          },
+        },
+        {
+          type: 'user',
+          subtype: 'notification',
+          uuid: 'agent-note',
+          message: { parts: [{ text: 'Background agent completed' }] },
+          systemPayload: { displayText: 'Background agent completed' },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items).toMatchObject([
+      {
+        type: 'notification',
+        text: 'Message from another session (a): ping',
+        display: { peer: true },
+      },
+      { type: 'notification', text: 'Background agent completed' },
+    ]);
+    // The control must stay unmarked: the fix cannot pass by marking every
+    // notification peer.
+    expect(items[1]!.display).toBeUndefined();
   });
 
   it('inserts a history-gap divider before the gap child record', () => {

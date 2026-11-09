@@ -37,6 +37,17 @@ const generalRestrictedSyntaxSelectors = [
   },
 ];
 
+// Core-barrel paths for `@typescript-eslint/no-restricted-imports`. Hoisted
+// so the cli-wide core-barrel block and the mid-turn-constants leaf block —
+// which must sit below it, since flat config keeps only the last setting of
+// a rule per file — can share them without drift.
+const coreBarrelPaths = [...CORE_BARREL_SPECIFIERS].map((name) => ({
+  name,
+  allowTypeImports: true,
+  message:
+    "Import from the core module that defines the symbol, e.g. '@qwen-code/qwen-code-core/utils/debugLogger.js'. The package root evaluates all of core in every test that reaches this file (#10908).",
+}));
+
 // Undeclared imports are checked in shipped sources only: tests resolve
 // shared tooling such as vitest from the root manifest by design.
 const extraneousDependencyTestFiles = [
@@ -320,12 +331,7 @@ export default tseslint.config(
       '@typescript-eslint/no-restricted-imports': [
         'error',
         {
-          paths: [...CORE_BARREL_SPECIFIERS].map((name) => ({
-            name,
-            allowTypeImports: true,
-            message:
-              "Import from the core module that defines the symbol, e.g. '@qwen-code/qwen-code-core/utils/debugLogger.js'. The package root evaluates all of core in every test that reaches this file (#10908).",
-          })),
+          paths: coreBarrelPaths,
         },
       ],
     },
@@ -346,6 +352,104 @@ export default tseslint.config(
           selector: "ImportExpression[source.value=/(^|\\x2f)serve(\\x2f|$)/i]",
           message:
             'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+        },
+      ],
+    },
+  },
+  {
+    // `peerMessaging/mid-turn-constants.ts` exists only to be importable from
+    // the settings schema without dragging the peer runtime in with it: the
+    // constants are read at schema-definition time, and importing them through
+    // `peer-messaging.ts` reaches core at import time, which breaks the CLI
+    // suites that partially mock core — at collection, with an error naming a
+    // mock rather than this file. So this module imports nothing at runtime:
+    // type-only imports are exempt (erased at compile time, as in the core
+    // barrel guard). This block must sit below the cli-wide core-barrel block:
+    // flat config keeps only the last setting of a rule per file, so a block
+    // above it would lose both this patterns group and the core-barrel paths
+    // for the leaf — hence the shared `coreBarrelPaths`. The dynamic-import
+    // companion below closes the hole `no-restricted-imports` cannot see.
+    files: ['packages/cli/src/peerMessaging/mid-turn-constants.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: coreBarrelPaths,
+          patterns: [
+            {
+              group: [
+                '*',
+                './*',
+                './**',
+                '../*',
+                '../**',
+                '@qwen-code/qwen-code-core',
+                '@qwen-code/qwen-code-core/**',
+              ],
+              allowTypeImports: true,
+              message:
+                'mid-turn-constants.ts must import nothing at runtime: it is read by the settings schema at definition time, and any value import reaching the peer runtime or core breaks partially-mocking CLI suites at collection. Keep the constants here, or move the unreadable-value reader into this leaf beside them.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // Same hole as the #8084 guard above, for the mid-turn-constants leaf: a
+    // dynamic `await import('./peer-messaging.js')` would slip past its
+    // no-restricted-imports patterns and drag the peer runtime in at call
+    // time. Any dynamic import counts — the leaf's contract is to reach no
+    // module at runtime.
+    files: ['packages/cli/src/peerMessaging/mid-turn-constants.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...generalRestrictedSyntaxSelectors,
+        {
+          selector: 'ImportExpression',
+          message:
+            'mid-turn-constants.ts must import nothing at runtime: it is read by the settings schema at definition time, and any dynamic import reaching the peer runtime or core breaks partially-mocking CLI suites at collection. Keep the constants here, or move the unreadable-value reader into this leaf beside them.',
+        },
+      ],
+    },
+  },
+  {
+    // The reverse direction of the mid-turn-constants leaf guard: the config
+    // modules must not reach the peer runtime at all. The settings schema
+    // reads the mid-turn constants through the dependency-free leaf, and any
+    // other runtime import from `peerMessaging/` would evaluate the peer
+    // graph at schema-definition time and break the partially-mocking CLI
+    // suites at collection with an error naming a mock, not this import.
+    // Must sit below the cli-wide core-barrel block and carry its paths:
+    // flat config keeps only the last setting of a rule per file, so a
+    // patterns-only block would strip core-barrel coverage from the config
+    // files. Test files stay exempt, matching the core-barrel block
+    // (config.test.ts legitimately imports peerMessaging/enabled.js), and so
+    // do the legacy core-barrel files the cli-wide block still exempts.
+    files: ['packages/cli/src/config/**/*.{ts,tsx}'],
+    ignores: [
+      '**/*.{test,spec}.{ts,tsx}',
+      '**/__tests__/**',
+      '**/fixtures/**',
+      ...legacyCoreBarrelImports,
+    ],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: coreBarrelPaths,
+          patterns: [
+            {
+              group: [
+                '**/peerMessaging/**',
+                '!**/peerMessaging/mid-turn-constants.js',
+              ],
+              allowTypeImports: true,
+              message:
+                'config must not import the peer runtime at runtime: the settings schema reads the mid-turn constants through the dependency-free leaf, and any other import evaluates the peer graph at schema-definition time and breaks partially-mocking CLI suites at collection. Import from mid-turn-constants.js, or move the unreadable-value reader into the leaf beside it.',
+            },
+          ],
         },
       ],
     },
