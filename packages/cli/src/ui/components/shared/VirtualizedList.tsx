@@ -245,7 +245,16 @@ function VirtualizedList<T>(
   const { width: measuredContainerWidth, height: measuredContainerHeight } =
     useBoxMetrics(containerRef as React.RefObject<DOMElement>);
 
-  const containerHeight = props.containerHeight ?? measuredContainerHeight;
+  // A host that derives the viewport from the terminal (MainContent passes
+  // `Math.max(0, terminalHeight - header - tabBar)`) legitimately hands down 0
+  // for a frame. `??` keeps that 0, which collapses the root box and leaves the
+  // transcript blank until the next measurement lands. Treat a non-positive
+  // host height as "not measured yet" so the measured box height keeps the
+  // content visible.
+  const containerHeight =
+    props.containerHeight !== undefined && props.containerHeight > 0
+      ? props.containerHeight
+      : measuredContainerHeight;
   const containerWidth = measuredContainerWidth;
 
   const [heights, setHeights] = useState<Record<string, number>>({});
@@ -983,12 +992,13 @@ function VirtualizedList<T>(
   // measurement so short content does not leave a gap above the composer.
   // `scrollableContainerHeight` (the scroll math) still uses the full
   // `containerHeight`, so scrolling is unaffected.
-  const rootHeight =
-    props.containerHeight !== undefined
-      ? fullHeightMeasurementPending
-        ? props.containerHeight
-        : Math.min(props.containerHeight, totalHeight)
-      : '100%';
+  const hostConstrainsHeight =
+    props.containerHeight !== undefined && props.containerHeight > 0;
+  const rootHeight = hostConstrainsHeight
+    ? fullHeightMeasurementPending
+      ? containerHeight
+      : Math.min(containerHeight, totalHeight)
+    : '100%';
 
   return (
     <Box ref={rootRef} width="100%" height={rootHeight} flexDirection="row">

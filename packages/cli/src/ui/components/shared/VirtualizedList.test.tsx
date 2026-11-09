@@ -1409,3 +1409,27 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     );
   });
 });
+
+describe('<VirtualizedList /> zero-height host measurement', () => {
+  // The host derives the viewport height as
+  // `Math.max(0, terminalHeight - controlsHeight - tabBarHeight)`, so it can
+  // legitimately hand down 0 for a frame. The measured box height is the
+  // fallback that keeps the transcript visible until the next commit.
+  it('falls back to the measured height when the host passes 0', () => {
+    const { lastFrame } = render(
+      <Box height={12} flexDirection="column">
+        <VirtualizedList<Item>
+          data={makeItems(3)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          containerHeight={0}
+          width={40}
+          showScrollbar={false}
+        />
+      </Box>,
+    );
+
+    expect(lastFrame() ?? '').toMatch(/item-0/);
+  });
+});
