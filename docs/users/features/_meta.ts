@@ -16,6 +16,7 @@ export default {
   mem0: 'Mem0',
   headless: 'Headless Mode',
   batch: 'Batch Mode (DashScope)',
+  'session-overview': 'Session Overview',
   'structured-output': 'Structured Output',
   'dual-output': 'Dual Output',
   'approval-mode': 'Approval Mode',

@@ -1947,6 +1947,50 @@ describe('DaemonSessionClient', () => {
     expect(session.replayDegraded).toBe(true);
   });
 
+  it.each([undefined, 0, 7])(
+    'preserves optional replay projection watermark %s for both load factories',
+    async (watermark) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      for (const standalone of [false, true]) {
+        const { fetch } = recordingFetch((req) => {
+          if (req.url.endsWith('/capabilities'))
+            return jsonResponse(200, { features: ['standalone_sessions_v1'] });
+          return jsonResponse(200, {
+            sessionId,
+            workspaceCwd: '/work/a',
+            attached: true,
+            clientId: 'client-1',
+            state: {},
+            compactedReplay: [],
+            liveJournal: [],
+            lastEventId: 10,
+            eventEpoch: 'epoch',
+            ...(watermark === undefined
+              ? {}
+              : { replayProjectionWatermark: watermark }),
+            ...(standalone
+              ? {
+                  sourceType: 'standalone',
+                  context: { kind: 'standalone' },
+                  projectlessOutputDirectory: '/conversations/example',
+                  workingDirectory: { state: 'ready' },
+                }
+              : {}),
+          });
+        });
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const session = standalone
+          ? await DaemonSessionClient.loadStandalone(client, sessionId)
+          : await DaemonSessionClient.load(client, sessionId, {
+              workspaceCwd: '/work/a',
+            });
+        expect(session.replayProjectionWatermark).toBe(watermark);
+        expect(session.session).not.toHaveProperty('replayProjectionWatermark');
+        client.dispose();
+      }
+    },
+  );
+
   it('reports incomplete and partial load replay snapshots', async () => {
     const { fetch } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {
