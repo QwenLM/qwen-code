@@ -975,7 +975,18 @@ const DIRECTORY_CHANGING_COMMANDS = new Set([
 
 /** The program a command node invokes, basename'd like the textual walks. */
 function commandNodeProgram(node: ShellSyntaxNode): string {
-  return programBasename(node.childForFieldName('name')?.text ?? '');
+  let name = node.childForFieldName('name')?.text ?? '';
+  // A quoted builtin such as `"cd"` is still cd in Bash; strip one layer of
+  // matching surrounding quotes so the directory-changing check recognises it
+  // instead of dropping the move and attributing to the launch directory.
+  if (
+    name.length >= 2 &&
+    ((name.startsWith('"') && name.endsWith('"')) ||
+      (name.startsWith("'") && name.endsWith("'")))
+  ) {
+    name = name.slice(1, -1);
+  }
+  return programBasename(name);
 }
 
 /**
@@ -3181,9 +3192,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         preRunRepoKeys?.resolved?.split('/')[0] || 'github.com';
       const canonicalRepo = (spec: string): string => {
         const parts = spec.split('/').filter(Boolean);
-        if (parts.length >= 3) return parts.slice(-3).join('/');
-        if (parts.length === 2) return `${derivedHost}/${parts[0]}/${parts[1]}`;
-        return spec;
+        let key: string;
+        if (parts.length >= 3) key = parts.slice(-3).join('/');
+        else if (parts.length === 2)
+          key = `${derivedHost}/${parts[0]}/${parts[1]}`;
+        else key = spec;
+        // GitHub repository identity is case-insensitive (gh compares owner and
+        // repo lowercased, and repoKeyFromWebUrl lowercases the derived keys),
+        // so `--repo O/R` must match a worktree of `o/r`.
+        return key.toLowerCase();
       };
       const repoKeys = [
         preRunRepoKeys?.resolved,

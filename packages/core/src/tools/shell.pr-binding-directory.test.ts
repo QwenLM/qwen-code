@@ -256,10 +256,11 @@ describe.skipIf(process.platform === 'win32')(
       expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
     });
 
-    it.each(['--repo github.com/o/r', "--repo='o/r'"])(
+    it.each(['--repo github.com/o/r', "--repo='o/r'", '--repo O/R'])(
       'binds a same-repo create spelled %s',
       async (repoArg) => {
-        // gh --repo accepts [HOST/]OWNER/REPO; a host-qualified or quoted-equals
+        // gh --repo accepts [HOST/]OWNER/REPO and compares identity
+        // case-insensitively; a host-qualified, quoted-equals or upper-case
         // spelling of the worktree's OWN repo must not be mistaken for a
         // different repository and re-pointed to the launch branch.
         const result = await run(

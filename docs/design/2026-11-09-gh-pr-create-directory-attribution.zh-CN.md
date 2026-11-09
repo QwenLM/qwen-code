@@ -238,6 +238,15 @@ const attributionDir =
 
 第五轮验证：**475 passed**（462 单测 + 13 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 Y（命令名净化）、Z（等号解码）、AA（host 规范化）各自杀掉点名用例且裸名/引号对照绿；每次从字节级备份还原（最终 `shell.ts` SHA-256 `352239efcf047ac37f931da6edd23154cff7e940f1e42fc704639a88a9688b22`）。
 
+### 第六轮评审（2026-11-09，复评 `27989984d5`）
+
+复评确认第五轮三条见证全部通过，并报出两条仍存的绑定缺陷。两条都先对 head 复现再修。
+
+1. **仓库名大小写（P2）。** `repoKeyFromWebUrl` 把每个 derived key 都小写化，但显式 `--repo` 值保留了大小写，于是 `--repo O/R`（或 `--repo github.com/O/R`）与 `o/r` 的 worktree 比较不相等、回退到启动目录，丢掉已创建的 PR。GitHub 仓库身份不区分大小写；`canonicalRepo` 现在对两侧都小写化。
+2. **R1-1 残留见证——引号的目录变更命令。** `"cd" <worktree> && gh pr create` 在 worktree 分支上创建，而两条腿都查启动目录：`commandNodeProgram` 读的是带引号的原始名字，目录变更检查认不出这个字面内建。现在它在取 basename 前剥掉一层匹配的外围引号，因此 `"cd"`/`'cd'` 与 `cd` 一样被解析。
+
+第六轮验证：**479 passed**（465 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AB（去大小写规范化）、AC（去引号剥离）各自杀掉点名用例且小写/非引号对照绿；每次从字节级备份还原（最终 `shell.ts` SHA-256 `1a1a4c45458f056eccb47813901632ee9e8e987154c20e62f27b19a0dd3e1b41`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

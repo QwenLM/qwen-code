@@ -539,6 +539,30 @@ their named cases with the bare/quoted controls green; every mutation restored
 from a byte-level backup (final `shell.ts` SHA-256
 `352239efcf047ac37f931da6edd23154cff7e940f1e42fc704639a88a9688b22`).
 
+### Review round 6 (2026-11-09, re-review of `27989984d5`)
+
+The re-review confirmed all three round-5 witnesses now pass and reported two
+remaining binding defects. Both reproduced against the head before fixing.
+
+1. **Repository-name case (P2).** `repoKeyFromWebUrl` lowercases every derived
+   key, but the explicit `--repo` value kept its case, so `--repo O/R` (or
+   `--repo github.com/O/R`) compared unequal to a worktree of `o/r` and
+   re-pointed to launch, losing the created PR. GitHub repository identity is
+   case-insensitive; `canonicalRepo` now lowercases both sides.
+2. **R1-1 remaining witness — a quoted directory-changing command.**
+   `"cd" <worktree> && gh pr create` created on the worktree branch while both
+   legs queried launch: `commandNodeProgram` read the raw quoted name, so the
+   directory-changing check did not recognise the literal builtin. It now
+   strips one layer of matching surrounding quotes before the basename, so
+   `"cd"`/`'cd'` resolve like `cd`.
+
+Round-6 verification: **479 passed** (465 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses AB (drop the
+case normalisation) and AC (drop the quote stripping) each red their named cases
+with the lower-case / unquoted controls green; every mutation restored from a
+byte-level backup (final `shell.ts` SHA-256
+`1a1a4c45458f056eccb47813901632ee9e8e987154c20e62f27b19a0dd3e1b41`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

@@ -1289,6 +1289,8 @@ describe('ShellTool', () => {
         ["--repo='o/r'", 'a single-quoted equals-form repo flag'],
         ['--repo="o/r"', 'a double-quoted equals-form repo flag'],
         ['--repo github.com/o/r', 'a host-qualified repo flag'],
+        ['--repo O/R', 'an upper-case repo flag'],
+        ['--repo github.com/O/R', 'a host-qualified upper-case repo flag'],
         [
           "--body 'explains --repo someone/else'",
           'a repo-looking flag inside the PR body',
@@ -1296,6 +1298,14 @@ describe('ShellTool', () => {
       ])('keeps %s attribution in the worktree: %s', async (args) => {
         mockCreatedPr(77);
         await runShell(`cd /test/dir/nested && gh pr create ${args}`, PR_77);
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('resolves a quoted cd builtin', async () => {
+        // `"cd"` is still the cd builtin in Bash; reading the raw quoted name
+        // dropped the move and attributed both legs to launch with no notice.
+        mockCreatedPr(77);
+        await runShell('"cd" /test/dir/nested && gh pr create --fill', PR_77);
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
