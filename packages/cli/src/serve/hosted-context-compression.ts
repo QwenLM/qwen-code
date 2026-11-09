@@ -44,6 +44,10 @@ import { loadSettings } from '../config/settings.js';
 import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { applyHostedModelPin } from './hosted-harness-model.js';
 import type { HostedAgentDefinition } from './hosted-agent-definition.js';
+import {
+  excludedHostedPrompts,
+  filterHostedTurnHistory,
+} from './hosted-turn-history.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 
 const debugLogger = createDebugLogger('HOSTED_CONTEXT_COMPRESSION');
@@ -207,26 +211,22 @@ export class HostedContextCompression {
           .filter((event) => event.kind === 'turn.settled')
           .map((event) => event.payload['turnId']),
       );
-      const unanswered = new Set(
-        session.authority
-          .eventsInSequenceRange(1, historyCutSequence)
-          .filter(
-            (event) =>
-              event.kind === 'turn.settled' &&
-              ['error', 'cancelled'].includes(String(event.payload['outcome'])),
-          )
-          .map((event) => event.payload['turnId']),
+      const unanswered = excludedHostedPrompts(
+        session.authority.eventsInSequenceRange(1, historyCutSequence),
+        await session.sink.project(historyCutSequence),
       );
       const history = await session.sink.projectModelHistory({
         throughSequence: historyCutSequence,
         includeRecord: (entry) =>
           (entry.type === 'system' || settled.has(entry.daemonPromptId)) &&
-          !(entry.type === 'user' && unanswered.has(entry.daemonPromptId)),
+          !(
+            entry.daemonPromptId !== undefined &&
+            unanswered.has(entry.daemonPromptId)
+          ),
       });
-      history.apiHistory = history.apiHistory.filter(
-        (entry) =>
-          entry.role !== 'user' ||
-          !unanswered.has(getApiHistoryPromptId(entry)),
+      history.apiHistory = filterHostedTurnHistory(
+        history.apiHistory,
+        unanswered,
       );
       const instructions = await this.options.instructions();
       const config = await this.createConfig(intent, instructions).catch(() => {

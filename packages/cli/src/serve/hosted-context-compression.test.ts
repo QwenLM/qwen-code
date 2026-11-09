@@ -219,6 +219,128 @@ describe('Hosted context compression', () => {
     expect(config.switchModel).not.toHaveBeenCalled();
   });
 
+  it.each(
+    [false, true].flatMap((snapshot) =>
+      [
+        {
+          stopReason: 'harness_interruption',
+          work: true,
+          expectedRoles: ['user', 'model', 'user'],
+        },
+        { stopReason: 'harness_interruption', work: false, expectedRoles: [] },
+        { stopReason: 'cancelled', work: true, expectedRoles: [] },
+      ].map((row) => ({ ...row, snapshot })),
+    ),
+  )(
+    'keeps compact source groups whole: $stopReason, work=$work, snapshot=$snapshot',
+    async ({ stopReason, work, expectedRoles, snapshot }) => {
+      const promptId = randomUUID();
+      const instruction = 'review COMPACT_REPRO then fix findings';
+      const callId = `${promptId}:agent`;
+      const sessionId = session.authority.sessionHeader.sessionKey.sessionId;
+      const messages: Content[] = [
+        { role: 'user', parts: [{ text: instruction }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: callId, name: 'agent', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'agent',
+                response: { output: 'Child started' },
+              },
+            },
+          ],
+        },
+      ];
+      if (!work) messages.splice(1);
+      for (const [index, message] of messages.entries())
+        await session.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: root,
+          version: 'test',
+          type: (['user', 'assistant', 'tool_result'] as const)[index]!,
+          daemonPromptId: promptId,
+          message,
+        });
+      await session.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        cwd: root,
+        version: 'test',
+        type: 'system',
+        subtype: 'turn_result',
+        daemonPromptId: promptId,
+        systemPayload: {
+          promptId,
+          state: 'cancelled',
+          stopReason,
+          endedAt: Date.now(),
+        },
+      });
+      if (snapshot)
+        await session.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: root,
+          version: 'test',
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: {
+            info: candidate.info,
+            compressedHistory: [...candidate.newHistory, ...messages],
+            summaryPrefixLength: 2,
+            promptIds: [
+              null,
+              null,
+              promptId,
+              ...messages.slice(1).map(() => null),
+            ],
+          },
+        });
+      engine();
+      const request = {
+        ...intent(),
+        expectedCompactionRevision: compression.revision,
+      };
+      await compression.admit(request);
+      await compression.wait();
+      expect(compression.status(request.operationId)?.status).toBe('completed');
+      const history = chat.setHistory.mock.calls[0]![0];
+      expect(
+        history.some((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.text ===
+              (snapshot ? 'remember: blue' : 'original blue history'),
+          ),
+        ),
+      ).toBe(true);
+      const interruptedGroup = history.filter((entry) =>
+        entry.parts?.some(
+          (part) =>
+            part.text === instruction ||
+            part.functionCall?.id === callId ||
+            part.functionResponse?.id === callId,
+        ),
+      );
+      expect(interruptedGroup.map((entry) => entry.role)).toEqual(
+        expectedRoles,
+      );
+    },
+  );
+
   it('durably compresses without a user Turn and replays the exact operation', async () => {
     const summarize = engine();
     const request = intent();

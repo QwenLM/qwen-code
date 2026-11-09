@@ -33,7 +33,7 @@ import type {
   ChatRecord,
   ChatCompressionRecordPayload,
 } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { filterHostedTurnHistory } from './hosted-turn-history.js';
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import type { HostedModelConfigReader } from './hosted-model-config.js';
@@ -416,17 +416,8 @@ async function runPreparedHostedHarnessTextTurn(
   let pendingToolResults =
     input.resumeFromToolResults !== undefined ||
     (input.resumeModel?.pendingToolResults ?? false);
-  const excludeUnanswered = (history: Content[]) => {
-    let excluded = false;
-    return history.filter((entry) => {
-      const promptId = getApiHistoryPromptId(entry);
-      // Compression marks prompts alone. Tool rounds and unmarked queued
-      // guidance belong to that boundary until the next marked prompt.
-      if (promptId !== undefined)
-        excluded = input.excludedPromptIds?.has(promptId) ?? false;
-      return !excluded;
-    });
-  };
+  const excludeUnanswered = (history: Content[]) =>
+    filterHostedTurnHistory(history, input.excludedPromptIds);
   const initialMessages: Content[] = excludeUnanswered(
     buildSessionHistoryFromConversation({
       messages: input.history,

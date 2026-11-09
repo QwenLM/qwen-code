@@ -172,6 +172,7 @@ import {
   parseToolResultManifestBytes,
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { excludedHostedPrompts } from './hosted-turn-history.js';
 import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
 import {
   isChildSessionRun,
@@ -1396,30 +1397,15 @@ function acceptedInputSequence(
   return sequence;
 }
 
-/**
- * Turns excluded from later model context as complete groups. A Harness
- * interruption keeps its original instruction with the work it committed;
- * other cancellations and errors do not carry their instructions forward.
- * Settlement provenance lives in journal events, not projected messages.
- */
-function unansweredPrompts(session: HostedSession): Set<string> {
+function unansweredPrompts(
+  session: HostedSession,
+  records: readonly ChatRecord[],
+): Set<string> {
   const authority = session.managed.authority;
-  const prompts = new Set<string>();
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
-    if (
-      event.kind === 'turn.settled' &&
-      (event.payload['outcome'] === 'error' ||
-        (event.payload['outcome'] === 'cancelled' &&
-          event.payload['stopReason'] !== 'harness_interruption'))
-    ) {
-      const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string') prompts.add(turnId);
-    }
-  }
-  return prompts;
+  return excludedHostedPrompts(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+    records,
+  );
 }
 
 /** Which input sources ride the wake pump — the one predicate the probe,
@@ -3872,7 +3858,7 @@ async function executeHostedTurn(
             .filter((event) => event.kind === 'turn.settled')
             .map((event) => event.payload['turnId']),
         );
-        const unanswered = unansweredPrompts(session);
+        const unanswered = unansweredPrompts(session, projected);
         const history = (
           session.toolProfile
             ? modelRecords.filter(
@@ -4062,7 +4048,7 @@ async function executeHostedTurn(
                   sessionId,
                   cwd,
                   history,
-                  excludedPromptIds: unansweredPrompts(session),
+                  excludedPromptIds: unansweredPrompts(session, projected),
                   classifierUserText: () =>
                     readHostedClassifierUserText(session),
                   commitCompression: async (payload) => {
@@ -11222,7 +11208,7 @@ export function registerHostedHarnessSessionRoutes(
           const parkedRound = new Set(
             turnRecords.slice(lastCallIndex + 1).map((entry) => entry.uuid),
           );
-          const unanswered = unansweredPrompts(session);
+          const unanswered = unansweredPrompts(session, projected);
           const history = modelRecords.filter(
             (entry) =>
               (entry.type === 'system' ||
@@ -11542,7 +11528,7 @@ export function registerHostedHarnessSessionRoutes(
             sessionId,
             cwd,
             history,
-            excludedPromptIds: unansweredPrompts(session),
+            excludedPromptIds: unansweredPrompts(session, projected),
             classifierUserText: () => readHostedClassifierUserText(session),
             commitCompression: async (payload) => {
               await session.managed.sink.write(

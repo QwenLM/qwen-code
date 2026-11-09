@@ -4540,7 +4540,7 @@ describe('Hosted Harness no-tool session', () => {
   it.each([
     ['cancelled', 'harness_interruption', ['user', 'assistant', 'tool_result']],
     ['cancelled', 'cancelled', []],
-    ['cancelled', 'deadline_exceeded', []],
+    ['error', 'deadline_exceeded', []],
     ['error', 'error', []],
   ] as const)(
     'keeps settled tool history whole after %s/%s (#14256)',
@@ -4617,6 +4617,107 @@ describe('Hosted Harness no-tool session', () => {
       ).toMatchObject({ outcome, stopReason });
     },
   );
+
+  it('excludes a naked interrupted instruction from the next prompt (PR #15959)', async () => {
+    mockBrokerBroker();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      })
+      .expect(200);
+    const managed = capturedWakeSession().managed;
+    const instruction = 'write INTERRUPTED_REPRO before answering';
+    const content = Buffer.from(
+      JSON.stringify([{ type: 'text', text: instruction }]),
+    );
+    await managed.authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef: await managed.resources.publish('managed-input', content),
+        admissionRef: await managed.resources.publish(
+          'managed-admission',
+          Buffer.from('{}'),
+        ),
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await createManagedHarnessHandle(managed).ensureRunnable();
+    const uuid = randomUUID();
+    await managed.sink.write({
+      uuid,
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      type: 'user',
+      daemonPromptId: PROMPT_ID,
+      message: { role: 'user', parts: [{ text: instruction }] },
+    });
+    await managed.sink.write({
+      uuid: randomUUID(),
+      parentUuid: uuid,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      type: 'system',
+      subtype: 'turn_result',
+      daemonPromptId: PROMPT_ID,
+      systemPayload: {
+        promptId: PROMPT_ID,
+        state: 'cancelled',
+        stopReason: 'harness_interruption',
+        endedAt: Date.now(),
+      },
+    });
+    const prompt = [{ type: 'text', text: 'answer this new question only' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce(), {
+      timeout: settleTimeoutMs(),
+    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const input = state.model.mock.calls[0]![0] as unknown as {
+      history: ChatRecord[];
+      prompt: string;
+    };
+    expect(input.prompt).toContain('answer this new question only');
+    expect(
+      input.history.filter((entry) => entry.daemonPromptId === PROMPT_ID),
+    ).toEqual([]);
+  });
 
   it('keeps a turn that ended unanswered out of the next wake turn history', async () => {
     await prewriteAutomationSession();
