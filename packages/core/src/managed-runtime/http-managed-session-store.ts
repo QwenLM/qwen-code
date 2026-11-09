@@ -2674,6 +2674,15 @@ class ManagedSessionStoreHttpClient {
       this.grant.leaseUntil > Date.now()
     )
       return;
+    // No renewal may fire while there is no grant: renewWriter() would
+    // throw out of the timer callback. The wait may have re-armed the
+    // timer (for example, a renewal that answered schedules the next one,
+    // and a renewal the timer started or joined that met a transient error
+    // schedules a retry); reaching this line after that takes a wall-clock
+    // step back, or a renewed lease that ran out between that re-arm and
+    // the check above. A successful acquire arms its own timer; a failed
+    // one restores the lapsed grant without one.
+    this.stopRenewal();
     this.grant = undefined;
     const acquire = (async () => {
       await this.acquireWriter();
