@@ -1815,9 +1815,10 @@ describe('ci failure patrol workflow', () => {
     const releaseGitConfig = join(root, 'release-gitconfig');
     writeFileSync(releaseGitConfig, '');
     const releaseAmbient = {
-      GIT_CONFIG_GLOBAL: releaseGitConfig,
       GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_PARAMETERS: '',
+      GIT_CONFIG_GLOBAL: releaseGitConfig,
     };
     // Pin the global file back to the planted config so the positive control
     // still exercises the hooksPath the fixture wrote.
@@ -1862,6 +1863,12 @@ describe('ci failure patrol workflow', () => {
       expect(existsSync(sentinel)).toBe(true);
 
       rmSync(sentinel);
+      // The ambient is why the pin above is load-bearing: with it in force the
+      // planted config is outranked and the hook cannot fire. Remove its
+      // GIT_CONFIG_GLOBAL and this assertion must go red.
+      git(['checkout', '--force', 'HEAD'], releaseAmbient);
+      expect(existsSync(sentinel)).toBe(false);
+
       const stepEnv = {
         ...process.env,
         HOME: home,
