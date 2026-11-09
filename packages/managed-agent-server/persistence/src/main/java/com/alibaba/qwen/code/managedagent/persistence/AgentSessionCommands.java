@@ -10,6 +10,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.dao.DuplicateKeyException;
@@ -32,7 +34,7 @@ final class AgentSessionCommands {
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
     private final JdbcTemplate jdbc;
     private final Clock clock;
-    private final ManagedWorkspaceRegistry workspaces;
+    private final JdbcManagedWorkspaceRegistry workspaces;
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
 
@@ -42,7 +44,7 @@ final class AgentSessionCommands {
             com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
             JdbcTemplate jdbc,
             Clock clock,
-            ManagedWorkspaceRegistry workspaces,
+            JdbcManagedWorkspaceRegistry workspaces,
             boolean workspaceFilesEnabled,
             boolean workspaceShellEnabled) {
         this.eventJournal = eventJournal;
@@ -113,7 +115,7 @@ final class AgentSessionCommands {
             throw new ManagedAgentException(409, "session_not_active",
                     "The Session does not accept new Turns.");
         }
-        SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenantId, sessionId);
+        JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenantId, sessionId);
         ManagedConfigStore.requireOpen(jdbc, tenantId, sessionId);
         if (sessionPolicies.hasActiveTurn(tenantId, sessionId)) {
             throw new ManagedAgentException(409, "turn_active",
@@ -314,8 +316,8 @@ final class AgentSessionCommands {
                     + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
                     + " ?, ?, ?, ?, ?, 'PENDING', 'ADMITTED', 'PENDING', ?, ?, ?)",
                 renameKey(tenantId, sessionId, next),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 "rename:" + next,
                 tenantId,
                 sessionId,
@@ -564,7 +566,7 @@ final class AgentSessionCommands {
         return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract
                         .OperationKind.RENAME,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedSessionStore.sessionScopeKey(tenant, session),
                 AgentStoreRows.renameTarget(tenant, session),
                 "rename:" + revision);
     }
@@ -757,7 +759,7 @@ final class AgentSessionCommands {
             String sessionId, String turnId, OperationKind kind,
             String command, String idempotencyKey, String requestDigest,
             byte[] actorKey, String sessionStatus, long now) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String target = turnOperationTarget(turnId);
         String operationId = AgentStoreRows.publicId("op");
         String operationKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
@@ -882,7 +884,7 @@ final class AgentSessionCommands {
                         + " operation_kind = ? AND target_key = ? AND state ="
                         + " 'PENDING' FOR UPDATE",
                 String.class,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 kind.name(), turnOperationTarget(turnId))) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"
                             + " admission_stage = ?, delivery_state = ?,"
@@ -1004,7 +1006,7 @@ final class AgentSessionCommands {
             return null;
         }
         try {
-            return com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            return ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return null;
         }
