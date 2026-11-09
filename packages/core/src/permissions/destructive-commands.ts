@@ -20,6 +20,10 @@
 
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
+import {
+  amendMentionsProvablyInert,
+  commandContainsGitAmend,
+} from './shell-semantics.js';
 
 /**
  * Destructive git commands that discard local work.
@@ -33,9 +37,11 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
 ]);
 
 /**
- * `git commit --amend` is blocked unless the target commit was made by the
- * agent in this session. Session tracking is managed externally via
- * {@link registerSessionCommit} and {@link isAmendOfSessionCommit}.
+ * Fail-closed literal backstop for the amend guard (#13570): the parsed
+ * recognizer in shell-semantics decides what IS an invocation, and this
+ * pattern keeps every literal mention the recognizer did not confirm
+ * blocked unless a narrow prover shows each occurrence is inert data.
+ * The recognizer can therefore only add denials, never relax one.
  */
 const GIT_AMEND_PATTERN = /\bgit\s+commit\s+--amend\b/;
 
@@ -216,7 +222,10 @@ export function isDestructiveCommand(
     }
   }
 
-  if (GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd)) {
+  const amendRecognized =
+    commandContainsGitAmend(command) ||
+    (GIT_AMEND_PATTERN.test(expanded) && !amendMentionsProvablyInert(command));
+  if (amendRecognized && !isAmendOfSessionCommit(cwd)) {
     return {
       blocked: true,
       reason:
