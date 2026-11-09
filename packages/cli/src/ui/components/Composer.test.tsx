@@ -268,6 +268,35 @@ describe('Composer', () => {
 
       expect(lastFrame()).not.toContain('Footer');
     });
+
+    it('keeps the footer mounted while messages are queued during a busy turn', () => {
+      // #8666: isInputActive is false across the whole window a queued message
+      // can exist in (approval-mode resets, slash-command processing,
+      // WaitingForConfirmation). The footer holds the only always-on "N
+      // queued" badge, so hiding it there leaves the queue invisible.
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: true,
+        messageQueue: ['queued while busy'],
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('Footer');
+      expect(lastFrame()).toContain('queued while busy');
+    });
+
+    it('keeps the footer hidden when input is inactive and the queue is empty', () => {
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: true,
+        messageQueue: [],
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('Footer');
+    });
   });
 
   describe('Loading Indicator', () => {

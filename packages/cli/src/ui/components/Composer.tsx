@@ -177,7 +177,15 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           which returns a message exactly while initialization is pending — so
           it has to mount on that window too, or startup shows no progress at
           all. InputPrompt stays gated on isInputActive alone. */}
-      {(uiState.isInputActive || !uiState.isConfigInitialized) &&
+      {/* The footer also carries the "N queued" badge, and isInputActive goes
+          false for the whole busy window the badge exists for (approval-mode
+          resets, slash-command processing, WaitingForConfirmation), so it has
+          to mount while the queue is non-empty too. Without this the only
+          queued-message indicator is unmounted exactly when the user needs to
+          know a message was registered (#8666). */}
+      {(uiState.isInputActive ||
+        !uiState.isConfigInitialized ||
+        uiState.messageQueue.length > 0) &&
         !showSuggestions &&
         (showShortcuts ? (
           <KeyboardShortcuts />
