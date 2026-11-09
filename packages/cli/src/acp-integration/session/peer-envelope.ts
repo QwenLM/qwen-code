@@ -19,10 +19,10 @@ export function defangPeerNotificationTags(text: string): string {
   // Only the opening `<` is rewritten, so the tag's own case, spacing and
   // attributes survive unchanged. The `(?![-\w])` guard keeps a longer tag that
   // merely shares the prefix (`<peer-notification-extra>`) out of the match.
-  // The whitespace run is matched once and the slash lives in its own optional
-  // group: two adjacent unbounded `\s*` repeats re-scan the same run for every
-  // backtracking start, which is quadratic in the report length (a 64 KiB run
-  // of spaces after `<` stalls the host event loop for seconds). Bounding the
-  // run instead would stop defanging `< peer-notification>`-shaped tags.
-  return text.replace(/<(?=\s*(?:\/\s*)?peer-notification(?![-\w]))/gi, '&lt;');
+  // Whitespace and the optional slash share ONE character class: two adjacent
+  // unbounded repeats re-scan the same run for every backtracking start, which
+  // is quadratic in the report length (a 64 KiB run of spaces after `<` stalls
+  // the host event loop for seconds). Bounding the run instead would stop
+  // defanging `<         /peer-notification>`-shaped tags.
+  return text.replace(/<(?=(?:\/|\s)*peer-notification(?![-\w]))/gi, '&lt;');
 }

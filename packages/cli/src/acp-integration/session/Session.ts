@@ -2096,10 +2096,11 @@ export interface BackgroundNotificationQueueItem {
   taskId: string;
   status: string;
   /**
-   * `peer` is a message from another agent session — today an Agent Team
-   * teammate's report to its leader. Core already models the kind end to end
-   * (`GROUP_ORDER.peer`, `droppedNoun` → "cross-session message", the
-   * `hasPeerLoss` accounting, and `background-turn-context`), and like `cron`
+   * `peer` is a message from another agent — today an Agent Team teammate's
+   * report to its leader. Core models the kind end to end (`GROUP_ORDER.peer`,
+   * `droppedNoun`, the `hasPeerLoss` accounting, and `background-turn-context`);
+   * the user- and model-facing nouns switch on the teammate `agent` identity so
+   * an in-session report is not announced as cross-session traffic. Like `cron`
    * it names no task the model could go and read, so a dropped one is a real
    * loss rather than a pointer to a registry entry.
    */
@@ -2162,6 +2163,7 @@ function toAdmissibleNotification(
     taskId: item.taskId,
     interim: item.kind === 'monitor' && item.status === 'running',
     persisted: item.persisted,
+    ...(item.agent ? { agent: { kind: item.agent.kind } } : {}),
   };
 }
 
@@ -13584,6 +13586,8 @@ export class Session implements SessionContext {
         : undefined,
       injectLeaderMessage: (modelText, displayText, senders) =>
         this.#enqueueTeammateMessage(modelText, displayText, senders),
+      injectLeaderNotice: (modelText, displayText) =>
+        this.#enqueueTeamRuntimeNotice(modelText, displayText),
       reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
       // Not `#requestPermissionQueued`: a teammate approval is session-scoped,
       // so no leader turn ending bounds it — one ignored card left on the
@@ -13607,6 +13611,36 @@ export class Session implements SessionContext {
           sessionId: this.sessionId,
           teammateName,
         }),
+    });
+  }
+
+  /**
+   * Runtime error/notice text (`<team_error>` / `<team_notice>`) that shares
+   * the leader callback with teammate reports. It names no sender and is not
+   * a message from anyone, so it must not enter the peer queue: that queue
+   * seals on close, lands cold copies as peer records, and renders rows under
+   * the peer label. It splices into the next ordinary turn as runtime context
+   * (the same live-history mechanism external agent records use) and records
+   * as a plain notification with no `backgroundTask`, so neither live nor
+   * reloaded transcripts present it as a peer report.
+   */
+  #enqueueTeamRuntimeNotice(modelText: string, displayText: string): void {
+    if (this.disposed) return;
+    this.pendingExternalAgentContext.push(modelText);
+    this.config
+      .getChatRecordingService()
+      ?.recordNotification([{ text: modelText }], displayText);
+    void this.sendUpdate({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: displayText },
+      _meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+      },
+    }).catch((error) => {
+      debugLogger.warn(
+        `Failed to publish team runtime notice: ${this.#formatError(error)}`,
+      );
     });
   }
 

@@ -252,7 +252,9 @@ export const SystemMessage = memo(function SystemMessage({
             turn?.kind === 'agent'
               ? 'background.agent'
               : turn?.kind === 'peer'
-                ? 'background.peer'
+                ? teammate
+                  ? 'background.teammate'
+                  : 'background.peer'
                 : 'background.task',
           )}
         </span>
@@ -422,13 +424,15 @@ export const SystemMessage = memo(function SystemMessage({
   };
   const taskStatus = stringField('status');
   const taskNotificationLabel =
-    taskStatus === 'completed'
-      ? t('system.taskCompleted')
-      : taskStatus === 'failed'
-        ? t('system.taskFailed')
-        : taskStatus === 'cancelled'
-          ? t('system.taskCancelled')
-          : t('system.taskNotification');
+    teammate && stringField('kind') === 'peer'
+      ? t('background.teammate')
+      : taskStatus === 'completed'
+        ? t('system.taskCompleted')
+        : taskStatus === 'failed'
+          ? t('system.taskFailed')
+          : taskStatus === 'cancelled'
+            ? t('system.taskCancelled')
+            : t('system.taskNotification');
   const taskNotificationTone =
     taskStatus === 'completed'
       ? 'success'

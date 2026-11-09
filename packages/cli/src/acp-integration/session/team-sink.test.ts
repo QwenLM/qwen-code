@@ -125,6 +125,7 @@ describe('attachTeamSink', () => {
   let manager: ReturnType<typeof makeManager>;
   let config: ReturnType<typeof makeConfig>;
   let injectLeaderMessage: ReturnType<typeof vi.fn>;
+  let injectLeaderNotice: ReturnType<typeof vi.fn>;
   let requestPermission: ReturnType<typeof vi.fn>;
   let reportRosterChange: ReturnType<typeof vi.fn>;
   let retireTeamBinding: ReturnType<typeof vi.fn>;
@@ -141,6 +142,7 @@ describe('attachTeamSink', () => {
     manager = makeManager();
     config = makeConfig(manager);
     injectLeaderMessage = vi.fn();
+    injectLeaderNotice = vi.fn();
     requestPermission = vi.fn();
     reportRosterChange = vi.fn();
     retireTeamBinding = vi.fn(async () => {});
@@ -150,6 +152,7 @@ describe('attachTeamSink', () => {
       sessionId: 's1',
       signal: new AbortController().signal,
       injectLeaderMessage,
+      injectLeaderNotice,
       reportRosterChange,
       retireTeamBinding,
       retireTeammateApprovals,
@@ -191,6 +194,35 @@ describe('attachTeamSink', () => {
       'report',
       '[team] report',
       ['correctness'],
+    );
+  });
+
+  it('routes a team_error off the peer path instead of framing it as a teammate report', () => {
+    // TeamManager.fireAndForget sends coordination failures through the same
+    // leader callback as reports; wrapping one as a peer report tells the
+    // leader model a teammate said it, and records it under the peer label.
+    attachTeamSink(deps);
+    manager.leaderCallback?.(
+      '<team_error>Coordination step "x" failed: boom</team_error>',
+      'Coordination step "x" failed',
+    );
+    expect(injectLeaderNotice).toHaveBeenCalledWith(
+      '<team_error>Coordination step "x" failed: boom</team_error>',
+      'Coordination step "x" failed',
+    );
+    expect(injectLeaderMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy single-callback delivery when no notice path exists', () => {
+    attachTeamSink({ ...deps, injectLeaderNotice: undefined });
+    manager.leaderCallback?.(
+      '<team_error>boom</team_error>',
+      'coordination failed',
+    );
+    expect(injectLeaderMessage).toHaveBeenCalledWith(
+      '<team_error>boom</team_error>',
+      'coordination failed',
+      undefined,
     );
   });
 
@@ -411,10 +443,13 @@ describe('attachTeamSink', () => {
     await vi.waitFor(() => expect(respond).toHaveBeenCalled());
     expect(respond.mock.calls[0]![0]).toBe(ToolConfirmationOutcome.Cancel);
     // Without this the leader only sees a teammate that silently gave up.
-    expect(injectLeaderMessage).toHaveBeenCalledWith(
+    // The notice names no sender, so it travels the notice path, not the
+    // peer-report path.
+    expect(injectLeaderNotice).toHaveBeenCalledWith(
       expect.stringContaining('<team_notice>'),
       expect.stringContaining('[team]'),
     );
+    expect(injectLeaderMessage).not.toHaveBeenCalled();
   });
 
   it('does not tell the leader the host failed to answer once the host has answered', async () => {

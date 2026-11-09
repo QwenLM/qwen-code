@@ -1550,6 +1550,56 @@ describe('Session', () => {
       },
     );
 
+    it('records a team_error as a runtime notice, not a peer report', async () => {
+      // TeamManager sends coordination failures through the leader callback
+      // too; framing one as a peer report tells the leader model a teammate
+      // said it and persists it under the peer kind with no sender.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.leaderCallback?.(
+        '<team_error>Coordination step "x" failed: boom</team_error>',
+        'Coordination step "x" failed',
+      );
+
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordNotification,
+        ).toHaveBeenCalledTimes(1),
+      );
+      const [parts, displayText, backgroundTask] = vi.mocked(
+        mockChatRecordingService.recordNotification,
+      ).mock.calls[0]!;
+      expect(parts).toEqual([
+        {
+          text: '<team_error>Coordination step "x" failed: boom</team_error>',
+        },
+      ]);
+      expect(displayText).toBe('Coordination step "x" failed');
+      // No backgroundTask at all: neither the live frame nor the persisted
+      // record may claim the peer kind for a runtime error.
+      expect(backgroundTask).toBeUndefined();
+      expect(sentPeerNotifications()).toHaveLength(0);
+      // The error still reaches the leader model on its next ordinary turn.
+      expect(session.pendingExternalAgentContext).toContain(
+        '<team_error>Coordination step "x" failed: boom</team_error>',
+      );
+      session.dispose();
+    });
+
     it('still delivers a teammate report that lands inside a reversible close', async () => {
       const manager = makeFakeTeamManager();
       session.dispose();

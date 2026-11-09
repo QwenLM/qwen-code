@@ -37,6 +37,10 @@ interface AgentIdentity {
 
 第二层消费共享身份契约。ACP Team sink 挂接当前 TeamManager，通过现有 peer 通知队列传递持久报告及成员加入/退出通知。发送者使用规范名归因，经过验证的身份通过录制与重放保留；Web Shell 在报告、成员通知及关联的轮次开始行标注队友。成员通知与报告共享投递及持久化路径；状态/idle 脉冲不进入 sink。
 
+运行时错误/提示文本（`<team_error>` 协调失败、sink 自身 fail-closed 的 `<team_notice>`）与报告共用 TeamManager 的 leader 回调，但不携带发送者。sink 把这种无发送者形态分流到独立的 notice 路径：作为运行时上下文拼入 leader 的下一次普通轮次，并以不带 backgroundTask 的普通通知记录，因此不进入 peer 队列的封存、冷拷贝或 peer 标签语义。携带发送者的载荷即使正文引用了 notice 标记，也仍是队友报告。
+
+`peer` 队列 kind 与跨会话流量共用，但带队友归因的条目是本会话内的报告：溢出摘要称之为 "teammate report"（而非跨会话消息），Web Shell 的轮次行与通知图标显示「队友报告」，不再使用跨会话与任务通知标签。
+
 队友审批直接到达 host，独立于 leader 权限队列。每个请求具有 UUID 和会话范围；会话生命周期、binding epoch、manager 替换及队友退出负责撤回过期请求。host 请求失败与答复后队友响应失败分开处理，bridge 所有权策略控制会话边界。
 
 未排空的 peer 报告保持待处理工作。可逆关闭、队列溢出及关机 flush 保存未投递报告，重复 flush 不重复录制。冷录制和暖通知 envelope 保留 peer 语义、XML 转义、rewind 与恢复行为。删除 Team 会发送剩余成员退出事件。

@@ -53,6 +53,18 @@ export interface TeamSinkDeps {
     senders?: readonly string[],
   ) => void;
   /**
+   * Runtime error/notice text (`<team_error>` from TeamManager coordination
+   * failures, `<team_notice>` from this sink's fail-closed cancellations).
+   * These name no sender and are not teammate reports, so they must not
+   * travel the peer queue with its seal, cold-copy and peer-labelling
+   * semantics. Optional: a host without a separate path keeps the legacy
+   * single-callback delivery.
+   */
+  readonly injectLeaderNotice?: (
+    modelText: string,
+    displayText: string,
+  ) => void;
+  /**
    * Roster membership changes. Status changes and idle pulses are deliberately
    * not reported: they fire on every transition, and each one would wake the
    * leader into an automatic turn for noise.
@@ -134,6 +146,17 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     debugLogger.warn(`Teammate approval ${what} failed:`, error);
   };
 
+  // Runtime error/notice text shares TeamManager's leader callback with
+  // teammate reports but names no sender; route it off the peer queue when
+  // the host offers a separate path.
+  const injectNotice = (modelText: string, displayText: string): void => {
+    if (deps.injectLeaderNotice) {
+      deps.injectLeaderNotice(modelText, displayText);
+      return;
+    }
+    deps.injectLeaderMessage(modelText, displayText);
+  };
+
   const respondCancel = (
     event: TeammateApprovalRequestEvent,
     reason: string,
@@ -144,7 +167,7 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
       .respond(ToolConfirmationOutcome.Cancel, { cancelMessage: reason })
       .catch((error) => swallow(error, 'Cancel'));
     // Tell the leader too, otherwise it only sees a teammate that gave up.
-    deps.injectLeaderMessage(
+    injectNotice(
       `<team_notice>\n${reason}\n</team_notice>`,
       `[team] ${reason}`,
     );
@@ -315,6 +338,19 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     if (!manager) return;
 
     manager.setLeaderMessageCallback((modelText, displayText, senders) => {
+      // TeamManager funnels `<team_error>` coordination failures (and the
+      // sink's own `<team_notice>` on legacy hosts) through the same callback
+      // as reports, with no senders. A payload WITH senders is a real
+      // teammate report even if its body quotes notice markup, so only the
+      // senderless shape is rerouted.
+      if (
+        deps.injectLeaderNotice &&
+        (!senders || senders.length === 0) &&
+        /^\s*<team_(error|notice)>/.test(modelText)
+      ) {
+        deps.injectLeaderNotice(modelText, displayText);
+        return;
+      }
       deps.injectLeaderMessage(modelText, displayText, senders);
     });
     const emitter = manager.getEventEmitter();

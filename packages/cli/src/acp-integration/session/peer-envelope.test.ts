@@ -47,6 +47,11 @@ describe('defangPeerNotificationTags', () => {
     expect(defangPeerNotificationTags('< / peer-notification>')).toBe(
       '&lt; / peer-notification>',
     );
+    // Exactly the case a bounded-whitespace remedy breaks: more spaces than
+    // any fixed bound, slash included, must still be defanged.
+    expect(
+      defangPeerNotificationTags(`<${' '.repeat(9)}/peer-notification>`),
+    ).toBe(`&lt;${' '.repeat(9)}/peer-notification>`);
   });
 
   it('does not touch a longer tag that merely shares the prefix', () => {
