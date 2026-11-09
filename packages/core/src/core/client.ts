@@ -3338,7 +3338,7 @@ export class LlmClient {
       .scheduleSkillReview({
         projectRoot: this.config.getProjectRoot(),
         sessionId: this.config.getSessionId(),
-        history: this.getHistoryShallow(),
+        history: () => this.getHistoryShallow(),
         config: this.config,
         toolCallCount: this.toolCallCount,
         skillsModified: this.skillsModifiedInSession,

@@ -207,7 +207,9 @@ export interface ScheduleExtractParams {
 export interface ScheduleSkillReviewParams {
   projectRoot: string;
   sessionId: string;
-  history: Content[];
+  /** Read only once a review is actually scheduled: most turns stop at a gate
+   * above the first use, and a snapshot is O(history) on every one of them. */
+  history: Content[] | (() => Content[]);
   toolCallCount: number;
   skillsModified: boolean;
   now?: Date;
@@ -221,6 +223,11 @@ export interface ScheduleSkillReviewParams {
    * Config.getAutoSkillConfirmEnabled(). */
   confirmBeforePersist?: boolean;
 }
+
+/** The params a scheduled review runs on, with its history already read. */
+type ResolvedSkillReviewParams = Omit<ScheduleSkillReviewParams, 'history'> & {
+  history: Content[];
+};
 
 export interface SkillReviewScheduleResult {
   status: 'scheduled' | 'skipped';
@@ -2035,6 +2042,8 @@ export class MemoryManager {
       };
     }
 
+    const history =
+      typeof params.history === 'function' ? params.history() : params.history;
     const record = makeTaskRecord(
       'skill-review',
       params.projectRoot,
@@ -2044,19 +2053,22 @@ export class MemoryManager {
       status: 'running',
       progressText: 'Running managed skill review.',
       metadata: {
-        historyLength: params.history.length,
+        historyLength: history.length,
         toolCallCount: params.toolCallCount,
         threshold,
       },
     });
 
-    const promise = this.track(record.id, this.runSkillReview(record, params));
+    const promise = this.track(
+      record.id,
+      this.runSkillReview(record, { ...params, history }),
+    );
     return { status: 'scheduled', taskId: record.id, promise };
   }
 
   private async runSkillReview(
     record: MemoryTaskRecord,
-    params: ScheduleSkillReviewParams,
+    params: ResolvedSkillReviewParams,
   ): Promise<MemoryTaskRecord> {
     this.skillReviewInFlightByProject.set(params.projectRoot, record.id);
 

@@ -11293,6 +11293,22 @@ Other open files:
 
         expect(mockMemoryManager.scheduleSkillReview).not.toHaveBeenCalled();
       });
+
+      it('should hand the manager a lazy history that a skipped review never reads', () => {
+        skipReview('below_threshold');
+        const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
+        client['toolCallCount'] = 3;
+
+        client.runManagedAutoSkillReview();
+
+        const passed = mockMemoryManager.scheduleSkillReview.mock
+          .calls[0]?.[0] as { history: unknown };
+        expect(typeof passed.history).toBe('function');
+        expect(getHistorySpy).not.toHaveBeenCalled();
+        expect((passed.history as () => unknown)()).toBe(
+          getHistorySpy.mock.results[0]?.value,
+        );
+      });
     });
 
     describe('recordCompletedToolCall', () => {
