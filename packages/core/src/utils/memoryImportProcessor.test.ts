@@ -594,10 +594,20 @@ Inner content
       fsSync.mkdirSync(projectRoot);
       fsSync.mkdirSync(outsideRoot);
       const secret = path.join(outsideRoot, 'secret.md');
+      const inside = path.join(projectRoot, 'inside.md');
+      const insideLink = path.join(projectRoot, 'inside-link.md');
       const link = path.join(projectRoot, 'linked.md');
       fsSync.writeFileSync(secret, 'private');
+      fsSync.writeFileSync(inside, 'inside');
+      fsSync.symlinkSync(inside, insideLink);
       fsSync.symlinkSync(secret, link);
       try {
+        expect(
+          validateImportPath('./inside.md', projectRoot, [projectRoot]),
+        ).toBe(true);
+        expect(
+          validateImportPath('./inside-link.md', projectRoot, [projectRoot]),
+        ).toBe(true);
         expect(
           validateImportPath('./linked.md', projectRoot, [projectRoot]),
         ).toBe(false);

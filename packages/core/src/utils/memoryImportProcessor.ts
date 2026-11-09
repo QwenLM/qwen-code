@@ -501,9 +501,10 @@ export function validateImportPath(
     // in the source for the caller to report as unresolved.
     let targetExists = false;
     try {
-      targetExists =
-        fsSync.lstatSync(resolvedPath).isSymbolicLink() ||
-        fsSync.existsSync(resolvedPath);
+      // lstat deliberately preserves dangling symlinks as existing directory
+      // entries so they cannot bypass the canonical containment check.
+      fsSync.lstatSync(resolvedPath);
+      targetExists = true;
     } catch {
       targetExists = false;
     }
