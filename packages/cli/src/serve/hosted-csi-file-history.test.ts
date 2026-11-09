@@ -6,7 +6,12 @@
 
 import { readFileSync } from 'node:fs';
 import { afterEach, expect, it, vi } from 'vitest';
-import { requestHostedCsiHistory } from './hosted-csi-file-history.js';
+import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  commitInitialHostedCsiHistory,
+  requestHostedCsiHistory,
+} from './hosted-csi-file-history.js';
+import { readHostedCsiFileProfile } from './managed-csi-file-profile.js';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -45,6 +50,39 @@ function body() {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+it.each(['csi-files-retirement/1', 'csi-files-retirement/2'])(
+  'writes initial history using the admitted %s profile without reading the definition again',
+  async (profile) => {
+    const commitDomainRecord = vi.fn().mockResolvedValue({});
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Buffer.from(JSON.stringify({ toolProfile: profile })),
+      )
+      .mockRejectedValue(new Error('Unexpected repeated definition read.'));
+    const session = {
+      authority: {
+        sessionHeader: { sessionKey: key, definitionRef: {} },
+        recordEnvelope: { cwd: '/workspace', version: 'test' },
+        domainRecord: () => undefined,
+        commitDomainRecord,
+      },
+      resources: { read },
+    } as unknown as ManagedSession;
+    expect(await readHostedCsiFileProfile(session)).toBe(profile);
+    await commitInitialHostedCsiHistory(session, fixture.valid[0].observation);
+    expect(commitDomainRecord).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        domain: 'file_history',
+        content: expect.objectContaining({ profile, schemaVersion: 2 }),
+      }),
+      { class: 'trusted_entry' },
+    );
+    expect(read).toHaveBeenCalledOnce();
+  },
+);
 
 it('fetches the original owner with exact credentials and validates the retained history', async () => {
   const response = body();

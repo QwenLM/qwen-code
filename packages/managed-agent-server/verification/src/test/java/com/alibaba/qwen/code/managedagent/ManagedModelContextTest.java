@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -52,9 +53,7 @@ class ManagedModelContextTest {
 
     @BeforeEach
     void setUp() {
-        var source = new JdbcDataSource();
-        source.setURL("jdbc:h2:mem:model-context-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        var source = dataSource();
         ManagedSchema.initialize(source);
         var counted = new DelegatingDataSource(source) {
             @Override
@@ -78,6 +77,171 @@ class ManagedModelContextTest {
         records = new ManagedExtensionRecordStore(jdbc);
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, records);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(counted));
+    }
+
+    protected javax.sql.DataSource dataSource() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:model-context-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return source;
+    }
+
+    @Test
+    void diagnosticsFoldAcrossCarriersWithoutRewindingOrCountingAReferenceAgain() throws Exception {
+        var journal = open(TENANT, "diagnostics", true);
+        ObjectNode first = diagnosticBody("snapshot-zero", 1);
+        commit(journal, diagnosticRequest(journal, "turn-before", first, ManagedModelDiagnostics.STATS_KIND, "completed"));
+        ObjectNode main = diagnosticBody("main-zero", 2);
+        var latest = diagnosticRequest(journal, "main", main, ManagedModelDiagnostics.MAIN_KIND, "output_committed");
+        commit(journal, latest);
+        commit(journal, diagnosticRequest(journal, "turn-after", first, ManagedModelDiagnostics.STATS_KIND, "completed"));
+
+        var saved = records.findModelDiagnostics(TENANT, "diagnostics");
+        assertThat(saved.statistics().path("snapshotRevision").longValue()).isEqualTo(2);
+        assertThat(saved.statisticsSequence()).isEqualTo(latest.firstSequence());
+        assertThat(saved.contextSequence()).isEqualTo(latest.firstSequence());
+        assertThat(saved.stale()).isFalse();
+        assertThat(context("diagnostics").modelId()).isEqualTo("qwen-test");
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?",
+                Integer.class, "diagnostics")).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD'", Integer.class)).isEqualTo(2);
+        assertThat(records.findModelDiagnostics("another-tenant", "diagnostics").statistics()).isNull();
+    }
+
+    @Test
+    void anAbandonedInvocationUpdatesStatisticsAndKeepsThePreviousCommittedContext() throws Exception {
+        var journal = open(TENANT, "failed-diagnostic", true);
+        var first = diagnosticRequest(journal, "main", diagnosticBody("main-zero", 1), ManagedModelDiagnostics.MAIN_KIND, "output_committed");
+        commit(journal, first);
+        ObjectNode failure = diagnosticBody("main-zero", 2).putNull("context");
+        failure.withObject("/statistics").withObject("/totals").withObject("/requests").put("total", 1).put("error", 1);
+        failure.withObject("/statistics").withObject("/sources").withObject("/main").withObject("/requests").put("total", 1).put("error", 1);
+        commit(journal, diagnosticRequest(journal, "failed", failure, ManagedModelDiagnostics.MAIN_KIND, "abandoned"));
+        var saved = records.findModelDiagnostics(TENANT, "failed-diagnostic");
+        assertThat(saved.contextSequence()).isEqualTo(first.firstSequence());
+        assertThat(saved.statistics().path("totals").path("requests").path("error").longValue()).isEqualTo(1);
+    }
+
+    @Test
+    void conflictingStatisticsRevisionRollsBackTheOriginalTransaction() throws Exception {
+        var journal = open(TENANT, "stats-conflict", true);
+        commit(journal, diagnosticRequest(journal, "first", diagnosticBody("snapshot-zero", 1), ManagedModelDiagnostics.STATS_KIND, "completed"));
+        long revision = records.findModelDiagnostics(TENANT, "stats-conflict").readRevision();
+        ObjectNode conflict = diagnosticBody("snapshot-zero", 1);
+        conflict.withObject("/statistics").put("observedAt", 1234);
+        assertThatThrownBy(() -> commit(journal, diagnosticRequest(journal, "conflicting", conflict,
+                ManagedModelDiagnostics.STATS_KIND, "completed"))).isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining("conflicting");
+        assertThat(records.findModelDiagnostics(TENANT, "stats-conflict").readRevision()).isEqualTo(revision);
+        assertThat(records.findModelDiagnostics(TENANT, "stats-conflict").statistics().path("observedAt").longValue()).isEqualTo(0);
+    }
+
+    @Test
+    void decreasingOverflowStatisticsRollBackTheOriginalTransaction() throws Exception {
+        var journal = open(TENANT, "overflow-regression", true);
+        ObjectNode first = diagnosticBody("snapshot-zero", 1);
+        for (String field : List.of("totals", "sources/main", "overflow")) {
+            first.withObject("/statistics/" + field + "/requests").put("total", 2).put("success", 2);
+        }
+        commit(journal, diagnosticRequest(journal, "first", first, ManagedModelDiagnostics.STATS_KIND, "completed"));
+        long revision = records.findModelDiagnostics(TENANT, "overflow-regression").readRevision();
+        ObjectNode next = first.deepCopy();
+        next.withObject("/statistics").put("snapshotRevision", 2);
+        next.withObject("/statistics/overflow/requests").put("total", 1).put("success", 1);
+        assertThatThrownBy(() -> commit(journal, diagnosticRequest(journal, "regressing", next,
+                ManagedModelDiagnostics.STATS_KIND, "completed"))).isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining("cannot decrease");
+        var saved = records.findModelDiagnostics(TENANT, "overflow-regression");
+        assertThat(saved.readRevision()).isEqualTo(revision);
+        assertThat(saved.statistics().at("/overflow/requests/total").longValue()).isEqualTo(2);
+    }
+
+    @Test
+    void decreasingFractionalRawOutputRollsBackTheOriginalTransaction() throws Exception {
+        var journal = open(TENANT, "raw-output-regression", true);
+        ObjectNode first = diagnosticBody("snapshot-zero", 1);
+        first.withObject("/statistics").put("rawOutputTokensTotal", 38.75);
+        commit(journal, diagnosticRequest(journal, "first", first, ManagedModelDiagnostics.STATS_KIND, "completed"));
+        long revision = records.findModelDiagnostics(TENANT, "raw-output-regression").readRevision();
+        ObjectNode next = first.deepCopy();
+        next.withObject("/statistics").put("snapshotRevision", 2).put("rawOutputTokensTotal", 38.25);
+        assertThatThrownBy(() -> commit(journal, diagnosticRequest(journal, "regressing", next,
+                ManagedModelDiagnostics.STATS_KIND, "completed"))).isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining("cannot decrease");
+        var saved = records.findModelDiagnostics(TENANT, "raw-output-regression");
+        assertThat(saved.readRevision()).isEqualTo(revision);
+        assertThat(saved.statistics().path("snapshotRevision").longValue()).isEqualTo(1);
+        assertThat(saved.statistics().path("rawOutputTokensTotal").decimalValue()).isEqualByComparingTo("38.75");
+    }
+
+    @Test
+    void staleContextRemainsReadableAfterCompactionAndTheBadgeReturnsAfterTheNextModel() throws Exception {
+        var journal = open(TENANT, "stale-diagnostic", true);
+        commit(journal, diagnosticRequest(journal, "main", diagnosticBody("main-zero", 1), ManagedModelDiagnostics.MAIN_KIND, "output_committed"));
+        byte[] summary = "{\"history\":[]}".getBytes(StandardCharsets.UTF_8);
+        commit(journal, request(journal, "compact", summary, "managed-message", "unused", 2000, event -> {
+            event.put("kind", "context.compacted").put("eventId", "compaction:compact");
+            ObjectNode payload = event.putObject("payload").put("compactionId", "compact").put("fromSequence", 1).put("toSequence", 1);
+            payload.set("summaryRef", ManagedExtensionRecordStoreTest.hookRef(
+                    ManagedExtensionRecordStoreTest.hookResource(ExtensionRecordJournal.resourceId(summary), "managed-message", summary)));
+            payload.putArray("replacedMessageIds");
+            payload.putNull("tokenCountsRef");
+        }));
+        var stale = records.findModelDiagnostics(TENANT, "stale-diagnostic");
+        assertThat(stale.context().path("model").asText()).isEqualTo("qwen-test");
+        assertThat(stale.stale()).isTrue();
+        assertThat(context("stale-diagnostic")).isNull();
+        commit(journal, diagnosticRequest(journal, "next", diagnosticBody("main-zero", 2), ManagedModelDiagnostics.MAIN_KIND, "output_committed"));
+        assertThat(records.findModelDiagnostics(TENANT, "stale-diagnostic").stale()).isFalse();
+        assertThat(context("stale-diagnostic")).isNotNull();
+    }
+
+    @Test
+    void theLatestMainOutputWithoutContextReplacesAnOlderKnownSnapshot() throws Exception {
+        var journal = open(TENANT, "missing-context", true);
+        commit(journal, diagnosticRequest(journal, "main", diagnosticBody("main-zero", 1), ManagedModelDiagnostics.MAIN_KIND, "output_committed"));
+        var latest = diagnosticRequest(journal, "unknown", diagnosticBody("main-zero", 2).putNull("context"),
+                ManagedModelDiagnostics.MAIN_KIND, "output_committed");
+        commit(journal, latest);
+        var read = records.findModelDiagnostics(TENANT, "missing-context");
+        assertThat(read.context()).isNull();
+        assertThat(read.contextSequence()).isEqualTo(latest.firstSequence());
+        assertThat(read.statistics().path("snapshotRevision").longValue()).isEqualTo(2);
+        assertThat(context("missing-context")).isNull();
+    }
+
+    @Test
+    void aStartedAttemptDoesNotInferLegacyCoverageFromItsJournalRevision() {
+        var journal = open(TENANT, "started-diagnostics", true);
+        ObjectNode route = json.createObjectNode().put("version", 1).put("turnId", "turn-1")
+                .put("model", "probe").putNull("budget");
+        commit(journal, request(journal, "started", ExtensionRecordJournal.bytes(route), "managed-hosted-model-route",
+                "started", 1000, event -> {
+                    ObjectNode payload = (ObjectNode) event.get("payload");
+                    payload.set("routeRef", payload.get("usageRef"));
+                    payload.putNull("usageRef").putNull("inputCheckpointRef");
+                }));
+        var read = records.findModelDiagnostics(TENANT, "started-diagnostics");
+        assertThat(read.readRevision()).isEqualTo(2L);
+        assertThat(read.context()).isNull();
+        assertThat(read.statistics()).isNull();
+        assertThat(read.coverageGaps()).isEmpty();
+    }
+
+    @Test
+    void absentAndLegacyDiagnosticsKeepUnknownObservationTimes() {
+        var missing = records.findModelDiagnostics(TENANT, "absent");
+        assertThat(missing.context()).isNull();
+        assertThat(missing.statistics()).isNull();
+        assertThat(missing.observedAt()).isNull();
+        var journal = open(TENANT, "legacy-diagnostics", true);
+        commit(journal, request(journal, "legacy", usage("legacy", 10, 100), USAGE_KIND, "output_committed", 1000));
+        var legacy = records.findModelDiagnostics(TENANT, "legacy-diagnostics");
+        assertThat(legacy.context()).isNull();
+        assertThat(legacy.statistics()).isNull();
+        assertThat(legacy.observedAt()).isNull();
+        assertThat(legacy.coverageGaps()).containsExactly("legacy_history");
     }
 
     @Test
@@ -447,6 +611,50 @@ class ManagedModelContextTest {
         body.putArray("attempts").addObject().put("promptTokenCount", input)
                 .put("contextWindowSize", window).put("totalTokenCount", 999_999);
         return body;
+    }
+
+    private ObjectNode diagnosticBody(String fixture, long revision) throws Exception {
+        JsonNode fixtures = json.readTree(VerificationFixtures.moduleRoot()
+                .resolve("../core/src/managed-runtime/contracts/managed-model-statistics-v1.fixtures.json").toFile());
+        for (JsonNode value : fixtures.get("valid")) {
+            if (fixture.equals(value.path("name").asText())) {
+                ObjectNode body = value.get("body").deepCopy();
+                body.withObject("/statistics").put("snapshotRevision", revision);
+                return body;
+            }
+        }
+        throw new IllegalArgumentException("Unknown diagnostics fixture");
+    }
+
+    private CommitTransactionRequest diagnosticRequest(ExtensionRecordJournal journal, String command,
+            ObjectNode body, String kind, String state) {
+        if (ManagedModelDiagnostics.STATS_KIND.equals(kind)) {
+            return request(journal, command, ExtensionRecordJournal.bytes(body), kind, state, 1000, event -> {
+                JsonNode usage = event.path("payload").path("usageRef").deepCopy();
+                event.put("kind", "turn.settled");
+                ObjectNode payload = event.putObject("payload").put("turnId", "turn-1").put("outcome", "completed")
+                        .put("stopReason", "end_turn").putNull("resultRef").putNull("pendingOwnersRef");
+                payload.set("usageRef", usage);
+            });
+        }
+        if (!body.path("context").isNull()) {
+            body.withObject("/context").put("attemptId", command);
+        }
+        ObjectNode route = json.createObjectNode().put("version", 1).put("turnId", body.path("turnId").asText())
+                .put("model", body.path("model").asText());
+        route.set("budget", body.get("budget"));
+        byte[] bytes = ExtensionRecordJournal.bytes(route);
+        CommitResource resource = ManagedExtensionRecordStoreTest.hookResource(ExtensionRecordJournal.resourceId(bytes), "managed-hosted-model-route", bytes);
+        var base = request(journal, command, ExtensionRecordJournal.bytes(body), kind, state, 1000, event -> {
+            ObjectNode payload = (ObjectNode) event.get("payload");
+            payload.set("routeRef", ManagedExtensionRecordStoreTest.hookRef(resource));
+            payload.putNull("inputCheckpointRef");
+        });
+        return new CommitTransactionRequest(base.workspaceId(), base.writerId(), base.writerGeneration(),
+                base.expectedJournalRevision(), base.expectedCommittedSequence(), base.transactionId(), base.operation(), base.commandId(),
+                base.contentDigest(), base.firstSequence(), base.lastSequence(), base.eventCount(), base.eventsDigest(), base.previousCommitDigest(),
+                base.commitDigest(), base.activationEpoch(), base.latestCheckpointResourceId(), base.recordCount(), base.recordBytesBase64(),
+                base.recordDigest(), List.of(base.resources().getFirst(), resource));
     }
 
     private CommitTransactionRequest request(ExtensionRecordJournal journal, String command,

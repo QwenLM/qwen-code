@@ -84,16 +84,9 @@ final class JournalCommit {
         Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
-        boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
-                || validated.resources().stream().anyMatch(resource -> {
-                    if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
-                        return false;
-                    }
-                    JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
-                    return body != null && (body.path("v").asInt() == 3 || body.path("v").asInt() == 4);
-                });
-        if (promotes) {
-            readerVersion.requireReadable(2);
+        int storageFloor = ManagedModelDiagnosticProjection.storageFloor(validated.recordBytes(), request.resources(), validated.resources());
+        if (storageFloor > 1) {
+            readerVersion.requireReadable(storageFloor);
         }
         var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
         var csiOriginal = continuation == null ? null : continuation.original();
@@ -101,6 +94,10 @@ final class JournalCommit {
             csiOriginal.requireContinuation();
         }
         JournalStoreRows.HeadRow csiHead = csiOriginal == null ? null : fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
+        if (csiOriginal != null && !com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.supportsStorage(
+                csiOriginal.request().getScope(), Math.max(csiHead.storageVersion(), storageFloor))) {
+            throw JournalStoreRows.invalid("This CSI profile does not admit the requested storage format.");
+        }
         JournalFencing.requireCsiWriter(csiOriginal, csiHead);
         if (csiOriginal != null
                 && ("commitFileHistory".equals(request.operation())
@@ -233,6 +230,9 @@ final class JournalCommit {
             if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
+            }
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+                ManagedModelDiagnosticProjection.validateResource(closureReader.apply(resource.resourceId()));
             }
         }
         boolean wakeInput = false;
@@ -383,7 +383,7 @@ final class JournalCommit {
                         : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
                         : activation.expiresAt(),
-                activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
