@@ -507,22 +507,127 @@ function hasStdoutRedirect(probe: string): boolean {
  * legitimate `cd … && create` chains. A leading `(`/`)` and whitespace are
  * stripped first so a subshell's `(cd …` is recognised too.
  *
- * `export` and `set` are only silent in their OPERAND forms (`export NAME=…`,
- * `set -e`): bare or with `-p` they print the variables, so the first word alone
- * cannot exempt them — `export -p` can print a comment URL nothing created.
+ * `export` and `set` are only silent for operand shapes that PROVABLY cannot
+ * print (`export NAME=…`, `set -e`). Bare, they print the variables, and so do
+ * `export -p`, `set -o` and `set +o`. The shell removes quotes, backslashes and
+ * ANSI-C `$'…'` before the builtin sees its arguments, and an expansion can turn
+ * into a printing flag (`export $FLAGS` with `FLAGS=-p`), so silence is granted
+ * only to literal words of a known-silent shape — never to a word whose text we
+ * cannot resolve. Over-counting a producer only costs an attribution; crediting
+ * a reader as an author would withhold a comment it never wrote.
  */
-const NO_STDOUT_FIRST_WORD =
-  /^(?:cd|unset|shift|wait|read|return|exit|break|continue|true|false|:)(?:\s|$)/;
-function writesNoStdout(probe: string): boolean {
-  const trimmed = probe.replace(/^[()\s]+/, '');
-  if (trimmed === '') return true;
-  if (NO_STDOUT_FIRST_WORD.test(trimmed)) return true;
-  const stateBuiltin = /^(?:export|set)(?:\s+([\s\S]*))?$/.exec(trimmed);
-  if (stateBuiltin !== null) {
-    const operands = (stateBuiltin[1] ?? '').trim();
-    if (operands === '') return false;
-    return !/(?:^|\s)-[A-Za-z]*p[A-Za-z]*(?:\s|$)/.test(operands);
+const NO_STDOUT_FIRST_WORDS = new Set([
+  'cd',
+  'unset',
+  'shift',
+  'wait',
+  'read',
+  'return',
+  'exit',
+  'break',
+  'continue',
+  'true',
+  'false',
+  ':',
+]);
+
+/**
+ * Split operand text into words and remove the quoting the shell removes:
+ * quote delimiters, `\x` escapes and the `$` of an ANSI-C `$'…'`. Expansions are
+ * NOT performed, so a word that still holds `$` or a backtick stays unresolved
+ * and the caller refuses to prove anything about it.
+ */
+function shellWords(text: string): string[] {
+  const words: string[] = [];
+  let current = '';
+  let started = false;
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+      } else if (ch === '\\' && quote === '"' && i + 1 < text.length) {
+        current += text[++i];
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === '\\' && i + 1 < text.length) {
+      current += text[++i];
+      started = true;
+      continue;
+    }
+    if (ch === '$' && text[i + 1] === "'") {
+      quote = "'";
+      started = true;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (started) {
+        words.push(current);
+        current = '';
+        started = false;
+      }
+      continue;
+    }
+    current += ch;
+    started = true;
   }
+  if (started) words.push(current);
+  return words;
+}
+
+/** A word with no expansion left in it, so the shell cannot reshape it. */
+function isLiteralWord(word: string): boolean {
+  return !word.includes('$') && !word.includes('`');
+}
+
+/**
+ * `set` prints with no operands and for a trailing `-o`/`+o` (which list the
+ * options). Any other literal option cluster or positional word is silent; a
+ * cluster containing `p` is refused outright, since `export`-style printing is
+ * the failure this guards and `set -p` costs at most one attribution.
+ */
+function setOperandsAreSilent(words: string[]): boolean {
+  if (words.length === 0) return false;
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
+    if (word === '--') return words.slice(i + 1).every(isLiteralWord);
+    if (/^[-+][A-Za-z]+$/.test(word)) {
+      if (word.includes('p')) return false;
+      if (word.endsWith('o') && i === words.length - 1) return false;
+      continue;
+    }
+    if (!isLiteralWord(word)) return false;
+  }
+  return true;
+}
+
+function writesNoStdout(command: string): boolean {
+  const words = shellWords(command.replace(/^[()\s]+/, ''));
+  const first = words[0];
+  if (first === undefined) return true;
+  if (NO_STDOUT_FIRST_WORDS.has(first)) return true;
+  const operands = words.slice(1);
+  if (first === 'export') {
+    // A literal `NAME` / `NAME=value` word can never be read as an option, even
+    // when its value expands; a word that is not literal in that position can.
+    return (
+      operands.length > 0 &&
+      operands.every((word) =>
+        /^[A-Za-z_][A-Za-z0-9_]*(?:=[\s\S]*)?$/.test(word),
+      )
+    );
+  }
+  if (first === 'set') return setOperandsAreSilent(operands);
   return false;
 }
 
@@ -550,18 +655,20 @@ function passesStdinThrough(rawStage: string): boolean {
  * API or not (`cat url.txt` prints a comment URL just as a read does) — makes
  * the origin unprovable. A command whose stdout is redirected (`> file`,
  * `>/dev/null`, `&>`), a pure assignment, or a no-stdout builtin (`cd`, `unset`,
- * `shift`, `wait`, …; `export`/`set` only in their operand forms) / bare shell
- * closer contributes no visible output and does not block: the heredoc that
+ * `shift`, `wait`, …; `export`/`set` only in provably silent operand forms) /
+ * bare shell closer contributes no visible output and does not block: the heredoc that
  * writes the body to a file still lets the creation that follows it attribute,
  * and `cd … && create` is not vetoed. A stderr-only redirect (`2>`) does NOT
  * silence stdout. A pipe keeps a pipeline together only while every downstream
  * stage provably passes that stdout through (`create | tee`, `create | cat`);
  * `create | cat url.txt` prints a FILE, and an input redirect overrides the pipe
  * (`create | tee < url.txt`), so both attribute nothing. Silence is judged from
- * the argument TEXT with only the quote characters removed, never from
- * quote-stripped spans — `export '-p'` prints just like `export -p`. A shell
- * conditional/loop is ambiguous (static analysis cannot prove which branch
- * executed). When the source cannot be proven, attribute nothing (fail-open:
+ * the argument TEXT with the shell's own quote removal, never from
+ * quote-stripped spans — `export '-p'`, `export \-p` and `export $'-p'` all print
+ * just like `export -p`, and only literal `NAME`/`NAME=value` operands (or a
+ * provably silent `set` option list) are exempt. A shell conditional/loop is
+ * ambiguous (static analysis cannot prove which branch executed). When the
+ * source cannot be proven, attribute nothing (fail-open:
  * the author may self-echo once, but a mere reader is never credited with
  * comments it only read).
  */
@@ -590,12 +697,10 @@ function creationOutputIsAmbiguous(command: string): boolean {
     const probe = stripQuotedSpans(stripShellComment(independent)).trim();
     if (probe === '') continue;
     if (hasStdoutRedirect(probe)) continue;
-    // Decide silence from the argument TEXT, not from quote-stripped spans:
+    // Silence is decided on the argument TEXT, never on quote-stripped spans:
     // stripping turns `export '-p'` into `export ''`, an empty operand that
-    // would look silent even though the shell prints the variables. Removing
-    // only the quote characters keeps the flag visible.
-    const unquoted = stripShellComment(independent).replace(/['"]/g, '').trim();
-    if (writesNoStdout(unquoted)) continue;
+    // would look silent even though the shell prints the variables.
+    if (writesNoStdout(stripShellComment(independent).trim())) continue;
     // A pure assignment produces no stdout; an env-prefixed creation does (and
     // is recognised as a creation, so it is not excluded here).
     if (

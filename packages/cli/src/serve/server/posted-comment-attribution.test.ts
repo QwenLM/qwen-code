@@ -584,6 +584,99 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
   });
 
+  it('does not exempt a BACKSLASH-escaped export -p (F1)', () => {
+    // The shell removes the backslash, so the builtin still sees `-p`.
+    const entry = shellResult(
+      'export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; false && gh pr comment 42 --body hi; export \\-p',
+      'export REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-111"',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt an ANSI-C quoted export -p (F1)', () => {
+    // `$'-p'` is unquoted by the shell to the same `-p` argument.
+    const entry = shellResult(
+      "export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; false && gh pr comment 42 --body hi; export $'-p'",
+      'export REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-111"',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt an export operand that EXPANDS to a printing flag', () => {
+    // `export $FLAGS` with FLAGS=-p prints; the operand text is not a literal
+    // NAME/NAME=value, so its silence cannot be proven.
+    const entry = shellResult(
+      'export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; FLAGS=-p; false && gh pr comment 42 --body hi; export $FLAGS',
+      'export REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-111"',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt a QUOTED export operand that expands to a printing flag', () => {
+    const entry = shellResult(
+      'export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; FLAGS=-p; false && gh pr comment 42 --body hi; export "$FLAGS"',
+      'export REVIEW_URL="https://github.com/o/r/pull/42#issuecomment-111"',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not exempt a set operand that expands away, leaving a bare set', () => {
+    // `set $E` with an empty E is a bare `set`, which prints every variable.
+    const entry = shellResult(
+      'export REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111; E=; false && gh pr comment 42 --body hi; set $E',
+      'REVIEW_URL=https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('counts a trailing set -o as a stdout producer (it lists the options)', () => {
+    const entry = shellResult(
+      'gh pr comment 42 --body hi; set -o',
+      'https://github.com/o/r/pull/42#issuecomment-111\nallexport off',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes when an export VALUE expands (never an option)', () => {
+    const entry = shellResult(
+      'X="a -p"\nexport FOO=$X\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('still attributes after export PATH=$PATH:/x', () => {
+    const entry = shellResult(
+      'export PATH=$PATH:/x\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('still attributes after a quoted export value containing spaces', () => {
+    const entry = shellResult(
+      'export FOO="a -p"\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('still attributes after set -euo pipefail (option with its operand)', () => {
+    const entry = shellResult(
+      'set -euo pipefail\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('still attributes after set -- a b (positional parameters)', () => {
+    const entry = shellResult(
+      'set -- a b\ngh pr comment 42 --body hi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
   it('attributes a creation piped into a bare cat (stdin passthrough)', () => {
     const entry = shellResult(
       'gh pr comment 42 --body hi | cat',

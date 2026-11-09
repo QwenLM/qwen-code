@@ -24725,6 +24725,78 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(deliveredTo).not.toContain('author-A');
       });
 
+      it('does not reselect the author during LEGACY-mode task recovery (F3)', async () => {
+        // Same exclusion contract without boundSessionActions: legacy mode
+        // re-resolves the single winner, so once the author becomes the newest
+        // binding the recovered task must retire instead of delivering to it.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'deferred-legacy-comment-task',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'winner-B',
+              role: 'fix',
+            },
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // The author is now the single legacy winner.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
       it('a reconstructed fan-out sibling inherits authorExclude (R2-3)', async () => {
         // A crash between the two claims leaves only the carrier, holding
         // fanout=[B,V] and authorExclude=[A]. Recovery rebuilds V's task; once A
