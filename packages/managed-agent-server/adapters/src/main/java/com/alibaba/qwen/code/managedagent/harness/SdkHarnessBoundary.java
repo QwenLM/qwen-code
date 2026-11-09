@@ -159,6 +159,24 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPackagePreparation() { return call(delegate::supportsPackagePreparation); }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.preparePackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.inspectPackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.previewPackage(metadata, source));
+    }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         return call(() -> delegate.applyExtensions(tenantId, sessionId, command));
     }
