@@ -5206,11 +5206,15 @@ describe('GithubChannel', () => {
       await pollOnce();
 
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+      // The failed batch is kept for another attempt, with no comment yet.
+      expect(readInboundTasks()).toEqual([
         expect.objectContaining({
-          body: expect.stringContaining('Failed to process'),
+          state: 'failed',
+          attempts: 1,
+          errorCommentPosted: false,
         }),
-      );
+      ]);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
     it('uses the generic fallback for other reasons', async () => {
@@ -7756,6 +7760,9 @@ describe('GithubChannel', () => {
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment()]);
       await pollOnce();
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+      await pollOnce();
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -7865,9 +7872,16 @@ describe('GithubChannel', () => {
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment()]);
 
+      const errorComments = () =>
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        );
       await pollOnce();
       mockOctokit.paginate.mockResolvedValue([]);
       await pollOnce();
+      // An attempt that will run again posts nothing: the comment asks the
+      // user to mention the bot again.
+      expect(errorComments()).toHaveLength(0);
       await pollOnce();
 
       expect(readInboundTasks()).toEqual([
@@ -7877,11 +7891,14 @@ describe('GithubChannel', () => {
           errorCommentPosted: true,
         }),
       ]);
-      expect(
-        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
-          String(call[0]?.body).includes('Failed to process'),
-        ),
-      ).toHaveLength(1);
+      expect(errorComments()).toHaveLength(1);
+      // The last attempt settles after the poll that ran it; the next poll
+      // marks the window read and does not run the task a fourth time.
+      await pollOnce();
+      expect(errorComments()).toHaveLength(1);
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({ state: 'failed', attempts: 3 }),
+      ]);
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
@@ -7891,7 +7908,122 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('retries the error comment when the first post fails', async () => {
+    it('posts no error comment when a retried attempt succeeds', async () => {
+      await initWithoutLoop();
+      const inbound = vi
+        .spyOn(channel, 'handleInbound')
+        .mockRejectedValueOnce(new Error('model returned 400'));
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        expect(readInboundTasks()).toEqual([
+          expect.objectContaining({ state: 'failed', attempts: 1 }),
+        ]);
+        mockOctokit.paginate.mockResolvedValue([]);
+        await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
+
+      expect(inbound).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        readChannelEvents()
+          .filter((row) => row['type'] === 'task')
+          .map((row) => row['outcome']),
+      ).toContain('failed');
+    });
+
+    it('posts the error comment when a crash left the last attempt running', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      writeInboundTasks([
+        makeInboundTaskRecord({ state: 'running', attempts: 3 }),
+      ]);
+      // As after a restart: recovery runs the interrupted task again.
+      (
+        channel as unknown as { inboundRecoveryPending: boolean }
+      ).inboundRecoveryPending = true;
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
+
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          attempts: 4,
+          errorCommentPosted: true,
+        }),
+      ]);
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('posts no error comment when the last attempt fails to publish its reply', async () => {
+      await initWithoutLoop();
+      const task = makeInboundTaskRecord({ attempts: 2 });
+      writeInboundTasks([task]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        new Error('ambiguous transport failure'),
+      );
+      channel.handleInboundHook = async (envelope) => {
+        await (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse(
+          envelope.chatId,
+          envelope.threadId!,
+          'Final reply',
+          'session-1',
+        );
+      };
+      channel.sourceMessageId = '1001';
+      channel.sourceSenderId = 'alice';
+      channel.sourceMetadata = 'Trigger: mention.';
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        abortableSleep: (ms: number) => Promise<void>;
+        runInboundTask: (task: Record<string, unknown>) => Promise<boolean>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      privateChannel.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await privateChannel.runInboundTask(task);
+      } finally {
+        stderr.mockRestore();
+      }
+
+      // The reply may have landed: no "please re-mention" after it.
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        ),
+      ).toHaveLength(0);
+      expect(
+        existsSync(inboundTaskPath())
+          ? readInboundTasks().filter((record) => record['state'] === 'failed')
+          : [],
+      ).toEqual([]);
+    });
+
+    it('records a last attempt whose error comment cannot be posted', async () => {
       channel.handleInboundError = new Error('agent down');
       await initWithoutLoop();
       (
@@ -7905,33 +8037,33 @@ describe('GithubChannel', () => {
       mockOctokit.rest.issues.createComment.mockRejectedValue(
         new Error('comment creation outage'),
       );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        mockOctokit.paginate.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+        await pollOnce();
+        // The task is spent: later polls neither run it nor post again.
+        await pollOnce();
+        await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
 
-      await pollOnce();
-
+      // One post on the last attempt, with its in-call retries.
       expect(readInboundTasks()).toEqual([
         expect.objectContaining({
           state: 'failed',
-          attempts: 1,
+          attempts: 3,
           errorCommentPosted: false,
-        }),
-      ]);
-
-      mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} });
-      mockOctokit.paginate.mockResolvedValue([]);
-      await pollOnce();
-
-      expect(readInboundTasks()).toEqual([
-        expect.objectContaining({
-          state: 'failed',
-          attempts: 2,
-          errorCommentPosted: true,
         }),
       ]);
       expect(
         mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
           String(call[0]?.body).includes('Failed to process'),
         ),
-      ).toHaveLength(4);
+      ).toHaveLength(3);
     });
 
     it('reuses an existing inbound task record instead of creating a duplicate', async () => {
@@ -8725,14 +8857,17 @@ describe('GithubChannel', () => {
       await pollOnce();
 
       // The comment and the first-contact body are independent dispatches;
-      // each failed dispatch posts its own error comment exactly once.
+      // each posts its own error comment exactly once, on its last attempt.
       const errorComments = () =>
         mockOctokit.rest.issues.createComment.mock.calls.filter(
           (call: Array<{ body?: string }>) =>
             call[0]?.body?.includes('Failed to process'),
         );
-      expect(errorComments()).toHaveLength(2);
+      expect(errorComments()).toHaveLength(0);
       mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+      await pollOnce();
+      expect(errorComments()).toHaveLength(2);
       await pollOnce();
       expect(errorComments()).toHaveLength(2);
     });
@@ -11110,21 +11245,37 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         .mockResolvedValueOnce([prNotification()])
         .mockResolvedValueOnce([makeComment()]);
       // The fallback re-enters the channel path; a failure there is a
-      // CHANNEL failure: public error comment and channel retry semantics,
-      // not the bound path's private dead-letter.
+      // CHANNEL failure: channel retry semantics (the public error comment
+      // waits for the last attempt), not the bound path's private
+      // dead-letter.
       const inbound = vi
         .spyOn(channel, 'handleInbound')
-        .mockRejectedValueOnce(new Error('channel down'));
+        .mockRejectedValue(new Error('channel down'));
 
       await pollOnce();
 
       expect(inbound).toHaveBeenCalledTimes(1);
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
       const tasks = readInboundTasks();
       expect(tasks).toHaveLength(1);
       expect(tasks[0]!['state']).toBe('failed');
       expect(tasks[0]!['delivery']).toBeUndefined();
       expect(tasks[0]!['attempts']).toBe(1);
+      expect(existsSync(boundDeadLetterPath())).toBe(false);
+
+      // Channel exhaustion: the last attempt posts the public comment once.
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+      await pollOnce();
+      expect(inbound).toHaveBeenCalledTimes(3);
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          attempts: 3,
+          errorCommentPosted: true,
+        }),
+      ]);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(existsSync(boundDeadLetterPath())).toBe(false);
       inbound.mockRestore();
     });
@@ -12763,72 +12914,98 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         },
       );
 
-      it('posts no public error comment when retiring a deferral at its cap fails', async () => {
-        await initChannel(
-          { deliverToBoundSessions: true, ...listed },
-          { boundSessions },
-        );
-        writeInboundTasks([
-          makeInboundTaskRecord({
-            state: 'failed',
-            deferCount: 239,
-            backpressure: true,
-            source: {
-              chatId: 'owner/repo',
-              threadId: 'pr:42',
-              messageId: '1001',
-            },
-            envelope: {
-              channelName: 'test-github',
-              senderId: 'alice',
-              senderName: 'alice',
-              chatId: 'owner/repo',
-              threadId: 'pr:42',
-              messageId: '1001',
-              text: 'please fix this',
-              isGroup: true,
-              isMentioned: true,
-              isReplyToBot: false,
-              metadata: 'Trigger: mention.',
-            },
-            delivery: { kind: 'bound-session', sessionId: 'bound-session' },
-          }),
-        ]);
-        boundSessions.deliverPrompt.mockRejectedValue(
-          new BoundSessionGoneError('bound-session'),
-        );
-        boundSessions.listPrBindings
-          .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
-          .mockResolvedValue({ bindings: [], partial: true });
-        // The dead letter is written, then removing the task fails.
-        const remove = vi
-          .spyOn(
-            channel as unknown as { removeInboundTask: (id: string) => void },
-            'removeInboundTask',
-          )
-          .mockImplementation(() => {
-            throw new Error('EIO: task store');
-          });
-        mockOctokit.paginate.mockResolvedValue([]);
-        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-        try {
-          await pollOnce();
-        } finally {
-          stderr.mockRestore();
-        }
+      it.each([
+        ['an earlier attempt', undefined],
+        ['the last attempt', 2],
+      ])(
+        'posts no public error comment when retiring a deferral at its cap fails (%s)',
+        async (_name, attempts) => {
+          await initChannel(
+            { deliverToBoundSessions: true, ...listed },
+            { boundSessions },
+          );
+          writeInboundTasks([
+            makeInboundTaskRecord({
+              state: 'failed',
+              // The last-attempt row also reaches the exhaustion retire.
+              attempts,
+              deferCount: 239,
+              backpressure: true,
+              source: {
+                chatId: 'owner/repo',
+                threadId: 'pr:42',
+                messageId: '1001',
+              },
+              envelope: {
+                channelName: 'test-github',
+                senderId: 'alice',
+                senderName: 'alice',
+                chatId: 'owner/repo',
+                threadId: 'pr:42',
+                messageId: '1001',
+                text: 'please fix this',
+                isGroup: true,
+                isMentioned: true,
+                isReplyToBot: false,
+                metadata: 'Trigger: mention.',
+              },
+              delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+            }),
+          ]);
+          boundSessions.deliverPrompt.mockRejectedValue(
+            new BoundSessionGoneError('bound-session'),
+          );
+          boundSessions.listPrBindings
+            .mockResolvedValueOnce({
+              bindings: [makeBinding()],
+              partial: false,
+            })
+            .mockResolvedValue({ bindings: [], partial: true });
+          // The dead letter is written, then removing the task fails.
+          const remove = vi
+            .spyOn(
+              channel as unknown as { removeInboundTask: (id: string) => void },
+              'removeInboundTask',
+            )
+            .mockImplementation(() => {
+              throw new Error('EIO: task store');
+            });
+          mockOctokit.paginate.mockResolvedValue([]);
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockReturnValue(true);
+          let logged = '';
+          try {
+            await pollOnce();
+          } finally {
+            // Read before the restore, which clears the recorded calls.
+            logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+            stderr.mockRestore();
+          }
 
-        expect(existsSync(boundDeadLetterPath())).toBe(true);
-        expect(remove).toHaveBeenCalled();
-        // The removal failure is recorded on the task it left behind.
-        expect(readInboundTasks()).toEqual([
-          expect.objectContaining({
-            state: 'failed',
-            error: 'EIO: task store',
-            delivery: { kind: 'bound-session', sessionId: 'bound-session' },
-          }),
-        ]);
-        expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
-      });
+          expect(existsSync(boundDeadLetterPath())).toBe(true);
+          // The task it left behind is still a bound one, so the failure stays
+          // private. Before the last attempt the removal failure is recorded
+          // on it. On the last attempt only the bound delivery, not the
+          // attempt budget, keeps the public comment away: retiring the
+          // exhausted task fails the same way and the error escapes the
+          // recovery, leaving the record running (so recoverable) after both
+          // dead letters were written.
+          expect(remove).toHaveBeenCalledTimes(attempts === undefined ? 1 : 2);
+          expect(logged.includes('inbound task recovery failed')).toBe(
+            attempts !== undefined,
+          );
+          expect(readInboundTasks()).toEqual([
+            expect.objectContaining({
+              delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+              ...(attempts === undefined
+                ? { state: 'failed', error: 'EIO: task store' }
+                : { state: 'running', attempts: 2 }),
+            }),
+          ]);
+          expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+        },
+      );
 
       it('posts no public error comment when retiring a private-only comment fails', async () => {
         writeInboundTasks([makeInboundTaskRecord({ privateOnly: true })]);
@@ -12873,7 +13050,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       });
 
       it('posts no public error comment when a private-only retirement fails before it starts', async () => {
-        writeInboundTasks([makeInboundTaskRecord({ privateOnly: true })]);
+        // The last attempt: a public task would post its error comment now.
+        writeInboundTasks([
+          makeInboundTaskRecord({ privateOnly: true, attempts: 2 }),
+        ]);
         await initChannel(
           { deliverToBoundSessions: true, ...listed },
           { boundSessions },
@@ -13347,6 +13527,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             },
           );
           mockOctokit.paginate
+            .mockResolvedValue([])
             .mockResolvedValueOnce([prNotification(reason)])
             .mockResolvedValueOnce([plainReview()]);
           const stderr = vi
@@ -13354,12 +13535,16 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             .mockReturnValue(true);
           try {
             await pollOnce();
+            expect(injected).toBe(1);
+            expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+            // Through the last attempt: a public task would comment there.
+            await pollOnce();
+            await pollOnce();
           } finally {
             stderr.mockRestore();
           }
 
-          expect(injected).toBe(1);
-          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(injected).toBe(3);
           expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
         },
       );
