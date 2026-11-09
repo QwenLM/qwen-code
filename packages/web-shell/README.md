@@ -847,11 +847,16 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 等配置继续决定默认和高级模式的可选操作，`composerPlaceholders` 占位文字覆盖继续
 生效。
 宿主若已通过 `renderComposerToolbarStart` 渲染自己的附件／添加入口，传入
-`hostOwnsAddMenu: true` 可隐藏内置 ＋ 菜单（主聊天、分屏与托管会话页一致，
-触屏的 commands-only 加号同样让位），避免两个加号并排。`workflowMode` 的菜单
-入口随菜单一起隐藏，此时改为在工具栏提供可开关的 Workflow 回退。与从
-`composerToolbarActions` 中去掉 `addMenu` 不同（那只作用主输入框），本开关
-覆盖全部输入框表面。
+`hostOwnsAddMenu: true` 可隐藏内置 ＋ 菜单（主聊天、分屏与托管会话页一致；触屏上
+仅含命令的入口同样让位，该入口图标为斜杠、aria-label 为 All commands／
+「全部命令」），避免出现两个入口。`workflowMode` 的菜单入口随菜单一起隐藏，改由
+默认变体的工具栏提供双向开关：宿主未报告可用状态时（unbound、同步中、未知、
+写入中、未提供变更回调，或未请求且不可用）开关禁用；已请求但当前不可用时仍可关闭。
+`composerVariant: 'simple'` 不渲染工具栏前导区（宿主的
+`renderComposerToolbarStart` 也在其中），该变体因此没有 Workflow 回退，此开关只
+适用于默认变体，设在简洁变体上只会连内置菜单一起去掉。与从
+`composerToolbarActions` 中去掉 `addMenu` 不同（那只作用主输入框），本开关作用于
+各输入框的内置菜单。
 
 ### 品牌（白标）
 
