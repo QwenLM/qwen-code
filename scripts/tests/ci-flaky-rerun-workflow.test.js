@@ -1864,8 +1864,7 @@ describe('ci failure patrol workflow', () => {
 
       rmSync(sentinel);
       // The bare base env keeps the ambient in force, so the planted config
-      // is outranked and the hook cannot fire. Remove the ambient's
-      // GIT_CONFIG_GLOBAL spread and this assertion must go red.
+      // is outranked and the hook cannot fire.
       git(['checkout', '--force', 'HEAD']);
       expect(existsSync(sentinel)).toBe(false);
 
@@ -1898,7 +1897,13 @@ describe('ci failure patrol workflow', () => {
       expect(existsSync(join(workspace, '.git'))).toBe(false);
 
       seed();
-      git(['checkout', '--force', 'HEAD'], exported);
+      // Keep the plant as the fallback: without it the ambient's empty global
+      // file would outrank $HOME/.gitconfig, so a dropped GIT_CONFIG_GLOBAL
+      // export would leave this assertion green.
+      git(['checkout', '--force', 'HEAD'], {
+        ...fixtureGitConfig,
+        ...exported,
+      });
       expect(existsSync(sentinel)).toBe(false);
       expect(readFileSync(join(workspace, 'driver.mjs'), 'utf8')).toBe(
         'trusted driver\n',
