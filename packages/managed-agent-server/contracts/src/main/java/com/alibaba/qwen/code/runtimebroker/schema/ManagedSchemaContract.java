@@ -22,6 +22,7 @@ public final class ManagedSchemaContract {
                     "ma_extension_package",
                     "ma_extension_settings",
                     "ma_extension_operation",
+                    "ma_journal_pack",
                     "ma_resource",
                     "ma_resource_ref",
                     "ma_output_capture",

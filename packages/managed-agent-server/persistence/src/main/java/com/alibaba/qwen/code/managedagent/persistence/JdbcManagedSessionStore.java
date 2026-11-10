@@ -64,7 +64,7 @@ public class JdbcManagedSessionStore
             JdbcManagedActionStore actions) {
         this(jdbc, extensionRecords, actions, null,
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
-                null, null, null, null, null, WriterCredentialPolicy.unbound(), null);
+                null, null, null, null, null, WriterCredentialPolicy.unbound(), null, null);
     }
 
     @Autowired
@@ -78,7 +78,9 @@ public class JdbcManagedSessionStore
             @org.springframework.lang.Nullable JdbcManagedToolResultStore toolResults,
             @org.springframework.lang.Nullable JournalEventTransport journalEventTransport,
             WriterCredentialPolicy credentials,
-            @org.springframework.lang.Nullable RuntimeBindingRepository bindings) {
+            @org.springframework.lang.Nullable RuntimeBindingRepository bindings,
+            @org.springframework.lang.Nullable
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings sessionResourceSettings) {
         if (lifecycleExecution == null || lifecycleSessions == null) {
             lifecycleExecution = null;
             lifecycleSessions = null;
@@ -99,26 +101,15 @@ public class JdbcManagedSessionStore
         this.jdbc = jdbc;
         this.publicationObjects = publicationObjects;
         this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings);
-        this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc);
+        this.historyQueries = sessionResourceSettings == null
+                ? new JournalHistoryQueries(fencing, storeRows, jdbc)
+                : new JournalHistoryQueries(fencing, storeRows, jdbc,
+                        new JdbcJournalPacks(jdbc, publicationObjects, sessionResourceSettings));
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
         this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention, ownerReads);
         this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc);
         this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords);
         this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
-    }
-
-    /**
-     * Optional setter injection keeps every manual construction site (maintenance launchers,
-     * fixtures) unchanged: without settings the history queries stay inline-only.
-     */
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    void setSessionResources(
-            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
-        if (settings == null) {
-            return;
-        }
-        JdbcJournalPacks packs = new JdbcJournalPacks(jdbc, publicationObjects, settings);
-        this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc, packs);
     }
 
     static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS;

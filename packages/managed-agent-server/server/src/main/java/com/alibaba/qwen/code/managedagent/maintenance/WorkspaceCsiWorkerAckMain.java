@@ -56,7 +56,7 @@ public final class WorkspaceCsiWorkerAckMain {
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null, null);
         var grants = new ToolPublicationStore(jdbc, manager, sessionStore, executions, bindings,
                 new ToolPublicationStore.Capacity(16L * 1024 * 1024, 64L * 1024 * 1024,
                         256L * 1024 * 1024, 64));

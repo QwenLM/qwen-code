@@ -124,7 +124,18 @@ final class AgentStoreRows {
                 result.getString("tool_profile"),
                 result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
                 result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"),
-                result.getString("preview"), nullableLong(result, "list_last_activity"));
+                result.getString("preview"), optionalLong(result, "list_last_activity"));
+    }
+
+    private static Long optionalLong(java.sql.ResultSet result, String column)
+            throws java.sql.SQLException {
+        java.sql.ResultSetMetaData meta = result.getMetaData();
+        for (int index = 1; index <= meta.getColumnCount(); index++) {
+            if (meta.getColumnLabel(index).equalsIgnoreCase(column)) {
+                return nullableLong(result, column);
+            }
+        }
+        return null;
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
