@@ -438,8 +438,40 @@ describe('useAttentionNotifications', () => {
     });
   });
 
-  it('names the foreground subagent tool waiting for approval', () => {
+  it.each([
+    {
+      description: 'names the foreground subagent tool waiting for approval',
+      awaitingToolsByAgent: [['grep_search']],
+      message: 'Qwen Code needs your permission to use grep_search',
+    },
+    {
+      description: 'uses a generic alert for parallel approvals in one agent',
+      awaitingToolsByAgent: [['read_file', 'grep_search']],
+      message: 'Qwen Code is waiting for your input',
+    },
+    {
+      description: 'uses a generic alert across foreground agents',
+      awaitingToolsByAgent: [['grep_search'], ['edit']],
+      message: 'Qwen Code is waiting for your input',
+    },
+  ])('$description', ({ awaitingToolsByAgent, message }) => {
     const { rerender } = render();
+    const pendingToolCalls = awaitingToolsByAgent.map((toolNames, index) => ({
+      status: 'executing',
+      request: { name: 'agent', callId: `agent-${index}` },
+      liveOutput: {
+        type: 'task_execution',
+        pendingConfirmation: { type: 'info' },
+        toolCalls: [
+          { callId: 'done', name: 'list_directory', status: 'success' },
+          ...toolNames.map((name, callIndex) => ({
+            callId: `c${callIndex}`,
+            name,
+            status: 'awaiting_approval',
+          })),
+        ],
+      },
+    })) as unknown as TrackedToolCall[];
 
     rerender({
       hookProps: {
@@ -448,32 +480,13 @@ describe('useAttentionNotifications', () => {
         elapsedTime: 0,
         settings: mockSettings,
         terminal: mockTerminal,
-        pendingToolCalls: [
-          {
-            status: 'executing',
-            request: { name: 'agent' },
-            liveOutput: {
-              type: 'task_execution',
-              pendingConfirmation: { type: 'info' },
-              toolCalls: [
-                { callId: 'c1', name: 'read_file', status: 'success' },
-                {
-                  callId: 'c2',
-                  name: 'grep_search',
-                  status: 'awaiting_approval',
-                },
-              ],
-            },
-          },
-        ] as unknown as TrackedToolCall[],
+        pendingToolCalls,
       },
     });
 
     expect(mockedSendNotification).toHaveBeenCalledTimes(1);
     expect(mockedSendNotification).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: 'Qwen Code needs your permission to use grep_search',
-      }),
+      expect.objectContaining({ message }),
       mockTerminal,
       true,
     );
@@ -536,25 +549,45 @@ describe('useAttentionNotifications', () => {
       );
     });
 
-    it('notifies when focus is lost with an approval already parked', () => {
-      const approvals = [parked('workflow:ap-1', 'grep_search')];
+    it('notifies for every parked approval when focus is lost', () => {
+      const approvals = [
+        parked('workflow:ap-1', 'grep_search', 1),
+        parked('workflow:ap-2', 'edit', 2),
+      ];
       const { rerender } = render({ backgroundApprovals: approvals });
       expect(mockedSendNotification).not.toHaveBeenCalled();
 
       rerender(unfocused(approvals));
-      expect(mockedSendNotification).toHaveBeenCalledTimes(1);
+      expect(mockedSendNotification).toHaveBeenCalledTimes(2);
+      expect(mockedSendNotification).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use grep_search',
+        }),
+        mockTerminal,
+        true,
+      );
+      expect(mockedSendNotification).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use edit',
+        }),
+        mockTerminal,
+        true,
+      );
 
       // Coming back and leaving again re-arms it, like the main prompt.
       rerender(unfocused(approvals, { isFocused: true }));
       rerender(unfocused(approvals));
-      expect(mockedSendNotification).toHaveBeenCalledTimes(2);
+      expect(mockedSendNotification).toHaveBeenCalledTimes(4);
     });
 
-    it('does not repeat the main prompt notification', () => {
+    it('defers a background alert until the main prompt clears', () => {
+      const approvals = [parked('workflow:ap-1', 'grep_search')];
       const { rerender } = render();
 
       rerender(
-        unfocused([parked('workflow:ap-1', 'grep_search')], {
+        unfocused(approvals, {
           streamingState: StreamingState.WaitingForConfirmation,
           pendingToolCalls: [
             { status: 'awaiting_approval', request: { name: 'Bash' } },
@@ -566,6 +599,16 @@ describe('useAttentionNotifications', () => {
       expect(mockedSendNotification).toHaveBeenCalledWith(
         expect.objectContaining({
           message: 'Qwen Code needs your permission to use Bash',
+        }),
+        mockTerminal,
+        true,
+      );
+
+      rerender(unfocused(approvals));
+      expect(mockedSendNotification).toHaveBeenCalledTimes(2);
+      expect(mockedSendNotification).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          message: 'Qwen Code needs your permission to use grep_search',
         }),
         mockTerminal,
         true,

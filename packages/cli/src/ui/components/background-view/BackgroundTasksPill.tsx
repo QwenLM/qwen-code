@@ -49,8 +49,8 @@ export interface PendingBackgroundApproval {
 
 /**
  * Every approval {@link hasPendingApproval} sees, oldest first. Workflow
- * approvals carry their own id; an agent approval is keyed by its entry and
- * tool-call id.
+ * approvals carry their own id; agent tool-call ids are scoped to the
+ * originating runtime, including nested agents that share a parent entry.
  */
 export function getPendingBackgroundApprovals(
   entries: readonly DialogEntry[],
@@ -60,7 +60,12 @@ export function getPendingBackgroundApprovals(
     if (entry.kind === 'agent') {
       for (const approval of entry.pendingApprovals ?? []) {
         approvals.push({
-          key: `agent:${entry.agentId}:${approval.callId}`,
+          key: JSON.stringify([
+            'agent',
+            entry.agentId,
+            approval.subagentId ?? null,
+            approval.callId,
+          ]),
           toolName: approval.name,
           at: approval.at,
         });

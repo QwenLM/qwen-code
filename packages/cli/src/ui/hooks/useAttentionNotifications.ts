@@ -80,7 +80,8 @@ export const useAttentionNotifications = ({
     );
     if (awaitingTool) return awaitingTool.request.name;
     // A foreground subagent's prompt rides on the executing Agent call's live
-    // output; name the subagent's tool rather than the Agent tool.
+    // output. Only name a tool if the active prompt is unambiguous.
+    let subagentToolName: string | undefined;
     for (const tc of pendingToolCalls ?? []) {
       if (tc.status !== 'executing') continue;
       const liveOutput = (tc as TrackedExecutingToolCall).liveOutput;
@@ -91,12 +92,15 @@ export const useAttentionNotifications = ({
         liveOutput.type === 'task_execution' &&
         liveOutput.pendingConfirmation != null
       ) {
-        return liveOutput.toolCalls?.find(
+        if (subagentToolName !== undefined) return undefined;
+        const awaitingCalls = liveOutput.toolCalls?.filter(
           (call) => call.status === 'awaiting_approval',
-        )?.name;
+        );
+        if (awaitingCalls?.length !== 1) return undefined;
+        subagentToolName = awaitingCalls[0].name;
       }
     }
-    return undefined;
+    return subagentToolName;
   }, [pendingToolCalls]);
 
   // Approvals parked by background agents and workflows never put the main
@@ -130,23 +134,23 @@ export const useAttentionNotifications = ({
       notified.clear();
       return;
     }
-    const fresh = pending.filter((approval) => !notified.has(approval.key));
-    if (fresh.length === 0) return;
-    for (const approval of fresh) notified.add(approval.key);
-    // The main prompt's own notification already covers this stretch.
+    // Defer these alerts until the main prompt clears.
     if (streamingState === StreamingState.WaitingForConfirmation) return;
     if (!terminalBellEnabled || !approvalNotificationsEnabled) return;
-    const toolName = fresh.at(-1)!.toolName;
-    sendNotification(
-      {
-        message: toolName
-          ? `Qwen Code needs your permission to use ${toolName}`
-          : 'Qwen Code is waiting for your input',
-        title: NOTIFICATION_TITLE,
-      },
-      terminal,
-      terminalBellEnabled,
-    );
+    for (const { key, toolName } of pending) {
+      if (notified.has(key)) continue;
+      sendNotification(
+        {
+          message: toolName
+            ? `Qwen Code needs your permission to use ${toolName}`
+            : 'Qwen Code is waiting for your input',
+          title: NOTIFICATION_TITLE,
+        },
+        terminal,
+        terminalBellEnabled,
+      );
+      notified.add(key);
+    }
   }, [
     backgroundApprovalSignature,
     isFocused,
