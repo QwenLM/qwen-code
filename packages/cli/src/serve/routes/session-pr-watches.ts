@@ -5,7 +5,10 @@
  */
 
 import { readCronTasks } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
-import { repoKeyFromWebUrl } from '@qwen-code/qwen-code-core/utils/github-prs.js';
+import {
+  fetchRemoteWebUrl,
+  repoKeyFromWebUrl,
+} from '@qwen-code/qwen-code-core/utils/github-prs.js';
 import { listAutofixPrWatches } from './autofix-pr-watches.js';
 
 /**
@@ -26,8 +29,10 @@ import { listAutofixPrWatches } from './autofix-pr-watches.js';
  * the channel keeps delivering as it did before the gate existed. That
  * includes the listing's NON-throwing failure shapes: `available: false`
  * (the clone's worktrees could not be enumerated) and a non-empty
- * `unreadable` (individual state files failed to read), and any gate whose
- * shell words cannot be determined (see `parseVerifyPrWatchGate`).
+ * `unreadable` (individual state files failed to read), any gate whose
+ * shell words cannot be determined (see `parseVerifyPrWatchGate`), and a
+ * workspace remote that cannot be resolved when a verify-pr watch needs
+ * keying (the gate takes no host; the remote supplies it).
  */
 export type ActivePrWatches = Map<string, Set<string>>;
 
@@ -144,12 +149,14 @@ export function shellWords(input: string): string[] | undefined {
 /**
  * What a scheduled task's gate says about a standing verify-pr watch:
  * - `watch`: the gate runs the probe for this (repo, PR);
- * - `none`: confirmed NOT a standing watch (not the probe script, a
+ * - `none`: confirmed NOT a standing watch (the executed command is not the
+ *   probe script — including a gate that only names it in a comment — a
  *   one-shot `--check`/`--claim`/`--release` invocation, or arguments the
  *   script itself would reject — such a gate never fires);
  * - `unknown`: the gate names the probe script but its shell words cannot
- *   be determined. The collector must fail open on `unknown` — turning it
- *   into `none` would stamp `watching: false` on a PR that may be watched.
+ *   be determined, or the name sits in a word whose execution we cannot
+ *   model. The collector must fail open on `unknown` — turning it into
+ *   `none` would stamp `watching: false` on a PR that may be watched.
  */
 export type VerifyPrWatchGateParse =
   | { kind: 'watch'; repo: string; pr: number }
@@ -167,15 +174,50 @@ export type VerifyPrWatchGateParse =
 export function parseVerifyPrWatchGate(
   gate: string | undefined,
 ): VerifyPrWatchGateParse {
-  if (!gate || !gate.includes('verify-pr-watch-gate.mjs')) {
+  const SCRIPT = 'verify-pr-watch-gate.mjs';
+  if (!gate || !gate.includes(SCRIPT)) {
     return { kind: 'none' };
   }
   const tokens = shellWords(gate);
   if (tokens === undefined) return { kind: 'unknown' };
-  const scriptIndex = tokens.findIndex((token) =>
-    token.endsWith('verify-pr-watch-gate.mjs'),
-  );
-  if (scriptIndex === -1) return { kind: 'unknown' };
+  // The EXECUTED script word: the command itself, or the word right after
+  // the node interpreter, skipping leading environment assignments. A name
+  // embedded in another word (a lookalike script, another command's quoted
+  // argument) is not the executed command and must not read as a watch.
+  const isScriptWord = (token: string): boolean =>
+    token === SCRIPT || token.endsWith(`/${SCRIPT}`);
+  let commandIndex = 0;
+  while (
+    commandIndex < tokens.length &&
+    /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[commandIndex]!)
+  ) {
+    commandIndex += 1;
+  }
+  const command = tokens[commandIndex];
+  let scriptIndex = -1;
+  if (command !== undefined && isScriptWord(command)) {
+    scriptIndex = commandIndex;
+  } else if (
+    command !== undefined &&
+    (command === 'node' ||
+      command === 'node.exe' ||
+      command.endsWith('/node')) &&
+    tokens[commandIndex + 1] !== undefined &&
+    isScriptWord(tokens[commandIndex + 1]!)
+  ) {
+    scriptIndex = commandIndex + 1;
+  }
+  if (scriptIndex === -1) {
+    // The shell's argv never executes the probe. When no word even CONTAINS
+    // the name, the gate cannot fire it — a comment-only gate runs nothing,
+    // which is a confirmed none, not an undeterminable argv. A word that
+    // merely contains the name (a lookalike script, a quoted `bash -c`
+    // payload) could still execute it through a wrapper we do not model:
+    // undeterminable, fail open.
+    return tokens.some((token) => token.includes(SCRIPT))
+      ? { kind: 'unknown' }
+      : { kind: 'none' };
+  }
   let pr: number | undefined;
   let repo: string | undefined;
   for (let i = scriptIndex + 1; i < tokens.length; i++) {
@@ -202,7 +244,8 @@ export function parseVerifyPrWatchGate(
   if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
     return { kind: 'none' };
   }
-  // The gate script takes no --host; its probe reads github.com.
+  // The gate script takes no --host; the collector keys the watch with the
+  // workspace remote's host (see collectActivePrWatches).
   return { kind: 'watch', repo, pr };
 }
 
@@ -237,6 +280,15 @@ export async function collectActivePrWatches(
   }
   try {
     const tasks = await readCronTasks(workspaceCwd);
+    // The gate script takes no --host: its probe resolves the host from
+    // GH_HOST, the PR's recorded gate cursor, else github.com. The workspace
+    // remote is the best available signal for that host — a hardcoded
+    // github.com key would never match a GitHub Enterprise binding and would
+    // stamp watching:false on a live watch (a delivery ban, the inverse of
+    // fail-open). Resolve it lazily, once, and only when a verify-pr watch
+    // actually needs keying; an unresolvable remote fails the workspace open.
+    let remoteHost: string | undefined;
+    let remoteResolved = false;
     for (const task of tasks) {
       if (task.enabled === false || !task.recurring || !task.sessionId) {
         continue;
@@ -244,8 +296,17 @@ export async function collectActivePrWatches(
       const parsed = parseVerifyPrWatchGate(task.gate);
       if (parsed.kind === 'unknown') return undefined;
       if (parsed.kind === 'watch') {
+        if (!remoteResolved) {
+          const remoteUrl = await fetchRemoteWebUrl(workspaceCwd);
+          remoteHost =
+            remoteUrl === undefined
+              ? undefined
+              : repoKeyFromWebUrl(remoteUrl)?.split('/')[0];
+          remoteResolved = true;
+        }
+        if (remoteHost === undefined) return undefined;
         const key = prWatchKey(
-          `https://github.com/${parsed.repo}/pull/${parsed.pr}`,
+          `https://${remoteHost}/${parsed.repo}/pull/${parsed.pr}`,
           parsed.pr,
         );
         if (key !== undefined) add(task.sessionId, key);

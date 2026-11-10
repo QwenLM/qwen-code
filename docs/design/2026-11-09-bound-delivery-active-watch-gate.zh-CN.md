@@ -102,19 +102,30 @@ GitHub channel 开启 `deliverToBoundSessions` 后，每个绑定了某 PR 的 d
    的 PR。分词后镜像脚本自身的 `parseArgs`：`--repo`/`--cli`/`--state-root`
    消费后一个词，第一个非旗标位置参数是 PR 号（空串即 `Number('') === 0`，
    脚本会拒绝），带 `--check`/`--claim`/`--release` 的 gate 是一次性探针
-   调用（安装/收尾），绝不是常驻 watch。结果为三态：`watch`（repo + PR）、
-   `none`（确认非常驻 watch——不是该脚本、一次性调用、或脚本自身会拒绝的
-   参数，这样的 gate 永不触发）、`unknown`（gate 指名该脚本但 argv 无法
-   确定：未闭合引号、`$`/反引号展开、glob/brace 展开、shell 操作符）。
-   任一 `unknown` 任务使整个 workspace 的
-   答案为 `undefined`（fail-open）——无法确定的 gate 绝不能变成已知的
-   「无 watch」，给可能正在被 watch 的 PR 盖上 `watching: false`。
+   调用（安装/收尾），绝不是常驻 watch。脚本词必须是**被执行的命令**——
+   命令词本身，或 `node` 解释器后紧跟的那个词，跳过前导环境变量赋值：
+   形似脚本（`not-verify-pr-watch-gate.mjs`）或别的命令参数里的脚本名都
+   不是探针。argv 从不执行探针、且没有任何词包含该名字时（纯注释 gate
+   什么都不运行），答案是确认的 `none`——对这种可确定的情形让整个
+   workspace fail-open 会静默关掉该克隆里所有会话的门。仅包含该名字
+   的词（引号内的 `bash -c` 载荷）仍是 `unknown`：未建模的包装仍可能执行它。
+   结果为三态：`watch`（repo + PR）、`none`（确认非常驻 watch——执行的不是
+   该脚本、一次性调用、或脚本自身会拒绝的参数，这样的 gate 永不触发）、
+   `unknown`（gate 指名该脚本但 argv 无法确定：未闭合引号、`$`/反引号展开、
+   glob/brace 展开、shell 操作符、名字嵌在词内）。任一 `unknown` 任务使整个
+   workspace 的答案为 `undefined`（fail-open）——无法确定的 gate 绝不能变成
+   已知的「无 watch」，给可能正在被 watch 的 PR 盖上 `watching: false`。
 
 键推导：两个来源都用 `prWatchKey(url, number)` = `repoKeyFromWebUrl(url)#number`
 给 watch 建键——与绑定路由对绑定 URL 用的是同一个函数，因此 host 拼写
 （非默认端口、前导 `www`、大小写）在两侧归一一致。autofix 来源用 watch 自身
-的 `url`；verify-pr 来源构造 `https://github.com/<repo>/pull/<number>`
-（gate 脚本不接受 host）。
+的 `url`。gate 脚本不接受 `--host`（其 probe 从 `GH_HOST`、该 PR 已记录的
+gate cursor、否则 github.com 解析 host），因此 verify-pr 来源用**工作区
+remote 的 host** 建键：`fetchRemoteWebUrl(workspaceCwd)`（与绑定同一套 URL
+机制），仅在确有 verify-pr watch 需要建键时惰性解析一次。硬编码 github.com
+的键永远匹配不上 GitHub Enterprise 绑定，会给活跃 watch 盖上
+`watching: false`——那是投递禁令，与 fail-open 正好相反。remote 无法解析时
+整个 workspace fail-open（`undefined`）。
 
 失败语义：任一来源抛错时 helper 返回 `undefined`（检测不可用）；列举的
 非抛错失败形态同样返回 `undefined`：`available: false`（clone 的 worktree
@@ -175,33 +186,48 @@ i18n 文案（en + zh）与编辑器字段顺序。适配器在 `deliverToBoundS
 「有跟随者、零合格目标」在完整新鲜快照下的私下退役出口：
 
 - `dispatchEnvelope`：既有 `no_role_matched` retire 分支扩展到 legacy 门模式。
-  role-aware 模式下 reason 保持 `no_role_matched`；legacy 门模式以新 reason
-  `bound_watch_required` 退役。partial/失败扫描下该分支不触发（未扫到的跟随者
-  可能合格）——无目标 claim 照旧经 absence 门推迟。
+  日志 reason 在两种模式下都点名**真实的过滤器**：原始跟随者全部被门排除时
+  reason 为 `bound_watch_required`（配门的 stderr 文案）；`no_role_matched`
+  保留其本义——role-aware 模板链确实什么都没匹配。partial/失败扫描下该分支
+  不触发（未扫到的跟随者可能合格）——无目标 claim 照旧经 absence 门推迟。
 - `deliverToBoundSession` 投递时复核：legacy 评论今天复核无候选时保留冻结
   目标；门开启下 `!current` 仅在门控确实排除了目标时才私下退役
-  （`bound_no_candidate`）——原始跟随者仍在且无一合格（claim 与投递之间
-  停掉了 watch）。绑定被移除（无原始跟随者）则保留 legacy 冻结目标契约，
-  门绝不改变其豁免的 fix/无类型会话的行为；该回退由下方 Gone 路径负责。
+  （`bound_no_candidate`）——原始跟随者仍在且**每一个**都不合格（claim 与
+  投递之间停掉了 watch）。仅因作者排除而无候选（重试时最新跟随者正是评论
+  作者）、或绑定被移除（无原始跟随者），都保留 legacy 冻结目标契约，门绝不
+  改变其豁免的 fix/无类型会话的行为；该回退由下方 Gone 路径负责。
 - Gone 回退耗尽：`siblings_still_follow` retire 分支扩展到门模式——原始列表
-  仍有跟随者（那些不合格的）即私下退役，而非公共回退。
+  仍有跟随者（那些不合格的）即私下退役，而非公共回退——但仅限**完整**快照：
+  驱逐后刷新为 partial/失败时，未扫描的 workspace 可能还有合格跟随者，事件
+  交给既有推迟块，而不是在证据不完整时退役。
 - 恢复的 legacy 背压重解析：门开启下过滤后的 map 无 delivery、但完整快照上
   原始跟随者存在时，退役（`retireBoundTask`）而不是把任务留给公共 absence
   门——与既有 role-aware「no role matched」退役对齐。
+- 冷启动判定读**原始**绑定存在性，而非过滤后的 map：评论车道冷空推迟、其
+  连击计数、刷新 catch 里的 `noAuthoritativeMap`，都只在没有任何原始行命名
+  PR 时才把「map 为空」当作「没有绑定」。门开启时全不合格快照的 map 为空但
+  sidecar 明明可读；车道不得停摆（最长 30 轮）或写下虚假的
+  `bindings_cold_empty` 降级。
 
 `processCommentLane` 的 mention 豁免探针消费
-`resolveBoundTargets(...).targets`，无需改动：仅有不合格绑定的 PR 失去豁免，
-其普通评论被 lane 丢弃而非先认领再退役——可观察结果相同（不投递、不公开回复）。
+`resolveBoundTargets(...).targets`：仅有不合格绑定的 PR 失去豁免，其普通评论
+被 lane 丢弃而非先认领再退役——可观察结果相同（不投递、不公开回复）。当豁免
+本会放行该评论（allowlist 列名的发送者、路由准入）但门排除了所有跟随者时，
+跳过行记 `bound_watch_required`，而非未绑定 PR 闲聊产生的 `mention_required`。
 
-watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤），两种 drain
-本就无候选即退役（`watch_no_target` / `watch_no_candidate`，role-aware drain
-退役）。
+watch 事件：检测冻结 `resolveBoundDelivery`（已过滤），两种 drain 无候选即
+退役（`watch_no_target` / `watch_no_candidate`，role-aware drain 退役）——
+但纯门排除先获得**一个宽限周期**：转换留在 pending（legacy drain，含 partial
+扫描下冻结的缺失目标）或不认领（role-aware drain），下一轮对新快照重解析。
+快照抓取之后才安装的 watch 因此能投递它要抓的事件；第二次纯门排除照旧退役。
+宽限是内存里的按键集合，投递或最终退役时清除。
 
-评论监视（`watchPrComments`）也无需新代码：它经同一个已门控的
-`resolveBoundTargets` 解析目标，对原始跟随者集合（而非仅目标）查询已发评论
-归属（保证 Gone 回退的排除集完整），其可投递过滤本就把无剩余目标的评论经
-`comment_watch_no_target` 日志行跳过、再推进游标。门开启时，全不合格的跟随者
-集合落入同一跳过——私下退役、游标推进、无公开回复。
+评论监视（`watchPrComments`）经同一个已门控的 `resolveBoundTargets` 解析
+目标，对原始跟随者集合（而非仅目标）查询已发评论归属（保证 Gone 回退的排除
+集完整）。全不合格的跟随者集合以 `bound_watch_required` 日志行跳过评论
+（纯作者排除的跳过保留 `comment_watch_no_target`）——但第一次纯门跳过把
+游标**留在该评论之前**一个宽限周期，而不是推进过去：快照抓取之后才安装的
+watch 能在下一轮投递该评论；第二轮跳过并推进。两种情形都无公开回复。
 
 ## 关键设计决策
 
@@ -220,22 +246,29 @@ watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤）
   要求 `deliverToBoundSessions`。
 - **D6 — 轮询集合不变。** 不合格绑定保留 watch 基线与终态观察；事件在 drain
   退役。成本受 `prWatchLimit` 约束；优化轮询集合是后续工作。
-- **D7 — 退役要呈现。** 每条新退役路径都写既有的 stderr 行 + channel-event
-  日志行（带 reason 的 skip/retire），被门控掉的事件绝不静默。
+- **D7 — 退役要呈现，且点名门。** 每条新退役路径都写既有的 stderr 行 +
+  channel-event 日志行（带 reason 的 skip/retire），被门控掉的事件绝不静默。
+  凡排除来自 `watchGateExcludes`——两种模式的 dispatch 退役、评论监视跳过、
+  mention 车道跳过——reason 一律 `bound_watch_required`；沿用的 reason
+  （`no_role_matched`、`comment_watch_no_target`、`mention_required`）保留
+  本义，绝不把运维引向什么都没过滤的子系统。
 
 ## 受影响文件
 
-| 文件                                                                    | 改动                        |
-| ----------------------------------------------------------------------- | --------------------------- |
-| `packages/cli/src/serve/routes/session-pr-watches.ts`（+ 测试）         | 新增：watch 检测            |
-| `packages/cli/src/serve/routes/session-pr-bindings.ts`（+ 测试）        | 把 `watching` 接进条目      |
-| `packages/cli/src/commands/channel/daemon-worker.ts`（+ 测试）          | 校验/透传 `watching`        |
-| `packages/channels/base/src/types.ts`                                   | `PrBindingEntry.watching?`  |
-| `packages/channels/github/src/GithubAdapter.ts`（+ 测试）               | 选项、过滤、退役路径        |
-| `packages/channels/github/src/index.ts`（+ 测试）                       | 描述符 + 校验               |
-| `packages/web-shell/client/i18n.tsx`                                    | en + zh 文案                |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx` | 字段顺序（parity 套件覆盖） |
-| `docs/design/…`（本双语文档）                                           | 设计                        |
+| 文件                                                                              | 改动                         |
+| --------------------------------------------------------------------------------- | ---------------------------- |
+| `packages/cli/src/serve/routes/session-pr-watches.ts`（+ 测试）                   | 新增：watch 检测             |
+| `packages/cli/src/serve/routes/session-pr-bindings.ts`（+ 测试）                  | 把 `watching` 接进条目       |
+| `packages/cli/src/commands/channel/daemon-worker.ts`（+ 测试）                    | 校验/透传 `watching`         |
+| `packages/channels/base/src/types.ts`                                             | `PrBindingEntry.watching?`   |
+| `packages/channels/github/src/GithubAdapter.ts`（+ 测试）                         | 选项、过滤、退役路径         |
+| `packages/channels/github/src/index.ts`（+ 测试）                                 | 描述符 + 校验                |
+| `packages/web-shell/client/i18n.tsx`                                              | en + zh 文案                 |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`           | 字段顺序 + 前置条件门        |
+| `packages/web-shell/client/components/channels/channel-editor-state.ts`（+ 测试） | `requiresBoundDelivery` 镜像 |
+| `docs/users/features/channels/github.md`                                          | 选项行 + 投递章节            |
+| `docs/developers/qwen-serve-protocol.md`                                          | `bound_watch_required` 原因  |
+| `docs/design/…`（本双语文档）                                                     | 设计                         |
 
 ## 风险
 
@@ -243,20 +276,36 @@ watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤）
   解析器无法确定的拼法一律 fail-open（会话继续接收事件），绝不落成确认的
   「无 watch」。token 解析接受旗标顺序变化、脚本路径带引号、续行与尾注释。
 - **扫描成本。** 每次绑定轮询（默认 60s）每 workspace 一次 `git worktree list`
-  （10s 超时）+ cron 文件读取。与 Web Shell watches 页面按需使用的机制相同。
+  （10s 超时）+ cron 文件读取，verify-pr watch 需要建键时再加一次
+  `git remote get-url origin`。与 Web Shell watches 页面按需使用的机制相同。
+  绑定扫描还有第二个消费者 `runPrWatchObservationTick`，每 5 分钟 tick 付出
+  同样的每 workspace 成本却不读 `watching`；它目前是惰性的
+  （`SESSION_PR_WATCH_OBSERVATION_ENABLED` 为 false），该开关翻开前需要先加
+  守卫。
 - **partial 快照下 `watching` 陈旧。** 保留行沿用最后已知值；永久 partial
   期间安装的 watch 要到完整快照才被看见。与既有 fail-closed 保留模型一致；
-  自愈。
+  自愈。**完整**快照上，一个宽限周期（见 §5）覆盖安装窗口：第一次纯门排除
+  留住事件，让下一轮的新快照能投递它。宽限只有一个周期，不是保证——更晚
+  安装的 watch 仍会错过该事件，这与任何快照派生信号的窗口相同。
+- **`available: false` 混淆两种状态。** worktree 列举把「git 失败」（瞬时）
+  与「不是仓库」（永久）都吞成 `available: false`，检测对两者都 fail-open。
+  非仓库 workspace 里不可能有 `/autofix-pr` watch，但 `/verify-pr --watch`
+  的 cron 任务活在 checkout 之外、仍然可读——检测放弃了一个本可读到的信号，
+  门在那里永久空转。fail-open 意味着什么都不坏，stderr 行点名 workspace；
+  区分两种状态是后续工作。
 - **Visuals。** 新编辑器字段可能移动 channel-editor 截图；diff 属实则更新
   visuals 基线。
 
 ## 验证计划
 
-- 单元：检测（两个来源、终态标记、禁用任务、畸形 gate、失败 → undefined）；
-  路由接线（已知/未知、live 合并行）；worker 校验（非 boolean 只丢字段）；
-  适配器——legacy 赢家跳过、role-aware 组跳过、Gone 回退跳过、复核退役、
-  dispatch 退役（两种模式）、恢复退役、partial 快照推迟、关门字节兼容、
-  未知 `watching` 合格。
+- 单元：检测（两个来源、终态标记、禁用任务、畸形 gate、纯注释与形似脚本
+  gate、工作区 remote host 建键、失败 → undefined）；路由接线（已知/未知、
+  live 合并行、不可解析 URL）；worker 校验（非 boolean 只丢字段）；适配器——
+  legacy 赢家跳过、review 角色跳过、role-aware 组跳过（先过滤再选赢家）、
+  按 PR 作用域、Gone 回退跳过与 partial 推迟、复核退役 vs 作者排除/移除的
+  冻结目标、dispatch 退役（两种模式、门 reason）、恢复退役、刷新失败推迟、
+  冷启动原始存在性、一个宽限周期（评论 + watch drain）、关门字节兼容、
+  未知 `watching` 合格；编辑器——前置条件镜像、禁用开关、存储值内联错误。
 - E2E（测试计划在 `.qwen/e2e-tests/`）：daemon + github channel 对测试仓库；
   一次性 verify 会话 vs `--watch` 会话；评论与 `ci_failure`/`head_change`
   事件；断言投递/退役日志行，且无公开回复。
@@ -272,6 +321,12 @@ watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤）
    公开回复。
 5. `fix`/无类型绑定与未知 `watching` 不受影响。
 6. 检测失败降级回今天的行为（fail-open）并写诊断行；不使快照 partial。
+7. 门导致的退役/跳过在每条车道（dispatch、评论监视、mention 车道）都记
+   `bound_watch_required`；沿用的 reason 保留本义。
+8. 第一次纯门排除留住事件一个周期；新快照显示 watch 即投递，第二次排除
+   才消费。
+9. 全不合格快照不停摆冷启动车道；GitHub Enterprise host 上的 verify-pr
+   watch 用工作区自己的 host 建键。
 
 ## 开放问题
 

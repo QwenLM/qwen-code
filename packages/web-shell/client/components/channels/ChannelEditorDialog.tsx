@@ -756,6 +756,14 @@ export function ChannelEditorDialog({
       const isLocalGhSwitch =
         field.key === 'useLocalGh' &&
         isRepositoryOnlyChannelType(descriptor.type);
+      // Same prerequisite gate as prWatchEvents: name it at the field
+      // instead of letting the daemon reject the whole draft after submit.
+      // A stored true stays switchable OFF while gated, so turning delivery
+      // off never strands the operator with a flag they cannot clear.
+      const gatedBoundWatch =
+        field.key === 'requireBoundWatch' &&
+        descriptor.type === 'github' &&
+        draft.values['deliverToBoundSessions'] !== true;
       const updateSwitch = (checked: boolean) => {
         if (field.key === 'deliverToBoundSessions') {
           // Both directions re-derive shown errors: on retires the dependency
@@ -808,12 +816,22 @@ export function ChannelEditorDialog({
           label={fieldLabel(field)}
           required={field.required}
           description={fieldDescription(field)}
+          hint={
+            gatedBoundWatch
+              ? t('channels.editor.field.github.requireBoundWatch.disabledHint')
+              : undefined
+          }
+          hintId={gatedBoundWatch ? `${id}-disabled-hint` : undefined}
           error={error}
         >
           <Switch
             id={id}
             checked={value === true}
             aria-required={field.required}
+            disabled={gatedBoundWatch && value !== true}
+            aria-describedby={
+              gatedBoundWatch ? `${id}-disabled-hint` : undefined
+            }
             onCheckedChange={updateSwitch}
           />
         </FieldShell>

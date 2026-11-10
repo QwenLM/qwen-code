@@ -587,6 +587,12 @@ export function validateChannelEditorDraft(
     ) {
       errors['prWatchEvents'] = 'requiresBoundDelivery';
     }
+    if (
+      draft.values['requireBoundWatch'] === true &&
+      draft.values['deliverToBoundSessions'] !== true
+    ) {
+      errors['requireBoundWatch'] = 'requiresBoundDelivery';
+    }
     // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
     // of owner/repo entries. While the mode is off the list is ignored (and
     // hidden), matching the runtime's ignore-while-off rule, so a parked list

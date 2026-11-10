@@ -1636,6 +1636,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   // a hint before the dead-letter alert hours later (doudouOUC).
   private partialSnapshotStreak = 0;
   /**
+   * Comment/watch keys the gate has already deferred ONCE. A watch installed
+   * after the bindings snapshot was fetched surfaces on the next pass; the
+   * first gate-only exclusion holds the event (cursor unmoved / pending kept)
+   * so that pass can deliver it, and the second consumes it like any other
+   * no-target event. In-memory: a restart resets the one-cycle grace, which
+   * is harmless. Keys are removed when the event delivers or finally skips.
+   */
+  private gateDeferredOnce = new Set<string>();
+  /**
    * True while the most recent pending-watch reconciliation FAILED (e.g.
    * the watch file is unreadable). Generic recovery must then leave watch
    * tasks alone: delivering and removing an accepted watch task without
@@ -2886,6 +2895,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.deliverToBoundSessions &&
       !this.boundSnapshotTrusted &&
       this.boundSessionByPr.size === 0 &&
+      // Under the gate the map can be empty while raw bindings exist (every
+      // listed follower watch-ineligible): the sidecars ARE readable, so the
+      // cold-empty premise is false and the lane must not stall.
+      !(this.requireBoundWatch && this.hasRawBoundPrs()) &&
       this.lastBindingsPartial &&
       this.coldEmptyPartialStreak < MAX_COLD_EMPTY_PARTIAL_POLLS
     ) {
@@ -3381,11 +3394,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           'comment',
         ).targets.length > 0;
       if (onlyMentioned && !hasMention && !mentionWaived) {
-        if (!this.journalOncePerWindow(`mention_required\0${key}`)) continue;
+        // Name the actual filter: when the waiver would have admitted this
+        // comment but the watch gate excluded every follower, the skip is
+        // bound_watch_required — not the mention_required an unbound PR's
+        // ambient chatter produces.
+        const reason =
+          this.gateExcludedAllFollowers(ctx.chatId, ctx.issueNumber) &&
+          this.waivesBoundMention(ctx.chatId, senderId) &&
+          this.admitsMessageRoute(text)
+            ? 'bound_watch_required'
+            : 'mention_required';
+        if (!this.journalOncePerWindow(`${reason}\0${key}`)) continue;
         this.recordChannelEvent({
           type: 'inbound',
           outcome: 'skipped',
-          reason: 'mention_required',
+          reason,
           triggerKind: ctx.reason,
           repository: ctx.chatId,
           thread: ctx.threadId,
@@ -4097,13 +4120,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // still match, so fall through to the untargeted claim: the absence
       // gate defers it as backpressure instead of consuming the event on
       // incomplete evidence. The watch gate retires the same way in legacy
-      // mode: every follower is bound but none is watch-eligible.
+      // mode: every follower is bound but none is watch-eligible. The
+      // journal reason names the ACTUAL filter: a gate exclusion is
+      // bound_watch_required in BOTH modes, not the role-aware template
+      // reason that would send the operator to templates that matched fine.
+      const gateExcludedAll = this.gateExcludedAllFollowers(
+        envelope.chatId,
+        issueNumber,
+      );
       this.applyTaskDedupe(dedupe);
       process.stderr.write(
         `[Channel:${this.name}] event ${envelope.messageId} ${
-          this.boundRoleAware
-            ? "matched no role's boundSessionActions"
-            : 'has no watch-eligible bound session (requireBoundWatch)'
+          gateExcludedAll
+            ? 'has no watch-eligible bound session (requireBoundWatch)'
+            : "matched no role's boundSessionActions"
         }; retiring without public fallback\n`,
       );
       // Retired before any task was claimed, so there is no task row to
@@ -4115,9 +4145,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.recordChannelEvent({
         type: 'inbound',
         outcome: 'skipped',
-        reason: this.boundRoleAware
-          ? 'no_role_matched'
-          : 'bound_watch_required',
+        reason: gateExcludedAll ? 'bound_watch_required' : 'no_role_matched',
         triggerKind: parseTriggerKind(envelope.metadata),
         repository: envelope.chatId,
         thread: envelope.threadId,
@@ -5976,7 +6004,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.lastBindings = snapshot.bindings;
       }
       this.boundSessionByPr = map;
-      if (snapshot.partial && map.size === 0 && !this.boundSnapshotTrusted) {
+      if (
+        snapshot.partial &&
+        map.size === 0 &&
+        !this.boundSnapshotTrusted &&
+        !(this.requireBoundWatch && this.hasRawBoundPrs())
+      ) {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
@@ -6015,6 +6048,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive binding scans (${listedSessions} sessions listed): the daemon could not read every PR sidecar, transcript or live session list, or a registered workspace has no runtime. ${
               !this.boundSnapshotTrusted &&
               map.size === 0 &&
+              !(this.requireBoundWatch && this.hasRawBoundPrs()) &&
               this.coldEmptyPartialStreak < MAX_COLD_EMPTY_PARTIAL_POLLS
                 ? `The comment lane is still deferred (${this.coldEmptyPartialStreak}/${MAX_COLD_EMPTY_PARTIAL_POLLS} cold binding scans), so PR and issue events are both stalled.`
                 : 'Unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected).'
@@ -6042,9 +6076,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // No authoritative map exists: either no snapshot has ever succeeded,
       // or only empty partials / failures have (boundSnapshotSeen may already
       // be true). The cold-start gate defers the comment lane, so every
-      // notification is stalled.
+      // notification is stalled. Under the gate, raw bindings left by the
+      // last successful scan prove the sidecars were readable — the empty
+      // map is gate filtering, not an absence of bindings.
       const noAuthoritativeMap =
-        !this.boundSnapshotTrusted && this.boundSessionByPr.size === 0;
+        !this.boundSnapshotTrusted &&
+        this.boundSessionByPr.size === 0 &&
+        !(this.requireBoundWatch && this.hasRawBoundPrs());
       if (noAuthoritativeMap) {
         // A failing refresh with no authoritative map is as non-authoritative
         // as an empty partial: advance the SAME bounded cold-empty escape so
@@ -6216,6 +6254,34 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       (role === 'review' || role === 'verify') &&
       watching === false
     );
+  }
+
+  /**
+   * True when raw followers exist and the watch gate excludes EVERY one of
+   * them — the only "no candidate" state the gate itself caused. A winner
+   * that is merely author-excluded, or a removed binding (no followers), is
+   * not this state and keeps the legacy frozen-target contract.
+   */
+  private gateExcludedAllFollowers(
+    chatId: string,
+    issueNumber: number,
+  ): boolean {
+    if (!this.requireBoundWatch) return false;
+    const followers = this.boundFollowersOf(chatId, issueNumber);
+    return (
+      followers.length > 0 &&
+      followers.every((f) => this.watchGateExcludes(f.role, f.watching))
+    );
+  }
+
+  /**
+   * Whether any raw binding row names a PR. The routing map is gate-filtered,
+   * so its emptiness alone cannot prove "no bindings exist": cold-start
+   * decisions must read raw presence, or a fully-ineligible snapshot stalls
+   * the lane as if the sidecars were unreadable.
+   */
+  private hasRawBoundPrs(): boolean {
+    return this.lastBindings.some((b) => b.prs.length > 0);
   }
 
   /**
@@ -6833,9 +6899,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         !current &&
         (isWatch ||
           this.boundRoleAware ||
-          (this.requireBoundWatch &&
-            this.boundFollowersOf(envelope.chatId, task.issueNumber).length >
-              0))
+          this.gateExcludedAllFollowers(envelope.chatId, task.issueNumber))
       ) {
         // On a complete snapshot with no candidate left for the task's role,
         // retire privately. Watch events are private-only by contract; a
@@ -6844,11 +6908,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // injecting the obsolete role's instruction into the frozen session
         // either. Under the watch gate a legacy comment retires too, but
         // ONLY when the gate actually excluded the target: raw followers
-        // still exist and none is eligible (the frozen target stopped
-        // watching between claim and delivery). A REMOVED binding (no raw
-        // followers left) keeps the legacy contract — the frozen target
-        // stands and the gone path below owns the fallback — so the gate
-        // never changes behavior for the fix/untyped sessions it exempts.
+        // still exist and EVERY one is ineligible (the frozen target stopped
+        // watching between claim and delivery). A merely author-excluded
+        // winner or a REMOVED binding (no raw followers left) keeps the
+        // legacy contract — the frozen target stands and the gone path below
+        // owns the fallback — so the gate never changes behavior for the
+        // fix/untyped sessions it exempts.
         process.stderr.write(
           `[Channel:${this.name}] ${isWatch ? 'watch' : 'bound'} event ${envelope.messageId} has no bound candidate left for its role; retiring without public fallback\n`,
         );
@@ -7020,11 +7085,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // be) delivered privately through that role's own task; a public
       // reply here would duplicate it on the PR. Only zero live followers
       // across every role opens the public fallback below. The watch gate
-      // applies the same rule in legacy mode: the raw followers left are
-      // the ineligible ones, and their binding is an operator scoping
-      // decision, not an absence.
+      // applies the same rule in legacy mode — but only on a COMPLETE
+      // snapshot: under a partial/failed refresh an unscanned workspace may
+      // still hold an eligible follower, so the deferral block below owns
+      // the event instead of a retirement on incomplete evidence.
       if (
-        (this.boundRoleAware || this.requireBoundWatch) &&
+        (this.boundRoleAware ||
+          (this.requireBoundWatch &&
+            !this.lastBindingsPartial &&
+            !this.boundRefreshFailed)) &&
         (this.boundFollowersOf(envelope.chatId, task.issueNumber).length > 0 ||
           this.boundEventAlreadyDelivered(envelope))
       ) {
@@ -8186,21 +8255,40 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // comments would re-fill every batch and the capped cursor would never reach
     // the tail. Filtering them out keeps the cap and the cursor progressing over
     // deliverable comments; the excluded ones are simply advanced past.
+    // A gate-only exclusion (every follower watch-ineligible) additionally
+    // earns ONE cycle of grace: a watch installed after this pass's snapshot
+    // was fetched surfaces on the next pass, and the comment it was installed
+    // to catch must not be skipped past with the cursor. The first such
+    // comment holds the cursor before itself; the second consumes it.
+    const gateBlocked =
+      targets.length === 0 && this.gateExcludedAllFollowers(chatId, number);
+    let gateHoldCursor: string | undefined;
     const deliverable: typeof candidates = [];
     for (const candidate of candidates) {
       const exclude = excludeFor(candidate);
       if (targets.some((target) => !exclude.has(target.sessionId))) {
+        this.gateDeferredOnce.delete(candidate.key);
         deliverable.push(candidate);
         continue;
       }
-      // Every bound target authored this same-account comment itself, so no
-      // session is left to receive it. The notification lanes cannot see it
-      // either (same account => no notification), so this skip row is the
-      // comment's only journal trace — record it instead of consuming silently.
+      if (gateBlocked && !this.gateDeferredOnce.has(candidate.key)) {
+        this.gateDeferredOnce.add(candidate.key);
+        gateHoldCursor ??= candidate.createdAt;
+        continue;
+      }
+      this.gateDeferredOnce.delete(candidate.key);
+      // Every bound target authored this same-account comment itself (or the
+      // gate excluded them all and the grace cycle is spent), so no session
+      // is left to receive it. The notification lanes cannot see it either
+      // (same account => no notification), so this skip row is the comment's
+      // only journal trace — record it instead of consuming silently, naming
+      // the gate when the gate is the cause.
       this.recordChannelEvent({
         type: 'inbound',
         outcome: 'skipped',
-        reason: 'comment_watch_no_target',
+        reason: gateBlocked
+          ? 'bound_watch_required'
+          : 'comment_watch_no_target',
         repository: chatId,
         thread: threadId,
         number,
@@ -8208,7 +8296,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
     }
     if (deliverable.length === 0) {
-      commitCursor(nowIso);
+      commitCursor(gateHoldCursor ?? nowIso);
       return;
     }
 
@@ -8245,13 +8333,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // retries; dispatchedComments dedupes anything already claimed. Advancing
       // here would skip the comment past with no task and no re-delivery chance.
       commitCursor(since);
-    } else if (capped) {
-      // Resume just before the last processed comment so the unprocessed tail is
-      // re-fetched next pass (a second of overlap is deduped, never lost).
-      const last = batch[batch.length - 1]!;
-      commitCursor(new Date(Date.parse(last.createdAt) - 1000).toISOString());
     } else {
-      commitCursor(nowIso);
+      // Resume just before the last processed comment when capped so the
+      // unprocessed tail is re-fetched next pass (a second of overlap is
+      // deduped, never lost); a gate-held comment holds the cursor before
+      // itself for its one grace cycle. The earliest hold wins.
+      let next = nowIso;
+      if (capped) {
+        const last = batch[batch.length - 1]!;
+        next = new Date(Date.parse(last.createdAt) - 1000).toISOString();
+      }
+      if (gateHoldCursor !== undefined && gateHoldCursor < next) {
+        next = gateHoldCursor;
+      }
+      commitCursor(next);
     }
   }
 
@@ -8326,7 +8421,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         if (current) {
           delivery = current;
+          this.gateDeferredOnce.delete(pending.key);
         } else {
+          // One grace cycle when the gate is the cause: a watch installed
+          // after the snapshot was fetched surfaces on the next pass, and
+          // the transition it was installed to catch must not retire first.
+          if (
+            this.gateExcludedAllFollowers(
+              pending.envelope.chatId,
+              pending.issueNumber,
+            ) &&
+            !this.gateDeferredOnce.has(pending.key)
+          ) {
+            this.gateDeferredOnce.add(pending.key);
+            return;
+          }
+          this.gateDeferredOnce.delete(pending.key);
           process.stderr.write(
             `[Channel:${this.name}] watch event ${pending.key} has no bound candidate left; retiring without public fallback\n`,
           );
@@ -8374,6 +8484,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           });
           continue;
         }
+      }
+      // A partial/failed scan keeps the frozen target — which may be absent
+      // because the gate filtered the map at detection time. Give that state
+      // the same one grace cycle before claiming a task that would retire
+      // targetless at run time.
+      if (
+        delivery === undefined &&
+        this.gateExcludedAllFollowers(
+          pending.envelope.chatId,
+          pending.issueNumber,
+        ) &&
+        !this.gateDeferredOnce.has(pending.key)
+      ) {
+        this.gateDeferredOnce.add(pending.key);
+        return;
       }
       let task: InboundTaskRecord;
       try {
@@ -8482,6 +8607,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ) {
           return;
         }
+        // One grace cycle when the gate is the cause: a watch installed
+        // after the snapshot was fetched surfaces on the next pass.
+        if (
+          this.gateExcludedAllFollowers(
+            pending.envelope.chatId,
+            pending.issueNumber,
+          ) &&
+          !this.gateDeferredOnce.has(pending.key)
+        ) {
+          this.gateDeferredOnce.add(pending.key);
+          return;
+        }
+        this.gateDeferredOnce.delete(pending.key);
         process.stderr.write(
           `[Channel:${this.name}] watch event ${pending.key} has no matching role target; retiring without public fallback\n`,
         );
@@ -8490,6 +8628,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.savePrWatchState();
         continue;
       }
+      this.gateDeferredOnce.delete(pending.key);
       const tasksBefore = this.readInboundTasks();
       const knownIds = new Set(tasksBefore.map((task) => task.id));
       const claimable = targets.filter(

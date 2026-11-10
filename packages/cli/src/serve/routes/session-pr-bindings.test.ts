@@ -1170,4 +1170,27 @@ describe('GET /sessions/pr-bindings', () => {
       expect.stringContaining('watch detection unavailable'),
     );
   });
+
+  it('leaves watching absent for an unparseable binding URL, even with an active watch', async () => {
+    // The key lookup cannot place a URL without owner/repo segments (the
+    // sidecar shape check only requires http(s)): stamping watching:false
+    // would ban a session that may hold a live watch. Absent = unknown.
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    const prPath = await seedBinding(cwd, SESSION_A, []);
+    await upsertSessionPr(prPath, {
+      number: 101,
+      url: 'https://github.com',
+      state: 'open',
+      role: 'verify',
+    });
+    watchMocks.collectActivePrWatches.mockResolvedValue(
+      new Map([[SESSION_A, new Set(['github.com/acme/widgets#101'])]]),
+    );
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings[0]?.prs[0]).not.toHaveProperty('watching');
+  });
 });

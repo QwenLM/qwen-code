@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   listAutofixPrWatches: vi.fn(),
   readCronTasks: vi.fn(),
+  fetchRemoteWebUrl: vi.fn(),
 }));
 
 vi.mock('./autofix-pr-watches.js', () => ({
@@ -23,6 +24,17 @@ vi.mock(
         typeof import('@qwen-code/qwen-code-core/services/cronTasksFile.js')
       >();
     return { ...actual, readCronTasks: mocks.readCronTasks };
+  },
+);
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/github-prs.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/github-prs.js')
+      >();
+    return { ...actual, fetchRemoteWebUrl: mocks.fetchRemoteWebUrl };
   },
 );
 
@@ -68,12 +80,14 @@ function cronTask(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   mocks.listAutofixPrWatches.mockReset();
   mocks.readCronTasks.mockReset();
+  mocks.fetchRemoteWebUrl.mockReset();
   mocks.listAutofixPrWatches.mockResolvedValue({
     v: 1,
     available: true,
     watches: [],
   });
   mocks.readCronTasks.mockResolvedValue([]);
+  mocks.fetchRemoteWebUrl.mockResolvedValue('https://github.com/acme/widgets');
 });
 
 describe('prWatchKey', () => {
@@ -250,6 +264,61 @@ describe('parseVerifyPrWatchGate', () => {
     ).toEqual({ kind: 'unknown' });
   });
 
+  it('confirms no watch for a gate that only names the script in a comment', () => {
+    // The shell runs nothing here; a whole-workspace fail-open on this
+    // determinable none would silently disable the gate for every session.
+    expect(
+      parseVerifyPrWatchGate(
+        '# node /clone/scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'none' });
+    expect(
+      parseVerifyPrWatchGate(
+        'node /clone/scripts/other.mjs 42 # verify-pr-watch-gate.mjs',
+      ),
+    ).toEqual({ kind: 'none' });
+  });
+
+  it('does not read a lookalike or embedded script name as the executed probe', () => {
+    // suffix-lookalike: a different script whose name ends with the probe's.
+    expect(
+      parseVerifyPrWatchGate(
+        'node /tmp/not-verify-pr-watch-gate.mjs 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'unknown' });
+    // script-in-quoted-other: the name is another command's argument.
+    expect(
+      parseVerifyPrWatchGate(
+        'node /tmp/other.mjs "verify-pr-watch-gate.mjs" 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'unknown' });
+    // A quoted interpreter payload could still execute the probe.
+    expect(
+      parseVerifyPrWatchGate(
+        "bash -c 'node scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets'",
+      ),
+    ).toEqual({ kind: 'unknown' });
+  });
+
+  it('reads the executed script word in direct and assignment-prefixed gates', () => {
+    expect(
+      parseVerifyPrWatchGate(
+        './scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+    expect(
+      parseVerifyPrWatchGate(
+        'GH_HOST=ghe.corp node scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'watch', repo: 'acme/widgets', pr: 42 });
+    // A node flag before the script is a shape we do not model: fail open.
+    expect(
+      parseVerifyPrWatchGate(
+        'node --inspect scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets',
+      ),
+    ).toEqual({ kind: 'unknown' });
+  });
+
   it('returns unknown when the gate names the script but argv is undeterminable', () => {
     expect(
       parseVerifyPrWatchGate(
@@ -372,6 +441,46 @@ describe('collectActivePrWatches', () => {
     mocks.readCronTasks.mockResolvedValue([
       cronTask({
         gate: 'node scripts/verify-pr-watch-gate.mjs 42 --repo acme/widgets --cli /bin/echo # omit --check for the standing watch',
+      }),
+    ]);
+    const watches = await collectActivePrWatches('/ws');
+    expect(watches?.get(SESSION)).toEqual(
+      new Set(['github.com/acme/widgets#42']),
+    );
+  });
+
+  it('keys a verify-pr watch with the workspace remote host (GHE)', async () => {
+    // A hardcoded github.com key would never match the ghe.corp binding:
+    // watching:false on a live watch is a delivery ban, not fail-open.
+    mocks.fetchRemoteWebUrl.mockResolvedValue('https://ghe.corp/acme/widgets');
+    mocks.readCronTasks.mockResolvedValue([cronTask()]);
+    const watches = await collectActivePrWatches('/ws');
+    expect(watches?.get(SESSION)).toEqual(
+      new Set(['ghe.corp/acme/widgets#42']),
+    );
+  });
+
+  it('fails open when a verify-pr watch needs keying but the remote is unresolvable', async () => {
+    mocks.fetchRemoteWebUrl.mockResolvedValue(undefined);
+    mocks.readCronTasks.mockResolvedValue([cronTask()]);
+    expect(await collectActivePrWatches('/ws')).toBeUndefined();
+  });
+
+  it('does not resolve the remote when no verify-pr watch needs keying', async () => {
+    mocks.readCronTasks.mockResolvedValue([cronTask({ gate: 'echo hello' })]);
+    const watches = await collectActivePrWatches('/ws');
+    expect(watches?.size).toBe(0);
+    expect(mocks.fetchRemoteWebUrl).not.toHaveBeenCalled();
+  });
+
+  it('keeps a defined map when a task gate only names the script in a comment', async () => {
+    // unknown here would fail the WHOLE workspace open and silently disable
+    // the gate for every review/verify session in the clone.
+    mocks.readCronTasks.mockResolvedValue([
+      cronTask(),
+      cronTask({
+        id: 't-commented',
+        gate: '# node scripts/verify-pr-watch-gate.mjs 7 --repo acme/other',
       }),
     ]);
     const watches = await collectActivePrWatches('/ws');

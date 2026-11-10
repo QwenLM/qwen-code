@@ -118,13 +118,23 @@ keyed `sessionId` → set of PR keys, the union of:
    word, the first non-flag positional is the PR number (an empty string
    is `Number('') === 0`, which the script rejects), and a gate carrying
    `--check`/`--claim`/`--release` is a one-shot probe invocation, never a
-   standing watch. The result is THREE-state: `watch` (repo + PR),
-   `none` (confirmed not a standing watch — not the script, a one-shot
-   invocation, or arguments the script itself would reject, so the gate
-   never fires), and `unknown` (the gate names the script but its argv
-   cannot be determined: unterminated quotes, `$`/backtick expansion,
-   glob/brace expansion, shell operators). Any `unknown` task makes the
-   whole workspace answer
+   standing watch. The script word must be the EXECUTED command — the
+   command word itself, or the word right after the `node` interpreter,
+   skipping leading environment assignments: a lookalike script
+   (`not-verify-pr-watch-gate.mjs`) or the name inside another command's
+   argument is not the probe. When the argv never executes the probe and
+   no word even contains the name (a comment-only gate runs nothing), the
+   answer is a confirmed `none` — failing the whole workspace open on that
+   determinable case would silently disable the gate for every session in
+   the clone. A word that merely CONTAINS the name (a quoted `bash -c`
+   payload) stays `unknown`: a wrapper we do not model could still run it.
+   The result is THREE-state: `watch` (repo + PR),
+   `none` (confirmed not a standing watch — not the executed script, a
+   one-shot invocation, or arguments the script itself would reject, so
+   the gate never fires), and `unknown` (the gate names the script but its
+   argv cannot be determined: unterminated quotes, `$`/backtick expansion,
+   glob/brace expansion, shell operators, an embedded name). Any `unknown`
+   task makes the whole workspace answer
    `undefined` (fail-open) — an undeterminable gate must never become a
    known "no watch" that stamps `watching: false` on a possibly-watched PR.
 
@@ -132,8 +142,15 @@ Key derivation: both sources key a watch by `prWatchKey(url, number)` =
 `repoKeyFromWebUrl(url)#number` — the SAME function the bindings route
 applies to the binding URL, so host spellings (non-default port, leading
 `www`, case) normalize identically on both sides. The autofix source uses
-the watch's own `url`; the verify-pr source builds
-`https://github.com/<repo>/pull/<number>` (the gate script takes no host).
+the watch's own `url`. The gate script takes no `--host` (its probe
+resolves the host from `GH_HOST`, the PR's recorded gate cursor, else
+github.com), so the verify-pr source keys with the WORKSPACE remote's
+host: `fetchRemoteWebUrl(workspaceCwd)` (the same URL machinery the
+bindings use), resolved lazily once and only when a verify-pr watch needs
+keying. A hardcoded github.com key would never match a GitHub Enterprise
+binding and would stamp `watching: false` on a live watch — a delivery
+ban, the inverse of fail-open. An unresolvable remote fails the workspace
+open (`undefined`).
 
 Failure semantics: the helper returns `undefined` (detection unavailable)
 when either source throws, AND on the listing's non-throwing failure shapes:
@@ -207,44 +224,67 @@ Private-retire outcomes for "followers exist, zero eligible targets" on a
 complete fresh snapshot:
 
 - `dispatchEnvelope`: the existing `no_role_matched` retire branch extends to
-  legacy gate mode. Reason stays `no_role_matched` in role-aware mode; legacy
-  gate mode retires with a new reason `bound_watch_required`. Under a
-  partial/failing scan the branch does not fire (an unscanned follower might
-  be eligible) — the untargeted claim defers through the absence gate as
-  today.
+  legacy gate mode. The journal reason names the ACTUAL filter in both
+  modes: when every raw follower is gate-excluded the reason is
+  `bound_watch_required` (with the gate's stderr wording), and
+  `no_role_matched` is kept for its original cause — a role-aware template
+  chain that genuinely matched nothing. Under a partial/failing scan the
+  branch does not fire (an unscanned follower might be eligible) — the
+  untargeted claim defers through the absence gate as today.
 - `deliverToBoundSession` delivery-time revalidation: legacy comments keep
   the frozen target today when revalidation finds no candidate; under the
   gate, `!current` retires privately (`bound_no_candidate`) ONLY when the
-  gate actually excluded the target — raw followers still exist and none is
-  eligible (a watch stopped between claim and delivery). A REMOVED binding
-  (no raw followers left) keeps the legacy frozen-target contract, so the
-  gate never changes behavior for the fix/untyped sessions it exempts; the
-  gone path below owns that fallback.
+  gate actually excluded the target — raw followers still exist and EVERY
+  one is gate-ineligible (a watch stopped between claim and delivery). A
+  merely author-excluded winner (the retry's newest follower authored the
+  comment) or a REMOVED binding (no raw followers left) keeps the legacy
+  frozen-target contract, so the gate never changes behavior for the
+  fix/untyped sessions it exempts; the gone path below owns that fallback.
 - Gone-fallback exhaustion: the `siblings_still_follow` retire branch extends
   to gate mode — raw followers still listed (the ineligible ones) mean
-  private retire, not the public fallback.
+  private retire, not the public fallback — but only on a COMPLETE snapshot:
+  under a partial/failed post-eviction refresh an unscanned workspace may
+  hold an eligible follower, so the existing deferral block owns the event
+  instead of a retirement on incomplete evidence.
 - Recovery's legacy backpressure re-resolve: when the filtered map yields no
   delivery but raw followers exist on a complete snapshot under the gate,
   retire (`retireBoundTask`) instead of leaving the task to the public
   absence gate — mirroring the existing role-aware `no role matched` retire.
+- Cold-start decisions read RAW binding presence, not the filtered map: the
+  comment-lane cold-empty deferral, its streak counter, and the refresh
+  catch's `noAuthoritativeMap` all treat "map empty" as "no bindings" only
+  when no raw row names a PR. Under the gate a fully-ineligible snapshot
+  leaves the map empty although the sidecars ARE readable; the lane must not
+  stall (up to 30 polls) or journal a false `bindings_cold_empty` degradation.
 
 The mention-exemption probes in `processCommentLane` consume
-`resolveBoundTargets(...).targets` and need no change: an ineligible-only PR
-loses the exemption, and its plain comments are dropped by the lane instead
-of claimed-then-retired — same observable outcome (no delivery, no public
-reply).
+`resolveBoundTargets(...).targets`: an ineligible-only PR loses the
+exemption, and its plain comments are dropped by the lane instead of
+claimed-then-retired — same observable outcome (no delivery, no public
+reply). When the waiver WOULD have admitted the comment (listed sender,
+admitted route) but the gate excluded every follower, the skip row names
+`bound_watch_required`, not the `mention_required` an unbound PR's ambient
+chatter produces.
 
-Watch events need no new code: detection freezes `resolveBoundDelivery`
-(filtered), and both drains already retire without a candidate
-(`watch_no_target` / `watch_no_candidate`, role-aware drain retire).
+Watch events: detection freezes `resolveBoundDelivery` (filtered), and both
+drains retire without a candidate (`watch_no_target` / `watch_no_candidate`,
+role-aware drain retire) — but a gate-only exclusion earns ONE grace cycle
+first: the transition stays pending (legacy drain, including a frozen
+absent target under a partial scan) or unclaimed (role-aware drain), and the
+next pass re-resolves against a fresh snapshot. A watch installed after the
+snapshot was fetched therefore delivers the event it was installed to catch;
+a second gate-only exclusion retires as before. The grace is an in-memory
+per-key set, cleared on delivery or final retire.
 
-The comment watch (`watchPrComments`) needs no new code either: it resolves
-targets through the same gated `resolveBoundTargets`, queries posted-comment
-attribution over the RAW follower set (so the Gone fallback's exclusions stay
-complete), and its deliverable filter already skips a comment with no
-remaining target via the `comment_watch_no_target` journal row before
-advancing the cursor. Under the gate, an all-ineligible follower set lands
-in that same skip — private retirement, cursor progress, no public reply.
+The comment watch (`watchPrComments`) resolves targets through the same
+gated `resolveBoundTargets` and queries posted-comment attribution over the
+RAW follower set (so the Gone fallback's exclusions stay complete). An
+all-ineligible follower set skips the comment with a `bound_watch_required`
+journal row (authorship-only skips keep `comment_watch_no_target`) — but the
+first gate-only skip holds the cursor BEFORE the comment for one grace
+cycle instead of advancing past it, so a watch installed after the snapshot
+was fetched delivers that comment on the next pass; the second pass skips
+and advances. No public reply in either case.
 
 ## Key design decisions
 
@@ -266,23 +306,31 @@ in that same skip — private retirement, cursor progress, no public reply.
 - **D6 — polling set unchanged.** Ineligible bindings keep their watch
   baselines and terminal observation; events retire at drain. Cost is bounded
   by `prWatchLimit`; optimizing the poll set is a follow-up.
-- **D7 — retirement is surfaced.** Every new retire path writes the existing
-  stderr line + channel-event journal row (skip/retire with reason), so a
-  gated-away event is never silent.
+- **D7 — retirement is surfaced, and names the gate.** Every new retire path
+  writes the existing stderr line + channel-event journal row (skip/retire
+  with reason), so a gated-away event is never silent. Wherever the exclusion
+  came from `watchGateExcludes` — dispatch retire in either mode, the
+  comment-watch skip, the mention-lane skip — the reason is
+  `bound_watch_required`; the inherited reasons (`no_role_matched`,
+  `comment_watch_no_target`, `mention_required`) keep their original causes,
+  so the operator is never sent to a subsystem that filtered nothing.
 
 ## Files affected
 
-| File                                                                    | Change                               |
-| ----------------------------------------------------------------------- | ------------------------------------ |
-| `packages/cli/src/serve/routes/session-pr-watches.ts` (+ test)          | new: watch detection                 |
-| `packages/cli/src/serve/routes/session-pr-bindings.ts` (+ test)         | wire `watching` into entries         |
-| `packages/cli/src/commands/channel/daemon-worker.ts` (+ test)           | validate/pass `watching`             |
-| `packages/channels/base/src/types.ts`                                   | `PrBindingEntry.watching?`           |
-| `packages/channels/github/src/GithubAdapter.ts` (+ test)                | option, filter, retire paths         |
-| `packages/channels/github/src/index.ts` (+ test)                        | descriptor + validation              |
-| `packages/web-shell/client/i18n.tsx`                                    | en + zh labels                       |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx` | field order (parity suite covers it) |
-| `docs/design/…` (this pair)                                             | design                               |
+| File                                                                             | Change                          |
+| -------------------------------------------------------------------------------- | ------------------------------- |
+| `packages/cli/src/serve/routes/session-pr-watches.ts` (+ test)                   | new: watch detection            |
+| `packages/cli/src/serve/routes/session-pr-bindings.ts` (+ test)                  | wire `watching` into entries    |
+| `packages/cli/src/commands/channel/daemon-worker.ts` (+ test)                    | validate/pass `watching`        |
+| `packages/channels/base/src/types.ts`                                            | `PrBindingEntry.watching?`      |
+| `packages/channels/github/src/GithubAdapter.ts` (+ test)                         | option, filter, retire paths    |
+| `packages/channels/github/src/index.ts` (+ test)                                 | descriptor + validation         |
+| `packages/web-shell/client/i18n.tsx`                                             | en + zh labels                  |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`          | field order + prerequisite gate |
+| `packages/web-shell/client/components/channels/channel-editor-state.ts` (+ test) | `requiresBoundDelivery` mirror  |
+| `docs/users/features/channels/github.md`                                         | option row + delivery section   |
+| `docs/developers/qwen-serve-protocol.md`                                         | `bound_watch_required` reason   |
+| `docs/design/…` (this pair)                                                      | design                          |
 
 ## Risks
 
@@ -292,23 +340,45 @@ in that same skip — private retirement, cursor progress, no public reply.
   token parse accepts flag order variation, quoting of the script path,
   line continuations, and trailing comments.
 - **Scan cost.** One `git worktree list` (10 s timeout) + cron-file read per
-  workspace per binding poll (default 60 s). Same machinery the Web Shell
-  watches page already uses on demand.
+  workspace per binding poll (default 60 s), plus one `git remote get-url
+origin` when a verify-pr watch needs keying. Same machinery the Web Shell
+  watches page already uses on demand. The bindings scan has a second
+  consumer, `runPrWatchObservationTick`, which pays the same per-workspace
+  cost per 5-minute tick without reading `watching`; it is inert today
+  (`SESSION_PR_WATCH_OBSERVATION_ENABLED` is false) and would need a guard
+  before that flag flips.
 - **Stale `watching` under partial snapshots.** Retained rows keep their last
   known value; a watch installed during a permanent partial is not seen until
   a complete snapshot. Consistent with the existing fail-closed retention
-  model; self-heals.
+  model; self-heals. On COMPLETE snapshots the one-cycle grace (see §5)
+  covers the install window: the first gate-only exclusion holds the event
+  so the next pass's fresh snapshot can deliver it. The grace is one cycle,
+  not a guarantee — a watch installed later than that still misses the event,
+  which is the same window every snapshot-derived signal has.
+- **`available: false` conflates two states.** The worktree listing swallows
+  both "git failed" (transient) and "not a repository" (permanent) into
+  `available: false`, and detection fails open for both. In a non-repo
+  workspace there can be no `/autofix-pr` watch, but a `/verify-pr --watch`
+  cron task lives outside the checkout and remains readable — detection
+  gives up a signal it could still read, and the gate is a permanent no-op
+  there. Fail-open means nothing breaks and the stderr line names the
+  workspace; separating the two states is a follow-up.
 - **Visuals.** A new editor field can shift the channel-editor screenshot;
   update the visuals baseline if the diff is real.
 
 ## Validation plan
 
 - Unit: detection (both sources, terminal markers, disabled tasks, malformed
-  gates, failure → undefined); route wiring (known/unknown, live-merge rows);
-  worker validation (non-boolean drops field only); adapter — legacy winner
-  skip, role-aware group skip, gone-fallback skip, revalidation retire,
-  dispatch retire (both modes), recovery retire, partial-snapshot deferral,
-  gate-off byte-compatibility, unknown-`watching` eligibility.
+  gates, comment-only and lookalike gates, workspace-remote host keying,
+  failure → undefined); route wiring (known/unknown, live-merge rows,
+  unparseable URL); worker validation (non-boolean drops field only);
+  adapter — legacy winner skip, review-role skip, role-aware group skip
+  (filter before winner), per-PR scoping, gone-fallback skip and partial
+  deferral, revalidation retire vs author-excluded/removed frozen target,
+  dispatch retire (both modes, gate reason), recovery retire, refresh-failure
+  deferral, cold-start raw presence, one-cycle grace (comment + watch drains),
+  gate-off byte-compatibility, unknown-`watching` eligibility; editor —
+  prerequisite mirror, disabled switch, stored-value inline error.
 - E2E (test plan in `.qwen/e2e-tests/`): daemon + github channel against a
   test repo; one-shot verify session vs `--watch` session; comment and
   `ci_failure`/`head_change` events; assert delivery/retire journal rows and
@@ -328,6 +398,14 @@ in that same skip — private retirement, cursor progress, no public reply.
 5. `fix`/untyped bindings and unknown `watching` are unaffected.
 6. Detection failure degrades to today's behavior (fail-open) with a
    diagnostic line; it does not mark the snapshot partial.
+7. A gate-caused retirement/skip journals `bound_watch_required` in every
+   lane (dispatch, comment watch, mention lane); inherited reasons keep
+   their original causes.
+8. The first gate-only exclusion holds the event one cycle; a fresh
+   snapshot showing the watch delivers it, a second exclusion consumes it.
+9. A fully-ineligible snapshot does not stall the cold-start lane, and a
+   verify-pr watch on a GitHub Enterprise host keys with the workspace's
+   own host.
 
 ## Open questions
 

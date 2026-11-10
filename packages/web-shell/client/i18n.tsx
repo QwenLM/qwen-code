@@ -4861,6 +4861,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Require Active Watch For Review/Verify Sessions',
   'channels.editor.field.github.requireBoundWatch.description':
     'Only deliver events to review/verify bound sessions while they hold an active watch on that PR (an /autofix-pr watch or /verify-pr --watch). One-shot /review and /verify-pr sessions stay bound but receive nothing; events with no eligible session retire privately instead of a public reply. Requires Deliver To PR-Bound Sessions. Unknown watch state (detection failure) keeps delivering.',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to require an active watch.',
   'channels.editor.field.github.prCommentWatch': 'PR Comment Watch',
   'channels.editor.field.github.prCommentWatch.description':
     'Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it. Enabled by default; turn off to disable. Requires Deliver To PR-Bound Sessions.',
@@ -9656,6 +9658,8 @@ const ZH: Messages = {
   'channels.editor.field.github.requireBoundWatch': '评审/验证会话须有活跃监视',
   'channels.editor.field.github.requireBoundWatch.description':
     '仅当 review/verify 绑定会话对该 PR 持有活跃监视（/autofix-pr 监视或 /verify-pr --watch）时才投递事件。一次性的 /review 与 /verify-pr 会话保持绑定但不接收任何事件；没有合格会话的事件私下退役，不做公开回复。需开启「投递到 PR 绑定会话」。监视状态未知（检测失败）时照常投递。',
+  'channels.editor.field.github.requireBoundWatch.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
     '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
