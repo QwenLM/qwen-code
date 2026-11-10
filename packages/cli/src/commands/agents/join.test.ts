@@ -244,6 +244,8 @@ it.each([
 
     expect(code).toBe(1);
     expect(err.join('\n')).toContain('the join may still complete');
+    // The same token picks up what the first run did.
+    expect(err.join('\n')).toContain('run the same command again');
     expect(err.join('\n')).not.toContain('No running qwen serve daemon');
     expect(err.join('\n')).not.toContain('Join failed');
     expect(err.join('\n')).not.toContain('qwen serve --join');

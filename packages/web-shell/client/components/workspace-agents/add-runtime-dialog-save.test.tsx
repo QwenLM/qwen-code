@@ -601,7 +601,7 @@ it('keeps the remote’s notice when a join command is created next', async () =
 });
 
 const mayStillBeJoining = (error: string) =>
-  `No answer from this computer’s daemon (${error}). It may still be joining: check on the coordinator before trying again, with a new join token if it did not join.`;
+  `No answer from this computer’s daemon (${error}). It may still be joining: check on the coordinator; if it did not join, join again with the same token, which picks up what this attempt did. Only a token it then refuses needs a new one.`;
 
 it.each([
   [
@@ -620,7 +620,7 @@ it.each([
     'Agent request failed (504)',
   ],
 ] as const)(
-  'drops the token of a join that %s, which may have spent it',
+  'keeps the token of a join that %s, for the same join again',
   async (_label, failure, message) => {
     await renderDialog({
       onJoinCoordinator: vi.fn(async (): Promise<RuntimeJoinOutcome> => {
@@ -633,10 +633,11 @@ it.each([
     await submit('join-coordinator');
 
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(message);
+    // Sent again, it picks up what this join did; refused, it is dropped.
     expect(
       document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
         .value,
-    ).toBe('');
+    ).toBe('join-token');
   },
 );
 
@@ -1618,6 +1619,57 @@ it('keeps the token when the daemon was not reachable, so nothing was sent', asy
     document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
       .value,
   ).toBe('join-token');
+});
+
+it.each([
+  [
+    'its first heartbeat failed',
+    new Error(
+      'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential, then join again with the same token.',
+    ),
+  ],
+  [
+    'the store was busy',
+    new Error('Agent Host enrollment did not complete; retry.'),
+  ],
+])(
+  'keeps the token when a join failed after %s, for the same join again',
+  async (_label, failure) => {
+    await renderDialog({
+      onJoinCoordinator: vi.fn(async (): Promise<RuntimeJoinOutcome> => {
+        throw failure;
+      }),
+    });
+    await chooseTab('Join a coordinator');
+    await type('joinLink', 'https://hub.example:4170/join/ws_1');
+    await type('enrollmentToken', 'join-token');
+    await submit('join-coordinator');
+
+    expect(
+      document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
+        .value,
+    ).toBe('join-token');
+  },
+);
+
+it.each([
+  'Invalid or expired Agent Host enrollment token.',
+  'Agent Host enrollment refused.',
+])('drops a token the coordinator refused: %s', async (message) => {
+  await renderDialog({
+    onJoinCoordinator: vi.fn(async (): Promise<RuntimeJoinOutcome> => {
+      throw new Error(message);
+    }),
+  });
+  await chooseTab('Join a coordinator');
+  await type('joinLink', 'https://hub.example:4170/join/ws_1');
+  await type('enrollmentToken', 'join-token');
+  await submit('join-coordinator');
+
+  expect(
+    document.querySelector<HTMLInputElement>('input[name="enrollmentToken"]')!
+      .value,
+  ).toBe('');
 });
 
 it('does not carry what was typed on one tab into the other tab’s fields', async () => {

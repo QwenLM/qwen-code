@@ -41,7 +41,7 @@ function mayHaveReachedDaemon(error: unknown): boolean {
  * but it is not one a join gives (not JSON, or without `connected`).
  */
 function mayStillComplete(baseUrl: string, answered = false): string {
-  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log before trying again, with a new token if it did not.`;
+  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log; if it did not join, run the same command again: it picks up what the first run did. Only a token it then refuses needs a new one.`;
 }
 
 export interface JoinArgs {
@@ -267,7 +267,8 @@ export async function runAgentsJoin(
         : ''
     }.${saved ? ' The daemon reconnects after restarts.' : ''}`,
   );
-  // Still a successful join: the token is spent, so rerunning with it fails.
+  // Still a successful join: it is connected, and only the reconnect after a
+  // restart is lost.
   if (!saved) {
     deps.err(
       `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}`,

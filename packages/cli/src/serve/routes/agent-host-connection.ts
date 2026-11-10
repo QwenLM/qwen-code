@@ -196,9 +196,9 @@ export function registerAgentHostRuntimeRoutes(
       );
       // Connected anyway; only the reconnect after a restart or a workspace
       // reload is lost, unless an earlier record for this connection still
-      // stands. The answer stays a success, because the token is spent: a
-      // client that treated this as a failed join would invite a rerun with
-      // that token. (Saving before connecting would make the failure
+      // stands. The answer stays a success, because the join is done: a
+      // client that treated this as a failed join would invite a needless
+      // rerun. (Saving before connecting would make the failure
       // retryable, but a failed join would then have to undo its record
       // against a concurrent join or disconnect of the same connection.)
       const saved =

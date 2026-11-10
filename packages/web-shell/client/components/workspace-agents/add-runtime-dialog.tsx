@@ -6,7 +6,6 @@
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { CheckCircle2, CopyIcon, LoaderCircle } from 'lucide-react';
-import { isDaemonUnavailableError } from '../../daemon/availability';
 import { useI18n } from '../../i18n';
 import { programLabel, runtimePrograms } from './agents-view-logic';
 import { Button } from '../ui/button';
@@ -177,6 +176,20 @@ function onlineIds(runtimes: readonly RuntimeSummary[]): Set<string> {
 }
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/**
+ * What the Host answers for a join whose token the coordinator refused
+ * (invalid, expired, spent by another join, or turned down): sent again as
+ * it is, it would be refused again.
+ */
+const REFUSED_JOIN_TOKEN_ERRORS: ReadonlySet<string> = new Set([
+  'Invalid or expired Agent Host enrollment token.',
+  'Agent Host enrollment refused.',
+]);
+
+function isRefusedJoinToken(error: unknown): boolean {
+  return error instanceof Error && REFUSED_JOIN_TOKEN_ERRORS.has(error.message);
+}
 
 /**
  * Whether this computer's daemon refuses a coordinator address unless HTTP
@@ -576,10 +589,10 @@ export function AddRuntimeDialog({
         }
       }
     } catch (cause) {
-      // Once sent, a token may be spent even by a join that failed (a proxy
-      // timeout, a dropped connection): never send it again as it is. One
-      // that never left (the daemon was unavailable) is kept.
-      if (!isDaemonUnavailableError(cause)) setJoinToken('');
+      // The same token sent again picks up what a failed join did (its
+      // answer lost, or its first heartbeat failed), so it is kept; only one
+      // the coordinator refused is dropped.
+      if (isRefusedJoinToken(cause)) setJoinToken('');
       const name = (cause as Error | undefined)?.name;
       setError(
         'join',

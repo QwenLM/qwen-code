@@ -1207,7 +1207,7 @@ describe('enrolling', () => {
       (secret) => Response.json({ host: { id: 'host-1' }, secret }),
       async (files, sent) => {
         await expect(connect()).rejects.toThrow(
-          'Agent Host could not confirm its connection',
+          'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential, then join again with the same token.',
         );
         await expect(readJson(files.credential)).resolves.toMatchObject({
           hostId: 'host-1',
@@ -1387,6 +1387,118 @@ describe('enrolling', () => {
     }
   });
 
+  it('goes on, run again, even with a secret its enrollment left behind', async () => {
+    // An older coordinator minted its own secret, and the proposed one's
+    // file could not be dropped: it still names this command's token.
+    await withCoordinator(
+      () => Response.json({ error: 'unexpected' }, { status: 500 }),
+      async (files, sent) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+            enrollmentTokenHash: tokenHash('join-token'),
+          }),
+        );
+        await fs.writeFile(
+          files.enrolling,
+          JSON.stringify({
+            schemaVersion: 1,
+            secret: 'q'.repeat(43),
+            tokenHashes: [tokenHash('join-token')],
+          }),
+        );
+
+        await connect();
+
+        // Not sent again with the spent token.
+        expect(sent).toEqual([]);
+      },
+      (url, input) =>
+        url.includes('/x/heartbeat') && input['enrollmentToken']
+          ? Response.json({ error: 'refused' }, { status: 401 })
+          : undefined,
+    );
+  });
+
+  it('waits for the same join sent again while it runs, rather than cutting it off', async () => {
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    const tokenHeartbeats: unknown[] = [];
+    await withCoordinator(
+      async (secret) => {
+        // Its answer is on the way when the same join is sent again.
+        await answered;
+        return Response.json({ host: { id: 'host-1' }, secret });
+      },
+      async (_files, sent) => {
+        // One daemon: its connect route passes the same bridge each time.
+        const bridge = {} as AcpSessionBridge;
+        const join = (enrollmentToken = 'join-token') =>
+          startAgentHostConnection({ ...target, bridge, enrollmentToken });
+        const first = join();
+        await vi.waitFor(() => expect(sent).toHaveLength(1));
+        const again = join();
+        answer();
+
+        await Promise.all([first, again]);
+        expect(sent).toHaveLength(1);
+        // Joined, the same join sent again keeps the connection it made,
+        // rather than starting it over.
+        await join();
+        expect(sent).toHaveLength(1);
+        expect(tokenHeartbeats).toEqual([]);
+
+        // Another token is another join: it replaces the connection.
+        await join('newer-token');
+        expect(tokenHeartbeats).toEqual(['newer-token']);
+      },
+      (url, input) => {
+        if (url.endsWith('/heartbeat') && input['enrollmentToken']) {
+          tokenHeartbeats.push(input['enrollmentToken']);
+        }
+        return undefined;
+      },
+    );
+  });
+
+  it('does not ask for the same token when a start without one cannot confirm', async () => {
+    await withCoordinator(
+      () => Response.json({ error: 'unexpected' }, { status: 500 }),
+      async (files) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+          }),
+        );
+
+        await expect(
+          startAgentHostConnection({
+            ...target,
+            bridge: {} as AcpSessionBridge,
+          }),
+        ).rejects.toThrow(
+          /^Agent Host could not confirm its connection to the coordinator\. Check the callback URL and saved credential\.$/,
+        );
+      },
+      (url) =>
+        url.includes('/x/heartbeat')
+          ? Response.json({ error: 'busy' }, { status: 503 })
+          : undefined,
+    );
+  });
+
   it('still says the token is spent when another command spent it', async () => {
     await withCoordinator(
       (secret) => Response.json({ host: { id: 'h2' }, secret }),
@@ -1534,9 +1646,22 @@ describe('enrolling', () => {
           files.enrolling,
           JSON.stringify({ schemaVersion: 1, secret: stranded }),
         );
-        const first = connect();
+        // One daemon, so one bridge: only another token replaces the join.
+        const bridge = {} as AcpSessionBridge;
+        const first = startAgentHostConnection({
+          ...target,
+          bridge,
+          enrollmentToken: 'join-token',
+        });
         await vi.waitFor(() => expect(sent).toHaveLength(1));
-        await expect(connect()).rejects.toThrow('fetch failed');
+        // A newer join: the same one sent again would wait for the first.
+        await expect(
+          startAgentHostConnection({
+            ...target,
+            bridge,
+            enrollmentToken: 'newer-token',
+          }),
+        ).rejects.toThrow('fetch failed');
         const own = sent[2];
         expect(own).not.toBe(stranded);
 
@@ -1548,7 +1673,7 @@ describe('enrolling', () => {
         await expect(readJson(files.enrolling)).resolves.toEqual({
           schemaVersion: 1,
           secret: own,
-          tokenHashes: [tokenHash('join-token')],
+          tokenHashes: [tokenHash('newer-token')],
         });
       },
     );

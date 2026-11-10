@@ -738,6 +738,8 @@ const activeConnections = new Map<
     generationGuard?: WorkspaceGenerationGuard;
     stop: AbortController;
     start: Promise<void>;
+    /** {@link enrollmentTokenHash} of the join that started it, if any. */
+    tokenHash?: string;
   }
 >();
 
@@ -757,12 +759,18 @@ export async function startAgentHostConnection(
     options.workspaceId,
     options.workspaceCwd,
   );
+  const tokenHash =
+    options.enrollmentToken !== undefined
+      ? enrollmentTokenHash(options.enrollmentToken)
+      : undefined;
   const existing = activeConnections.get(key);
   if (existing) {
     if (
       existing.bridge === options.bridge &&
       existing.generationGuard === options.generationGuard &&
-      !options.enrollmentToken &&
+      // The same join sent again waits for (or keeps) the one under way:
+      // replacing it could cut off an answer that spent its token.
+      (!options.enrollmentToken || existing.tokenHash === tokenHash) &&
       !existing.stop.signal.aborted
     ) {
       return existing.start;
@@ -777,6 +785,7 @@ export async function startAgentHostConnection(
     generationGuard: options.generationGuard,
     stop,
     start,
+    ...(tokenHash !== undefined ? { tokenHash } : {}),
   });
   try {
     await start;
@@ -974,28 +983,27 @@ async function connectAgentHost(
           await discardRevokedCredential(savedCredential);
           credential = undefined;
         }
-        if (credential) {
-          // The saved credential works, and the token was spent. A Replace
-          // this command ran (the secret was sent with this token), whose
-          // answer was lost, left a secret of its own: sent again, it is
-          // answered as that enrollment. Another command's is not taken.
+        // The saved credential works, and the token was spent. If this
+        // command's first run got this credential and failed after that,
+        // run again, it goes on with what it got; its record decides first,
+        // so a secret left behind by its enrollment cannot outrank it.
+        if (credential && savedCredential.enrollmentTokenHash !== tokenHash) {
+          // A Replace this command ran (the secret was sent with this
+          // token), whose answer was lost, left a secret of its own: sent
+          // again, it is answered as that enrollment. Another command's is
+          // not taken, and whatever else this command did (a Replace
+          // refused outright did nothing), it did not get this credential.
           const pending = await readEnrollmentSecret(files.enrollment).catch(
             () => undefined,
           );
           if (
-            pending !== undefined &&
-            pending.secret !== savedCredential.secret &&
-            pending.tokenHashes.includes(tokenHash)
+            pending === undefined ||
+            pending.secret === savedCredential.secret ||
+            !pending.tokenHashes.includes(tokenHash)
           ) {
-            credential = undefined;
-          } else if (savedCredential.enrollmentTokenHash !== tokenHash) {
-            // Not the token this credential was enrolled or re-joined with:
-            // whatever this command did (a Replace refused outright did
-            // nothing), it did not get this credential.
             throw new Error('Invalid or expired Agent Host enrollment token.');
           }
-          // Otherwise this command's first run got this credential and
-          // failed after that: run again, it goes on with what it got.
+          credential = undefined;
         }
       }
     }
@@ -1662,8 +1670,12 @@ async function connectAgentHost(
 
   if (!(await heartbeat())) {
     stop.signal.throwIfAborted();
+    // With a token, the credential is saved and (best effort, on a
+    // re-join) records it: the same join again goes on with it.
     throw new Error(
-      'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential.',
+      `Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential${
+        options.enrollmentToken ? ', then join again with the same token' : ''
+      }.`,
     );
   }
   const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
