@@ -283,7 +283,10 @@ test('uses a configured destination without contacts and switches back to manual
   });
   await channels.selectOption('ops-bot');
   await expect(
-    page.getByText('Configured DingTalk group', { exact: true }),
+    page.getByText(
+      'Messages are sent to the group configured for this Channel.',
+      { exact: true },
+    ),
   ).toBeVisible();
   await expect(id).toHaveCount(0);
   await expect(suggestions).toHaveCount(0);
@@ -291,7 +294,9 @@ test('uses a configured destination without contacts and switches back to manual
     state.reads.filter((path) => path.endsWith('/channel/observed-contacts')),
   ).toEqual([]);
   await page
-    .getByText('Configured DingTalk group', { exact: true })
+    .getByText('Messages are sent to the group configured for this Channel.', {
+      exact: true,
+    })
     .scrollIntoViewIfNeeded();
   await page.screenshot({
     path: info.outputPath('configured-delivery-desktop.png'),
@@ -306,7 +311,9 @@ test('uses a configured destination without contacts and switches back to manual
   await expect(suggestions).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await page
-    .getByText('Configured DingTalk group', { exact: true })
+    .getByText('Messages are sent to the group configured for this Channel.', {
+      exact: true,
+    })
     .scrollIntoViewIfNeeded();
   const width = await page.getByRole('dialog').evaluate((element) => ({
     client: element.clientWidth,

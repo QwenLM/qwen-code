@@ -2139,7 +2139,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.delivery.channel': 'Delivery Channel',
-  'scheduledTasks.delivery.configuredDestination': 'Configured destination',
+  'scheduledTasks.delivery.configuredGroupHint':
+    'Messages are sent to the group configured for this Channel.',
   'scheduledTasks.delivery.configuredHint':
     'Messages are sent to the destination configured for this Channel.',
   'scheduledTasks.delivery.useConfiguredDestination':
@@ -7177,7 +7178,7 @@ const ZH: Messages = {
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.delivery.channel': '投递频道',
-  'scheduledTasks.delivery.configuredDestination': '已配置的目标',
+  'scheduledTasks.delivery.configuredGroupHint': '消息会发送到此频道配置的群。',
   'scheduledTasks.delivery.configuredHint': '消息会发送到此频道配置的目标。',
   'scheduledTasks.delivery.useConfiguredDestination': '使用已配置的目标',
   'scheduledTasks.delivery.differentConfiguredDestination':

@@ -122,7 +122,11 @@ describe('ScheduledTaskDeliveryFields configured destinations', () => {
     selectChannel('webhook-bot');
     expect(onChange).toHaveBeenLastCalledWith(configuredDelivery);
     await render(configuredDelivery);
-    expect(container.textContent).toContain(configuredTarget.label);
+    expect(container.textContent).toContain(
+      'Messages are sent to the group configured for this Channel.',
+    );
+    expect(container.textContent).not.toContain(configuredTarget.label);
+    expect(container.textContent).not.toContain('webhook-bot · Chat · default');
     expect(container.querySelector('#scheduled-task-delivery-id')).toBeNull();
     expect(container.querySelector('#scheduled-task-delivery-type')).toBeNull();
     expect(
@@ -140,7 +144,7 @@ describe('ScheduledTaskDeliveryFields configured destinations', () => {
     await render(configuredDelivery);
     expect(onChange).not.toHaveBeenCalled();
     expect(container.textContent).toContain('webhook-bot');
-    expect(container.textContent).toContain('default');
+    expect(container.textContent).not.toContain('webhook-bot · Chat · default');
     selectChannel('');
     expect(onChange).toHaveBeenLastCalledWith(null);
   });

@@ -158,7 +158,10 @@ export function ScheduledTaskDeliveryFields({
   return (
     <FieldGroup>
       <Field>
-        <FieldLabel htmlFor="scheduled-task-delivery-channel">
+        <FieldLabel
+          className={styles.fieldLabel}
+          htmlFor="scheduled-task-delivery-channel"
+        >
           {t('scheduledTasks.delivery.channel')}
         </FieldLabel>
         <select
@@ -193,60 +196,68 @@ export function ScheduledTaskDeliveryFields({
             </option>
           ))}
         </select>
-        <FieldDescription>{t('scheduledTasks.delivery.hint')}</FieldDescription>
+        <FieldDescription className={styles.fieldHint}>
+          {t('scheduledTasks.delivery.hint')}
+        </FieldDescription>
         {!available && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.unavailable')}
           </FieldDescription>
         )}
         {available && perRun && hasTarget && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.perRun')}
           </FieldDescription>
         )}
         {available && !canDiscover && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.error.workspaceUnavailable')}
           </FieldDescription>
         )}
         {canDiscover && channels.loading && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.loading')}
           </FieldDescription>
         )}
         {canDiscover && channels.error && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.channelsFailed')}
           </FieldDescription>
         )}
         {channelsReady && names.length === 0 && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.noChannels')}
           </FieldDescription>
         )}
       </Field>
       {target && (
         <>
-          <FieldDescription className="min-w-0 break-all">
-            {identity(target)}
-          </FieldDescription>
+          {!usesConfiguredTarget && (
+            <FieldDescription
+              className={`${styles.fieldHint} min-w-0 break-all`}
+            >
+              {identity(target)}
+            </FieldDescription>
+          )}
           {unavailableTarget && (
-            <FieldDescription>
+            <FieldDescription className={styles.fieldHint}>
               {t('scheduledTasks.delivery.targetUnavailable')}
             </FieldDescription>
           )}
           {configuredTarget && (
             <Field>
-              <FieldLabel>
-                {t('scheduledTasks.delivery.configuredDestination')}
-              </FieldLabel>
-              <FieldDescription>
-                {configuredTarget.label ??
-                  t('scheduledTasks.delivery.configuredHint')}
-              </FieldDescription>
+              {usesConfiguredTarget && (
+                <FieldDescription className={styles.fieldHint}>
+                  {t(
+                    configuredTarget.type === 'chat'
+                      ? 'scheduledTasks.delivery.configuredGroupHint'
+                      : 'scheduledTasks.delivery.configuredHint',
+                  )}
+                </FieldDescription>
+              )}
               {!usesConfiguredTarget && (
                 <>
-                  <FieldDescription>
+                  <FieldDescription className={styles.fieldHint}>
                     {t(
                       'scheduledTasks.delivery.differentConfiguredDestination',
                     )}
@@ -271,7 +282,10 @@ export function ScheduledTaskDeliveryFields({
           )}
           {!configuredTarget && (
             <Field>
-              <FieldLabel htmlFor="scheduled-task-delivery-suggestion">
+              <FieldLabel
+                className={styles.fieldLabel}
+                htmlFor="scheduled-task-delivery-suggestion"
+              >
                 {t('scheduledTasks.delivery.suggestion')}
               </FieldLabel>
               <select
@@ -307,16 +321,16 @@ export function ScheduledTaskDeliveryFields({
                 !contactsError &&
                 target.id &&
                 !selectedSuggestion && (
-                  <FieldDescription>
+                  <FieldDescription className={styles.fieldHint}>
                     {t('scheduledTasks.delivery.notObserved')}
                   </FieldDescription>
                 )}
               {contactsLoading && (
-                <FieldDescription>
+                <FieldDescription className={styles.fieldHint}>
                   {t('scheduledTasks.delivery.loadingContacts')}
                 </FieldDescription>
               )}
-              <FieldDescription>
+              <FieldDescription className={styles.fieldHint}>
                 {t(
                   contactsError
                     ? 'scheduledTasks.delivery.contactsFailed'
@@ -328,7 +342,10 @@ export function ScheduledTaskDeliveryFields({
           {!usesConfiguredTarget && (
             <>
               <Field>
-                <FieldLabel htmlFor="scheduled-task-delivery-type">
+                <FieldLabel
+                  className={styles.fieldLabel}
+                  htmlFor="scheduled-task-delivery-type"
+                >
                   {t('scheduledTasks.delivery.type')}
                 </FieldLabel>
                 <select
@@ -352,7 +369,10 @@ export function ScheduledTaskDeliveryFields({
                 </select>
               </Field>
               <Field>
-                <FieldLabel htmlFor="scheduled-task-delivery-id">
+                <FieldLabel
+                  className={styles.fieldLabel}
+                  htmlFor="scheduled-task-delivery-id"
+                >
                   {t('scheduledTasks.delivery.id')}
                 </FieldLabel>
                 <Input
@@ -368,7 +388,10 @@ export function ScheduledTaskDeliveryFields({
                 />
                 {hasSurroundingWhitespace && (
                   <>
-                    <FieldDescription id="scheduled-task-delivery-id-whitespace">
+                    <FieldDescription
+                      className={styles.fieldHint}
+                      id="scheduled-task-delivery-id-whitespace"
+                    >
                       {t('scheduledTasks.delivery.whitespace')}
                     </FieldDescription>
                     <Button
