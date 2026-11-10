@@ -195,6 +195,46 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
+  it('keeps DEBUG_MODE from pausing the sandbox at a breakpoint', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('DEBUG', '');
+    vi.stubEnv('DEBUG_MODE', '1');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    expect(args.some((arg) => arg.includes('--inspect-brk'))).toBe(false);
+    expect(args).not.toContain('9229:9229');
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
   it('lets the runtime choose a hostname for image-ID containers', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');

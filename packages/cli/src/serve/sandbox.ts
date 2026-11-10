@@ -148,7 +148,7 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   }
 
   if (os.platform() === 'linux') {
-    if (isDebugEnabled()) {
+    if (isDebugEnabled() || isTruthyEnvFlag(process.env['DEBUG_MODE'])) {
       // Use stderr so it doesn't clutter normal STDOUT output (e.g. in `--prompt` runs).
       writeStderrLine(
         'INFO: Using current user UID/GID in Linux sandbox. Set SANDBOX_SET_UID_GID=false to disable.',
@@ -160,19 +160,24 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   return false;
 }
 
+function isTruthyEnvFlag(value: string | undefined): boolean {
+  return value === 'true' || value === '1';
+}
+
 /**
- * DEBUG/DEBUG_MODE only enable sandbox debugging for explicit truthy values.
+ * `DEBUG` only enables sandbox debugging for explicit truthy values.
  *
  * qwen-code-action always exports `DEBUG=false` for non-debug runs, so the old
  * truthiness check treated every CI run as a debug run: the sandbox container
  * was started as `node --inspect-brk=...`, waited for a debugger that never
  * attached, and kept host port 9229 bound after the job timed out, which made
  * every later sandboxed job on that host fail with "port is already allocated".
+ *
+ * `DEBUG_MODE` stays out of this check on purpose: it controls debug logging
+ * elsewhere and must not make an interactive sandbox pause at a breakpoint.
  */
 function isDebugEnabled(): boolean {
-  return [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-    (value) => value === 'true' || value === '1',
-  );
+  return isTruthyEnvFlag(process.env['DEBUG']);
 }
 
 function ports(): string[] {
