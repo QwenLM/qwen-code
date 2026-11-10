@@ -8374,7 +8374,8 @@ export class Session implements SessionContext {
                     },
                   });
                   if (roundResult.ended) return roundResult.ended;
-                  ({                    usageMetadata,
+                  ({
+                    usageMetadata,
                     streamStartTime,
                     requestRouteKey,
                     channelDeliveryResponseBlock,
@@ -9200,20 +9201,19 @@ export class Session implements SessionContext {
       };
     }
     await showBackgroundResponse();
-              return {
-                usageMetadata,
-                streamStartTime,
-                requestRouteKey,
-                channelDeliveryResponseBlock,
-                // A bounded output recovery that exhausted its attempts ends
-                // here with the response still truncated. Reporting the
-                // turn's stop as `max_tokens` is what lets an ACP client
-                // tell an unresolved output limit from a completed answer.
-                maxTokensTruncated:
-                  lastFinishReason === FinishReason.MAX_TOKENS,
-                // The client runs the turn's memory tasks when a response
-                // stops on its own.
-                stoppedOnItsOwn:
+    return {
+      usageMetadata,
+      streamStartTime,
+      requestRouteKey,
+      channelDeliveryResponseBlock,
+      // A bounded output recovery that exhausted its attempts ends
+      // here with the response still truncated. Reporting the
+      // turn's stop as `max_tokens` is what lets an ACP client
+      // tell an unresolved output limit from a completed answer.
+      maxTokensTruncated: lastFinishReason === FinishReason.MAX_TOKENS,
+      // The client runs the turn's memory tasks when a response
+      // stops on its own.
+      stoppedOnItsOwn:
         roundType !== SendMessageType.Steer &&
         functionCalls.length === 0 &&
         !streamFailed &&
