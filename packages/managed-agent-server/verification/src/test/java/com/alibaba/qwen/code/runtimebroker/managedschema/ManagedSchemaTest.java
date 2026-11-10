@@ -94,7 +94,8 @@ class ManagedSchemaTest {
         for (String declaration : Set.of("CREATE TABLE ma_unpublished (witness INT)",
                 "CREATE VIEW ma_unpublished AS SELECT 1 AS witness",
                 "CREATE TABLE qwen_runtime_binding (witness INT)",
-                "CREATE VIEW managed_workspace_registry AS SELECT 1 AS witness")) {
+                "CREATE VIEW managed_workspace_registry AS SELECT 1 AS witness",
+                "DROP TABLE ma_tenant_guard")) {
             DataSource source = initialized();
             try (var connection = source.getConnection(); var statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE da_business (witness INT)");
@@ -242,6 +243,12 @@ class ManagedSchemaTest {
                 var row = statement.executeQuery("SELECT witness FROM business_data")) {
             assertTrue(row.next());
             assertEquals(42, row.getInt(1));
+        }
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement();
+                var row = statement.executeQuery("SELECT installed_rank FROM flyway_schema_history")) {
+            assertTrue(row.next());
+            assertEquals(1, row.getInt(1));
         }
     }
 
