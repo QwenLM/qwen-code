@@ -16,14 +16,18 @@ export const META_KEY = 'qwen/generated-ui';
 export const MAX_RESULT_CHARS = 24_000;
 export const MAX_RESULT_BYTES = 24_000;
 const NON_BLANK_TEXT = /[^\s\u200c\u200d]/u;
+const textSchema = z.string({
+  error: (issue) =>
+    issue.code === 'invalid_type' ? 'Expected text.' : undefined,
+});
 
 export const showInputSchema = z
   .object({
-    title: z.string('Expected text.').min(1).max(120),
-    summary: z.string('Expected text.').min(1).max(2000),
-    html: z.string('Expected text.').min(1).max(12_000),
-    css: z.string('Expected text.').max(6000),
-    javascript: z.string('Expected text.').max(12_000),
+    title: textSchema.min(1).max(120),
+    summary: textSchema.min(1).max(2000),
+    html: textSchema.min(1).max(12_000),
+    css: textSchema.max(6000),
+    javascript: textSchema.max(12_000),
   })
   .strict();
 
