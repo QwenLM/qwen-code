@@ -2,7 +2,7 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-Status: proposed (2026-11-09), partially landed (#16732 and this increment). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It covers the four items the drain increment deferred to enablement: the shared restore (§1), the resume-drain hook (§2), the lifecycle close reorder (§3), and the daemon-level deps provisioning (§4). **Landed so far: §3 in full and the host enumerator from §4 (#16732), plus §1, the shared restore, in this increment.** §2, the rest of §4 and §5 are still ahead; each section below is marked accordingly. **The off switch stays `false` and the `sessionPrWatch` setting is still not read** — configuration (§6), the channel alias and turning the switch on (§7) remain PR B. No build may ever run both pollers.
+Status: proposed (2026-11-09), partially landed (#16732 and this increment). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It covers the four items the drain increment deferred to enablement: the shared restore (§1), the resume-drain hook (§2), the lifecycle close reorder (§3), and the daemon-level deps provisioning (§4). **Landed so far: §3 in full and the host enumerator from §4 (#16732); §1, the shared restore (#16810); §5, the listing write and `listedKeys`.** §2 and the rest of §4 are still ahead, and they land together because §4 supplies the consumers §2 needs; each section below is marked accordingly. **The off switch stays `false` and the `sessionPrWatch` setting is still not read** — configuration (§6), the channel alias and turning the switch on (§7) remain PR B. No build may ever run both pollers.
 
 ## Problem
 
@@ -95,7 +95,7 @@ The arms must be **sequential, not parallel**. Sampling drain-idle alongside the
 - **Self-push ledger**: `cloneWorktreesOf` from the candidate's clone (the bridge live summary's `worktree.path`, else the binding's `workspaceCwd`), then `vouchedScanRoots`, `autofixPrPaths`, `readState`, accepted only when `sameRepository` and the `sessionId` match. The untrusted primary uses the coordinate alone — no git runs in its checkout. Any refusal means no ledger and the transition delivers.
 - **Actions**: not provisioned. `sessionPrWatch.actions` is PR B; the drain's empty-map normalisation already treats an absent map as the generic prompt.
 
-### 5. Listing write and listedKeys (not yet landed)
+### 5. Listing write and listedKeys (landed)
 
 The refresh's slim listing already knows each listed PR's state. Under the same gate, and only when the daemon holds the owner record, write `state` and `observedAt` to that PR's watch file under its per-PR lock — the same atomic write the observation uses, initialising silently when no file exists. Collect the listed keys into `listedKeys` and pass them to the observation so a closed PR the listing returned leaves the view rotation (master §1).
 
@@ -120,10 +120,10 @@ The refresh's slim listing already knows each listed PR's state. Under the same 
 | `packages/cli/src/serve/server/pr-watch-deps.ts` (new)          | build the observation and drain deps: hosts, admission, restore mapping, ledger                                                                                 |
 | `packages/cli/src/serve/run-qwen-serve.ts`                      | populate both seams via late-bound getters; register the shutdown drain                                                                                         |
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                 | no shape change; the new drain registers through the existing `addAppDrain`                                                                                     |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`           | listing→watch write, `listedKeys`, `partial` threading; `stopWatch` and the tick settle signal                                                                  |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`           | listing→watch write and `listedKeys` (landed); `stopWatch` and the tick settle signal (#16732). No `partial` threading — see §5                                 |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md` (+zh-CN) | this design                                                                                                                                                     |
 
-The rows for `session-restore.ts`, `routes/session.ts`, `worktree-ownership-op.ts` and the four test files are not part of #16732 — they land with §1 in this increment. `pr-watch-deps.ts` lands with the rest of §4. Two more rows are partial: `session-pr-refresh.ts` landed `stopWatch` and the tick settle signal but not the listing write, `listedKeys` or `partial` threading; `run-qwen-serve.ts` landed the shutdown drain registration but not the two seams.
+The rows for `session-restore.ts`, `routes/session.ts`, `worktree-ownership-op.ts` and the four test files are not part of #16732 — they land with §1 in this increment. `pr-watch-deps.ts` lands with the rest of §4. `session-pr-refresh.ts` is now complete for §5: `stopWatch` and the tick settle signal landed in #16732, the listing write and `listedKeys` here, and no `partial` threading is needed. `run-qwen-serve.ts` remains partial — it landed the shutdown drain registration but not the two seams.
 
 ## Key design decisions
 
