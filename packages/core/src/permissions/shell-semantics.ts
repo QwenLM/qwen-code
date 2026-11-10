@@ -2479,41 +2479,57 @@ function resolveCdTargetCwd(
  * A group's close is found by depth, not by the first `}`: `{a{b},c}` closes
  * the inner group first, and a quoted or escaped `}` closes nothing at all, so
  * matching the first `}` would miss the outer group's top-level comma.
+ *
+ * When no close so far yields a list, bash keeps scanning for a later `}`:
+ * `{a}b,c}` expands to `a}b` and `c`, because the first `}` leaves a body with
+ * no separator while the second one encloses the comma. Stopping at the first
+ * `}` would publish `a}b` as a real cwd.
  */
 function canBraceExpand(target: string, bare: string | undefined): boolean {
   // `bare` is undefined when the caller has no per-character marking; a target
   // reached here is always shell-decoded, so assume the braces were typed bare.
   const isBare = (index: number) => bare === undefined || bare[index] === '1';
+  // Without a `}` after it, an opening brace can never close a group, so the
+  // scan is bounded by the last bare `}`: `{{{{…` costs one pass, not one per
+  // `{`, and this runs synchronously on the permission path.
+  let lastClose = -1;
+  for (let i = target.length - 1; i >= 0; i--) {
+    if (target[i] === '}' && isBare(i)) {
+      lastClose = i;
+      break;
+    }
+  }
   for (
     let opening = target.indexOf('{');
     opening !== -1;
     opening = target.indexOf('{', opening + 1)
   ) {
+    if (opening > lastClose) break;
     if (!isBare(opening)) continue;
-    // Match the `}` that closes THIS group by depth: `{a{b},c}` has an inner
-    // `}` first, and a quoted or escaped `}` does not close anything, so
-    // stopping at the first `}` would miss the outer group's top-level comma.
+    // Walk the group once, tracking nesting relative to this `{`. A `}` at
+    // depth 0 is a close candidate for this brace; a separator seen at depth 0
+    // stays counted for every later candidate, which is what makes `{a}b,c}`
+    // expand. Separators inside a nested group belong to that group instead.
     let depth = 0;
-    let expands = false;
-    let closed = false;
-    for (let i = opening; i < target.length; i++) {
+    let separates = false;
+    for (let i = opening + 1; i < target.length; i++) {
       if (!isBare(i)) continue;
       const ch = target[i];
       if (ch === '{') {
         depth++;
       } else if (ch === '}') {
-        if (--depth === 0) {
-          closed = true;
-          break;
+        if (depth > 0) {
+          depth--;
+        } else if (separates) {
+          return true;
         }
       } else if (
-        depth === 1 &&
+        depth === 0 &&
         (ch === ',' || (ch === '.' && target[i + 1] === '.' && isBare(i + 1)))
       ) {
-        expands = true;
+        separates = true;
       }
     }
-    if (closed && expands) return true;
   }
   return false;
 }

@@ -842,6 +842,25 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite('/repo/settings.json')],
     ],
     [
+      // bash prints `a}b` and `c` for `echo {a}b,c}`: the first `}` leaves a
+      // body with no separator, so the expansion happens at the second one.
+      'marks a brace group that only separates after a later close',
+      'cd {a}b,c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a brace group whose separator precedes an inner group close',
+      'cd {a{b,c},d} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // bash prints `{a}bc` and `{a}bd`: the first group stays literal, the
+      // second one expands, so the whole target never names one directory.
+      'marks a later brace group when the first one stays literal',
+      'cd {a}b{c,d} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
       'keeps an unclosed brace as a literal cd target',
       'cd {a,b && echo x > settings.json',
       [write('/repo/{a,b/settings.json')],
