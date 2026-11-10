@@ -1450,7 +1450,8 @@ describe('CoreToolScheduler', () => {
           ),
           getAutoModeDenialState: () => autoModeDenialState,
           setAutoModeDenialState,
-          getAutoModeSettings: () => ({}),
+          getAutoModeSettings: () =>
+            options?.classifyAllShell ? { classifyAllShell: true } : {},
           getWorkspaceContext: () => ({
             isPathWithinWorkspace: () => false,
           }),
@@ -8449,6 +8450,8 @@ describe('CoreToolScheduler request queueing', () => {
       denialState?: TestDenialState;
       disableHooks?: boolean;
       failPermissionDeniedHook?: boolean;
+      /** Routes an L4 `allow` through the AUTO classifier for every shell. */
+      classifyAllShell?: boolean;
     },
     signal = new AbortController().signal,
   ) {
@@ -8487,7 +8490,8 @@ describe('CoreToolScheduler request queueing', () => {
       setAutoModeDenialState,
       getLlmClient: () => ({ getHistoryTail: () => [] }),
       getToolRegistry: () => toolRegistry,
-      getAutoModeSettings: () => ({}),
+      getAutoModeSettings: () =>
+        options?.classifyAllShell ? { classifyAllShell: true } : {},
       getModel: () => 'test-model',
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -8559,6 +8563,29 @@ describe('CoreToolScheduler request queueing', () => {
     expect(runSideQueryMock).toHaveBeenCalled();
     expect(setAutoModeDenialState).toHaveBeenCalledWith(blockedState(0));
     expect(lastBatch(onToolCallsUpdate)[0]?.status).toBe('scheduled');
+  });
+
+  it('keeps a pending amend awaiting approval instead of auto-approving it', async () => {
+    // R24-2 third consumer: the sibling auto-approval pass re-reviews a pending
+    // L4 allow under AUTO. The amend floor must stay awaiting approval and be
+    // decorated with its `autoModeFallback` record — without the decoration
+    // the dialog would offer "always allow" and persist the floor away.
+    const { internals } = await autoApprovePendingProtectedWrite({
+      command: 'git commit --amend --no-edit',
+      classifyAllShell: true,
+    });
+
+    const waiting = internals.toolCalls.find(
+      (call) => call.request.callId === 'pending-protected-write',
+    ) as WaitingToolCall | undefined;
+    expect(waiting?.status).toBe('awaiting_approval');
+    expect(waiting?.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'safety_check',
+        message: expect.stringContaining('manual approval'),
+      },
+    });
   });
 
   it('fires PermissionDenied hooks for pending AUTO classifier blocks', async () => {
