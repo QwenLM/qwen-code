@@ -2214,9 +2214,7 @@ it('commits a tombstone-heavy snapshot under the total capacity and reads it bac
   });
   const servers = selectedMcpServers(previous, command);
   expect(servers).toHaveLength(96);
-  expect(servers.filter((entry) => entry.state === 'removed')).toHaveLength(
-    64,
-  );
+  expect(servers.filter((entry) => entry.state === 'removed')).toHaveLength(64);
   const body = JSON.stringify({
     kind: 'hosted-mcp-settings',
     schemaVersion: 1,
