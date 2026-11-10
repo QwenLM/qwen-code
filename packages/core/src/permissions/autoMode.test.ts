@@ -583,8 +583,8 @@ describe('shouldForceAutoModeReviewForAllow', () => {
   it('asks when the heredoc boundary is unproven (R25-1 fail-closed)', () => {
     for (const command of [
       "printf '%s' $'a\\'b' <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
-      "echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
-      "echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      'echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
+      'echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
     ]) {
       expect(forcesReview(command)).toBe(true);
     }

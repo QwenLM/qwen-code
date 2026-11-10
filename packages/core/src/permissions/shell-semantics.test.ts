@@ -766,14 +766,14 @@ describe('extractShellOperationsAcrossCommand', () => {
       // R25-1 fail-closed: `a\ #` has no word boundary before `#`, so bash
       // keeps it in the word and still reads the `<<EOF` opener.
       'marks the cwd unknown when an escaped space precedes a hash',
-      "echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      'echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
       [uncertainWrite('/tmp/out.txt')],
     ],
     [
       // R25-1 fail-closed: `$(…)#` closes a command substitution inside the
       // word, so the hash is data and the heredoc opener still counts.
       'marks the cwd unknown when a hash follows a command substitution close',
-      "echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      'echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
       [uncertainWrite('/tmp/out.txt')],
     ],
     [
