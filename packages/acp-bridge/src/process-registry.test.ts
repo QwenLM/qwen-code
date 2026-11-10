@@ -721,51 +721,44 @@ describe('ProcessRegistry', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
-  it('falls back to the direct root when its POSIX group signal fails', async () => {
-    setPlatform('linux');
-    setAsyncProcessTable('1234 1 1234');
-    const child = fakeChild(1234);
-    vi.mocked(child.kill).mockImplementation(() => {
-      child.emit('exit', 0, null);
-      return true;
-    });
-    vi.spyOn(process, 'kill').mockImplementation(((
-      _pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      if (signal === 0) throw errno('ESRCH');
-      throw errno('EIO');
-    }) as typeof process.kill);
-    const tracked = new ProcessRegistry()
-      .reserve()
-      .attach(child, { ownsProcessTree: true });
+  it.each([
+    {
+      name: 'a non-EPERM refusal is proof of failure',
+      error: errno('EIO'),
+      outcome: async (terminating: Promise<void>) =>
+        expect(terminating).rejects.toThrow('could not send SIGTERM'),
+    },
+    {
+      name: 'an EPERM refusal is not',
+      error: errno('EPERM'),
+      outcome: async (terminating: Promise<void>) =>
+        expect(terminating).resolves.toBeUndefined(),
+    },
+  ])(
+    'handles a POSIX group-signal refusal: $name',
+    async ({ error, outcome }) => {
+      setPlatform('linux');
+      setAsyncProcessTable('1234 1 1234');
+      const child = fakeChild(1234);
+      vi.mocked(child.kill).mockImplementation(() => {
+        child.emit('exit', 0, null);
+        return true;
+      });
+      vi.spyOn(process, 'kill').mockImplementation(((
+        _pid: number,
+        signal?: NodeJS.Signals | number,
+      ) => {
+        if (signal === 0) throw errno('ESRCH');
+        throw error;
+      }) as typeof process.kill);
+      const tracked = new ProcessRegistry()
+        .reserve()
+        .attach(child, { ownsProcessTree: true });
 
-    await expect(tracked.terminate()).rejects.toThrow('could not send SIGTERM');
-    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
-  });
-
-  it('reports a clean exit when the group signal is refused with EPERM and the group empties', async () => {
-    setPlatform('linux');
-    setAsyncProcessTable('1234 1 1234');
-    const child = fakeChild(1234);
-    vi.mocked(child.kill).mockImplementation(() => {
-      child.emit('exit', 0, null);
-      return true;
-    });
-    vi.spyOn(process, 'kill').mockImplementation(((
-      _pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      if (signal === 0) throw errno('ESRCH');
-      throw errno('EPERM');
-    }) as typeof process.kill);
-    const tracked = new ProcessRegistry()
-      .reserve()
-      .attach(child, { ownsProcessTree: true });
-
-    await expect(tracked.terminate()).resolves.toBeUndefined();
-    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
-  });
+      await outcome(tracked.terminate());
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    },
+  );
 
   it('still fails at the deadline when an EPERM-refused group is verifiably alive', async () => {
     vi.useFakeTimers();
@@ -800,6 +793,75 @@ describe('ProcessRegistry', () => {
     await expect(terminating).resolves.toMatchObject({
       message: expect.stringContaining('surviving pgids=1234'),
     });
+    // The escalated kill is refused too, and the operator needs to know the
+    // escalation never left the process.
+    await expect(terminating).resolves.toMatchObject({
+      message: expect.stringContaining('was refused SIGKILL to pgid=1234'),
+    });
+  });
+
+  it('names only the surviving pgid when a refusal was recorded for a retired group', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    setAsyncProcessTable(['1234 1 1234', '1235 1234 1234'].join('\n'));
+    const child = fakeChild(1234);
+    vi.mocked(child.kill).mockImplementation(() => true);
+    // pgid 1236 refuses the signal and then empties; pgid 1234 stays alive.
+    const alive = new Set([1234, 1236]);
+    vi.spyOn(process, 'kill').mockImplementation(((
+      pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      const group = -pid;
+      if (signal === 0) {
+        if (!alive.has(group)) throw errno('ESRCH');
+        return true;
+      }
+      if (group === 1236) {
+        alive.delete(1236);
+        throw errno('EPERM');
+      }
+      return true;
+    }) as typeof process.kill);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+    (tracked as unknown as { knownGroups: Set<number> }).knownGroups.add(1236);
+
+    const terminating = tracked.terminate().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const message = ((await terminating) as Error).message;
+    expect(message).toContain('surviving pgids=1234');
+    expect(message).not.toContain('pgid=1236');
+  });
+
+  it('keeps the unclean exit when the group signal behind it was refused', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    setAsyncProcessTable('1234 1 1234');
+    const child = fakeChild(1234);
+    // The refused signal is what let the crash through: the root still dies on
+    // a signal, and the classification must survive that path.
+    vi.mocked(child.kill).mockImplementation(() => {
+      child.emit('exit', null, 'SIGSEGV');
+      return true;
+    });
+    vi.spyOn(process, 'kill').mockImplementation(((
+      _pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      if (signal === 0) throw errno('ESRCH');
+      throw errno('EPERM');
+    }) as typeof process.kill);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+
+    await expect(tracked.terminate()).rejects.toBeInstanceOf(ProcessExitError);
+    await expect(tracked.terminate()).rejects.toThrow(
+      /exited uncleanly during shutdown/,
+    );
   });
 
   it('keeps a group whose liveness probe is refused with EPERM', async () => {

@@ -172,12 +172,15 @@ class TrackedChild implements TrackedChildProcess {
   private readonly knownGroups = new Set<number>();
   private cleanupProofError: Error | undefined;
   /**
-   * The first signal the kernel refused with EPERM. Not proof of a failed
-   * shutdown, so it never throws on its own, but it is the only thing that
-   * tells "we lost permission or the pgid was reused" apart from "our own
-   * process tree is wedged", so it rides along on the deadline error.
+   * Every signal the kernel refused with EPERM, keyed by pgid. Not proof of a
+   * failed shutdown, so a refusal never throws on its own, but it is the only
+   * thing that tells "we lost permission or the pgid was reused" apart from
+   * "our own process tree is wedged", so the refusals for groups still alive
+   * at the deadline ride along on the deadline error. Keying by pgid drops a
+   * refusal recorded for a group that has since emptied, and keeping every
+   * refusal per group keeps a refused SIGKILL visible next to the SIGTERM.
    */
-  private cleanupRefusalNote: string | undefined;
+  private readonly cleanupRefusals = new Map<number, string[]>();
   private exitInfo: AcpChannelExitInfo | undefined;
   private exitedSettled = false;
   private forceKillRequested = false;
@@ -448,8 +451,12 @@ class TrackedChild implements TrackedChildProcess {
         const proof = this.cleanupProofError
           ? `; ${this.cleanupProofError.message}`
           : '';
-        const refusal = this.cleanupRefusalNote
-          ? `; ${this.cleanupRefusalNote}`
+        const refusal = survivingGroups.length
+          ? [...this.cleanupRefusals]
+              .filter(([group]) => survivingGroups.includes(group))
+              .flatMap(([, notes]) => notes)
+              .map((note) => `; ${note}`)
+              .join('')
           : '';
         throw new Error(
           `ACP child pid=${rootPid} did not exit with its owned process groups ` +
@@ -579,9 +586,12 @@ class TrackedChild implements TrackedChildProcess {
         // the `surviving pgids=` error below. `survivingGroups` already treats
         // EPERM as provisional for the same reason.
         if (isErrno(error, 'EPERM')) {
-          this.cleanupRefusalNote ??=
+          const notes = this.cleanupRefusals.get(group) ?? [];
+          notes.push(
             `ACP child pid=${rootPid ?? 'unknown'} was refused ${signal} ` +
-            `to pgid=${group}: ${toError(error).message}`;
+              `to pgid=${group}: ${toError(error).message}`,
+          );
+          this.cleanupRefusals.set(group, notes);
           continue;
         }
         this.recordCleanupProofError(
