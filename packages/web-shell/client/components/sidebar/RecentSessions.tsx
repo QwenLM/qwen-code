@@ -129,6 +129,7 @@ export function RecentSessions({
   useEffect(() => {
     setEntries([]);
     setLoading(true);
+    setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [
     client,
     workspaceKey,
@@ -137,6 +138,10 @@ export function RecentSessions({
     organizationEnabled,
     sortBy,
   ]);
+
+  useEffect(() => {
+    if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
+  }, [expanded]);
 
   useEffect(() => {
     if (!expanded || refreshPaused) return;
@@ -210,15 +215,18 @@ export function RecentSessions({
     retry,
   ]);
 
-  const rows = expanded
+  // Count renderable rows, not raw entries: renderSession returns null for
+  // entries this list does not draw (e.g. an optimistically pinned session),
+  // and the expand label must promise only rows the click actually reveals.
+  const renderableRows = expanded
     ? entries
-        .slice(0, visibleCount)
         .map((entry) => ({
           key: JSON.stringify([entry.workspaceCwd, entry.session.sessionId]),
           node: renderSession(entry),
         }))
         .filter((row) => row.node !== null)
     : [];
+  const rows = renderableRows.slice(0, visibleCount);
   const visibleKeys = JSON.stringify(rows.map((row) => row.key));
   useEffect(() => {
     onVisibleRowsChange?.(visibleKeys);
@@ -293,7 +301,7 @@ export function RecentSessions({
           {rows.map((row) => (
             <Fragment key={row.key}>{row.node}</Fragment>
           ))}
-          {entries.length > visibleCount && (
+          {renderableRows.length > visibleCount && (
             <button
               type="button"
               className={styles.showAllSessions}
@@ -304,7 +312,7 @@ export function RecentSessions({
               {t('sidebar.showMoreSessions', {
                 count: Math.min(
                   SIDEBAR_SESSION_EXPAND_STEP,
-                  entries.length - visibleCount,
+                  renderableRows.length - visibleCount,
                 ),
               })}
             </button>

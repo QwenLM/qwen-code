@@ -36,12 +36,12 @@ which is the precedent for this change.
 ## Non-Goals
 
 - No change to the five-row preview limit.
-- No change to server-side pagination (the standalone "load next page"
-  button keeps its `sidebar.showAllSessions` label and behavior).
 - No new "collapse back to five" affordance; collapsing the section already
   resets the preview.
 - No change to the Pinned section, which intentionally renders all pinned
   rows without a preview limit.
+- No change to the standalone server-side load-more button's label
+  (`sidebar.showAllSessions`); its gating does change, as described below.
 
 ## Proposed Solution
 
@@ -54,11 +54,24 @@ to `SIDEBAR_SESSION_PREVIEW_LIMIT`. Each click adds
 when fewer than 10 rows are left ("Show 3 more" / "再显示 3 个"). The button
 disappears once every row is visible.
 
-Existing escape hatches are unchanged: an active search, a rename editing a
-row beyond the preview, and `limitSessions={false}` still reveal all rows.
-Existing reset points now restore the count to 5 instead of clearing a
-boolean: section collapse, workspace/source change, sort change
-(standalone), and bulk collapse/expand.
+An active search and `limitSessions={false}` still reveal all rows. The
+rename escape hatch keeps the edited row mounted, but the two flat lists now
+measure the edited row's index against their live visible count instead of
+the fixed five, so renaming an already-visible row no longer mounts the whole
+catalog; group sections keep the fixed preview bound because their expansion
+count lives inside `SessionGroupSection`. Every renderer restores the count
+to 5 on the resets it already had — section collapse, workspace/source
+change, sort change (standalone), and bulk collapse/expand — and
+`RecentSessions` gains the collapse and source/sort resets its four siblings
+already had.
+
+Two details keep the numeric promise honest. The `RecentSessions` label and
+button gate count renderable rows (after `renderSession` returns null for
+entries this list does not draw), not raw catalog entries. The standalone
+server-side load-more button is decoupled from the preview gate (rendered on
+`cursor` alone), and `loadMore` advances the visible count by the fetched
+page length so an appended page stays rendered instead of re-arming the
+preview and hiding the rows the user just asked for.
 
 ## Design Decisions
 
@@ -79,15 +92,25 @@ boolean: section collapse, workspace/source change, sort change
 - The visible count is component state, not persisted; a remount starts from
   the five-row preview, exactly as the old boolean did.
 - `RecentSessions` still caps its catalog at 20, so its expansion terminates
-  after at most two clicks (5 → 15 → 20).
+  after at most two clicks (5 → 15 → 20); its resets key on collapse and on
+  source/sort change, never on the 10-second refresh, so polling does not
+  collapse the user's expansion.
 - Tree rows count as one row per collapsed parent, unchanged; the step
   applies to rendered rows, not raw session records.
+- Group-section rename reveal still uses the fixed preview bound; making it
+  live would require passing the editing identity into `SessionGroupSection`
+  and is left as a follow-up to avoid a rename-visibility regression.
 
 ## Validation Plan
 
 - Unit tests (vitest, jsdom) in each renderer's collocated test file:
   five-row preview, "Show 10 more" → 15 rows, remainder label, button
   removal at full expansion, and reset on collapse.
+- Regression tests pinned by deletion mutations: the standalone fetched-page
+  render (both from preview and from full expansion), the standalone
+  sort-change reset, the `WebShellSidebar` collapse reset, the
+  `WorkspaceSection` source-type reset, the flat-list rename bound, and the
+  `RecentSessions` collapse reset and renderable-row label.
 - `i18n.test.ts` pins the new key's English and Chinese copy with counts.
 - Playwright e2e (`web-shell.session-preview-expansion.spec.ts`) against the
   mock daemon: 16-session workspace expands 5 → 15 → 16, resets on collapse,
@@ -98,7 +121,12 @@ boolean: section collapse, workspace/source change, sort change
 ## Acceptance Criteria
 
 - Every sidebar session list expands by at most 10 rows per click.
-- The button label always equals the number of rows the next click reveals.
-- No button remains once all rows are visible.
-- Collapse/source/sort resets return the list to five rows.
-- Search, rename-reveal, and standalone server pagination behave as before.
+- The button label always equals the number of renderable rows the next click
+  reveals.
+- No button remains once all renderable rows are visible.
+- Collapse/source/sort resets return every list (including Recent) to five
+  rows.
+- Search and rename-reveal keep the edited row mounted without mounting the
+  whole catalog for an already-visible row.
+- A standalone server page, once fetched, stays rendered; the load-more
+  control is available whenever a cursor exists.

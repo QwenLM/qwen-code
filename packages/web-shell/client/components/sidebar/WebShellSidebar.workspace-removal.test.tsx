@@ -6410,6 +6410,73 @@ describe('WebShellSidebar session list notices', () => {
     expect(expandButton()).toBeUndefined();
   });
 
+  it('keeps the expanded bound when renaming an already-visible row', async () => {
+    active.sessions = Array.from({ length: 30 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Preview session ${index + 1}`,
+      workspaceCwd: '/tmp/project',
+    }));
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await ensureWorkspaceExpanded('project');
+    const sessionRows = () =>
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]');
+    const expandButton = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+    act(() => click(expandButton()!));
+    expect(sessionRows()).toHaveLength(15);
+
+    await act(async () => {
+      click(inlineSessionAction('Preview session 8', 'Rename')!);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input')).not.toBeNull();
+    // Row 8 is already visible within the 15-row bound; renaming it must not
+    // mount the whole 30-session catalog.
+    expect(sessionRows()).toHaveLength(15);
+    expect(expandButton()).toBeDefined();
+    expect(container.textContent).not.toContain('Preview session 16');
+  });
+
+  it('resets the flat preview when the workspace collapses and re-expands', async () => {
+    active.sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Preview session ${index + 1}`,
+      workspaceCwd: '/tmp/project',
+    }));
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const expandButton = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+    act(() => click(expandButton()!));
+    expect(container.textContent).toContain('Preview session 15');
+
+    const header = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('project'))!;
+    await act(async () => {
+      click(header);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      click(header);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Preview session 5');
+    expect(container.textContent).not.toContain('Preview session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+  });
+
   it('keeps an edited session visible when the preview order changes', async () => {
     active.sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,

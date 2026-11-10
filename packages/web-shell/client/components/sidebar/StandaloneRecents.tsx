@@ -288,6 +288,10 @@ export function StandaloneRecents({
       setSessions((current) =>
         appendUnique(current, withoutChildren(page.sessions)),
       );
+      // A fetched page must stay visible: advance the preview by the page
+      // length (not the shared expand step) so appending rows does not re-arm
+      // the preview gate and hide the page the user just asked for.
+      setVisibleCount((count) => count + page.sessions.length);
       setCursor(page.nextCursor);
       setLoadError(undefined);
     } catch (error) {
@@ -657,7 +661,7 @@ export function StandaloneRecents({
                 })}
               </button>
             )}
-            {cursor && !sessionsLimited && (
+            {cursor && (
               <Button
                 type="button"
                 variant="ghost"

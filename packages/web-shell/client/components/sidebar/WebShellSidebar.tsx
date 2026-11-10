@@ -6300,19 +6300,26 @@ export function WebShellSidebar({
   const body = useMemo(() => {
     // Rename only has to reveal the edited row. Expanding the whole catalog —
     // or even the whole section — mounted hundreds of rows exactly when the
-    // rename editor opened, which is what made typing lag.
+    // rename editor opened, which is what made typing lag. The flat list
+    // measures against its live visible count so renaming an already-visible
+    // row does not mount everything; group sections keep the fixed preview
+    // bound because their own expansion count lives inside SessionGroupSection.
     const editingSessionBeyondPreview = (
       items: readonly DaemonSessionSummary[],
+      bound: number,
     ): boolean =>
       !pinnedSectionHostsEditing &&
       editingSessionIdentity !== null &&
       items.findIndex(
         (session) => getIdentityForSession(session) === editingSessionIdentity,
-      ) >= SIDEBAR_SESSION_PREVIEW_LIMIT;
+      ) >= bound;
     const renderFlatSessions = () => {
       const unlimited =
         Boolean(searchQuery.trim()) ||
-        editingSessionBeyondPreview(filteredSessions);
+        editingSessionBeyondPreview(
+          filteredSessions,
+          projectSessionVisibleCount,
+        );
       const treeRows = sessionTree.buildRows(filteredSessions);
       const previewLimited =
         !unlimited && treeRows.length > projectSessionVisibleCount;
@@ -6385,8 +6392,10 @@ export function WebShellSidebar({
             label={section.label}
             count={tree.rows.length}
             limitSessions={
-              !editingSessionBeyondPreview(section.sessions) &&
-              !searchQuery.trim()
+              !editingSessionBeyondPreview(
+                section.sessions,
+                SIDEBAR_SESSION_PREVIEW_LIMIT,
+              ) && !searchQuery.trim()
             }
             expanded={!collapsedSessionSectionIds.has(section.id)}
             onToggle={() => toggleSessionSection(section.id)}
@@ -6420,8 +6429,10 @@ export function WebShellSidebar({
             ) : undefined
           }
           limitSessions={
-            !editingSessionBeyondPreview(section.sessions) &&
-            !searchQuery.trim()
+            !editingSessionBeyondPreview(
+              section.sessions,
+              SIDEBAR_SESSION_PREVIEW_LIMIT,
+            ) && !searchQuery.trim()
           }
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}

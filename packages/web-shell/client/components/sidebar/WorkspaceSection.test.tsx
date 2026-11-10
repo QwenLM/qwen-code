@@ -1163,6 +1163,37 @@ describe('WorkspaceSection session loading', () => {
     expect(expandButton()).toBeUndefined();
   });
 
+  it('resets the flat preview when the source type changes', async () => {
+    const sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    }));
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const expandButton = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+
+    renderSection({ client, expanded: true, sourceType: 'default' });
+    await flush();
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 15');
+    expect(container.textContent).not.toContain('Session 16');
+
+    renderSection({ client, expanded: true, sourceType: 'channel' });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    expect(container.textContent).not.toContain('Session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+  });
+
   it('keeps the edited row mounted when a refresh reorders it past the preview', async () => {
     const sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,
