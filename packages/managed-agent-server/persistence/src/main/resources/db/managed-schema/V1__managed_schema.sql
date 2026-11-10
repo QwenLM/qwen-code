@@ -1241,6 +1241,22 @@ CREATE INDEX idx_ma_delivery_channel ON ma_delivery (tenant_id, channel_id, clai
 
 CREATE INDEX idx_ma_delivery_session ON ma_delivery (source_scope_key, delivery_kind, consumption_state);
 
+CREATE TABLE ma_channel_segment (
+    delivery_key CHAR(64) NOT NULL COMMENT 'Parent ma_delivery.delivery_key of the CHANNEL delivery.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    channel_id VARBINARY(512) NOT NULL COMMENT 'External channel instance identity within the tenant.',
+    segment_id VARBINARY(512) NOT NULL COMMENT 'Stable segment identity from the delivery record plan.',
+    segment_ordinal BIGINT UNSIGNED NOT NULL COMMENT 'Ordering position of the segment within the delivery.',
+    provider_receipt_json LONGTEXT COMMENT 'Write-once provider receipt for the segment, null until receipted.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_channel_segment_identity UNIQUE (delivery_key, segment_id),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_channel_segment_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Per-segment identities and write-once provider receipts of a channel delivery.';
+
+CREATE INDEX idx_ma_channel_segment_delivery ON ma_channel_segment (delivery_key, segment_ordinal);
+
 CREATE TABLE ma_side_query (
     query_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and query identity.',
     query_id VARBINARY(512) NOT NULL COMMENT 'Public actor-private side query identity.',
