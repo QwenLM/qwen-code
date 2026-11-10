@@ -22,6 +22,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import { formatRecordArtifactReminder } from '@qwen-code/qwen-code-core/tools/artifact/workspace-auto-record.js';
+import { isPdftotextAvailable } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
@@ -74,6 +76,27 @@ vi.mock(
         fetch: globalThis.fetch,
       }),
     };
+  },
+);
+
+// Records each call into the Bash parser module so a test can pin a Shell
+// path that should never load the parser. Calls pass through unchanged.
+const bashParserCalls = vi.hoisted(() => [] as string[]);
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/shellAstParser.js',
+  async (importOriginal) => {
+    const actual = await importOriginal<Record<string, unknown>>();
+    return Object.fromEntries(
+      Object.entries(actual).map(([name, value]) => [
+        name,
+        typeof value === 'function'
+          ? (...args: unknown[]) => {
+              bashParserCalls.push(name);
+              return (value as (...callArgs: unknown[]) => unknown)(...args);
+            }
+          : value,
+      ]),
+    );
   },
 );
 
@@ -2439,6 +2462,216 @@ describe('original CSI worker synchronous ACK confirmation', () => {
   });
 });
 
+// #15076: `todo_write` runs in the Worker as per-Session bookkeeping under
+// the Worker's own runtime directory. `web_fetch` is admitted as well, since
+// it ships on `main`; this block covers only the todo tool.
+describe('todo_write in the Worker', () => {
+  let workspace: string;
+  let runtimeDir: string;
+
+  function reference(callId: string, input: unknown): ManagedToolReference {
+    return {
+      sessionId: 'session-15076',
+      promptId: 'prompt-15076',
+      callId,
+      argsDigest: managedToolDigest(input as Record<string, unknown>),
+    };
+  }
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(path.join(tmpdir(), 'qwen-15076-'));
+    runtimeDir = await mkdtemp(path.join(tmpdir(), 'qwen-15076-runtime-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(undefined);
+    await rm(workspace, { recursive: true, force: true });
+    await rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  it('admits todo_write alongside the shipped web_fetch', () => {
+    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+    expect(exec.hasTool('todo_write')).toBe(true);
+    // web_fetch ships on `main` independently of this profile.
+    expect(exec.hasTool('web_fetch')).toBe(true);
+  });
+
+  it('keeps a task list across calls in one Session and refuses a cycle', async () => {
+    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+    const first = {
+      todos: [
+        { id: 'a', content: 'first', status: 'completed' as const },
+        { id: 'b', content: 'second', status: 'in_progress' as const },
+      ],
+    };
+    const created = await exec.execute(
+      reference('todo-1', first),
+      'todo_write',
+      first,
+    );
+    expect(created.executionStatus).toBe('success');
+
+    const second = {
+      todos: [
+        { id: 'a', content: 'first', status: 'completed' as const },
+        { id: 'b', content: 'second', status: 'completed' as const },
+      ],
+    };
+    const updated = await exec.execute(
+      reference('todo-2', second),
+      'todo_write',
+      second,
+    );
+    expect(updated.executionStatus).toBe('success');
+
+    const stored = JSON.parse(
+      await readFile(
+        path.join(runtimeDir, 'todos', 'session-15076.json'),
+        'utf8',
+      ),
+    ) as { todos: Array<{ id: string; status: string }> };
+    expect(stored.todos.map((todo) => [todo.id, todo.status])).toEqual([
+      ['a', 'completed'],
+      ['b', 'completed'],
+    ]);
+
+    const cycle = {
+      todos: [
+        { id: 'a', content: 'a', status: 'pending' as const, blockedBy: ['b'] },
+        { id: 'b', content: 'b', status: 'pending' as const, blockedBy: ['a'] },
+      ],
+    };
+    const refused = await exec.execute(
+      reference('todo-3', cycle),
+      'todo_write',
+      cycle,
+    );
+    expect(refused.executionStatus).toBe('error');
+    expect(refused.error?.message).toContain('cycle');
+    await exec.close();
+  });
+
+  it('scrubs the runtime root from a failed write reported as success', async () => {
+    // A file where the todos directory belongs makes the write fail. Core then
+    // reports the failure inside a success-shaped result whose text names the
+    // absolute runtime path, outside the tenant Workspace.
+    await writeFile(path.join(runtimeDir, 'todos'), 'not a directory');
+    const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
+    const todos = { todos: [{ id: 'a', content: 'a', status: 'pending' }] };
+    const result = await exec.execute(
+      reference('todo-failed-write', todos),
+      'todo_write',
+      todos,
+    );
+    const text = (result.responseParts as Array<{ text?: string }>)
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(result.executionStatus).toBe('success');
+    expect(text).toContain('Failed to modify todos');
+    expect(text).not.toContain(runtimeDir);
+    await exec.close();
+  });
+});
+
+// A Hosted Session declares no record_artifact and the Worker forwards no
+// artifact metadata, so no Worker result may ask the model to record one.
+describe.skipIf(process.platform === 'win32')(
+  'record_artifact guidance in the Worker',
+  () => {
+    let workspace: string;
+    let runtimeDir: string;
+
+    function reference(callId: string, input: unknown): ManagedToolReference {
+      return {
+        sessionId: 'session-artifact',
+        promptId: 'prompt-artifact',
+        callId,
+        argsDigest: managedToolDigest(input as Record<string, unknown>),
+      };
+    }
+
+    async function resultText(
+      exec: ManagedToolExecutor,
+      callId: string,
+      toolName: string,
+      input: Record<string, unknown>,
+    ): Promise<string> {
+      const result = await exec.execute(
+        reference(callId, input),
+        toolName,
+        input,
+      );
+      expect(result.executionStatus).toBe('success');
+      return (result.responseParts as Array<{ text?: string }>)
+        .map((part) => part.text ?? '')
+        .join('');
+    }
+
+    beforeEach(async () => {
+      workspace = await mkdtemp(path.join(tmpdir(), 'qwen-artifact-'));
+      runtimeDir = await mkdtemp(path.join(tmpdir(), 'qwen-artifact-runtime-'));
+      Storage.setRuntimeBaseDir(runtimeDir);
+    });
+
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      Storage.setRuntimeBaseDir(undefined);
+      await rm(workspace, { recursive: true, force: true });
+      await rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    it.each(['', '1'])(
+      'leaves it out of a Shell result that wrote a file (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+      async (flag) => {
+        vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
+        const exec = ManagedToolExecutor.forWorkspace(
+          workspace,
+          'session-artifact',
+        );
+        bashParserCalls.length = 0;
+        const text = await resultText(exec, 'shell', 'run_shell_command', {
+          command: 'echo hello > notes.md',
+        });
+        expect(await readFile(path.join(workspace, 'notes.md'), 'utf8')).toBe(
+          'hello\n',
+        );
+        expect(text).not.toContain('record_artifact');
+        // The reminder was the only reason this path parsed the command, and
+        // loading the parser is what grows each resident Worker.
+        expect(bashParserCalls).toEqual([]);
+        await exec.close();
+      },
+    );
+
+    it.each(['', '1'])(
+      'does not claim a written or edited Markdown file was recorded (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+      async (flag) => {
+        vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
+        const exec = ManagedToolExecutor.forWorkspace(
+          workspace,
+          'session-artifact',
+        );
+        const file = path.join(workspace, 'report.md');
+        const written = await resultText(exec, 'write', 'write_file', {
+          file_path: file,
+          content: '# Report\n',
+        });
+        const edited = await resultText(exec, 'edit', 'edit', {
+          file_path: file,
+          old_string: '# Report',
+          new_string: '# Final report',
+        });
+        expect(await readFile(file, 'utf8')).toBe('# Final report\n');
+        const claim = formatRecordArtifactReminder('report.md');
+        expect(written).not.toContain(claim);
+        expect(edited).not.toContain(claim);
+        await exec.close();
+      },
+    );
+  },
+);
+
 // The route-level fixtures cannot express these geometries (a Session root is
 // always a deep unique tmpdir path), so the anchoring invariants are pinned
 // against the function directly.
@@ -2796,6 +3029,122 @@ describe('readWorkspaceContext', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('ManagedToolExecutor PDF page reads', () => {
+  const markers = [
+    'FIRST_PAGE_MARKER',
+    'SECOND_PAGE_MARKER',
+    'THIRD_PAGE_MARKER',
+  ];
+  let workspace: string;
+  let runtimeDir: string;
+  let executor: ManagedToolExecutor;
+
+  function pdfFixture(): Buffer {
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>',
+      ...markers.map(
+        (_, index) =>
+          `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 6 0 R >> >> /Contents ${7 + index} 0 R >>`,
+      ),
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+      ...markers.map((marker) => {
+        const stream = `BT /F1 12 Tf 20 100 Td (${marker}) Tj ET`;
+        return `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`;
+      }),
+    ];
+    const offsets: number[] = [];
+    let pdf = '%PDF-1.4\n';
+    objects.forEach((object, index) => {
+      offsets.push(Buffer.byteLength(pdf));
+      pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+    });
+    const xref = Buffer.byteLength(pdf);
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    pdf += offsets
+      .map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`)
+      .join('');
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    return Buffer.from(pdf);
+  }
+
+  beforeEach(async () => {
+    workspace = fs.realpathSync(
+      await mkdtemp(path.join(tmpdir(), 'qwen-managed-pdf-')),
+    );
+    runtimeDir = await mkdtemp(
+      path.join(tmpdir(), 'qwen-managed-pdf-runtime-'),
+    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+    executor = ManagedToolExecutor.forWorkspace(workspace, 'pdf-session');
+    await writeFile(path.join(workspace, 'document.pdf'), pdfFixture());
+  });
+
+  afterEach(async () => {
+    await executor.close();
+    unregisterSessionModel('pdf-session');
+    unregisterSessionProjectDir('pdf-session');
+    Storage.setRuntimeBaseDir(undefined);
+    await rm(workspace, { recursive: true, force: true });
+    await rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  function read(input: Record<string, unknown>) {
+    return executor.execute(
+      {
+        sessionId: 'pdf-session',
+        promptId: 'pdf-prompt',
+        callId: 'pdf-read',
+        argsDigest: managedToolDigest(input),
+      },
+      'read_file',
+      input,
+    );
+  }
+
+  it('extracts only page 2 from a real three-page PDF', async ({ skip }) => {
+    if (!(await isPdftotextAvailable())) return skip();
+    const result = await read({ file_path: 'document.pdf', pages: '2' });
+    expect(result.executionStatus).toBe('success');
+    const output = JSON.stringify(result.responseParts);
+    expect(output).toContain(markers[1]);
+    expect(output).not.toContain(markers[0]);
+    expect(output).not.toContain(markers[2]);
+  });
+
+  it.each([
+    ['0', 'Invalid pages parameter'],
+    ['3-1', 'Invalid pages parameter'],
+    ['2-', 'Open-ended page ranges'],
+    ['1-21', 'maximum of 20 pages'],
+  ])(
+    'rejects unsupported PDF pages %s through Core',
+    async (pages, message) => {
+      const result = await read({ file_path: 'document.pdf', pages });
+      expect(result.executionStatus).toBe('error');
+      expect(result.error?.message).toContain(message);
+    },
+  );
+
+  it('retains text line selection when PDF pages are omitted with null', async () => {
+    await writeFile(
+      path.join(workspace, 'notes.txt'),
+      'FIRST_TEXT_LINE\nSECOND_TEXT_LINE\nTHIRD_TEXT_LINE\n',
+    );
+    const result = await read({
+      file_path: 'notes.txt',
+      offset: 1,
+      limit: 1,
+      pages: null,
+    });
+    expect(result.executionStatus).toBe('success');
+    const output = JSON.stringify(result.responseParts);
+    expect(output).toContain('SECOND_TEXT_LINE');
+    expect(output).not.toContain('FIRST_TEXT_LINE');
+    expect(output).not.toContain('THIRD_TEXT_LINE');
   });
 });
 

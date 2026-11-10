@@ -12,6 +12,8 @@ integrated commit and is still pending.
 
 ## Status and boundary
 
+The [clipboard/source lifecycle batch](2026-10-24-opentui-clipboard-source-lifetime.md) keeps external editing on the same raw expanded draft and final submit owner. Model-facing framing is applied only after pending paste settlement, never by the editor or prepared Retry. Its candidate verification is separate from the historical results below.
+
 This A batch starts at U2A `269600799782a5c507d62f3ae0db011c768be234`
 ([#14946](https://github.com/QwenLM/qwen-code/pull/14946)). It is split from the
 preserved U2B v10 candidate to keep one complete transaction within the intended
@@ -61,7 +63,10 @@ Read the live composer buffer for Ctrl+D: nonempty D stays editing. C arms befor
 cleanup, so a fast second C exits. Empty D cancels a responding turn without
 pre-arming. At a pending approval, D preserves the confirmation and arms D/D exit;
 C cancels it while retaining the exit window. Reuse the existing expiry/mixed-key
-guard. Harness cleanup and exit-code differences are not graceful-exit parity.
+guard. Confirmed keyboard exits use 0 in all three renderer/runtime profiles,
+after the shared cleanup drain; actual OS-signal termination retains its signal
+code. Historical 0/130 observations remain baseline evidence, not acceptance
+of the mismatch. Harness cleanup is not a graceful exit.
 
 Composer cancel registers one callback on the current live-turn sequence. Keep
 the callback, structured queue pop, draft restore and start-level C/D dispatch

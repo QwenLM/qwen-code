@@ -12,6 +12,7 @@ import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
   useWorkspace,
+  type DaemonContextMemoryDetail,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -132,6 +133,7 @@ import type {
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { DaemonConnectionBanner } from '../DaemonConnectionBanner';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
@@ -222,6 +224,7 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       workspaceId?: string;
       changes?: readonly TurnOutputFileChange[];
+      unfilteredChanges?: readonly TurnOutputFileChange[];
       selectedPath?: string;
       sourceTurnId?: string;
       sourceSessionId?: string;
@@ -458,6 +461,11 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
     workspaceId?: string,
   ) => void;
+  /** Open a context-panel memory file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
@@ -669,6 +677,7 @@ export function ArtifactPanel({
   onSelectTurnCallsPrompt,
   onCloseTab,
   onOpenFilePreview,
+  onOpenMemoryFile,
   latestReviewAvailable = false,
   onOpenLatestReview,
   onOpenTerminal,
@@ -1091,6 +1100,7 @@ export function ArtifactPanel({
           </button>
         </div>
       </div>
+      {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
       <div
         className={`${styles.body} ${
           activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
@@ -1517,6 +1527,10 @@ export function ArtifactPanel({
         ) : isWorkspaceScopedTab(activeTab) &&
           (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
           (activeTab.kind !== 'file' || !activeTab.previewOnly) &&
+          (activeTab.kind !== 'review' ||
+            !(activeTab.changes ?? reviewChanges).some(
+              (change) => change.diffs.length > 0,
+            )) &&
           (activeTab.kind !== 'artifact' ||
             activeTabArtifact?.metadata?.['artifactType'] !==
               'web_preview_snapshot') &&
@@ -1529,20 +1543,26 @@ export function ArtifactPanel({
             changes={activeTab.changes ?? reviewChanges}
             selectedPath={activeTab.selectedPath ?? selectedReviewPath}
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
-            onOpenFilePreview={(change) =>
-              onOpenFilePreview(
-                change,
-                activeTab.workspaceCwd ?? workspaceCwd,
-                activeTab.workspaceId,
-              )
+            onOpenFilePreview={
+              activeWorkspaceActions
+                ? (change) =>
+                    onOpenFilePreview(
+                      change,
+                      activeTab.workspaceCwd ?? workspaceCwd,
+                      activeTab.workspaceId,
+                    )
+                : undefined
             }
-            onDownloadFile={(change, isCancelled) =>
-              downloadWorkspaceFile(
-                activeWorkspaceActions!,
-                change.path,
-                getReviewDownloadMimeType(change.path),
-                isCancelled,
-              )
+            onDownloadFile={
+              activeWorkspaceActions
+                ? (change, isCancelled) =>
+                    downloadWorkspaceFile(
+                      activeWorkspaceActions,
+                      change.path,
+                      getReviewDownloadMimeType(change.path),
+                      isCancelled,
+                    )
+                : undefined
             }
             onDownloadError={(downloadError) => {
               const message = t('common.downloadFailed', {
@@ -1704,6 +1724,7 @@ export function ArtifactPanel({
             controls={contextUsageControls?.[activeTab.sessionId]}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+            onOpenMemoryFile={onOpenMemoryFile}
           />
         ) : activeTab.kind === 'trajectory' ? (
           <TrajectoryPanel
@@ -2496,8 +2517,8 @@ function ReviewChanges({
   changes: readonly TurnOutputFileChange[];
   selectedPath: string | null;
   workspaceCwd?: string;
-  onOpenFilePreview: (change: TurnOutputFileChange) => void;
-  onDownloadFile: (
+  onOpenFilePreview?: (change: TurnOutputFileChange) => void;
+  onDownloadFile?: (
     change: TurnOutputFileChange,
     isCancelled: () => boolean,
   ) => Promise<void>;
@@ -2619,7 +2640,7 @@ function ReviewChanges({
     setExpandedPath((current) => (current === path ? null : path));
   };
   const downloadFile = async (change: TurnOutputFileChange) => {
-    if (downloadingPaths.has(change.path)) return;
+    if (!onDownloadFile || downloadingPaths.has(change.path)) return;
     setDownloadingPaths((current) => new Set(current).add(change.path));
     try {
       await onDownloadFile(change, () => !mountedRef.current);
@@ -2717,8 +2738,10 @@ function ReviewChanges({
           >
             {changes.map((change) => {
               const isExpanded = expandedPath === change.path;
-              const canOpenPreview = isRenderedFilePath(change.path);
-              const canDownload = isDownloadableReviewFilePath(change.path);
+              const canOpenPreview =
+                onOpenFilePreview && isRenderedFilePath(change.path);
+              const canDownload =
+                onDownloadFile && isDownloadableReviewFilePath(change.path);
               return (
                 <div
                   key={`${change.toolCallId}:${change.path}`}
@@ -2752,7 +2775,7 @@ function ReviewChanges({
                         <button
                           type="button"
                           className={styles.reviewOpenButton}
-                          onClick={() => onOpenFilePreview(change)}
+                          onClick={() => onOpenFilePreview?.(change)}
                           title={`${t('turnOutputs.preview')} ${change.path}`}
                         >
                           {t('turnOutputs.preview')}

@@ -55,6 +55,19 @@ function user(id: string, parent: string | null): ChatRecord {
 
 const anchor = record('anchor', null);
 
+/** The system record `recordMemoryCatalogSnapshot` writes. */
+function snapshot(id: string, parent: string | null, text: string): ChatRecord {
+  return record(id, parent, 'system', {
+    subtype: 'memory_catalog_snapshot',
+    message: {
+      role: 'user',
+      parts: [
+        { text, partMetadata: { 'qwen-code:memory-catalog-snapshot': true } },
+      ],
+    },
+  });
+}
+
 describe('message group deletion', () => {
   it('deletes nonconsecutive complete turns and repairs only removed edges', () => {
     const records = [
@@ -715,6 +728,59 @@ describe('message group deletion', () => {
     expect(() =>
       deleteTranscriptMessageGroups([legacy, compression], ['legacy'], anchor),
     ).toThrow('legacy turn');
+  });
+  it('deletes a turn together with the catalog snapshot it appended', () => {
+    // The snapshot is written during the turn whose durable request appended
+    // it to the model history. Keeping the record after the turn is gone
+    // would replay it onto an earlier turn on restore.
+    const records = [
+      user('u1', null),
+      record('a1', 'u1', 'assistant'),
+      snapshot('s1', 'a1', 'catalog A'),
+      user('u2', 's1'),
+      record('a2', 'u2', 'assistant'),
+    ];
+    const groups = getTranscriptMessageGroups(records);
+    expect(groups.find((group) => group.id === 'u1')!.recordIds).toContain(
+      's1',
+    );
+
+    const { records: kept } = deleteTranscriptMessageGroups(
+      records,
+      ['u1'],
+      anchor,
+    );
+
+    expect(kept.map((item) => item.uuid)).toEqual(['u2', 'a2', 'anchor']);
+    expect(
+      JSON.stringify(buildApiHistoryFromConversation({ messages: kept })),
+    ).not.toContain('catalog A');
+  });
+
+  it('keeps an earlier turn’s catalog snapshot when a later turn is deleted', () => {
+    const records = [
+      user('u1', null),
+      snapshot('s1', 'u1', 'catalog A'),
+      record('a1', 's1', 'assistant'),
+      user('u2', 'a1'),
+      snapshot('s2', 'u2', 'catalog B'),
+      record('a2', 's2', 'assistant'),
+    ];
+    const groups = getTranscriptMessageGroups(records);
+    expect(groups.find((group) => group.id === 'u1')!.recordIds).toContain(
+      's1',
+    );
+    expect(groups.find((group) => group.id === 'u2')!.recordIds).toContain(
+      's2',
+    );
+
+    const { records: kept } = deleteTranscriptMessageGroups(
+      records,
+      ['u2'],
+      anchor,
+    );
+
+    expect(kept.map((item) => item.uuid)).toEqual(['u1', 's1', 'a1', 'anchor']);
   });
 });
 

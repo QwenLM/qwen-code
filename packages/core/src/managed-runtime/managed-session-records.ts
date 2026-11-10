@@ -4,6 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../utils/managed-session-format.js';
+export {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../utils/managed-session-format.js';
+
 import { createHash } from 'node:crypto';
 import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
@@ -27,6 +36,7 @@ export const MANAGED_SESSION_FORMAT_VERSION = 1;
 // created in between (H3 round-5 verification matrix), so the stamp
 // rises only when a change genuinely breaks an older reader mid-scan.
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
+export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
 const MAX_ERROR_VALUE_LENGTH = 4096;
@@ -34,22 +44,6 @@ const MAX_ERROR_VALUE_LENGTH = 4096;
 export const MANAGED_SESSION_HEADER_SUBTYPE = 'managed_session_header_v1';
 export const MANAGED_SESSION_EVENT_SUBTYPE = 'managed_session_event_v1';
 export const MANAGED_SESSION_COMMIT_SUBTYPE = 'managed_session_commit_v1';
-
-export const MANAGED_SESSION_LIMITS = {
-  maxIdBytes: 512,
-  // Not frozen by the storage spec: a bound for free-form enum-adjacent fields
-  // such as `source` or `stopReason`, borrowed from its error-message cap.
-  maxTextBytes: 4096,
-  maxTimeMs: 8_640_000_000_000_000,
-  maxJsonDepth: 64,
-  maxHeaderBytes: 64 * 1024,
-  maxEventBytes: 1024 * 1024,
-  maxCommitMarkerBytes: 64 * 1024,
-  maxTransactionEvents: 256,
-  maxTransactionBytes: 8 * 1024 * 1024,
-  defaultReadEvents: 100,
-  maxReadEvents: 256,
-} as const;
 
 export const MANAGED_SESSION_EVENT_KINDS = [
   'input.accepted',
@@ -60,6 +54,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'tool.intent',
   'action.changed',
   'tool.receipt',
+  'tool.measured',
   'checkpoint.committed',
   'context.compacted',
   'cancel.requested',
@@ -128,8 +123,10 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
   [
+    'tool_stage',
     'config_install',
     'goal_state',
+    'todo_state',
     'session_metadata',
     'file_history',
     'session_source',
@@ -299,6 +296,7 @@ export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
   [
     'config_install',
     'goal_state',
+    'todo_state',
     'session_metadata',
     'file_history',
     'session_source',
@@ -417,15 +415,6 @@ export interface ManagedSessionCommitMarker {
   readonly eventCount: number;
   readonly eventsDigest: string;
   readonly previousCommitDigest: string | null;
-}
-
-export class ManagedSessionRecordError extends Error {
-  readonly code: string = 'managed_session_invalid_record';
-
-  constructor(message: string) {
-    super(message);
-    this.name = 'ManagedSessionRecordError';
-  }
 }
 
 /**
@@ -744,6 +733,20 @@ export function managedSessionKeysEqual(
   );
 }
 
+/** Whether two references name the same resource with the same identity. */
+export function managedSessionDurableRefsEqual(
+  left: ManagedSessionDurableRef,
+  right: ManagedSessionDurableRef,
+): boolean {
+  return (
+    left.resourceId === right.resourceId &&
+    left.kind === right.kind &&
+    left.schemaVersion === right.schemaVersion &&
+    left.byteLength === right.byteLength &&
+    left.digest === right.digest
+  );
+}
+
 export function assertManagedSessionDurableRef(
   value: ManagedSessionJsonValue | undefined,
   label: string,
@@ -961,8 +964,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         contentRef: 'ref',
         modelAttemptId: 'idOrNull',
         parentMessageId: 'idOrNull',
+        diagnosticsRef: 'ref',
       },
-      optional: ['modelAttemptId'],
+      optional: ['modelAttemptId', 'diagnosticsRef'],
     },
     'tool.intent': {
       fields: {
@@ -972,7 +976,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         toolDefinitionRef: 'ref',
         argsRef: 'ref',
         outcomeSource: 'text',
+        diagnosticsRef: 'ref',
       },
+      optional: ['diagnosticsRef'],
     },
     'message.delta': {
       fields: {
@@ -1011,6 +1017,13 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         optionsRef: 'refOrNull',
         state: 'text',
         decisionRef: 'refOrNull',
+      },
+    },
+    'tool.measured': {
+      fields: {
+        executionCallId: 'id',
+        toolOutcomeRef: 'ref',
+        measurementsRef: 'ref',
       },
     },
     'tool.receipt': {
@@ -1113,6 +1126,7 @@ const EVENT_ACTORS: Readonly<
   'hosted.cleanup': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
+  'tool.measured': ['harness'],
   'checkpoint.committed': ['harness'],
   'context.compacted': ['harness'],
   'cancel.requested': ['trusted_entry'],
@@ -1138,6 +1152,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'hosted.cleanup': true,
   'action.changed': false,
   'tool.receipt': false,
+  'tool.measured': true,
   'checkpoint.committed': true,
   'context.compacted': true,
   'cancel.requested': false,
@@ -1480,6 +1495,7 @@ function assertPayloadRules(
     case 'tool.intent':
     case 'message.delta':
     case 'tool.receipt':
+    case 'tool.measured':
     case 'cancel.requested':
     case 'turn.settled':
       return;
@@ -1792,7 +1808,7 @@ export function parseManagedSessionHeader(
   const minimumReader = record['minimumReader'];
   const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
   const currentReaderVersion = managedSessionReaderVersion(
-    MANAGED_SESSION_MINIMUM_READER,
+    MANAGED_SESSION_READER_CAPABILITY,
   );
   if (
     requiredReaderVersion === null ||

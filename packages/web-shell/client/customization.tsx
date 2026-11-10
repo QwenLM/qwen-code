@@ -30,6 +30,11 @@ import type { WebShellTheme } from './themeContext';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
+/** Select an existing directory on the connected daemon, or cancel with undefined. */
+export type WebShellWorkspaceDirectoryPicker = (opts?: {
+  signal?: AbortSignal;
+}) => Promise<string | undefined>;
+
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
   /**
@@ -722,6 +727,7 @@ export interface WebShellCustomization {
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  composerVariant?: 'default' | 'simple';
   /**
    * Built-in / host @ mention providers. Split-view panes share this context
    * so they match the main composer without ChatPane prop drilling.
@@ -742,11 +748,44 @@ export interface WebShellCustomization {
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
+  /**
+   * The host already renders its own add ("+") entry in
+   * `renderComposerToolbarStart`. Hides the built-in composer AddMenu in the
+   * main, split-pane, and managed composers, and the touch composer's
+   * commands trigger (slash icon, "All commands" label), so the two entries
+   * do not sit side by side.
+   *
+   * Workflow loses its menu entry with the menu, so the default-variant
+   * toolbar carries a switch for it instead. That switch drives both
+   * directions and is disabled only while the host reports no usable state
+   * (unbound, syncing, unknown, a pending write, no change handler, or
+   * unavailable with nothing requested); when Workflow is requested but
+   * currently unavailable, the switch stays enabled so the preference can
+   * still be turned off.
+   *
+   * `composerVariant: 'simple'` does not render the composer toolbar leading
+   * area where this switch lives — the host's own
+   * `renderComposerToolbarStart` is skipped there as well — so that variant
+   * has no Workflow fallback, and setting this flag only takes its built-in
+   * menu away. The flag is meant for the default variant.
+   *
+   * Unlike leaving `addMenu` out of `composerToolbarActions`, which only
+   * reaches the main composer, this flag applies to every composer's
+   * built-in menu.
+   */
+  hostOwnsAddMenu?: boolean;
   renderComposerHeader?: ComposerHeaderRenderer;
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   hostOwnsEditDiffPreview?: boolean;
+  /**
+   * The embedding host claims right-panel open requests and may render artifact
+   * previews itself. Managed-storage artifacts have no content in the default
+   * panel (metadata only), so the card only promises Preview for them when this
+   * is set; otherwise it keeps the generic Open.
+   */
+  hostOwnsArtifactPreview?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving

@@ -5,7 +5,12 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { CircleDashedIcon, SquarePenIcon } from 'lucide-react';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CircleDashedIcon,
+  SquarePenIcon,
+} from 'lucide-react';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionArchiveState,
@@ -25,10 +30,15 @@ import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
 import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import { Button } from '../ui/button';
+import {
+  readWorkspaceExpanded,
+  writeWorkspaceExpanded,
+} from './workspaceExpansion';
 import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 
 interface StandaloneRecentsProps {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   archiveState: DaemonSessionArchiveState;
   currentSessionId?: string;
   currentSessionReady?: boolean;
@@ -49,7 +59,10 @@ interface StandaloneRecentsProps {
       onDelete: () => void;
     },
   ) => ReactNode;
-  onLoadSession: (sessionId: string) => Promise<void> | void;
+  onLoadSession: (
+    sessionId: string,
+    displayName?: string,
+  ) => Promise<void> | void;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onMutated?: () => void;
   onStatusChange?: (status: {
@@ -104,6 +117,7 @@ function downloadExport(result: {
 }
 
 export function StandaloneRecents({
+  sortBy,
   archiveState,
   currentSessionId,
   currentSessionReady = false,
@@ -135,9 +149,12 @@ export function StandaloneRecents({
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const [cursor, setCursor] = useState<string>();
-  const [expanded, setExpanded] = useState(true);
+  const expansionId = `standalone:${archiveState}`;
+  const [expanded, setExpanded] = useState(() =>
+    readWorkspaceExpanded(expansionId),
+  );
   const [showAll, setShowAll] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<{ cursor?: string }>();
   const [busySessionId, setBusySessionId] = useState<string>();
@@ -164,10 +181,14 @@ export function StandaloneRecents({
       loadGenerationRef.current = generation;
       setLoadingMore(false);
       setLoading(true);
+      // A discarded page must not leave its cursor behind: it is bound to the
+      // sort that produced it, and the daemon rejects it under another sort.
+      if (!preservePages) setCursor(undefined);
       try {
         const targetCount = preservePages ? sessionsRef.current.length : 0;
         let page = await workspace.client.listStandaloneSessionsPage({
           archiveState,
+          ...(sortBy !== undefined ? { sortBy } : {}),
           pageSize: PAGE_SIZE,
         });
         if (loadGenerationRef.current !== generation) return;
@@ -175,6 +196,7 @@ export function StandaloneRecents({
         while (page.nextCursor && loaded.length < targetCount) {
           page = await workspace.client.listStandaloneSessionsPage({
             archiveState,
+            ...(sortBy !== undefined ? { sortBy } : {}),
             cursor: page.nextCursor,
             pageSize: PAGE_SIZE,
           });
@@ -193,7 +215,7 @@ export function StandaloneRecents({
         if (loadGenerationRef.current === generation) setLoading(false);
       }
     },
-    [archiveState, supported, workspace.client],
+    [archiveState, sortBy, supported, workspace.client],
   );
 
   useEffect(() => {
@@ -214,11 +236,16 @@ export function StandaloneRecents({
     }
   }, [currentSessionId, currentSessionReady]);
 
+  const previousSortRef = useRef(sortBy);
   useEffect(() => {
     const refreshRequested = previousRefreshKeyRef.current !== refreshKey;
     previousRefreshKeyRef.current = refreshKey;
-    if (!loadedRef.current || refreshRequested) void load(true);
-  }, [load, refreshKey]);
+    const sortChanged = previousSortRef.current !== sortBy;
+    previousSortRef.current = sortBy;
+    if (sortChanged) setShowAll(false);
+    if (!loadedRef.current || refreshRequested || sortChanged)
+      void load(!sortChanged);
+  }, [load, refreshKey, sortBy]);
 
   useEffect(() => {
     const previous = previousStreamingStateRef.current;
@@ -242,12 +269,13 @@ export function StandaloneRecents({
   }, [expanded]);
 
   const loadMore = useCallback(async () => {
-    if (!cursor || loadingMore) return;
+    if (!cursor || loadingMore || loading) return;
     const generation = loadGenerationRef.current;
     setLoadingMore(true);
     try {
       const page = await workspace.client.listStandaloneSessionsPage({
         archiveState,
+        ...(sortBy !== undefined ? { sortBy } : {}),
         cursor,
         pageSize: PAGE_SIZE,
       });
@@ -265,7 +293,7 @@ export function StandaloneRecents({
     } finally {
       if (loadGenerationRef.current === generation) setLoadingMore(false);
     }
-  }, [archiveState, cursor, loadingMore, workspace.client]);
+  }, [archiveState, sortBy, cursor, loading, loadingMore, workspace.client]);
 
   const run = useCallback(
     async (
@@ -407,7 +435,11 @@ export function StandaloneRecents({
       openingSessionIdRef.current = sessionId;
       setSessionError(undefined);
       try {
-        await onLoadSession(sessionId);
+        await onLoadSession(
+          sessionId,
+          sessionsRef.current.find((session) => session.sessionId === sessionId)
+            ?.displayName,
+        );
       } catch (error) {
         if (generation !== openGenerationRef.current) return;
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) return;
@@ -427,7 +459,6 @@ export function StandaloneRecents({
 
   if (!supported) return null;
   if (
-    archiveState === 'archived' &&
     !loadError &&
     !sessionError &&
     !loading &&
@@ -455,7 +486,11 @@ export function StandaloneRecents({
   return (
     <>
       <section
-        className={`${workspaceStyles.section} mb-3`}
+        className={
+          archiveState === 'active'
+            ? workspaceStyles.section
+            : `${workspaceStyles.section} mb-3`
+        }
         aria-label={
           archiveState === 'active'
             ? t('sidebar.noWorkspaceSessions')
@@ -463,32 +498,56 @@ export function StandaloneRecents({
         }
         data-testid={`standalone-${archiveState}-group`}
       >
-        <div className={`${workspaceStyles.headerRow} group`}>
+        <div
+          className={
+            archiveState === 'active'
+              ? sidebarStyles.projectsHeader
+              : `${workspaceStyles.headerRow} group`
+          }
+        >
           <button
             type="button"
-            className={workspaceStyles.header}
+            className={
+              archiveState === 'active'
+                ? sidebarStyles.projectsHeaderToggle
+                : workspaceStyles.header
+            }
             aria-expanded={expanded}
+            disabled={Boolean(query)}
             onClick={(event) => {
-              setExpanded((value) => !value);
+              const nextExpanded = !expanded;
+              writeWorkspaceExpanded(expansionId, nextExpanded);
+              setExpanded(nextExpanded);
               if (event.detail > 0) event.currentTarget.blur();
             }}
           >
-            <CircleDashedIcon
-              className={workspaceStyles.folderIcon}
-              size={14}
-              strokeWidth={1.4}
-              aria-hidden="true"
-            />
-            <span className={workspaceStyles.headerContent}>
-              <span className={workspaceStyles.name}>
-                {t('sidebar.noWorkspaceSessions')}
-              </span>
-            </span>
+            {archiveState === 'active' ? (
+              <>
+                <span>{t('sidebar.noWorkspaceSessions')}</span>
+                {expanded ? (
+                  <ChevronDownIcon size={14} aria-hidden="true" />
+                ) : (
+                  <ChevronRightIcon size={14} aria-hidden="true" />
+                )}
+              </>
+            ) : (
+              <>
+                <CircleDashedIcon
+                  className={workspaceStyles.folderIcon}
+                  size={14}
+                  strokeWidth={1.4}
+                  aria-hidden="true"
+                />
+                <span className={workspaceStyles.headerContent}>
+                  <span className={workspaceStyles.name}>
+                    {t('sidebar.noWorkspaceSessions')}
+                  </span>
+                </span>
+              </>
+            )}
           </button>
           {archiveState === 'active' && onNewSession && (
-            <div
-              className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover:visible group-focus-within:visible`}
-            >
+            <div className={sidebarStyles.projectsHeaderActions}>
               <button
                 className={sidebarStyles.workspaceHeaderAction}
                 type="button"
@@ -532,7 +591,13 @@ export function StandaloneRecents({
           </div>
         )}
         {(expanded || Boolean(query)) && (
-          <div className="flex flex-col gap-0.5">
+          <div
+            className={
+              archiveState === 'active'
+                ? sidebarStyles.pinnedSessionList
+                : 'flex flex-col gap-0.5'
+            }
+          >
             {displayedSessions.map((session) => {
               const isCurrent = session.sessionId === currentSessionId;
               return renderSession(session, {
@@ -587,7 +652,7 @@ export function StandaloneRecents({
                 variant="ghost"
                 size="sm"
                 className="w-full"
-                disabled={loadingMore}
+                disabled={loading || loadingMore}
                 onClick={() => void loadMore()}
               >
                 {t('sidebar.showAllSessions')}

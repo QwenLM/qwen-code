@@ -28,6 +28,214 @@ const identity = {
   harnessSessionId: 'session',
   runtimeSessionId: 'turn',
 };
+
+it('resolves and pins Harness capability once without acquiring or warming a Runtime', async () => {
+  const requests: string[] = [];
+  const broker = await fixture((path, body) => {
+    requests.push(path);
+    expect(body['runtimeSessionId']).toBeUndefined();
+    return {
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'workspace',
+        },
+      },
+    };
+  });
+  await Promise.all([
+    broker.resolveCapabilities(),
+    broker.resolveCapabilities(),
+  ]);
+  expect(broker.capabilityDigest).toBe(RESIDENT_WORKSPACE_CAPABILITY_DIGEST);
+  expect(requests).toEqual([
+    '/internal/runtime-broker/v1/runtimes:capabilities',
+  ]);
+  expect(broker.acquired).toBe(false);
+  expect(broker.runtime).toBeUndefined();
+});
+
+it('retains frozen measurements observed by a cancellation status poll', async () => {
+  const metadata = {
+    protocolVersion: 4,
+    executionProtocol: 2,
+    resultDigest: 'a'.repeat(64),
+    measurements: {
+      protocol: 'managed-tool-measurements/1',
+      executionDurationMs: 0,
+      executionOutcome: 'success',
+      file: null,
+    },
+  };
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'execution',
+      status: {
+        state: 'settled',
+        result: {
+          executionStatus: 'success',
+          responseParts: [],
+          diagnostics: metadata,
+        },
+      },
+    },
+  }));
+  expect(await broker.status('execution')).toEqual({
+    state: 'settled',
+    executionStatus: 'success',
+  });
+  expect(broker.toolMeasurements('execution')).toEqual({
+    resultDigest: metadata.resultDigest,
+    measurements: metadata.measurements,
+  });
+  broker.releaseToolMeasurements('execution');
+  expect(broker.toolMeasurements('execution')).toBeUndefined();
+});
+
+it('reads a fresh saved Workspace context after capabilities were cached', async () => {
+  let generation = 0;
+  const broker = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      scope: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        workspaceGeneration: '1',
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+        isolationClass: 'session',
+      },
+      workspaceContext: {
+        cwdRelative: `project-${++generation}`,
+        contextRevision: String(generation),
+      },
+    },
+  }));
+  await broker.resolveCapabilities();
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-2',
+    contextRevision: '2',
+  });
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-3',
+    contextRevision: '3',
+  });
+  expect(broker.acquired).toBe(false);
+});
+
+it.each([
+  { cwdRelative: '.', contextRevision: 1 },
+  { cwdRelative: '.', contextRevision: '0' },
+  { cwdRelative: '.', contextRevision: '01' },
+  { cwdRelative: '.', contextRevision: '1.5' },
+  { cwdRelative: '.', contextRevision: '9'.repeat(20) },
+  { cwdRelative: '/absolute', contextRevision: '1' },
+  { cwdRelative: '../escape', contextRevision: '1' },
+  { cwdRelative: 'a\\b', contextRevision: '1' },
+  { cwdRelative: 'https://other', contextRevision: '1' },
+  { cwdRelative: 'a//b', contextRevision: '1' },
+  { cwdRelative: 'a\u0000b', contextRevision: '1' },
+])(
+  'rejects an invalid saved Workspace context %j without acquiring a Runtime',
+  async (workspaceContext) => {
+    const broker = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'session',
+        },
+        workspaceContext,
+      },
+    }));
+    await expect(broker.readWorkspaceContext()).rejects.toThrow(
+      'Invalid saved Workspace context.',
+    );
+    expect(broker.acquired).toBe(false);
+  },
+);
+
+it.each(['http503', 'connection-drop', 'scope-mismatch'])(
+  'retries capability resolution after %s while sharing concurrent reads',
+  async (failure) => {
+    let requests = 0;
+    const broker = await fixture(() => {
+      requests++;
+      if (requests === 1 && failure === 'http503')
+        return { code: 503, body: { error: 'unavailable' } };
+      if (requests === 1 && failure === 'connection-drop')
+        return { drop: true };
+      return {
+        body: {
+          protocolVersion: 1,
+          harnessSessionId: 'session',
+          scope: {
+            tenantId:
+              requests === 1 && failure === 'scope-mismatch'
+                ? 'foreign'
+                : 'tenant',
+            workspaceId: 'workspace',
+            workspaceGeneration: '1',
+            capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+            isolationClass: 'workspace',
+          },
+        },
+      };
+    });
+    const failed = await Promise.allSettled([
+      broker.resolveCapabilities(),
+      broker.resolveCapabilities(),
+    ]);
+    expect(failed.map((result) => result.status)).toEqual([
+      'rejected',
+      'rejected',
+    ]);
+    expect(requests).toBe(1);
+    expect(() => broker.capabilityDigest).toThrow('unavailable');
+    await Promise.all([
+      broker.resolveCapabilities(),
+      broker.resolveCapabilities(),
+    ]);
+    await broker.resolveCapabilities();
+    expect(requests).toBe(2);
+    expect(broker.capabilityDigest).toBe(RESIDENT_WORKSPACE_CAPABILITY_DIGEST);
+    expect(broker.runtime).toBeUndefined();
+    expect(broker.acquired).toBe(false);
+  },
+);
+
+it.each(['tenantId', 'workspaceId', 'capabilityDigest', 'isolationClass'])(
+  'refuses a mismatched %s in Harness capability resolution',
+  async (field) => {
+    const broker = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'workspace',
+          [field]: 'wrong',
+        },
+      },
+    }));
+    await expect(broker.resolveCapabilities()).rejects.toThrow('scope');
+    expect(() => broker.capabilityDigest).toThrow('unavailable');
+    expect(broker.runtime).toBeUndefined();
+  },
+);
 async function fixture(
   handler: (
     path: string,
@@ -61,6 +269,95 @@ async function fixture(
     'turn',
   );
 }
+
+function runtimeResponse(provisionerKind?: unknown) {
+  return {
+    ...identity,
+    ready: true,
+    acquired: true,
+    scope: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      workspaceGeneration: '3',
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    },
+    runtime: {
+      bindingId: 'binding',
+      generation: '7',
+      ...(provisionerKind !== undefined ? { provisionerKind } : {}),
+    },
+  };
+}
+
+it.each(['local-process', 'ssh-process', 'external-workspace'])(
+  'reads %s provider metadata through HTTP warm and recovery acquire without extending identity',
+  async (provider) => {
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const broker = await fixture((path, body) => {
+      requests.push({ path, body });
+      return { body: runtimeResponse(provider) };
+    });
+    await broker.warm();
+    expect(broker.provisionerKind).toBe(provider);
+    expect(broker.acquired).toBe(false);
+    expect(broker.runtime).toEqual({
+      bindingId: 'binding',
+      generation: '7',
+      workspaceGeneration: '3',
+    });
+    await broker.acquire({ runtimeBindingId: 'binding', generation: '7' });
+    expect(broker.provisionerKind).toBe(provider);
+    expect(broker.acquired).toBe(true);
+    expect(broker.runtime).toEqual({
+      bindingId: 'binding',
+      generation: '7',
+      workspaceGeneration: '3',
+    });
+    expect(requests.map((request) => request.path)).toEqual([
+      '/internal/runtime-broker/v1/runtimes:warm',
+      '/internal/runtime-broker/v1/tool-sessions:acquire',
+    ]);
+    expect(requests[1].body).toMatchObject({
+      recoveryBindingId: 'binding',
+      recoveryGeneration: '7',
+    });
+  },
+);
+
+it.each(['warm', 'acquire'] as const)(
+  'clears stale provider metadata when HTTP %s returns an older binding response',
+  async (operation) => {
+    let response = runtimeResponse('local-process');
+    const broker = await fixture(() => ({ body: response }));
+    await broker[operation]();
+    expect(broker.provisionerKind).toBe('local-process');
+    response = runtimeResponse();
+    await broker[operation]();
+    expect(broker.provisionerKind).toBeUndefined();
+    expect(broker.runtime).toEqual({
+      bindingId: 'binding',
+      generation: '7',
+      workspaceGeneration: '3',
+    });
+  },
+);
+
+it.each(
+  (['warm', 'acquire'] as const).flatMap((operation) =>
+    [null, '', 1, false, {}, []].map((provider) => ({ operation, provider })),
+  ),
+)(
+  'rejects invalid provider metadata from HTTP $operation ($provider)',
+  async ({ operation, provider }) => {
+    const broker = await fixture(() => ({ body: runtimeResponse(provider) }));
+    await expect(broker[operation]()).rejects.toThrow(
+      'Runtime Broker provider is invalid.',
+    );
+    expect(broker.provisionerKind).toBeUndefined();
+    expect(broker.acquired).toBe(false);
+    expect(broker.runtime).not.toHaveProperty('provisionerKind');
+  },
+);
 
 it.each([false, true])(
   'carries the original cleanup fence with drain=%s',
@@ -527,6 +824,20 @@ it.each(['runtime_idempotency_conflict', 'runtime_execution_conflict'])(
     ]);
   },
 );
+
+it('preserves a definite payload-invalid start rejection without polling', async () => {
+  const paths: string[] = [];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return { code: 400, body: { code: 'runtime_payload_invalid' } };
+  });
+  await expect(
+    broker.execute('execution', '{}', new AbortController().signal, 50),
+  ).rejects.toMatchObject({ status: 400, code: 'runtime_payload_invalid' });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+  ]);
+});
 
 it('queries the original identity when start reports an unknown execution', async () => {
   const paths: string[] = [];

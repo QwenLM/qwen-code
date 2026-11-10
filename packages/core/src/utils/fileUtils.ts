@@ -25,6 +25,11 @@ import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
+import {
+  base64ByteLength,
+  readFileWithinBase64Limit,
+  type ReadFileMediaLimits,
+} from './inline-media.js';
 import type { PDFRenderedImage } from './pdf.js';
 import {
   buildLargePDFGuidance,
@@ -1129,6 +1134,7 @@ export interface ProcessSingleFileContentOptions {
    */
   preparePdfForVisionBridge?: boolean;
   signal?: AbortSignal;
+  mediaLimits?: ReadFileMediaLimits;
   /**
    * Large full-PDF text fallback returns a tool error by default. `@`-attached
    * PDFs use `reference` so the model gets guidance without a failed read.
@@ -1216,6 +1222,7 @@ export async function processSingleFileContent(
     preserveUnsupportedImage = false,
     preparePdfForVisionBridge = false,
     signal,
+    mediaLimits,
     largePdfBehavior = 'error',
     displayPath = filePath,
   } = options;
@@ -1233,11 +1240,36 @@ export async function processSingleFileContent(
           signal,
         )
       : fs.promises.readFile(contentPath, signal ? { signal } : undefined));
+  const readMediaBytes = async () => {
+    if (!mediaLimits) return readBytes();
+    if (!descriptor) {
+      return readFileWithinBase64Limit(
+        contentPath,
+        mediaLimits.maxInlineMediaBase64Bytes,
+        signal,
+      );
+    }
+    if (
+      base64ByteLength(descriptor.stats.size) >
+      mediaLimits.maxInlineMediaBase64Bytes
+    ) {
+      return undefined;
+    }
+    return readBytes();
+  };
   const relativePathForDisplay = (
     path.isAbsolute(displayPath)
       ? path.relative(rootDirectory, displayPath)
       : displayPath
   ).replace(/\\/g, '/');
+  const mediaTooLarge = (
+    message = "File exceeds the inline media byte limit. For PDFs, use 'pages' with a narrower range; otherwise use a smaller file.",
+  ): ProcessedFileReadResult => ({
+    llmContent: message,
+    returnDisplay: message,
+    error: message,
+    errorType: ToolErrorType.FILE_TOO_LARGE,
+  });
   try {
     signal?.throwIfAborted();
     let stats: import('node:fs').Stats;
@@ -1309,10 +1341,11 @@ export async function processSingleFileContent(
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
     const displayName = path.basename(displayPath);
-    // Use optional call (`?.()`) so mock Configs that don't implement
-    // getContentGeneratorConfig still work for non-media file types.
+    // An empty effective view is authoritative; only legacy mocks fall back.
     const modalities: InputModalities =
-      config.getContentGeneratorConfig?.()?.modalities ?? {};
+      typeof config.getEffectiveInputModalities === 'function'
+        ? config.getEffectiveInputModalities()
+        : (config.getContentGeneratorConfig?.()?.modalities ?? {});
 
     // Vision-capable main model, explicit read (not `@`-reference): when text
     // extraction overflows or fails, render pages to images for the model
@@ -1401,6 +1434,7 @@ export async function processSingleFileContent(
     }
     if (willExtractPdfText && !pageRange) {
       pdfPageCount = await getPDFPageCount(pdfSource, signal);
+      signal?.throwIfAborted();
       const requirement = shouldRequirePDFPageRange(pdfPageCount, stats.size);
       // A vision render can hold up to PDF_MAX_PAGES_PER_READ pages, so only
       // require an explicit range past that ceiling; the text path keeps the
@@ -1413,10 +1447,11 @@ export async function processSingleFileContent(
         `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pdfPageCount ?? 'unknown'}, required=${requirement.required}, rangeRequired=${rangeRequired}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
       );
       if (rangeRequired) {
-        if (
-          largePdfBehavior === 'error' &&
-          !(await isPdftotextAvailable(descriptor?.fileHandle, signal))
-        ) {
+        const textAvailable =
+          largePdfBehavior !== 'error' ||
+          (await isPdftotextAvailable(descriptor?.fileHandle, signal));
+        signal?.throwIfAborted();
+        if (largePdfBehavior === 'error' && !textAvailable) {
           return {
             llmContent: `[Cannot extract text from PDF: "${displayName}". ${PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE}]`,
             returnDisplay: `Failed to read pdf: ${relativePathForDisplay}`,
@@ -1750,6 +1785,14 @@ export async function processSingleFileContent(
                   viewSignal,
                 )
               : await renderImageOverview(contentPath, viewSignal);
+            signal?.throwIfAborted();
+            if (
+              mediaLimits &&
+              base64ByteLength(view.bytes.length) >
+                mediaLimits.maxInlineMediaBase64Bytes
+            ) {
+              return mediaTooLarge();
+            }
             const registry = config.getToolRegistry?.();
             const codeModeOnly = config.getCodeModeOnly?.();
             const declaredTools = new Set(
@@ -1866,7 +1909,9 @@ export async function processSingleFileContent(
             returnDisplay: `Omitted unsupported image format: ${relativePathForDisplay} (${mediaMimeType})`,
           };
         }
-        const contentBuffer = await readBytes();
+        const contentBuffer = await readMediaBytes();
+        if (contentBuffer === undefined) return mediaTooLarge();
+        signal?.throwIfAborted();
         if (mediaMimeType === 'image/gif') {
           // GIFs skip the overview renderer, so nothing has validated the
           // bytes yet: a corrupt or mislabeled .gif would reach the provider
@@ -1962,7 +2007,9 @@ export async function processSingleFileContent(
         // Otherwise, fall back to pdftotext for text extraction.
         if (!pageRange && modalities.pdf) {
           // Model supports PDF natively — send as base64
-          const contentBuffer = await readBytes();
+          const contentBuffer = await readMediaBytes();
+          if (contentBuffer === undefined) return mediaTooLarge();
+          signal?.throwIfAborted();
           const base64Data = contentBuffer.toString('base64');
           const base64SizeInMB = base64Data.length / (1024 * 1024);
           if (base64SizeInMB > 9.9) {
@@ -2036,9 +2083,53 @@ export async function processSingleFileContent(
               lastPage: PDF_MAX_PAGES_PER_READ,
             }),
             signal,
+            ...(mediaLimits && {
+              maxTotalBase64Bytes: mediaLimits.maxInlineMediaBase64Bytes,
+            }),
           });
+          signal?.throwIfAborted();
+          if (
+            (!render.success && render.tooLarge) ||
+            (mediaLimits &&
+              pageRange &&
+              render.success &&
+              render.bytesTruncated)
+          ) {
+            return mediaTooLarge(!render.success ? render.error : undefined);
+          }
           if (render.success && render.images.length > 0) {
+            if (
+              mediaLimits &&
+              pageRange &&
+              render.images.length !== pageRange.lastPage - startPage + 1
+            ) {
+              pdfPageCount = await getPDFPageCount(pdfSource, signal);
+              signal?.throwIfAborted();
+              const lastPage = Math.min(
+                pageRange.lastPage,
+                pdfPageCount ?? pageRange.lastPage,
+              );
+              if (render.images.length !== lastPage - startPage + 1) {
+                const message =
+                  'The requested PDF page range was not fully rendered. Use a range within the document.';
+                return {
+                  llmContent: message,
+                  returnDisplay: message,
+                  error: message,
+                  errorType: ToolErrorType.READ_CONTENT_FAILURE,
+                };
+              }
+            }
             const parts = toImageParts(render.images, startPage);
+            if (
+              pageRange &&
+              pdfPageCount != null &&
+              pageRange.lastPage > pdfPageCount
+            ) {
+              parts.push({
+                text: `[The document has ${pdfPageCount} pages; rendered pages ${startPage}-${startPage + render.images.length - 1}.]`,
+              });
+            }
             // Never drop pages silently. Two ways a no-page-range read can be
             // partial: the byte cap kicked in, or the render filled the page
             // ceiling (the page count was unknown/underestimated upstream, so
@@ -2086,6 +2177,7 @@ export async function processSingleFileContent(
         if (renderForBridge && (!pdfResult.success || singlePageTextOverflow)) {
           if (pageRange && pdfPageCount === undefined) {
             pdfPageCount = await getPDFPageCount(pdfSource, signal);
+            signal?.throwIfAborted();
           }
           const firstPage = pageRange?.firstPage ?? 1;
           const requestedLastPage =
@@ -2106,11 +2198,24 @@ export async function processSingleFileContent(
                   firstPage,
                   lastPage,
                   signal,
+                  ...(mediaLimits && {
+                    maxTotalBase64Bytes: mediaLimits.maxInlineMediaBase64Bytes,
+                  }),
                 })
               : {
                   success: false as const,
                   error: 'The requested page range is outside the PDF.',
                 };
+          signal?.throwIfAborted();
+          if (
+            (!render.success && 'tooLarge' in render && render.tooLarge) ||
+            (mediaLimits &&
+              pageRange &&
+              render.success &&
+              render.bytesTruncated)
+          ) {
+            return mediaTooLarge(!render.success ? render.error : undefined);
+          }
           if (render.success && render.images.length > 0) {
             const parts = toImageParts(render.images, firstPage);
             const renderedLastPage = firstPage + render.images.length - 1;

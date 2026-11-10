@@ -56,6 +56,9 @@ setTimeout(() => {}, 120_000);`;
       await expect(
         InteractiveSession.start({
           command: { bin: process.execPath, args: ['-e', stub] },
+          onStartupFailure: () => {
+            throw new Error('capture failed');
+          },
         }).then((s) => {
           session = s;
         }),
@@ -98,6 +101,29 @@ setTimeout(() => {}, 120_000);`;
     await expect(attempt).rejects.toThrow('CLI exited during startup (code 3');
     await expect(attempt).rejects.toThrow('BOOTCRASH_MARKER');
     expect(Date.now() - startedAt).toBeLessThan(30_000);
+  });
+
+  it('preserves raw startup output beyond the error tail', async () => {
+    let captured = '';
+    const boot = '\x1b[31mBOOT_PREFIX\n' + 'boot detail\n'.repeat(100);
+    const attempt = InteractiveSession.start({
+      command: {
+        bin: process.execPath,
+        args: [
+          '-e',
+          `process.stdout.write(${JSON.stringify(boot)} + '\\x1b[0mBOOT_END');
+setTimeout(() => process.exit(3), 500);`,
+        ],
+      },
+      onStartupFailure: (output) => {
+        captured = output;
+      },
+    });
+    await expect(attempt).rejects.toThrow('CLI exited during startup (code 3');
+    expect(captured).toContain('\x1b[31mBOOT_PREFIX');
+    expect(captured).toContain('\x1b[0mBOOT_END');
+    expect(captured.length).toBeGreaterThan(500);
+    await expect(attempt).rejects.not.toThrow('BOOT_PREFIX');
   });
 
   it('words an immediate post-prompt death from the captured output', async () => {

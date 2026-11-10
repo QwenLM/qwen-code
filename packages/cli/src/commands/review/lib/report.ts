@@ -23,6 +23,13 @@ import { buildSelectionIdentity, type SelectionIdentity } from './selection.js';
 
 export interface FileMetric {
   path: string;
+  /**
+   * The old path of a rename (`DiffFile.renameFrom`) — absent otherwise, so
+   * a plan without renames pays nothing for it. `build-test` reads it: what
+   * imported the old path is no longer in any import graph, so a rename
+   * runs every suite whole rather than only the tests related to the diff.
+   */
+  renameFrom?: string;
   kind: PathKind;
   /**
    * New-side line ranges this file's hunks occupy, 1-based inclusive.
@@ -196,6 +203,7 @@ export function buildPlanReport(
     });
     return {
       path: f.path,
+      ...(f.renameFrom !== undefined ? { renameFrom: f.renameFrom } : {}),
       kind: f.kind,
       hunks: f.hunks
         .filter((h) => h.newCount > 0)

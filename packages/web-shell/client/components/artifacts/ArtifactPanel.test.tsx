@@ -14,6 +14,8 @@ import type {
   DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import { DaemonAvailability } from '../../daemon/availability.js';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
 import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
@@ -3614,6 +3616,108 @@ describe('ArtifactPanel add menu', () => {
 });
 
 describe('ArtifactPanel review downloads', () => {
+  it.each([
+    { name: 'standalone', workspaceCwd: undefined, workspaceId: undefined },
+    {
+      name: 'unregistered conversation directory',
+      workspaceCwd: '/private-conversation',
+      workspaceId: undefined,
+    },
+    {
+      name: 'stale workspace identity',
+      workspaceCwd: '/primary',
+      workspaceId: 'removed-id',
+    },
+    {
+      name: 'untrusted workspace',
+      workspaceCwd: '/primary',
+      workspaceId: 'primary-id',
+    },
+  ])(
+    'shows recorded diffs without file access for $name',
+    async ({ name, workspaceCwd, workspaceId }) => {
+      if (name === 'untrusted workspace') {
+        mockWorkspace.capabilities.workspaces[0].trusted = false;
+      }
+      const changes = [
+        {
+          path: 'preview.html',
+          status: 'created' as const,
+          toolCallId: 'write-preview',
+          isArtifact: false,
+          diffs: [
+            {
+              oldText: '',
+              newText: '<h1>Standalone change</h1>',
+              fullContent: true,
+            },
+          ],
+        },
+      ];
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const onOpenFilePreview = vi.fn();
+      const renderPanel = () => (
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes: name === 'standalone' ? undefined : changes,
+                workspaceCwd,
+                workspaceId,
+              },
+            ]}
+            activeTabId="review"
+            workspaceCwd="/primary"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={onOpenFilePreview}
+            onClose={() => {}}
+          />
+        </I18nProvider>
+      );
+
+      act(() => root.render(renderPanel()));
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="preview.html"]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle!.click());
+
+      await vi.waitFor(() =>
+        expect(container.querySelector('.cm-content')?.textContent).toContain(
+          '<h1>Standalone change</h1>',
+        ),
+      );
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(
+        container.querySelector('button[title="Preview preview.html"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('button[title="Download preview.html"]'),
+      ).toBeNull();
+      expect(onOpenFilePreview).not.toHaveBeenCalled();
+      expect(mockWorkspace.client.workspaceByCwd).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+
+      changes[0].diffs = [];
+      act(() => root.render(renderPanel()));
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'This workspace may have been removed or the link is no longer valid.',
+      );
+    },
+  );
+
   it('renders a saved unified patch without full file bodies', () => {
     const fileDiff =
       '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';
@@ -4265,6 +4369,8 @@ describe('ArtifactPanel fullscreen toggle', () => {
   function renderPanel(props: {
     fullscreen?: boolean;
     onToggleFullscreen?: () => void;
+    variant?: 'docked' | 'drawer';
+    availability?: DaemonAvailability;
   }) {
     const task: DaemonSessionMonitorTaskStatus = {
       kind: 'monitor',
@@ -4285,32 +4391,88 @@ describe('ArtifactPanel fullscreen toggle', () => {
     mounted.push({ root, container });
     act(() => {
       root.render(
-        <I18nProvider language="en">
-          <ArtifactPanel
-            artifacts={[]}
-            tabs={[
-              {
-                id: 'monitor:monitor-1',
-                kind: 'monitor',
-                title: task.description,
-                task,
-              },
-            ]}
-            activeTabId="monitor:monitor-1"
-            reviewChanges={[]}
-            selectedReviewPath={null}
-            onSelectTab={() => {}}
-            onCloseTab={() => {}}
-            onOpenFilePreview={() => {}}
-            onClose={() => {}}
-            fullscreen={props.fullscreen}
-            onToggleFullscreen={props.onToggleFullscreen}
-          />
-        </I18nProvider>,
+        <DaemonAvailabilityContext.Provider value={props.availability}>
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'monitor:monitor-1',
+                  kind: 'monitor',
+                  title: task.description,
+                  task,
+                },
+              ]}
+              activeTabId="monitor:monitor-1"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+              fullscreen={props.fullscreen}
+              variant={props.variant}
+              onToggleFullscreen={props.onToggleFullscreen}
+            />
+          </I18nProvider>
+        </DaemonAvailabilityContext.Provider>,
       );
     });
     return container;
   }
+
+  it.each([
+    ['docked', 'unavailable'],
+    ['drawer', 'unavailable'],
+    ['docked', 'auth-required'],
+    ['drawer', 'auth-required'],
+  ] as const)(
+    'keeps %s connection retry inside the panel when %s',
+    async (variant, state) => {
+      const native = vi.fn(async () => {
+        if (state === 'unavailable') throw new TypeError('offline');
+        return new Response(null, { status: 401 });
+      });
+      const availability = new DaemonAvailability(
+        'https://panel.example',
+        undefined,
+        native,
+      );
+      try {
+        await availability.check();
+        const container = renderPanel({
+          fullscreen: variant === 'docked',
+          variant,
+          availability,
+        });
+        const panel = container.querySelector('aside')!;
+        const banner = panel.querySelector(
+          '[data-testid="daemon-connection-banner"]',
+        );
+        expect(banner).not.toBeNull();
+        expect(banner?.closest('[hidden], [aria-hidden="true"]')).toBeNull();
+        native.mockImplementation(async (input?: unknown) =>
+          Response.json(
+            String(input).endsWith('/health')
+              ? { status: 'ok' }
+              : { features: [] },
+          ),
+        );
+        const retry = Array.from(banner!.querySelectorAll('button')).find(
+          (button) => button.textContent === 'Retry connection',
+        )!;
+        retry.focus();
+        expect(document.activeElement).toBe(retry);
+        await act(async () => retry.click());
+        expect(availability.getSnapshot()).toBe('available');
+        expect(
+          panel.querySelector('[data-testid="daemon-connection-banner"]'),
+        ).toBeNull();
+      } finally {
+        act(() => availability.dispose());
+      }
+    },
+  );
 
   it('shows a fullscreen toggle and reports clicks', () => {
     const onToggleFullscreen = vi.fn();

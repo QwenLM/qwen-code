@@ -87,11 +87,17 @@ matches its own route lines.
   is mounted with no legacy tag and no exclusion appears in the column, which
   is the signal #15075 asked for. The remaining labels are pinned in
   `MANAGED_ONLY_REPORTED`, so an addition fails the suite until someone
-  records it. The column currently reports three labels, each a public and a
-  WebShell route pair: `SESSION_CONTEXT_COMPRESSION` compresses a Session's
-  context, `SESSION_RECOVERY_QUERY` reads its recovery state, and
-  `SESSION_RECOVERY_RECHECK` re-runs its recovery checks. The daemon
-  advertises no tag for any of the three.
+  records it. The column currently reports fifteen labels: nine `EXTENSION_*`
+  labels describe package publication, archive access, settings, operation
+  queries and Session configuration. Their Session-pinned contract differs
+  from the daemon's extension APIs; recording them does not establish legacy
+  API compatibility or platform acceptance. `SESSION_CONTEXT_COMPRESSION`
+  compresses a Session's context, `SESSION_RECOVERY_QUERY` reads its recovery
+  state, and `SESSION_RECOVERY_RECHECK` re-runs its recovery checks. `SESSION_WORKTREE`
+  manages Session worktrees. `MEMORY_STORE_CREATE` and `MEMORY_STORE_LIST` expose
+  personal Stores with immutable Session binding, which differs from the daemon's
+  Workspace memory-file API. The writer-only `STORE_MEMORY_QUERY` stays excluded
+  from client capabilities.
 
 ## Acceptance
 

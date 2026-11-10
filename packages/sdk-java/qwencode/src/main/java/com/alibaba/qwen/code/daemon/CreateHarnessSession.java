@@ -15,13 +15,17 @@ public final class CreateHarnessSession {
     private final Long approvalTimeoutMs;
     private final Long captureBytes;
     private final Map<String, Object> agentDefinition;
+    private final String modelConfigDigest;
+    private final String memoryStoreId;
     private final Map<String, Object> sessionSkillsRef;
+    private final Map<String, Object> initialSelection;
     private final List<Map<String, Object>> mcpServers;
     private final Map<String, Object> hookCatalog;
     private final Map<String, Object> lineage;
     private final boolean suppressChildAgents;
     private final int publicChildAgentsVersion;
     private final Map<String, Object> publicChildModelRoute;
+    private final Map<String, Object> publicChildExtensionAgent;
     private final boolean childWorkspaces;
     private final boolean foregroundOnly;
     private final boolean childSnapshots;
@@ -36,13 +40,23 @@ public final class CreateHarnessSession {
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.captureBytes = builder.captureBytes;
         this.agentDefinition = builder.agentDefinition;
+        this.modelConfigDigest = builder.modelConfigDigest;
+        this.memoryStoreId = builder.memoryStoreId;
+        if (memoryStoreId != null && managedSessionStore == null) {
+            throw new IllegalArgumentException("Personal memory requires a Managed Session Store");
+        }
+        if (modelConfigDigest != null && managedSessionStore == null) {
+            throw new IllegalArgumentException("Session model configuration requires a Managed Session Store");
+        }
         this.sessionSkillsRef = builder.sessionSkillsRef;
+        this.initialSelection = builder.initialSelection;
         this.mcpServers = builder.mcpServers;
         this.hookCatalog = builder.hookCatalog;
         this.lineage = builder.lineage;
         this.suppressChildAgents = builder.suppressChildAgents;
         this.publicChildAgentsVersion = builder.publicChildAgentsVersion;
         this.publicChildModelRoute = builder.publicChildModelRoute;
+        this.publicChildExtensionAgent = builder.publicChildExtensionAgent;
         this.childWorkspaces = builder.childWorkspaces;
         this.foregroundOnly = builder.foregroundOnly;
         this.childSnapshots = builder.childWorkspaces && builder.childSnapshots;
@@ -72,6 +86,9 @@ public final class CreateHarnessSession {
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
         }
+        if (publicChildExtensionAgent != null) {
+            result.put("publicChildExtensionAgent", publicChildExtensionAgent);
+        }
         if (publicChildModelRoute != null) {
             result.put("publicChildModelRoute", publicChildModelRoute);
         }
@@ -89,6 +106,15 @@ public final class CreateHarnessSession {
         }
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
+        }
+        if (modelConfigDigest != null) {
+            result.put("modelConfigDigest", modelConfigDigest);
+        }
+        if (memoryStoreId != null) {
+            result.put("memoryStoreId", memoryStoreId);
+        }
+        if (initialSelection != null) {
+            result.put("initialSelection", initialSelection);
         }
         if (sessionSkillsRef != null) {
             result.put("sessionSkillsRef", sessionSkillsRef);
@@ -123,13 +149,17 @@ public final class CreateHarnessSession {
         private Long approvalTimeoutMs;
         private Long captureBytes;
         private Map<String, Object> agentDefinition;
+        private String modelConfigDigest;
+        private String memoryStoreId;
         private Map<String, Object> sessionSkillsRef;
+        private Map<String, Object> initialSelection;
         private List<Map<String, Object>> mcpServers;
         private Map<String, Object> hookCatalog;
         private Map<String, Object> lineage;
         private boolean suppressChildAgents;
         private int publicChildAgentsVersion;
         private Map<String, Object> publicChildModelRoute;
+        private Map<String, Object> publicChildExtensionAgent;
         private boolean childWorkspaces;
         private boolean foregroundOnly;
         private boolean childSnapshots;
@@ -164,6 +194,19 @@ public final class CreateHarnessSession {
 
         public Builder agentDefinition(Map<String, Object> value) {
             this.agentDefinition = Map.copyOf(value);
+            return this;
+        }
+
+        public Builder memoryStoreId(String value) {
+            if (value != null && !value.matches("[A-Za-z0-9_-]{1,128}")) {
+                throw new IllegalArgumentException("Invalid memoryStoreId");
+            }
+            this.memoryStoreId = value;
+            return this;
+        }
+
+        public Builder modelConfigDigest(String value) {
+            this.modelConfigDigest = value == null ? null : HostedHarnessClient.requireDigest(value, "modelConfigDigest");
             return this;
         }
 
@@ -230,6 +273,11 @@ public final class CreateHarnessSession {
             return new CreateHarnessSession(this);
         }
 
+        public Builder initialSelection(Map<String, Object> value) {
+            this.initialSelection = value == null ? null : Map.copyOf(value);
+            return this;
+        }
+
         public Builder sessionSkillsRef(Map<String, Object> value) {
             this.sessionSkillsRef = value == null ? null : Map.copyOf(value);
             return this;
@@ -237,6 +285,11 @@ public final class CreateHarnessSession {
 
         public Builder toolProfile(String toolProfile) {
             this.toolProfile = toolProfile;
+            return this;
+        }
+
+        public Builder publicChildExtensionAgent(Map<String, Object> value) {
+            this.publicChildExtensionAgent = value == null ? null : Map.copyOf(value);
             return this;
         }
 

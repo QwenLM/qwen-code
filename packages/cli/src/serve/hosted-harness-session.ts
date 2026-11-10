@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import {
+  enableManagedExecutionDiagnostics,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import {
   parsePublicChildModelRoute,
+  type PublicChildExtensionAgent,
   type PublicChildModelRoute,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 
@@ -13,6 +19,13 @@ import {
   HostedContextCompression,
   HostedCompressionRefusal,
 } from './hosted-context-compression.js';
+import { extensionInstructionText } from './hosted-extension-tool-context.js';
+import { parseHostedTodoState } from './hosted-todo-session.js';
+import {
+  parseHostedModelConfig,
+  parseHostedModelConfigDigest,
+  type HostedModelConfigReader,
+} from './hosted-model-config.js';
 
 import {
   parseHostedApprovalSelection,
@@ -50,7 +63,16 @@ import {
 import {
   reconcileHostedTurnCleanup,
   hasHostedCleanupDebt,
+  hasBlockingHostedCleanupDebt,
+  oweHostedTurnCleanup,
+  type HostedCleanupHold,
+  type HostedCleanupResult,
 } from './hosted-turn-cleanup.js';
+import {
+  acquireHostedQuestionRuntime,
+  questionWaitDefinitionAdmitted,
+  waitForHostedQuestion,
+} from './hosted-question-wait.js';
 import { inspectHostedRecovery } from './hosted-recovery-status.js';
 import {
   HostedHarnessInstance,
@@ -68,6 +90,7 @@ import {
   parseHostedActionOptions,
   hostedLiveApprovalPoll,
 } from './hosted-tool-approval.js';
+import { readHostedQuestionDecision } from './hosted-user-question.js';
 
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
@@ -92,6 +115,25 @@ import {
   readHostedMcpSettings,
   validateHostedMcpHistory,
 } from './hosted-mcp-settings.js';
+import { isManagedExtensionConfig } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
+import {
+  parseManagedExtensionApplyCommand,
+  type ManagedExtensionApplyCommand,
+  parseManagedExtensionEffectiveBundle,
+  type ManagedExtensionEffectiveBundle,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import { readManagedExtensionContributions } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-contributions.js';
+import {
+  parseHostedChildExtensionAgent,
+  hostedChildExtensionApplyCommand,
+  type HostedChildExtensionAgent,
+} from './hosted-extension-agent.js';
+import {
+  HostedExtensionSession,
+  HostedExtensionRecoveryRequired,
+  HostedExtensionRevisionConflict,
+  type HostedExtensionPackage,
+} from './hosted-extension-session.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -105,6 +147,11 @@ import {
   harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import {
+  HostedMemorySession,
+  findHostedMemoryResults,
+  parseHostedMemoryStoreId,
+} from './hosted-memory-session.js';
 import { collectNestedResourceRefs } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
@@ -135,7 +182,14 @@ import {
   parseToolResultManifestBytes,
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
+  MANAGED_MESSAGE_KIND,
+  readManagedMessageBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
+  HostedRestoreKeptBytes,
+  readerWithVerified,
+} from './hosted-restore-kept-bytes.js';
 import {
   isChildSessionRun,
   parseChildRun,
@@ -161,6 +215,7 @@ import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   isChildNotificationSource,
+  managedSessionDurableRefsEqual,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionCommitRejectedError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -305,6 +360,7 @@ import {
   answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   fillParkedRoundCommandGaps,
+  HostedChildLedgerRecoveryRequiredError,
   HostedRecoveryQuiescingError,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
@@ -322,6 +378,7 @@ import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/service
 import {
   hostedShellLaneAttachesChildAgents,
   isHostedWorkspaceReadProfile,
+  HOSTED_WORKSPACE_FILE_PROFILE_V3,
 } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
@@ -376,7 +433,11 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-definition',
   'managed-session_metadata',
   'managed-config_install',
+  'managed-extension-config-bundle',
+  'managed-extension-contributions',
+  'managed-extension-root',
   'managed-file_history',
+  'managed-todo_state',
   'managed-tool-outcome',
   'managed-tool-result-manifest',
   'managed-checkpoint',
@@ -489,9 +550,106 @@ function describeManagedError(cause: unknown): string {
  * Lifts a Session's recovery block. The named reason belongs to the block,
  * so it is cleared with it here rather than by hand at each lift site.
  */
+function selectExtensionCatalog(
+  session: HostedSession,
+  bundle: ManagedExtensionEffectiveBundle,
+  packages: readonly HostedExtensionPackage[],
+): void {
+  session.baseSkills ??= session.skills ?? new HostedSkillCatalog([]);
+  session.skills = extensionSkillCatalog(session.baseSkills, packages);
+  session.extensionBundle = bundle;
+  session.extensionPackages = packages;
+  session.extensionContext = packages
+    .flatMap((entry) =>
+      entry.contributions.context.map(
+        (context) =>
+          `<extension_context source="extension://${entry.extensionId}/${context.path}">\n${extensionInstructionText(context.body, entry.extensionId)}\n</extension_context>`,
+      ),
+    )
+    .join('\n\n');
+}
+
+function extensionSkillCatalog(
+  base: HostedSkillCatalog | undefined,
+  packages: readonly HostedExtensionPackage[],
+): HostedSkillCatalog {
+  const agents = packages.flatMap((entry) =>
+    entry.contributions.agents.map((agent) => agent.name),
+  );
+  if (new Set(agents).size !== agents.length)
+    throw new Error('Extension agent names conflict.');
+  return new HostedSkillCatalog(
+    [
+      ...(base?.entries() ?? []),
+      ...packages.flatMap((entry) =>
+        entry.contributions.skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          body: extensionInstructionText(skill.body, entry.extensionId),
+          model_invocable: skill.model_invocable,
+          user_invocable: skill.user_invocable,
+          asset_directory: `extension://${entry.extensionId}/${skill.assetDirectory.replace(/\/$/u, '')}/`,
+        })),
+      ),
+    ],
+    packages.flatMap((entry) =>
+      entry.contributions.commands.map((command) => ({
+        ...command,
+        extensionId: entry.extensionId,
+      })),
+    ),
+  );
+}
+
+function extensionAgentsOf(session: HostedSession) {
+  const bundleRef = session.extensions?.activeBundleRef;
+  if (!bundleRef || !session.extensionBundle) return [];
+  return (session.extensionPackages ?? []).flatMap((entry) => {
+    const member = session.extensionBundle!.packages.find(
+      (member) => member.pin.extensionId === entry.extensionId,
+    )!;
+    return entry.contributions.agents.map((agent) => ({
+      name: agent.name,
+      ...(agent.model ? { model: agent.model } : {}),
+      ...(agent.tools ? { tools: agent.tools } : {}),
+      ...(agent.disallowedTools
+        ? { disallowedTools: agent.disallowedTools }
+        : {}),
+      descriptor: {
+        configRevision: session.extensionBundle!.configRevision,
+        bundleRef,
+        pin: member.pin,
+        contributionsRef: member.contributionsRef,
+        agentName: agent.name,
+        toolNames: [],
+      },
+    }));
+  });
+}
+
+async function extensionBootstrapIncomplete(
+  session: HostedSession,
+  manager: HostedExtensionSession,
+): Promise<boolean> {
+  if (!session.initialSelection && !session.publicChildExtensionAgent)
+    return false;
+  const active = await manager.active();
+  return (
+    !manager.activeBundleRef ||
+    !active ||
+    active.configRevision < 1 ||
+    (!!session.publicChildExtensionAgent &&
+      !isDeepStrictEqual(
+        active.packages.map((entry) => entry.pin),
+        session.extensionAgentPins,
+      ))
+  );
+}
+
 function liftRecoveryBlock(session: HostedSession): void {
   session.blocked = false;
   session.recoveryReason = undefined;
+  session.recoveryCancelPromptId = undefined;
   session.cleanupBlocked = false;
 }
 
@@ -530,8 +688,23 @@ interface HostedSession {
   storeBaseUrl: string;
   definition: Record<string, unknown> | null;
   agentDefinition?: HostedAgentDefinition;
+  modelConfigDigest?: string;
+  modelConfig?: HostedModelConfigReader;
+  memoryStoreId?: string;
+  memory?: HostedMemorySession;
   sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
+  baseSkills?: HostedSkillCatalog;
+  extensions?: HostedExtensionSession;
+  extensionBundle?: ManagedExtensionEffectiveBundle;
+  extensionPackages?: readonly HostedExtensionPackage[];
+  extensionContext?: string;
+  publicChildExtensionAgent?: HostedChildExtensionAgent;
+  initialSelection?: ManagedExtensionApplyCommand;
+  extensionBootstrapPending?: boolean;
+  extensionAgentPins?: ManagedExtensionApplyCommand['extensions'];
+  extensionAgentTools?: readonly string[];
+  extensionAgentPrompt?: string;
   clientId: string;
   cwd: string;
   streams: Set<() => void>;
@@ -543,6 +716,8 @@ interface HostedSession {
    * until the block clears. Only `managed_session_store_unavailable` goes
    * here; other recovery blocks keep naming themselves at the caller. */
   recoveryReason?: string;
+  /** The one A6 block whose pre-aborted managed cancel can still settle. */
+  recoveryCancelPromptId?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   foregroundOnly?: boolean;
   publicChildAgentsVersion?: 1;
@@ -606,6 +781,8 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  cleanupHolds?: Map<string, HostedCleanupHold>;
+  cleanupRetry?: Promise<void>;
   recoveryCleanupOnly?: boolean;
   lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
@@ -665,17 +842,25 @@ async function hostedApprovalForTurn(
   promptId: string,
 ): Promise<HostedApprovalTurnOptions | undefined> {
   if (!session.approval) return undefined;
+  const live =
+    session.stores &&
+    !session.definition?.['lineage'] &&
+    [
+      'hosted-workspace-files/1',
+      'hosted-workspace-shell/1',
+      'hosted-workspace-files/3',
+    ].includes(session.toolProfile ?? '');
+  const admission = await readHostedTurnApprovalSelection(
+    session.managed,
+    promptId,
+    live ? () => session.stores!.approvalSelection() : undefined,
+  );
   const settings = (await hostedTurnApproval(
     session.managed,
     promptId,
     session.approval,
+    admission,
   ))!;
-  const live =
-    session.stores &&
-    !session.definition?.['lineage'] &&
-    ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-      session.toolProfile ?? '',
-    );
   return {
     settings,
     waiters: session.waiters,
@@ -684,7 +869,7 @@ async function hostedApprovalForTurn(
       ? {
           readSettings: createHostedLiveApprovalReader(
             settings,
-            await readHostedTurnApprovalSelection(session.managed, promptId),
+            admission,
             () => session.stores!.approvalSelection(),
           ),
         }
@@ -742,6 +927,7 @@ function compressionFor(session: HostedSession): HostedContextCompression {
     session: session.managed,
     cwd: session.cwd,
     agentDefinition: session.agentDefinition,
+    modelConfig: session.modelConfig,
     instructions: async () =>
       [
         await readHostedAgentInstructions(
@@ -800,6 +986,7 @@ async function runHostedLifecycleHook(
   event: HookEventName,
   operationId: string,
   fields: Record<string, unknown>,
+  kind?: 'legacy-close',
 ): Promise<unknown> {
   if (!session.hooks) return undefined;
   await session.hooks.ensureReady();
@@ -824,6 +1011,9 @@ async function runHostedLifecycleHook(
           cwd: session.cwd,
           signal,
           scope,
+          modelConfig: session.modelConfig
+            ? () => session.modelConfig!(kind)
+            : undefined,
         },
         run,
       );
@@ -1077,6 +1267,30 @@ function record(
   };
 }
 
+async function readHostedClassifierUserText(
+  session: HostedSession,
+): Promise<ReadonlyMap<string, string>> {
+  const accepted = session.managed.authority
+    .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+    .filter(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['source'] === 'hosted-harness',
+    )
+    .slice(-40);
+  return new Map(
+    await Promise.all(
+      accepted.map(async (event) => {
+        const promptId = String(event.payload['inputId']);
+        return [
+          promptId,
+          (await readHostedInput(session.managed, promptId, '')).text,
+        ] as const;
+      }),
+    ),
+  );
+}
+
 /**
  * The child orchestration a Turn of this Session gets, the same for an
  * ordinary Turn and a recovered one: its funnel, its depth, whether the
@@ -1094,6 +1308,7 @@ function childAgentsOf(session: HostedSession) {
         promptId: string,
         model: string,
         route: PublicChildModelRoute,
+        extensionAgent?: PublicChildExtensionAgent,
       ) => {
         const selection = parseHostedApprovalSelection(
           await session.stores!.approvalSelection(),
@@ -1117,9 +1332,11 @@ function childAgentsOf(session: HostedSession) {
           promptId,
         );
         return {
-          version: 1 as const,
+          version: extensionAgent ? (2 as const) : (1 as const),
+          ...(extensionAgent ? { extensionAgent } : {}),
           sourcePromptId: promptId,
-          approvalMode: selection.mode,
+          approvalMode:
+            selection.mode === 'auto' ? ('default' as const) : selection.mode,
           approvalRevision: selection.revision,
           modelId: model,
           modelRevision: modelSelection?.revision ?? 0,
@@ -2365,23 +2582,65 @@ function runSettleProjection(
     });
 }
 
+function retainHostedCleanupHolds(
+  session: HostedSession,
+  result: HostedCleanupResult | undefined,
+): void {
+  if (!result) return;
+  session.cleanupHolds ??= new Map();
+  for (const promptId of result.states.keys())
+    session.cleanupHolds.delete(promptId);
+  for (const [promptId, hold] of result.held) {
+    session.cleanupHolds.set(promptId, hold);
+    session.heldRuntimeTurns.add(hold.runtimeSessionId);
+  }
+}
+
 async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
+  drain = false,
 ): Promise<void> {
-  if (unsettledPromptId(session)) return;
+  if (!drain && unsettledPromptId(session)) return;
+  // A load can overlap the wake pump's retry. Re-read the debt with each
+  // caller's authority after the previous attempt settles.
+  const retry = (session.cleanupRetry ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(async () => {
+      if (!drain && unsettledPromptId(session)) return;
+      try {
+        session.cleanupHolds?.clear();
+        if (hasHostedCleanupDebt(session.managed)) {
+          // Unsettled wake turns need their recovery pump to commit the terminal
+          // record before reconciliation can release their Runtime.
+          retainHostedCleanupHolds(
+            session,
+            await reconcileHostedTurnCleanup(
+              session.managed,
+              options,
+              undefined,
+              drain,
+            ),
+          );
+        }
+        if (session.cleanupBlocked) liftRecoveryBlock(session);
+        session.cleanupBlocked = false;
+      } catch (cause) {
+        if (!session.blocked) {
+          session.cleanupBlocked = true;
+          session.blocked = true;
+          session.monitorWake?.kick();
+        }
+        throw cause;
+      }
+    });
+  session.cleanupRetry = retry;
   try {
-    if (hasHostedCleanupDebt(session.managed))
-      await reconcileHostedTurnCleanup(session.managed, options);
-    if (session.cleanupBlocked) liftRecoveryBlock(session);
-    session.cleanupBlocked = false;
-  } catch (cause) {
-    if (!session.blocked) {
-      session.cleanupBlocked = true;
-      session.blocked = true;
-      session.monitorWake?.kick();
+    await retry;
+  } finally {
+    if (session.cleanupRetry === retry) {
+      session.cleanupRetry = undefined;
     }
-    throw cause;
   }
 }
 
@@ -2446,8 +2705,52 @@ async function verifyWorkspaceRestore(
   toolResults: DurableToolResultResourceStore,
   throughSequence: number,
 ): Promise<boolean> {
-  const { authority, resources, sink } = session.managed;
-  const segmentStore = new ResourceToolResultSegmentStore(toolResults);
+  const { incomplete, messages } = await checkWorkspaceRestore(
+    session,
+    preverified,
+    toolResults,
+    throughSequence,
+  );
+  // Every check passed. The message bodies the checks kept go to the
+  // projection's cache, so projecting the history does not read them again.
+  for (const { ref, bytes } of messages.entries())
+    session.managed.sink.rememberMessageBody(ref, bytes);
+  messages.clear();
+  await session.managed.sink.project(throughSequence);
+  return incomplete;
+}
+
+/**
+ * The checks of `verifyWorkspaceRestore`. Returns whether a publication is
+ * incomplete, and the verified message bodies it kept for the projection.
+ * Everything else the checks hold, the kept manifests among it, is released
+ * when they return, before the projection fills the shared body cache.
+ */
+async function checkWorkspaceRestore(
+  session: HostedSession,
+  preverified: ReadonlyMap<string, ManagedSessionDurableRef>,
+  toolResults: DurableToolResultResourceStore,
+  throughSequence: number,
+): Promise<{ incomplete: boolean; messages: HostedRestoreKeptBytes }> {
+  const { authority, resources } = session.managed;
+  // Checkpoints are parsed from the bytes their verification read. The
+  // verified bytes of manifests and of message bodies are kept, each within
+  // its own budget: the manifests serve the manifest loop and the manifest
+  // reads of the content checks below, and the message bodies are returned
+  // for the projection.
+  const keptManifests = new HostedRestoreKeptBytes();
+  const keptMessages = new HostedRestoreKeptBytes();
+  const segmentStore = new ResourceToolResultSegmentStore({
+    // The checks only read through it.
+    publish: () =>
+      Promise.reject(new Error('The restore verification publishes nothing.')),
+    read: (ref) => {
+      const bytes = keptManifests.get(ref);
+      return bytes !== undefined
+        ? Promise.resolve(bytes)
+        : toolResults.read(ref);
+    },
+  });
   const manifests = new Map<string, ManagedSessionDurableRef>();
   // What opening the Session verified is checked for conflicting references
   // but not read again, except the kinds this verification descends into,
@@ -2466,12 +2769,7 @@ async function verifyWorkspaceRestore(
   function readRef(ref: ManagedSessionDurableRef): Promise<void> {
     const previous = verified.get(ref.resourceId);
     if (previous) {
-      if (
-        previous.ref.kind !== ref.kind ||
-        previous.ref.schemaVersion !== ref.schemaVersion ||
-        previous.ref.byteLength !== ref.byteLength ||
-        previous.ref.digest !== ref.digest
-      )
+      if (!managedSessionDurableRefsEqual(previous.ref, ref))
         return Promise.reject(
           new Error('Hosted resource references conflict.'),
         );
@@ -2483,8 +2781,24 @@ async function verifyWorkspaceRestore(
   }
   async function verifyRef(ref: ManagedSessionDurableRef): Promise<void> {
     const bytes = await resources.read(ref);
-    if (ref.kind === 'managed-tool-result-manifest')
+    if (ref.kind === MANAGED_MESSAGE_KIND) keptMessages.keep(ref, bytes);
+    if (ref.kind === 'managed-tool-result-manifest') {
       manifests.set(ref.resourceId, ref);
+      keptManifests.keep(ref, bytes);
+    }
+    if (ref.kind === 'managed-todo_state') {
+      parseHostedTodoState(bytes);
+      const previous = object(JSON.parse(bytes.toString('utf8')))?.[
+        'previousRecordRef'
+      ];
+      if (previous)
+        await readRef(
+          assertManagedSessionDurableRef(
+            previous as ManagedSessionJsonValue,
+            'previous Todo state',
+          ),
+        );
+    }
     if (
       ref.kind === 'managed-session_metadata' ||
       ref.kind === 'managed-file_history'
@@ -2524,6 +2838,7 @@ async function verifyWorkspaceRestore(
     }
     if (ref.kind === 'managed-definition') {
       const definition = object(JSON.parse(bytes.toString('utf8')));
+      parseHostedModelConfigDigest(definition?.['modelConfigDigest']);
       const sessionSkills = parseSessionSkillsRef(
         definition?.['sessionSkillsRef'],
       );
@@ -2552,7 +2867,12 @@ async function verifyWorkspaceRestore(
         );
     }
     if (ref.kind === 'managed-checkpoint') {
-      const checkpoint = await readHarnessCheckpoint(resources, ref);
+      // The checkpoint itself comes from the bytes just read; only its
+      // history pages, if any, are read through the Store.
+      const checkpoint = await readHarnessCheckpoint(
+        readerWithVerified(resources, ref, bytes),
+        ref,
+      );
       refs.push(...collectNestedResourceRefs(ref, bytes));
       if (
         checkpoint.resume.fileHistoryRef ||
@@ -2622,11 +2942,15 @@ async function verifyWorkspaceRestore(
       event.kind === 'domain.committed' &&
       ![
         'session_metadata',
-        ...(session.mcp ? ['config_install'] : []),
+        ...(session.mcp || session.extensions?.enabled
+          ? ['config_install']
+          : []),
+        ...(session.extensions?.enabled ? ['tool_stage'] : []),
         'hook_registration',
         'hook_execution',
         'file_history',
         'history_maintenance',
+        'todo_state',
         ...(session.mcp ? ['mcp_configuration', 'mcp_operation'] : []),
         // H3 families: an admitted child_run or monitor_run journal is
         // exactly what a workspace-profile load must restore, driven by
@@ -2782,7 +3106,9 @@ async function verifyWorkspaceRestore(
     Array<{ ref: ManagedSessionDurableRef; manifest: ToolResultManifest }>
   >();
   for (const ref of manifests.values()) {
-    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
+    const manifest = parseToolResultManifestBytes(
+      keptManifests.get(ref) ?? (await toolResults.read(ref)),
+    );
     if (detached.get(manifest.executionCallId) !== undefined) {
       let members = lineages.get(manifest.executionCallId);
       if (members === undefined) {
@@ -2833,8 +3159,7 @@ async function verifyWorkspaceRestore(
     if (terminal.manifest.captureStatus === 'complete')
       await verifyContents(terminal.ref, terminal.manifest);
   }
-  await sink.project(throughSequence);
-  return incomplete;
+  return { incomplete, messages: keptMessages };
 }
 
 /**
@@ -3052,6 +3377,38 @@ async function eventEnvelope(
               sourceEventEpoch: event.payload['sourceEventEpoch'],
             }
           : {}),
+      },
+    };
+  }
+  if (
+    event.kind === 'message.committed' &&
+    event.payload['role'] === 'user' &&
+    String(event.payload['messageId']).startsWith('umsg_')
+  ) {
+    const message = JSON.parse(
+      (
+        await readManagedMessageBody(
+          (ref) => session.managed.resources.read(ref),
+          event.payload['contentRef'] as unknown as ManagedSessionDurableRef,
+        )
+      ).toString('utf8'),
+    ) as ChatRecord;
+    if (message.subtype !== 'mid_turn_user_message')
+      return {
+        v: 1,
+        id: event.sequence,
+        type: 'managed_journal_event',
+        data: { sessionId },
+      };
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'user_message_consumed',
+      promptId: message.daemonPromptId,
+      data: {
+        sessionId,
+        messageId: message.uuid,
+        parts: message.message?.parts ?? [],
       },
     };
   }
@@ -3297,6 +3654,16 @@ async function startHostedRecoveredTurn(
   liftRecoveryBlock(session);
 }
 
+// E2E fault injection only (QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId>, set
+// by the packaged finished-before-commit arm on the generation that must crash):
+// once the main model stream's Finished marker is durable but before the assistant
+// output commits, hold the turn so the runner can SIGKILL this generation inside
+// that window. The next generation must reissue the saved request rather than
+// compensate an already-committed terminal. The flag is never set in production.
+const crashBeforeCommitSession =
+  process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT'];
+let crashBeforeCommitFired = false;
+
 async function executeHostedTurn(
   session: HostedSession,
   sessionId: string,
@@ -3317,6 +3684,7 @@ async function executeHostedTurn(
     ? { text, parts: [{ text }], attachments: [] }
     : await readHostedInput(session.managed, promptId, text);
   const harness = createManagedHarnessHandle(session.managed);
+  let questionRecoveryBroker: HostedWorkspaceBroker | undefined;
   if (resumeModel) {
     await harness.adoptPreparedContinuation(promptId, true);
     session.workspaceContext = resumeModel.workspaceContext ?? undefined;
@@ -3364,35 +3732,94 @@ async function executeHostedTurn(
   }
   if (resumeApproval) {
     const plan = resumeApproval.plan;
+    if (plan.runtime?.provisionerKind) {
+      if (
+        !brokerOptions ||
+        session.mcp ||
+        session.hooks ||
+        session.foregroundOnly ||
+        (await ensureMemberPlanMode(session)) ||
+        !questionWaitDefinitionAdmitted(
+          session.definition,
+          session.childDepth ?? 0,
+        )
+      )
+        throw new HostedToolRecoveryRequiredError(
+          'Original question Session is not qualified.',
+        );
+      questionRecoveryBroker = new HostedWorkspaceBroker(
+        brokerOptions,
+        authority.sessionHeader.sessionKey,
+        plan.runtime.runtimeSessionId,
+      );
+      questionRecoveryBroker.runtime = {
+        bindingId: plan.runtime.bindingId,
+        generation: plan.runtime.generation,
+        workspaceGeneration: plan.runtime.workspaceGeneration,
+      };
+    }
     if (plan.stage === 'approval') {
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
       const options = await readHostedActionOptions(session.managed, original);
       try {
         const liveApproval =
-          options.toolName !== 'exit_plan_mode'
+          options.toolName !== 'exit_plan_mode' &&
+          !options.requiresHumanDecision
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
         onResumeReady?.();
-        await session.waiters.wait(
-          actionId,
-          options.expiresAt,
-          abort.signal,
-          () =>
-            authority.action(actionId)?.state !== 'requested' ||
-            authority.writesStopped,
-          liveApproval?.readSettings
-            ? hostedLiveApprovalPoll(
-                session.managed,
-                session.waiters,
-                options,
-                liveApproval.readSettings,
-                abort.signal,
-                false,
-                liveApproval.isBlocked,
-              )
-            : undefined,
-        );
+        if (
+          plan.runtime &&
+          questionRecoveryBroker &&
+          original.state === 'requested' &&
+          !abort.signal.aborted &&
+          Date.now() < options.expiresAt
+        ) {
+          const history = await readHostedFileHistory(session.managed);
+          if (history?.pendingTurn || history?.pendingUndo)
+            throw new Error('Question file history is still owed.');
+          await oweHostedTurnCleanup(
+            session.managed,
+            promptId,
+            questionRecoveryBroker,
+          );
+          const acquired = await acquireHostedQuestionRuntime(
+            questionRecoveryBroker,
+            plan.runtime,
+            abort.signal,
+            options.expiresAt,
+          );
+          if (acquired)
+            await waitForHostedQuestion({
+              session: session.managed,
+              broker: questionRecoveryBroker,
+              brokerOptions: brokerOptions!,
+              waiters: session.waiters,
+              requestId: actionId,
+              expiresAt: options.expiresAt,
+              signal: abort.signal,
+            });
+        } else
+          await session.waiters.wait(
+            actionId,
+            options.expiresAt,
+            abort.signal,
+            () =>
+              authority.action(actionId)?.state !== 'requested' ||
+              authority.writesStopped,
+            liveApproval?.readSettings
+              ? hostedLiveApprovalPoll(
+                  session.managed,
+                  session.waiters,
+                  options,
+                  liveApproval.readSettings,
+                  abort.signal,
+                  false,
+                  liveApproval.isBlocked,
+                )
+              : undefined,
+          );
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
       }
@@ -3404,8 +3831,11 @@ async function executeHostedTurn(
         );
       const action = authority.action(actionId)!;
       await harness.resolveDurableWait();
+      if (action.state === 'decided' && options.v === 4)
+        await readHostedQuestionDecision(session.managed, action, options);
       if (
         action.state === 'decided' &&
+        options.v !== 4 &&
         !hostedActionAllowed(action, options.policyRevision) &&
         !hostedActionDenied(action, options.policyRevision)
       )
@@ -3416,9 +3846,11 @@ async function executeHostedTurn(
         index === plan.approvalOrdinal
           ? {
               ...item,
-              refusal: hostedActionAllowed(action, options.policyRevision)
-                ? null
-                : 'Original approval denied the call.',
+              refusal:
+                (options.v === 4 && action.state === 'decided') ||
+                hostedActionAllowed(action, options.policyRevision)
+                  ? null
+                  : 'Original approval denied the call.',
             }
           : item,
       );
@@ -3546,6 +3978,12 @@ async function executeHostedTurn(
                 : { message: { role: 'user', parts: promptInput.parts } }),
             },
           );
+          const initialQueued = await session.stores?.claimUserMessages(
+            promptId,
+            true,
+          );
+          if (initialQueued?.length)
+            inputRecord.uuid = `${initialQueued[0].id}:${initialQueued[0].revision}`;
           await session.managed.sink.write(inputRecord);
           parentUuid = inputRecord.uuid;
         }
@@ -3573,13 +4011,14 @@ async function executeHostedTurn(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant' && deltas) {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -3596,7 +4035,8 @@ async function executeHostedTurn(
         // runner's own dispatch, and the Session's broker-backed tool
         // surface belongs to model turns.
         toolTurn =
-          workflowLaunch === undefined && session.toolProfile && brokerOptions
+          workflowLaunch === undefined &&
+          ((session.toolProfile && brokerOptions) || session.memory)
             ? new HostedWorkspaceToolTurn(
                 brokerOptions,
                 session.managed,
@@ -3612,9 +4052,20 @@ async function executeHostedTurn(
                 session.shell,
                 await hostedApprovalForTurn(session, promptId),
                 {
+                  recoveryBroker: questionRecoveryBroker,
+                  memory: session.memory,
+                  memoryOnly: !session.toolProfile,
                   mcp: session.mcp,
                   hooks: session.hooks,
                   skills: session.skills,
+                  extensionConfig: session.extensionBundle
+                    ? {
+                        revision: session.extensionBundle.configRevision,
+                        packages: session.extensionBundle.packages,
+                      }
+                    : undefined,
+                  extensionAgents: extensionAgentsOf(session),
+                  allowedToolNames: session.extensionAgentTools,
                   profile: session.toolProfile,
                   foregroundOnly: session.foregroundOnly,
                   context: workspaceContext,
@@ -3622,6 +4073,7 @@ async function executeHostedTurn(
                   monitors: session.monitors,
                   backgroundLane: session.backgroundLane,
                   childAgents: childAgentsOf(session),
+                  childDepth: session.childDepth,
                   messages: session.messages,
                   teams: session.teams,
                   commands: session.commands,
@@ -3681,12 +4133,15 @@ async function executeHostedTurn(
                   launch: workflowLaunch,
                   signal: abort.signal,
                   agentDefinition: session.agentDefinition,
+                  modelConfig: session.modelConfig,
                 })
               : await runHostedHarnessTextTurn({
                   sessionId,
                   cwd,
                   history,
                   excludedPromptIds: unansweredPrompts(session),
+                  classifierUserText: () =>
+                    readHostedClassifierUserText(session),
                   commitCompression: async (payload) => {
                     await session.managed.sink.write(
                       record(session, sessionId, 'system', null, {
@@ -3698,15 +4153,61 @@ async function executeHostedTurn(
                   prompt: text,
                   attachmentParts: promptInput.attachments,
                   promptId,
+                  ...(session.stores
+                    ? {
+                        userMessages: {
+                          claim: async () =>
+                            (
+                              await session.stores!.claimUserMessages(promptId)
+                            ).map((message) => ({
+                              id: `${message.id}:${message.revision}`,
+                              ...parseHostedInput(message.input),
+                            })),
+                          commit: async (id: string, parts: Part[]) => {
+                            const message = record(
+                              session,
+                              sessionId,
+                              'user',
+                              parentUuid,
+                              {
+                                uuid: id,
+                                daemonPromptId: promptId,
+                                subtype: 'mid_turn_user_message',
+                                message: { role: 'user', parts },
+                              },
+                            );
+                            await session.managed.sink.write(message);
+                            parentUuid = message.uuid;
+                          },
+                          commitAssistant: async (
+                            parts: Part[],
+                            model: string,
+                          ) => {
+                            await commit('assistant', parts, model);
+                          },
+                        },
+                      }
+                    : {}),
                   signal: abort.signal,
                   modelScope,
                   workspaceContext,
                   agentDefinition: session.agentDefinition,
+                  modelConfig: session.modelConfig,
+                  memory: session.memory,
+                  recallUserInput: authority
+                    .eventsInSequenceRange(1, authority.committedSequence)
+                    .some(
+                      (event) =>
+                        event.kind === 'input.accepted' &&
+                        event.payload['inputId'] === promptId &&
+                        event.payload['source'] === 'hosted-harness',
+                    ),
                   publicChildModelRoute: session.publicChildModelRoute,
                   modelSelection: await readHostedTurnModelSelection(
                     session.managed,
                     promptId,
                   ),
+                  extensionInstructions: session.extensionContext,
                   agentInstructions: await readHostedAgentInstructions(
                     session.agentDefinition,
                     session.managed.resources,
@@ -3749,6 +4250,29 @@ async function executeHostedTurn(
                     : {}),
                   ...(deltas ? { textDeltas: deltas } : {}),
                 });
+          if (
+            crashBeforeCommitSession === sessionId &&
+            !crashBeforeCommitFired
+          ) {
+            // The stream's Finished marker is already durable (the model layer's
+            // finally committed a usage-only output_committed); the assistant
+            // message.committed below is not. Hold here so the runner crashes this
+            // generation inside the B3a window and the next one must reissue. The
+            // hold still observes the Turn's abort signal: a leaked flag must not
+            // park a real Session uncancellably, so a cancel/deadline/daemon abort
+            // rejects into the enclosing catch and settles the Turn instead.
+            crashBeforeCommitFired = true;
+            writeStderrLineSafe(
+              `qwen serve: E2E holding finished turn before assistant commit for Session ${sessionId} prompt ${promptId}`,
+            );
+            await new Promise<never>((_resolve, reject) => {
+              const release = (): void =>
+                reject(abort.signal.reason ?? new Error('aborted'));
+              if (abort.signal.aborted) release();
+              else
+                abort.signal.addEventListener('abort', release, { once: true });
+            });
+          }
           await commit(
             'assistant',
             result.parts ?? [{ text: result.text }],
@@ -3817,7 +4341,9 @@ async function executeHostedTurn(
         onTurnResult?.(turnResult);
         await session.managed.sink.write(turnResult);
         try {
-          await toolTurn?.cleanup();
+          session.cleanupHolds?.delete(promptId);
+          retainHostedCleanupHolds(session, await toolTurn?.cleanup());
+          if (toolTurn?.runtimeHeld) session.heldRuntimeTurns.add(promptId);
         } catch (cause) {
           if (!session.blocked) {
             session.cleanupBlocked = true;
@@ -3900,7 +4426,11 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): { owns: (id: string) => boolean } {
+): {
+  owns: (id: string) => boolean;
+  accepting: () => boolean;
+  beginOperation?: () => () => void;
+} {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
   // daemon owns them and stops them at shutdown.
@@ -3921,6 +4451,13 @@ export function registerHostedHarnessSessionRoutes(
   const unresolvedOpenings = new Set<string>();
   let initialReconciliations = 0;
   const epoch = contract.bootId.replaceAll('-', '_');
+  // E2E fault injection only (QWEN_E2E_DROP_LOAD_REPLY=<sessionId>, set by the
+  // packaged load-reply-lost arm on the replacement Harness): lose exactly the
+  // first load attach reply for that Session, after its driver has started, so
+  // the control plane must redrive the same load into the now-active driver.
+  // The flag is never set in production.
+  const dropLoadReplySession = process.env['QWEN_E2E_DROP_LOAD_REPLY'];
+  let loadReplyDropped = false;
   const released = new Map<
     string,
     { clientId: string; receipt: HostedHarnessReleaseReceipt }
@@ -4145,6 +4682,14 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     recovery?: HostedRuntimeRecoveryReport,
   ): void => {
+    if (dropLoadReplySession === sessionId && !loadReplyDropped) {
+      loadReplyDropped = true;
+      writeStderrLineSafe(
+        `qwen serve: E2E dropping first load reply for Session ${sessionId}`,
+      );
+      res.destroy();
+      return;
+    }
     res.status(200).json({
       sessionId,
       clientId: session.clientId,
@@ -4230,16 +4775,21 @@ export function registerHostedHarnessSessionRoutes(
     if (session.fileHistoryOwed === promptId)
       session.fileHistoryOwed = undefined;
     if (brokerOptions) {
-      await reconcileHostedTurnCleanup(
-        session.managed,
-        brokerOptions,
-        promptId,
+      session.cleanupHolds?.delete(promptId);
+      retainHostedCleanupHolds(
+        session,
+        await reconcileHostedTurnCleanup(
+          session.managed,
+          brokerOptions,
+          promptId,
+        ),
       );
       const lease = session.runtimeLeaseHeld;
       if (
         lease?.promptId === promptId &&
         session.runtimeLeaseOwedByTerminalRoute &&
-        (await releaseHeldRuntime(session, brokerOptions, lease)) &&
+        (await releaseHeldRuntime(session, brokerOptions, lease)) !==
+          'pending' &&
         session.runtimeLeaseHeld === lease
       ) {
         session.runtimeLeaseHeld = undefined;
@@ -4253,7 +4803,10 @@ export function registerHostedHarnessSessionRoutes(
         .findLast((event) => event.kind === 'input.accepted')?.payload[
         'turnId'
       ] === promptId &&
-      !hasHostedCleanupDebt(session.managed) &&
+      !(await hasBlockingHostedCleanupDebt(
+        session.managed,
+        session.cleanupHolds,
+      )) &&
       !session.fileHistoryOwed &&
       !session.runtimeLeaseOwedByTerminalRoute
     )
@@ -4328,8 +4881,14 @@ export function registerHostedHarnessSessionRoutes(
     }
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
+    let modelConfigDigest: string | undefined;
+    let memoryStoreId: string | undefined;
     let sessionSkillsRef: ManagedSessionDurableRef | undefined;
     try {
+      modelConfigDigest = parseHostedModelConfigDigest(
+        body?.['modelConfigDigest'],
+      );
+      memoryStoreId = parseHostedMemoryStoreId(body?.['memoryStoreId']);
       sessionSkillsRef = parseSessionSkillsRef(body?.['sessionSkillsRef']);
       agentDefinition = parseHostedAgentDefinition(
         body?.['agentDefinition'],
@@ -4343,7 +4902,24 @@ export function registerHostedHarnessSessionRoutes(
     let captureBytes = body?.['captureBytes'];
     const publicChildAgentsVersion = body?.['publicChildAgentsVersion'] ?? 0;
     let publicChildModelRoute: PublicChildModelRoute | undefined;
+    let publicChildExtensionAgent: HostedChildExtensionAgent | undefined;
+    let initialSelection: ManagedExtensionApplyCommand | undefined;
     try {
+      if (body?.['initialSelection'] !== undefined) {
+        initialSelection = parseManagedExtensionApplyCommand(
+          body['initialSelection'],
+        );
+        if (
+          initialSelection.expectedRevision !== 0 ||
+          initialSelection.mcpChange
+        )
+          throw new Error('Invalid initial extension selection.');
+      }
+      publicChildExtensionAgent = parseHostedChildExtensionAgent(
+        body?.['publicChildExtensionAgent'],
+      );
+      if (publicChildExtensionAgent && initialSelection)
+        throw new Error('Child and creation extension bindings conflict.');
       publicChildModelRoute =
         body?.['publicChildModelRoute'] === undefined
           ? undefined
@@ -4353,6 +4929,11 @@ export function registerHostedHarnessSessionRoutes(
         (publicChildAgentsVersion !== 1 || (!body?.['lineage'] && create))
       )
         throw new Error('A model route belongs only to a public child.');
+      if (
+        publicChildExtensionAgent &&
+        (!publicChildModelRoute || (create && !body?.['lineage']))
+      )
+        throw new Error('An extension agent belongs only to a public child.');
     } catch {
       return error(res, 400, 'invalid_public_child_model_route');
     }
@@ -4360,13 +4941,17 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 400, 'invalid_public_child_agents_version');
       return;
     }
+    const extensionChildProfile =
+      contract.features?.includes('session-extension-packages/1') === true &&
+      contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/1');
     if (
       publicChildAgentsVersion === 1 &&
       (toolProfile !== 'hosted-workspace-shell/1' ||
         body?.['foregroundOnly'] === true ||
-        body?.['mcpServers'] !== undefined ||
-        body?.['hookCatalog'] !== undefined ||
-        agentDefinition !== undefined ||
+        (!extensionChildProfile &&
+          (body?.['mcpServers'] !== undefined ||
+            body?.['hookCatalog'] !== undefined ||
+            agentDefinition !== undefined)) ||
         body?.['childWorkspaces'] === true ||
         body?.['childSnapshots'] === true)
     ) {
@@ -4571,8 +5156,13 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (
       resident &&
-      !create &&
-      !sameHostedAgentDefinition(resident.agentDefinition, agentDefinition)
+      ((!create &&
+        !sameHostedAgentDefinition(
+          resident.agentDefinition,
+          agentDefinition,
+        )) ||
+        resident.modelConfigDigest !== modelConfigDigest ||
+        resident.memoryStoreId !== memoryStoreId)
     ) {
       error(res, 409, 'hosted_agent_definition_conflict');
       return;
@@ -4903,6 +5493,19 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      if (
+        !isDeepStrictEqual(
+          resident.publicChildExtensionAgent,
+          publicChildExtensionAgent,
+        )
+      ) {
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (!isDeepStrictEqual(resident.initialSelection, initialSelection)) {
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
       if (resident.childAgents) {
         await resident.childAgents.serialized(async () => {
           resident.publicChildLaunchEnabled =
@@ -5098,10 +5701,17 @@ export function registerHostedHarnessSessionRoutes(
           }
           const model = await findHostedModelRequest(resident.managed, parked);
           const approval =
-            resident.toolProfile && brokerOptions
+            (resident.toolProfile && brokerOptions) || resident.memory
               ? await findHostedApprovalContinuation(resident.managed, parked)
               : undefined;
-          if (model || approval) {
+          const memoryResults =
+            resident.memory &&
+            !model &&
+            !approval &&
+            (await parkNeedsNoRuntimeSettlement(resident.managed))
+              ? await findHostedMemoryResults(resident.managed, parked)
+              : undefined;
+          if (model || approval || memoryResults) {
             const user = (await resident.managed.sink.project()).find(
               (item) => item.type === 'user' && item.daemonPromptId === parked,
             );
@@ -5126,7 +5736,7 @@ export function registerHostedHarnessSessionRoutes(
               resident,
               sessionId,
               cwd,
-              { promptId: parked, text, parts: [] },
+              { promptId: parked, text, parts: memoryResults ?? [] },
               brokerOptions,
               approval,
               model,
@@ -5451,10 +6061,16 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
+                  ...(modelConfigDigest ? { modelConfigDigest } : {}),
+                  ...(memoryStoreId ? { memoryStoreId } : {}),
                   ...(publicChildAgentsVersion === 1
                     ? { publicChildAgentsVersion }
                     : {}),
                   ...(publicChildModelRoute ? { publicChildModelRoute } : {}),
+                  ...(publicChildExtensionAgent
+                    ? { publicChildExtensionAgent }
+                    : {}),
+                  ...(initialSelection ? { initialSelection } : {}),
                   ...(sessionSkillsRef ? { sessionSkillsRef } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(foregroundOnly ? { foregroundOnly: true } : {}),
@@ -5468,6 +6084,7 @@ export function registerHostedHarnessSessionRoutes(
                         approval,
                         !agentDefinition &&
                           (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+                            toolProfile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
                             isHostedWorkspaceShellProfile(toolProfile)),
                       )
                     : {}),
@@ -5499,6 +6116,10 @@ export function registerHostedHarnessSessionRoutes(
           ? { create: refs, requireNew: true }
           : { retainVerifiedResources: true }),
       });
+      if (stores.supportsModelDiagnostics?.())
+        await enableManagedSessionDiagnostics(managed);
+      if (stores.supportsExecutionDiagnostics?.())
+        await enableManagedExecutionDiagnostics(managed);
       if (!acceptingWork()) {
         await managed.close();
         error(res, 409, 'hosted_harness_quiescing');
@@ -5530,6 +6151,17 @@ export function registerHostedHarnessSessionRoutes(
       let savedSessionSkillsRef: ManagedSessionDurableRef | undefined;
       let skills: HostedSkillCatalog | undefined;
       try {
+        if (
+          parseHostedModelConfigDigest(definition?.['modelConfigDigest']) !==
+          modelConfigDigest
+        ) {
+          throw new Error('Session model configuration binding changed.');
+        }
+        if (
+          parseHostedMemoryStoreId(definition?.['memoryStoreId']) !==
+          memoryStoreId
+        )
+          throw new Error('Session personal memory binding changed.');
         savedAgentDefinition = parseHostedAgentDefinition(
           definition?.['agentDefinition'],
         );
@@ -5573,6 +6205,17 @@ export function registerHostedHarnessSessionRoutes(
         )
       )
         throw new Error('Public child model route changed.');
+      if (
+        !isDeepStrictEqual(
+          definition?.['publicChildExtensionAgent'],
+          publicChildExtensionAgent,
+        )
+      )
+        throw new Error('Public child extension binding changed.');
+      if (
+        !isDeepStrictEqual(definition?.['initialSelection'], initialSelection)
+      )
+        throw new Error('Initial extension selection changed.');
       if (
         (definition?.['publicChildAgentsVersion'] ?? 0) !==
         publicChildAgentsVersion
@@ -5661,10 +6304,34 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(memoryStoreId
+          ? {
+              memoryStoreId,
+              memory: new HostedMemorySession(stores, memoryStoreId),
+            }
+          : {}),
+        ...(modelConfigDigest
+          ? {
+              modelConfigDigest,
+              modelConfig: async (kind) => {
+                try {
+                  return parseHostedModelConfig(
+                    await stores.modelConfig(modelConfigDigest, kind),
+                    modelConfigDigest,
+                  );
+                } catch (cause) {
+                  if (namedStoreFailure(cause)) throw cause;
+                  throw new HostedModelUnavailableError();
+                }
+              },
+            }
+          : {}),
         ...(publicChildAgentsVersion === 1
           ? { publicChildAgentsVersion: 1 as const }
           : {}),
         ...(publicChildModelRoute ? { publicChildModelRoute } : {}),
+        ...(publicChildExtensionAgent ? { publicChildExtensionAgent } : {}),
+        ...(initialSelection ? { initialSelection } : {}),
         publicChildLaunchEnabled: body?.['suppressChildAgents'] !== true,
         ...(savedSessionSkillsRef
           ? { sessionSkillsRef: savedSessionSkillsRef }
@@ -5740,7 +6407,20 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
-      const mcpSettings = await readHostedMcpSettings(managed);
+      const configurationHead =
+        managed.authority.domainRecord('config_install');
+      const hasExtensionConfiguration =
+        configurationHead &&
+        isManagedExtensionConfig(
+          JSON.parse(
+            (
+              await managed.resources.read(configurationHead.recordRef)
+            ).toString('utf8'),
+          ),
+        );
+      const mcpSettings = hasExtensionConfiguration
+        ? []
+        : await readHostedMcpSettings(managed);
       validateHostedMcpHistory(mcpServers ?? [], mcpSettings);
       if (
         mcpSettings.length &&
@@ -5789,21 +6469,137 @@ export function registerHostedHarnessSessionRoutes(
         sendAttachment(res, sessionId, session);
         return;
       }
-      if ((mcpServers || mcpSettings.length) && brokerOptions)
+      const extensionManagement =
+        hasExtensionConfiguration ||
+        publicChildExtensionAgent ||
+        initialSelection
+          ? await extensionsManager(session, !!publicChildExtensionAgent)
+          : undefined;
+      if (initialSelection && extensionManagement && !passiveRecovery)
+        await extensionManagement.bootstrap(initialSelection);
+      if (publicChildExtensionAgent && extensionManagement) {
+        const source = parseManagedExtensionEffectiveBundle(
+          JSON.parse(
+            (
+              await managed.resources.read(
+                publicChildExtensionAgent.effectiveConfigRef,
+              )
+            ).toString('utf8'),
+          ),
+        );
+        const descriptor = publicChildExtensionAgent.extensionAgent;
+        const member = source.packages.find(
+          (entry) =>
+            isDeepStrictEqual(entry.pin, descriptor.pin) &&
+            isDeepStrictEqual(
+              entry.contributionsRef,
+              descriptor.contributionsRef,
+            ),
+        );
+        if (!member || source.configRevision !== descriptor.configRevision)
+          throw new Error('Child extension source membership changed.');
+        const contributions = await readManagedExtensionContributions(
+          managed.resources,
+          member.contributionsRef,
+        );
+        const agent = contributions.agents.find(
+          (entry) => entry.name === descriptor.agentName,
+        );
+        if (
+          !agent ||
+          descriptor.toolNames.some(
+            (name) =>
+              (agent.tools && !agent.tools.includes(name)) ||
+              agent.disallowedTools?.includes(name),
+          )
+        )
+          throw new Error('Child extension descriptor changed.');
+        session.extensionAgentTools = descriptor.toolNames;
+        session.extensionAgentPrompt = extensionInstructionText(
+          agent.systemPrompt,
+          descriptor.pin.extensionId,
+        );
+        session.extensionAgentPins = source.packages.map((entry) => entry.pin);
+        if (!passiveRecovery)
+          await extensionManagement.bootstrap(
+            hostedChildExtensionApplyCommand(
+              sessionId,
+              publicChildExtensionAgent.effectiveConfigRef.digest,
+              session.extensionAgentPins,
+            ),
+          );
+      }
+      const extensionBundle = await extensionManagement?.active();
+      if (
+        extensionManagement &&
+        (await extensionBootstrapIncomplete(session, extensionManagement))
+      ) {
+        if (!passiveRecovery) throw new HostedExtensionRecoveryRequired();
+        session.extensionBootstrapPending = true;
+        session.blocked = true;
+      }
+      const effectiveMcpServers = extensionBundle?.mcpServers ?? mcpServers;
+      const effectiveHookCatalog = extensionBundle
+        ? extensionBundle.hookCatalog
+        : hookCatalog;
+      if (
+        (effectiveMcpServers?.length || mcpSettings.length) &&
+        brokerOptions &&
+        !session.mcp
+      ) {
+        // A non-terminal discard can leave drained rows under a superseded
+        // owner; now that this bundle is durably active, release them so the
+        // constructor below does not see owners.size>1 (R15-3). The active
+        // owner's own drained rows stay for the reload to re-initialize, so a
+        // failed apply that kept the previous revision active is never stranded.
+        if (extensionBundle)
+          await HostedMcpSession.releaseSupersededDrained(
+            managed,
+            `extensions-components-${createHash('sha256')
+              .update(
+                JSON.stringify([
+                  managed.authority.sessionHeader.sessionKey,
+                  extensionBundle.configRevision,
+                ]),
+              )
+              .digest('hex')}`,
+          );
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
-          mcpServers ?? [],
+          effectiveMcpServers ?? [],
           mcpSettings.at(-1),
+          undefined,
+          extensionBundle !== undefined,
         );
-      if (hookCatalog && brokerOptions)
+      }
+      if (effectiveHookCatalog && brokerOptions && !session.hooks)
         session.hooks = new HostedHookSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
-          hookCatalog,
+          effectiveHookCatalog,
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
+          extensionBundle
+            ? `extensions-components-${createHash('sha256')
+                .update(
+                  JSON.stringify([
+                    session.managed.authority.sessionHeader.sessionKey,
+                    extensionBundle.configRevision,
+                  ]),
+                )
+                .digest('hex')}`
+            : undefined,
         );
+      if (extensionBundle && extensionManagement)
+        selectExtensionCatalog(
+          session,
+          extensionBundle,
+          await extensionManagement.packages(extensionBundle),
+        );
+      if (session.extensionAgentPrompt)
+        session.extensionContext = `${session.extensionContext ?? ''}\n\n${session.extensionAgentPrompt}`;
+      if (extensionManagement?.pending) session.blocked = true;
       if (!foregroundOnly && session.toolProfile && brokerOptions) {
         session.childRuns = new HostedChildRunSession(
           {
@@ -6091,10 +6887,10 @@ export function registerHostedHarnessSessionRoutes(
             try {
               if (
                 runtime.broker &&
-                !(await releaseHeldRuntime(session, brokerOptions, {
+                (await releaseHeldRuntime(session, brokerOptions, {
                   promptId: turn.turnId,
                   runtimeSessionId: runtime.broker.runtimeSessionId,
-                }))
+                })) === 'pending'
               )
                 return 'busy';
               await retryHostedCleanup(session, brokerOptions);
@@ -6428,15 +7224,47 @@ export function registerHostedHarnessSessionRoutes(
             session.monitorWake?.kick();
       }
       if (pinned) session.approval = pinned;
+      if (session.extensionBootstrapPending) {
+        sessions.set(sessionId, session);
+        sendAttachment(res, sessionId, session);
+        return;
+      }
       // A takeover recovers exactly the parked Turn, including the file
       // history it left pending; only refuse a stranger's pending state.
       // A bare load of a parked Session keeps refusing with 409 so it never
       // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
+      const pendingCommandApproval =
+        session.extensions?.enabled && unsettled
+          ? await findHostedApprovalContinuation(managed, unsettled)
+          : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
+      // An extensions Session that also carries a Hook catalog never satisfies
+      // `takeover` (hooks set), yet a parked command-step approval is still
+      // recoverable by an explicit takeover load. Compute it once and use it
+      // for BOTH the file-history settle exemption and the resume arm below,
+      // so a batch that owes file history while a command step parks at
+      // await_action is resumed rather than 409'd on a settle it can never
+      // produce (R8-1 / R7-2).
+      const extensionsCommandStepTakeover =
+        takeoverFlags &&
+        !lifecycle &&
+        !!session.extensions?.enabled &&
+        pendingCommandApproval?.plan.commandStep !== undefined;
+      // A parked command-step round must never be answered by a cold load:
+      // answering writes a durable tool_result for the plan's own skill call,
+      // which permanently destroys the continuation. Both answer guards below
+      // key on this one predicate. pendingCommandApproval is computed
+      // unconditionally above; resumeApproval is only assigned inside the
+      // takeover arm, so on a bare load it is undefined and cannot be the key
+      // (R9-1).
+      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      const commandStepPark =
+        pendingCommandApproval?.plan.commandStep !== undefined ||
+        resumeApproval?.plan.commandStep !== undefined;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -6444,7 +7272,12 @@ export function registerHostedHarnessSessionRoutes(
       // committed, any other as never run — or the gate would refuse this
       // Session on every load. A failed answer leaves the gate's retriable
       // refusal.
-      if (session.hooks && !lifecycle && unsettled !== undefined) {
+      if (
+        session.hooks &&
+        !lifecycle &&
+        unsettled !== undefined &&
+        !commandStepPark
+      ) {
         try {
           await answerResumedTurnCalls({
             session: managed,
@@ -6508,7 +7341,8 @@ export function registerHostedHarnessSessionRoutes(
       // than by whichever conjunct of it the probe trips first.
       const settle: HostedFileHistorySettlement | null =
         !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !channelParked
-          ? takeover && unsettled !== undefined
+          ? (takeover || extensionsCommandStepTakeover) &&
+            unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
               ? null
               : { blocker: 'pending_turn_mismatch' }
@@ -6657,14 +7491,24 @@ export function registerHostedHarnessSessionRoutes(
           resume = { promptId: unsettled, text, parts: [] };
         }
       }
-      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      // The extensions arm reuses extensionsCommandStepTakeover (computed with
+      // the settle exemption above): an explicit, non-lifecycle takeover of an
+      // extensions Session's parked command-step plan, even when a Hook catalog
+      // makes `takeover` itself false. It is scoped to a command-step plan — a
+      // native approval on a hooks/MCP Session is refused by
+      // resumeSavedNativeBatch, so admitting it here would 503 the load instead
+      // of attaching (R7-2); native approvals stay on the no-hooks arm. Sharing
+      // the boolean with the settle exemption keeps a file-history-owing batch
+      // recoverable instead of 409'ing before this arm is consulted (R8-1).
       if (
-        takeover &&
         unsettled &&
-        session.toolProfile &&
-        !session.hooks &&
-        !session.mcp &&
-        brokerOptions
+        ((takeover &&
+          !session.hooks &&
+          !session.mcp &&
+          ((session.toolProfile && brokerOptions) || session.memory)) ||
+          (session.toolProfile &&
+            brokerOptions &&
+            extensionsCommandStepTakeover))
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -6673,10 +7517,9 @@ export function registerHostedHarnessSessionRoutes(
             verdict.checkpoint.continuation.phase,
           )
         ) {
-          resumeApproval = await findHostedApprovalContinuation(
-            managed,
-            unsettled,
-          );
+          resumeApproval =
+            pendingCommandApproval ??
+            (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const user = (await managed.sink.project()).find(
               (item) =>
@@ -6698,7 +7541,7 @@ export function registerHostedHarnessSessionRoutes(
       if (
         takeover &&
         unsettled &&
-        session.skills &&
+        (session.skills || session.memory) &&
         !resume &&
         !resumeApproval &&
         !committedModelOutput &&
@@ -6714,15 +7557,24 @@ export function registerHostedHarnessSessionRoutes(
         const calls = assistant?.message?.parts?.flatMap((part) =>
           part.functionCall ? [part.functionCall] : [],
         );
-        if (calls?.length && calls.every((call) => call.name === 'skill')) {
-          await answerResumedTurnCalls({
-            session: managed,
-            sessionId,
-            cwd,
-            promptId: unsettled,
-            skills: session.skills,
-            hooks: session.hooks,
-          });
+        const memoryResults = session.memory
+          ? await findHostedMemoryResults(managed, unsettled)
+          : undefined;
+        if (
+          memoryResults ||
+          (session.skills &&
+            calls?.length &&
+            calls.every((call) => call.name === 'skill'))
+        ) {
+          if (!memoryResults)
+            await answerResumedTurnCalls({
+              session: managed,
+              sessionId,
+              cwd,
+              promptId: unsettled,
+              skills: session.skills,
+              hooks: session.hooks,
+            });
           const projected = (await managed.sink.project()).filter(
             (record) => record.daemonPromptId === unsettled,
           );
@@ -6734,7 +7586,7 @@ export function registerHostedHarnessSessionRoutes(
             .join('\n');
           if (!text)
             throw new HostedToolRecoveryRequiredError(
-              'Original Skill Prompt is missing.',
+              'Original Prompt is missing.',
             );
           const lastAssistant = projected.findLastIndex(
             (record) => record.type === 'assistant',
@@ -6742,9 +7594,11 @@ export function registerHostedHarnessSessionRoutes(
           resume = {
             promptId: unsettled,
             text,
-            parts: projected
-              .slice(lastAssistant + 1)
-              .flatMap((record) => record.message?.parts ?? []),
+            parts:
+              memoryResults ??
+              projected
+                .slice(lastAssistant + 1)
+                .flatMap((record) => record.message?.parts ?? []),
           };
         }
       }
@@ -6988,7 +7842,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId)
+        if (promptId && !commandStepPark)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
@@ -7157,10 +8011,13 @@ export function registerHostedHarnessSessionRoutes(
       // rather than failing the load (the Workspace-level cascade stays
       // the backstop). The Broker answers Runtime Session ids, and
       // hostedRuntimeSessionId is idempotent, so the close's drain maps a
-      // restored entry back to itself. The set's only reader is the close's
-      // drain loop, which sits in the v1-only close block: a lifecycle-v2
-      // Session would restore an obligation its close never drains, so the
-      // restore stays off that load (#13986 R1-3).
+      // restored entry back to itself. The restore stays off a lifecycle-v2
+      // load (#13986 R1-3). Its original reason — v2 had no drain — is gone
+      // now that settle_resources drains the set too (R24-1), but the gate
+      // stays for a different one: a restored id can be a deterministic Hook
+      // owner, and the v2 drain releases it terminally, which would tombstone
+      // the id a reload recomputes (R13-1/R14-1). Re-enabling the restore for
+      // v2 belongs with the keep-READY drain, not ahead of it.
       if (
         !create &&
         brokerOptions &&
@@ -7355,8 +8212,26 @@ export function registerHostedHarnessSessionRoutes(
       if (!identity(req, sessions, legacyClose))
         return error(res, 404, 'hosted_session_not_found');
       try {
+        const extensionBody = object(req.body);
+        const extensionCommand =
+          object(extensionBody?.['command']) ?? extensionBody;
+        const extensionOperation =
+          req.method === 'POST' &&
+          (req.path === '/extensions/management' ||
+            (req.path === '/mcp/management' && session.extensions?.enabled))
+            ? extensionCommand?.['operationId']
+            : req.method === 'POST'
+              ? /^\/extensions\/management\/operations\/([^/]+)\/(?:continue|recover-previous)$/u.exec(
+                  req.path,
+                )?.[1]
+              : undefined;
         await session.stores!.authorizeOrdinary(
-          legacyClose ? 'legacy-close' : undefined,
+          legacyClose
+            ? 'legacy-close'
+            : typeof extensionOperation === 'string' &&
+                HOSTED_UUID.test(extensionOperation)
+              ? `configuration:${extensionOperation}`
+              : undefined,
         );
         if (session.lifecycle)
           return error(res, 409, 'hosted_lifecycle_operation_active');
@@ -7557,7 +8432,12 @@ export function registerHostedHarnessSessionRoutes(
             ...brokerOptions,
             lifecycleAuthority: () => session.lifecycle,
           });
-        if (hasHostedCleanupDebt(session.managed))
+        if (
+          await hasBlockingHostedCleanupDebt(
+            session.managed,
+            session.cleanupHolds,
+          )
+        )
           throw new Error('Runtime cleanup remains owed.');
       }
       session.monitorWake?.close();
@@ -7584,16 +8464,95 @@ export function registerHostedHarnessSessionRoutes(
         });
         await session.automations?.reconcileRuns();
         if (phase === 'settle_resources') {
-          await session.hooks?.close();
+          // Stop what the turns still owe ahead of the owner close that asks
+          // for the mount back (R22-1, the order the v1 close already keeps for
+          // R14-2): a live background run keeps the release-mount guard
+          // refusing runtime_session_busy, so a handback issued first parks the
+          // detach on recovery-required for as long as the process lives. The
+          // stops also land their finalize through the still-open publisher
+          // closed below. Two drains because the debt is recorded in two places
+          // — a descriptor here, a held Runtime below (R24-1).
+          if (brokerOptions)
+            await retryHostedCleanup(
+              session,
+              {
+                ...brokerOptions,
+                lifecycleAuthority: () => session.lifecycle,
+              },
+              true,
+            );
+          else if (hasHostedCleanupDebt(session.managed))
+            throw new Error('Runtime cleanup remains owed after drain.');
+          // Drain the Runtimes a turn left held, where the v1 close already
+          // does, so a live background run stops before the handback asks for
+          // the mount back (R24-1). Scope: this reaches the obligations a wake
+          // turn's held aftermath and a cleanup hold register. A Hook-
+          // configured turn registers NEITHER — it acquires through
+          // hooks.acquire(), writes no cleanup descriptor, and finish() skips
+          // the broker.release() whose 409 catch is the only assignment of
+          // runtimeHeld — so for that shape this loop is empty and the close
+          // still parks on recovery-required below. That gap is pinned by
+          // 'never registers a held Runtime for a Hook-configured turn' and
+          // needs a keep-READY drain to close: the release used here would
+          // tombstone the deterministic Hook owner (R13-1/R14-1).
+          let heldDrainUnproven = false;
+          if (brokerOptions)
+            for (const heldTurn of [...session.heldRuntimeTurns]) {
+              try {
+                await new HostedWorkspaceBroker(
+                  brokerOptions,
+                  session.managed.authority.sessionHeader.sessionKey,
+                  hostedRuntimeSessionId(heldTurn),
+                ).release({ drain: true });
+                session.heldRuntimeTurns.delete(heldTurn);
+              } catch (cause) {
+                // Both tolerances the v1 drain carries (R25-1). A 404 means
+                // nothing remains to stop. A Broker that restarted beside the
+                // Harness holds no resident Session and answers the
+                // declared-retryable 503; throwing there would skip the owner
+                // close, the lease release, the loop stops and the publisher
+                // closes on every attempt while the reload re-seeds the same
+                // id, so the Session could never close. The Workspace cascade
+                // owns that Runtime instead — but the stop stays unproven, so
+                // the loops below must not settle it as confirmed.
+                if (
+                  cause instanceof HostedWorkspaceBrokerRejection &&
+                  ((cause.status === 404 &&
+                    cause.code === 'runtime_session_not_found') ||
+                    (cause.status === 503 &&
+                      cause.code === 'runtime_reconciliation_required'))
+                ) {
+                  session.heldRuntimeTurns.delete(heldTurn);
+                  if (cause.status === 503) heldDrainUnproven = true;
+                  continue;
+                }
+                // Any other refusal left the run unproven with no cascade to
+                // hand it to. Park rather than hand the mount back over a
+                // writer that may still live.
+                throw cause;
+              }
+            }
+          // Only a delete is terminal; a close keeps the deterministic owner
+          // re-acquirable across the reload (R14-1).
+          await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
+          // Neither an unprovable drain nor a Session whose own settlement
+          // already failed proved to the Runtime that anything stopped, so
+          // both settle on the runtime_lost line — the only state
+          // rebuildFromRuntimeLost accepts (R25-1/R26-1, matching the v1
+          // close). v2 has no heldDrainFailed: that arm throws above instead.
+          const stopSettle =
+            session.blocked || heldDrainUnproven
+              ? 'runtime_lost'
+              : 'stop_requested';
           for (const loop of session.shell?.monitorLoops?.values() ?? [])
-            await loop.stop('stop_requested');
+            await loop.stop(stopSettle);
           for (const loop of session.backgroundLane?.monitorLoops?.values() ??
             [])
-            await loop.stop('stop_requested');
+            await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources();
+          await session.mcp?.closeResources({ terminal: kind === 'delete' });
         }
         res.json({
           protocolVersion: 2,
@@ -7708,15 +8667,24 @@ export function registerHostedHarnessSessionRoutes(
         (!session.approval ||
           !(
             session.agentDefinition
-              ? ['hosted-workspace-files/1', 'hosted-workspace-shell/1']
+              ? [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-files/3',
+                ]
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-files/2',
+                  'hosted-workspace-files/3',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
-            approvalSelection.mode !== session.approval.mode))
+            (approvalSelection.mode !== session.approval.mode ||
+              !isDeepStrictEqual(
+                approvalSelection.permissionRules,
+                session.approval.permissionRules,
+              ))))
       )
         throw new Error('Approval selection is unavailable for this Session.');
       if (
@@ -8396,6 +9364,8 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.hooks) return error(res, 409, 'hosted_hooks_unavailable');
+    if (session.extensions?.enabled)
+      return error(res, 409, 'hosted_extension_configuration_required');
     if (
       session.active ||
       session.hooksBusy ||
@@ -8454,12 +9424,501 @@ export function registerHostedHarnessSessionRoutes(
     );
   };
 
+  async function extensionsManager(
+    session: HostedSession,
+    childBootstrap = false,
+  ): Promise<HostedExtensionSession> {
+    if (
+      !brokerOptions ||
+      session.foregroundOnly ||
+      ((session.childDepth ?? 0) !== 0 &&
+        !(childBootstrap && session.publicChildExtensionAgent)) ||
+      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+        session.toolProfile ?? '',
+      ) ||
+      !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
+    )
+      throw new Error('Hosted extension management is unavailable.');
+    if (session.extensions) return session.extensions;
+    const head = session.managed.authority.domainRecord('config_install');
+    const config =
+      head &&
+      JSON.parse(
+        (await session.managed.resources.read(head.recordRef)).toString('utf8'),
+      );
+    const unified = config && isManagedExtensionConfig(config);
+    const legacy = unified ? [] : await readHostedMcpSettings(session.managed);
+    const baseMcp = session.definition?.['mcpServers'];
+    const options = {
+      ...brokerOptions,
+      lifecycleAuthority: () => session.lifecycle,
+    };
+    const manager = new HostedExtensionSession(
+      session.managed,
+      options,
+      {
+        mcpRevision: legacy.at(-1)?.revision ?? 0,
+        mcpServers:
+          legacy.at(-1)?.servers ??
+          (baseMcp === undefined
+            ? []
+            : parseHostedMcpServers(baseMcp).map((pin) => ({
+                ...pin,
+                state: 'enabled' as const,
+              }))),
+        hookCatalog:
+          session.hooks?.selectedPin ??
+          (session.definition?.['hookCatalog'] === undefined
+            ? null
+            : parseHostedHookPin(session.definition['hookCatalog'])),
+      },
+      {
+        validate: (packages) => {
+          extensionSkillCatalog(session.baseSkills ?? session.skills, packages);
+          if (
+            (session.childDepth ?? 0) === 0 &&
+            session.publicChildAgentsVersion !== 1 &&
+            packages.some((entry) => entry.contributions.agents.length > 0)
+          )
+            throw new Error(
+              'Extension agents require the public child Session profile.',
+            );
+        },
+        drain: async (bundle, forceMcpServerId) => {
+          if (
+            session.hooks &&
+            !isDeepStrictEqual(session.hooks.selectedPin, bundle.hookCatalog)
+          ) {
+            await session.hooks.close();
+            session.hooks = undefined;
+          }
+          if (bundle.mcpServers.length || session.hooks)
+            await session.mcp?.drainForExtensionConfiguration(
+              bundle.mcpServers,
+              forceMcpServerId,
+            );
+          else if (session.mcp) {
+            await session.mcp.close();
+            session.mcp = undefined;
+          }
+        },
+        enable: async (bundle, packages, operationId) => {
+          const ownerId = `extensions-components-${createHash('sha256')
+            .update(
+              JSON.stringify([
+                session.managed.authority.sessionHeader.sessionKey,
+                bundle.configRevision,
+              ]),
+            )
+            .digest('hex')}`;
+          if (bundle.mcpServers.length && !session.mcp) {
+            const broker =
+              session.hooks?.broker ??
+              new HostedWorkspaceBroker(
+                options,
+                session.managed.authority.sessionHeader.sessionKey,
+                ownerId,
+              );
+            // A non-terminal discard can leave drained rows under a superseded
+            // owner; release them before constructing so a live off->on->off->on
+            // toggle does not accumulate owners.size>1 (R15-3, the live-path
+            // counterpart of the cold-load sweep). The active owner's own drained
+            // rows are untouched, so a failed apply is never stranded.
+            await HostedMcpSession.releaseSupersededDrained(
+              session.managed,
+              ownerId,
+            );
+            session.mcp = new HostedMcpSession(
+              options,
+              session.managed,
+              bundle.mcpServers,
+              undefined,
+              broker,
+              true,
+            );
+            if (session.hooks?.broker === broker)
+              session.hooks.delegateBrokerToMcp();
+          }
+          const extensionBroker =
+            session.mcp?.broker ??
+            new HostedWorkspaceBroker(
+              options,
+              session.managed.authority.sessionHeader.sessionKey,
+              ownerId,
+            );
+          if (
+            session.hooks &&
+            session.hooks.broker.runtimeSessionId !==
+              extensionBroker.runtimeSessionId
+          ) {
+            // The owner moved (configRevision changed) while the Hook catalog
+            // pin stayed the same, so drain kept this session. Close it to
+            // release its mount claim and let the rebuild below bind the new
+            // owner. Swapping the broker under a held mount would orphan the
+            // claim, and refusing the swap would park a previously-valid apply
+            // at recovery_required.
+            await session.hooks.close();
+            session.hooks = undefined;
+          }
+          if (bundle.hookCatalog && !session.hooks) {
+            session.hooks = new HostedHookSession(
+              options,
+              session.managed,
+              bundle.hookCatalog,
+              session.mcp?.broker,
+              () => session.lifecycleProtocolVersion === 2,
+              ownerId,
+            );
+          }
+          if (
+            bundle.hookCatalog &&
+            session.hooks &&
+            (!isDeepStrictEqual(
+              session.hooks.selectedPin,
+              bundle.hookCatalog,
+            ) ||
+              session.managed.authority.extensionRecordsInDomain(
+                'hook_registration',
+              ).length === 0)
+          )
+            await session.hooks.configure(
+              `extension-catalog-${operationId}-${bundle.configRevision}`,
+              bundle.hookCatalog,
+              session.managed.authority.extensionRecordsInDomain(
+                'hook_registration',
+              ).length,
+            );
+          await session.mcp?.enableExtensionConfiguration(
+            bundle.mcpServers,
+            operationId,
+          );
+          await session.hooks?.ensureReady();
+          selectExtensionCatalog(session, bundle, packages);
+        },
+      },
+    );
+    await manager.open();
+    session.extensions = manager;
+    return manager;
+  }
+
+  app.get('/session/:id/extensions/management', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    void extensionsManager(session, !!session.publicChildExtensionAgent)
+      .then(async (manager) => res.json(await manager.snapshot()))
+      .catch(() => error(res, 409, 'hosted_extension_management_unavailable'));
+  });
+
+  function skillBroker(
+    session: HostedSession,
+    owner?: { bindingId: string; generation: string },
+  ) {
+    if (
+      !brokerOptions ||
+      session.foregroundOnly ||
+      (session.childDepth ?? 0) !== 0 ||
+      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+        session.toolProfile ?? '',
+      ) ||
+      !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
+    )
+      throw new Error('hosted_skill_import_unsupported');
+    const broker = new HostedWorkspaceBroker(
+      { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+      session.managed.authority.sessionHeader.sessionKey,
+      'skill-management',
+    );
+    if (owner)
+      broker.expectExtensionRuntime({
+        runtimeBindingId: owner.bindingId,
+        generation: owner.generation,
+      });
+    return broker;
+  }
+
+  function skillOwner(value: unknown): {
+    bindingId: string;
+    generation: string;
+  } {
+    const owner = object(value);
+    if (
+      !owner ||
+      Object.keys(owner).sort().join(',') !== 'bindingId,generation' ||
+      typeof owner['bindingId'] !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/u.test(owner['bindingId']) ||
+      typeof owner['generation'] !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(owner['generation']) ||
+      BigInt(owner['generation']) > 2n ** 63n - 1n
+    )
+      throw new Error('invalid_skill_owner');
+    return { bindingId: owner['bindingId'], generation: owner['generation'] };
+  }
+
+  app.get('/session/:id/extensions/skills/candidates', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    void (async () => {
+      const broker = skillBroker(session);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-candidates',
+        operationId: randomUUID(),
+      });
+      if (!broker.runtime || !Array.isArray(result['candidates']))
+        throw new Error('Invalid Skill response.');
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner: {
+          bindingId: broker.runtime.bindingId,
+          generation: broker.runtime.generation,
+        },
+        candidates: result['candidates'],
+      });
+    })().catch((cause) =>
+      error(
+        res,
+        409,
+        cause instanceof HostedWorkspaceBrokerRejection &&
+          typeof cause.code === 'string'
+          ? cause.code
+          : 'hosted_skill_source_unavailable',
+      ),
+    );
+  });
+
+  app.post('/session/:id/extensions/skills/snapshot', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (
+      session.active ||
+      session.hooksBusy ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.blocked
+    )
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    if (
+      !body ||
+      Object.keys(body).sort().join(',') !== 'digest,operationId,owner,path' ||
+      typeof body['operationId'] !== 'string' ||
+      !HOSTED_UUID.test(body['operationId']) ||
+      typeof body['path'] !== 'string' ||
+      typeof body['digest'] !== 'string'
+    )
+      return error(res, 400, 'invalid_skill_snapshot');
+    let owner: { bindingId: string; generation: string };
+    try {
+      owner = skillOwner(body['owner']);
+    } catch {
+      return error(res, 400, 'invalid_skill_snapshot');
+    }
+    session.mcpBusy = true;
+    void (async () => {
+      const broker = skillBroker(session, owner);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-snapshot',
+        operationId: body['operationId'] as string,
+        path: body['path'] as string,
+        digest: body['digest'] as string,
+      });
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner,
+        ...result,
+      });
+    })()
+      .catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_source_unavailable',
+        ),
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.get(
+    '/session/:id/extensions/skills/archives/:preparationId',
+    (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      void (async () => {
+        const owner = skillOwner({
+          bindingId: req.query['bindingId'],
+          generation: req.query['generation'],
+        });
+        const operationId = req.query['operationId'];
+        const offset = req.query['offset'];
+        if (
+          typeof operationId !== 'string' ||
+          !HOSTED_UUID.test(operationId) ||
+          typeof offset !== 'string' ||
+          !/^(?:0|[1-9][0-9]*)$/u.test(offset) ||
+          !Number.isSafeInteger(Number(offset))
+        )
+          throw new Error('Invalid Skill chunk request.');
+        const broker = skillBroker(session, owner);
+        const result = await broker.skillControl({
+          kind: 'extension-skill-archive',
+          operationId,
+          preparationId: String(req.params['preparationId']),
+          offset: Number(offset),
+        });
+        res.json({
+          sessionId:
+            session.managed.authority.sessionHeader.sessionKey.sessionId,
+          owner,
+          ...result,
+        });
+      })().catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_snapshot_unavailable',
+        ),
+      );
+    },
+  );
+
+  app.get(
+    '/session/:id/extensions/management/operations/:operationId',
+    (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      void extensionsManager(session, !!session.publicChildExtensionAgent)
+        .then(async (manager) =>
+          res.json(await manager.snapshot(req.params['operationId'])),
+        )
+        .catch(() => error(res, 404, 'hosted_extension_operation_not_found'));
+    },
+  );
+
+  for (const action of ['apply', 'continue', 'recover-previous'] as const) {
+    const path =
+      action === 'apply'
+        ? '/session/:id/extensions/management'
+        : `/session/:id/extensions/management/operations/:operationId/${action}`;
+    app.post(path, (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      if (
+        session.active ||
+        session.hooksBusy ||
+        session.mcpBusy ||
+        session.mcpRecovering ||
+        session.mcpClosing ||
+        session.lifecycle ||
+        session.recoveryCleanupOnly ||
+        (action === 'apply' &&
+          session.blocked &&
+          !session.extensionBootstrapPending)
+      )
+        return error(res, 409, 'hosted_turn_active');
+      let operationId: string;
+      let command:
+        | ReturnType<typeof parseManagedExtensionApplyCommand>
+        | undefined;
+      try {
+        if (action === 'apply') {
+          command = parseManagedExtensionApplyCommand(
+            object(req.body)?.['command'] ?? req.body,
+          );
+          operationId = command.operationId;
+        } else {
+          operationId = req.params['operationId'];
+          if (!HOSTED_UUID.test(operationId))
+            throw new Error('Invalid operation.');
+        }
+      } catch {
+        return error(res, 400, 'invalid_extension_command');
+      }
+      session.mcpBusy = true;
+      void (async () => {
+        const manager = await extensionsManager(
+          session,
+          !!session.publicChildExtensionAgent,
+        );
+        try {
+          if (command && session.publicChildExtensionAgent) {
+            const binding = session.publicChildExtensionAgent;
+            const source = parseManagedExtensionEffectiveBundle(
+              JSON.parse(
+                (
+                  await session.managed.resources.read(
+                    binding.effectiveConfigRef,
+                  )
+                ).toString('utf8'),
+              ),
+            );
+            if (
+              !isDeepStrictEqual(
+                command,
+                hostedChildExtensionApplyCommand(
+                  session.managed.authority.sessionHeader.sessionKey.sessionId,
+                  binding.effectiveConfigRef.digest,
+                  source.packages.map((entry) => entry.pin),
+                ),
+              )
+            )
+              throw new HostedMcpConflictError(
+                'Child extension configuration is immutable.',
+              );
+          }
+          if (command) await manager.submit(command);
+          else if (action === 'continue') await manager.continue(operationId);
+          else await manager.recoverPrevious(operationId);
+          session.extensionBootstrapPending =
+            await extensionBootstrapIncomplete(session, manager);
+          session.blocked =
+            manager.pending || session.extensionBootstrapPending;
+          res.status(202).json(await manager.snapshot(operationId));
+        } catch (cause) {
+          session.extensionBootstrapPending =
+            await extensionBootstrapIncomplete(session, manager);
+          session.blocked =
+            manager.pending || session.extensionBootstrapPending;
+          if (cause instanceof HostedExtensionRevisionConflict)
+            error(res, 409, 'extension_config_revision_conflict');
+          else if (
+            cause instanceof HostedMcpConflictError ||
+            cause instanceof ManagedSessionConflictError ||
+            cause instanceof ManagedSessionCommitRejectedError
+          )
+            error(res, 409, 'hosted_extension_configuration_conflict');
+          else if (manager.enabled)
+            res.status(202).json(await manager.snapshot(operationId));
+          else error(res, 503, 'hosted_extension_recovery_required');
+        }
+      })()
+        .catch(() => {
+          if (!res.headersSent)
+            error(res, 503, 'hosted_extension_recovery_required');
+        })
+        .finally(() => {
+          session.mcpBusy = false;
+        });
+    });
+  }
+
   app.get('/session/:id/mcp/management', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (session.recoveryCleanupOnly)
       return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
+      if (session.extensions?.enabled) {
+        res.json(await session.extensions.mcpSnapshot());
+        return;
+      }
       const manager = mcpManager(session);
       await manager.open();
       res.json(await manager.snapshot());
@@ -8472,6 +9931,15 @@ export function registerHostedHarnessSessionRoutes(
     if (session.recoveryCleanupOnly)
       return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
+      if (session.extensions?.enabled) {
+        res.json(
+          await session.extensions.mcpSnapshot(
+            req.params['operationId'],
+            false,
+          ),
+        );
+        return;
+      }
       const manager = mcpManager(session);
       await manager.open();
       if (!manager.status(req.params['operationId']))
@@ -8497,16 +9965,26 @@ export function registerHostedHarnessSessionRoutes(
     )
       return error(res, 409, 'hosted_turn_active');
     let command;
-    let manager: HostedMcpManager;
+    let manager: HostedMcpManager | undefined;
     try {
       command = parseHostedMcpCommand(req.body);
-      manager = mcpManager(session);
+      if (!session.extensions?.enabled) manager = mcpManager(session);
     } catch {
       return error(res, 400, 'invalid_mcp_command');
     }
     session.mcpBusy = true;
     void (async () => {
       try {
+        if (session.extensions?.enabled) {
+          await session.extensions.submitMcp(command);
+          res
+            .status(202)
+            .json(
+              await session.extensions.mcpSnapshot(command.operationId, false),
+            );
+          return;
+        }
+        if (!manager) throw new Error('MCP manager is unavailable.');
         await manager.open();
         await manager.submit(command);
         res
@@ -8519,13 +9997,21 @@ export function registerHostedHarnessSessionRoutes(
           cause instanceof ManagedSessionCommitRejectedError
         )
           error(res, 409, 'hosted_mcp_configuration_conflict');
-        else if (manager.status(command.operationId))
+        else if (session.extensions?.enabled)
+          res
+            .status(202)
+            .json(
+              await session.extensions.mcpSnapshot(command.operationId, false),
+            );
+        else if (manager?.status(command.operationId))
           res
             .status(202)
             .json(await manager.snapshot(false, command.operationId));
         else error(res, 503, 'hosted_mcp_recovery_required');
       } finally {
-        session.mcp = manager.mcp;
+        if (manager) session.mcp = manager.mcp;
+        if (session.extensions?.enabled)
+          session.blocked = session.extensions.pending;
         if (session.mcp && session.hooks?.broker === session.mcp.broker)
           session.hooks.delegateBrokerToMcp();
         session.mcpBusy = false;
@@ -8803,18 +10289,21 @@ export function registerHostedHarnessSessionRoutes(
     options: HostedWorkspaceBrokerOptions,
     lease: NonNullable<HostedSession['runtimeLeaseHeld']>,
     drain = false,
-  ): Promise<boolean> => {
+  ): Promise<'released' | 'held' | 'pending'> => {
     const { promptId, runtimeSessionId } = lease;
-    const states = await reconcileHostedTurnCleanup(
+    session.cleanupHolds?.delete(promptId);
+    const result = await reconcileHostedTurnCleanup(
       session.managed,
       options,
       promptId,
       drain,
     );
-    if (states.get(promptId) === 'owed') return false;
+    retainHostedCleanupHolds(session, result);
+    if (result.held.has(promptId)) return 'held';
+    if (result.states.get(promptId) === 'owed') return 'pending';
     if (
       runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
-      !states.has(promptId)
+      !result.states.has(promptId)
     ) {
       try {
         await new HostedWorkspaceBroker(
@@ -8833,7 +10322,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (!hasHostedCleanupDebt(session.managed))
       await retryHostedCleanup(session, options);
-    return true;
+    return 'released';
   };
 
   // A recovery load may hold the Runtime Session. On the cancellation
@@ -8853,8 +10342,8 @@ export function registerHostedHarnessSessionRoutes(
     )
       return;
     void releaseHeldRuntime(session, brokerOptions, lease).then(
-      (confirmed) => {
-        if (confirmed && session.runtimeLeaseHeld === lease) {
+      (outcome) => {
+        if (outcome !== 'pending' && session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
           session.runtimeLeaseOwedByTerminalRoute = false;
         }
@@ -8895,8 +10384,8 @@ export function registerHostedHarnessSessionRoutes(
       lease,
       true,
     ).then(
-      (confirmed) => {
-        if (!confirmed)
+      (outcome) => {
+        if (outcome !== 'released')
           throw new Error('Original Runtime cleanup is still owed.');
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
@@ -10090,13 +11579,14 @@ export function registerHostedHarnessSessionRoutes(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant') {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -10123,8 +11613,18 @@ export function registerHostedHarnessSessionRoutes(
           session.shell,
           await hostedApprovalForTurn(session, promptId),
           {
+            memory: session.memory,
+            memoryOnly: !session.toolProfile,
             mcp: session.mcp,
             skills: session.skills,
+            extensionConfig: session.extensionBundle
+              ? {
+                  revision: session.extensionBundle.configRevision,
+                  packages: session.extensionBundle.packages,
+                }
+              : undefined,
+            extensionAgents: extensionAgentsOf(session),
+            allowedToolNames: session.extensionAgentTools,
             profile: session.toolProfile,
             foregroundOnly: session.foregroundOnly,
             context: workspaceContext,
@@ -10132,6 +11632,7 @@ export function registerHostedHarnessSessionRoutes(
             monitors: session.monitors,
             backgroundLane: session.backgroundLane,
             childAgents: childAgentsOf(session),
+            childDepth: session.childDepth,
             messages: session.messages,
             teams: session.teams,
             commands: session.commands,
@@ -10261,6 +11762,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: abort.signal,
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
@@ -10354,6 +11856,7 @@ export function registerHostedHarnessSessionRoutes(
             cwd,
             history,
             excludedPromptIds: unansweredPrompts(session),
+            classifierUserText: () => readHostedClassifierUserText(session),
             commitCompression: async (payload) => {
               await session.managed.sink.write(
                 record(session, sessionId, 'system', null, {
@@ -10364,14 +11867,49 @@ export function registerHostedHarnessSessionRoutes(
             },
             prompt: '',
             promptId,
+            memory: session.memory,
+            ...(session.stores
+              ? {
+                  userMessages: {
+                    claim: async () =>
+                      (await session.stores!.claimUserMessages(promptId)).map(
+                        (message) => ({
+                          id: `${message.id}:${message.revision}`,
+                          ...parseHostedInput(message.input),
+                        }),
+                      ),
+                    commit: async (id: string, parts: Part[]) => {
+                      const message = record(
+                        session,
+                        sessionId,
+                        'user',
+                        parentUuid,
+                        {
+                          uuid: id,
+                          daemonPromptId: promptId,
+                          subtype: 'mid_turn_user_message',
+                          message: { role: 'user', parts },
+                        },
+                      );
+                      await session.managed.sink.write(message);
+                      parentUuid = message.uuid;
+                    },
+                    commitAssistant: async (parts: Part[], model: string) => {
+                      await commit('assistant', parts, model);
+                    },
+                  },
+                }
+              : {}),
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,
+            modelConfig: session.modelConfig,
             publicChildModelRoute: session.publicChildModelRoute,
             modelSelection: await readHostedTurnModelSelection(
               session.managed,
               promptId,
             ),
+            extensionInstructions: session.extensionContext,
             agentInstructions: await readHostedAgentInstructions(
               session.agentDefinition,
               session.managed.resources,
@@ -10486,6 +12024,13 @@ export function registerHostedHarnessSessionRoutes(
         }
       } catch (cause) {
         if (cause instanceof HostedToolRecoveryRequiredError) {
+          session.recoveryCancelPromptId =
+            cause instanceof HostedChildLedgerRecoveryRequiredError
+              ? promptId
+              : undefined;
+          if (cause instanceof HostedChildLedgerRecoveryRequiredError)
+            // A blocked continue's admission must not replay as a cancel.
+            session.admissions.delete(promptId);
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
@@ -10578,7 +12123,7 @@ export function registerHostedHarnessSessionRoutes(
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
-    if (session.blocked) {
+    if (session.blocked && session.recoveryCancelPromptId !== promptId) {
       // A retry-inviting refusal: keep an adopted lease owed with the
       // still-READY identity — the next takeover re-acquires it
       // idempotently, while a release would persist RELEASED and wedge
@@ -10695,7 +12240,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    if (session.blocked)
+    if (session.blocked && session.recoveryCancelPromptId !== promptId)
       return error(
         res,
         409,
@@ -10778,6 +12323,8 @@ export function registerHostedHarnessSessionRoutes(
                 commands: session.commands,
               });
             }
+            const cancelCommandFillAbort = new AbortController();
+            cancelCommandFillAbort.abort();
             await fillParkedRoundCommandGaps({
               managed: session.managed,
               sessionId,
@@ -10787,6 +12334,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: cancelCommandFillAbort.signal,
             });
           }
         } else if (agentWait !== null) {
@@ -11118,6 +12666,11 @@ export function registerHostedHarnessSessionRoutes(
         // No handback here: the coordinator retries a failed cancel, and a
         // release would wedge that retry; the success path above already
         // released and discharged the flag itself.
+        if (
+          session.recoveryCancelPromptId === promptId &&
+          !unsettledInputs(session).has(promptId)
+        )
+          liftRecoveryBlock(session);
         session.active = undefined;
       }
     })();
@@ -11811,31 +13364,22 @@ export function registerHostedHarnessSessionRoutes(
             HookEventName.SessionEnd,
             `session-end:${req.params['id']}`,
             { reason: 'other' },
+            'legacy-close',
           );
           await runHostedLifecycleHook(
             session,
             HookEventName.SessionDelete,
             `session-delete:${req.params['id']}`,
             { deleted_session_id: req.params['id'] },
+            'legacy-close',
           );
         } finally {
           session.hooksBusy = false;
         }
       }
       if (session.lifecycleProtocolVersion !== 2) {
-        await session.hooks?.close();
-        // Deferred until the close is known terminal: a Hook fence refusal
-        // above keeps the Session attached and retryable, and its wake pump
-        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
-        // wake turn can start meanwhile; pending notifications settle below.
-        session.monitorWake?.close();
-        // A lease a recovery load acquired must go back with the Session, or
-        // the Workspace stays pinned after every later route is gone. The
-        // release retires a settled Turn's owed file-history marker first,
-        // ahead of the unguarded loop stop below so that a throw there
-        // cannot strand the retirement.
-        await releaseLeaseNow(session);
-        // #13856: drain every Runtime a turn left held, ahead of the loop
+        // #13856: drain every Runtime a turn left held, ahead of the owner
+        // close that asks for the mount back (R14-2) as well as the loop
         // stops and the publisher close. The drain's stops land their
         // finalize through the still-open publisher — the maintenance
         // answer rides the completion that carries the finalize — so the
@@ -11898,6 +13442,23 @@ export function registerHostedHarnessSessionRoutes(
             }
           }
         }
+        // A DELETE is terminal; a detach keeps the Session reloadable, so the
+        // deterministic config-scoped Hook owner must stay re-acquirable
+        // (R13-1) instead of being tombstoned under the id a reload recomputes.
+        // The held-Runtime drain above ran first so a turn's background run no
+        // longer fences the non-terminal mount handback (R14-2).
+        await session.hooks?.close({ terminal: req.method === 'DELETE' });
+        // Deferred until the close is known terminal: a Hook fence refusal
+        // above keeps the Session attached and retryable, and its wake pump
+        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
+        // wake turn can start meanwhile; pending notifications settle below.
+        session.monitorWake?.close();
+        // A lease a recovery load acquired must go back with the Session, or
+        // the Workspace stays pinned after every later route is gone. The
+        // release retires a settled Turn's owed file-history marker first,
+        // ahead of the unguarded loop stop below so that a throw there
+        // cannot strand the retirement.
+        await releaseLeaseNow(session);
         // A registered observation loop outlives its turn: only the Session
         // close ends it. Stop every live loop here, ahead of the publisher
         // close and the log close, so its settle write can still reach the
@@ -11916,13 +13477,21 @@ export function registerHostedHarnessSessionRoutes(
         for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
           await loop.stop(stopSettle);
         if (heldDrainFailed !== null) throw heldDrainFailed;
+        // Nonterminal owners keep their durable debt for replacement recovery.
+        // Every terminal owner must complete the actual drain before closing.
+        if (brokerOptions)
+          await retryHostedCleanup(session, brokerOptions, true);
+        else if (hasHostedCleanupDebt(session.managed))
+          throw new Error('Runtime cleanup remains owed after drain.');
         // The drains above stopped the Session's background Shells and
         // watches, and their exits settled through this publisher; it
         // closes last.
         await session.shell?.publisher?.close();
         await session.backgroundLane?.publisher?.close();
         const mcpLease = session.runtimeLeaseHeld;
-        await session.mcp?.close();
+        // Only a DELETE is terminal; a detach keeps the owner re-acquirable
+        // across the reload (R14-1), matching the Hook close above.
+        await session.mcp?.close({ terminal: req.method === 'DELETE' });
         if (
           session.mcp &&
           mcpLease !== undefined &&
@@ -12319,6 +13888,8 @@ export function registerHostedHarnessSessionRoutes(
     void close(req, res, true);
   });
   return {
+    accepting: acceptingWork,
+    beginOperation: instance?.beginOperation,
     owns: (id) =>
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),

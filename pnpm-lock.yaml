@@ -856,8 +856,8 @@ importers:
         specifier: ^17.7.2
         version: 17.7.2
       yauzl:
-        specifier: ^2.10.0
-        version: 2.10.0
+        specifier: ^3.4.0
+        version: 3.4.0
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -990,11 +990,11 @@ importers:
         specifier: 0.32.0
         version: 0.32.0
       '@modelcontextprotocol/client':
-        specifier: 2.0.0
-        version: 2.0.0
+        specifier: 2.4.0
+        version: 2.4.0
       '@modelcontextprotocol/core':
-        specifier: 2.0.0
-        version: 2.0.0
+        specifier: 2.4.0
+        version: 2.4.0
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.30.0(supports-color@7.2.0)(zod@3.25.76)
@@ -1610,17 +1610,20 @@ importers:
         specifier: ^6.35.0
         version: 6.43.1
       '@datafe-open/markdown-chart':
-        specifier: ^0.1.12
-        version: 0.1.12
+        specifier: ^0.4.1
+        version: 0.4.1
       '@datafe-open/markdown-chart-echarts':
-        specifier: ^0.1.12
-        version: 0.1.12(echarts@6.1.0)
+        specifier: ^0.4.1
+        version: 0.4.1(echarts@6.1.0)
       '@datafe-open/markdown-chart-react':
-        specifier: ^0.1.12
-        version: 0.1.12(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)
+        specifier: ^0.4.1
+        version: 0.4.1(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)
       '@modelcontextprotocol/ext-apps':
         specifier: ^1.7.5
         version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
       '@tanstack/react-table':
         specifier: ^8.21.3
         version: 8.21.3(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -1715,6 +1718,9 @@ importers:
       '@qwen-code/acp-bridge':
         specifier: workspace:*
         version: link:../acp-bridge
+      '@qwen-code/channel-github':
+        specifier: workspace:*
+        version: link:../channels/github
       '@qwen-code/sdk':
         specifier: workspace:*
         version: link:../sdk-typescript
@@ -2130,19 +2136,25 @@ packages:
     resolution: {integrity: sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==}
     engines: {node: '>=18'}
 
-  '@datafe-open/markdown-chart-echarts@0.1.12':
-    resolution: {integrity: sha512-/GzbYGC5ZYU0myaPlT+PLR2QLttf4W9CZ1oNmQJVGS0GNOqS2WTZeMBCvVkVqtXnT7e1We3RiG5MQsY4FhFTyA==}
+  '@datafe-open/markdown-chart-echarts@0.4.1':
+    resolution: {integrity: sha512-FCtbjzIcTHoqj/KJ/ihp3slC0X/qvMfZk0JZlaSrIg6Fldbkpk22wDO+H3ycDe5GSyoZw3+wHZbIJCCfw6lz9g==}
     peerDependencies:
       echarts: '>=5.5 <7'
 
-  '@datafe-open/markdown-chart-react@0.1.12':
-    resolution: {integrity: sha512-JOAnOYgGBS6wVVUc5+DaV0TMiJUMms3YcOVTI2A1NIy80hPJyeWElFGTVML1L8nktU1Q1XQtsbxekSMuweJ7EA==}
+  '@datafe-open/markdown-chart-kpi@0.4.1':
+    resolution: {integrity: sha512-H5gsq8QkNaaGaQvjZF/A22S9cTzVlXKL1M/1l9WyhNoQXV7orZbVpFV8+mRBaCw2YLeU27uX5AzdRTCpE04Evg==}
+
+  '@datafe-open/markdown-chart-react@0.4.1':
+    resolution: {integrity: sha512-xvI0qpHDK+zUMdNFbyaao6DEPPFo0LEsarjFleTMzsWkqOvC2s/vIQQbjF4e0dFFFHcTELT1P9V8oR4vI/h5Mg==}
     peerDependencies:
       echarts: '>=5.5 <7'
       react: ^19.2.4
 
-  '@datafe-open/markdown-chart@0.1.12':
-    resolution: {integrity: sha512-q/eS0se1h8jXoSPrGdKYiKxbGiG13mFoQYdA8RC41bFRQCJHCrQNk2UEhXWG0JJFabTopmMKMENUsDVWp0+Rvw==}
+  '@datafe-open/markdown-chart-table@0.4.1':
+    resolution: {integrity: sha512-k1srdpqIUWCw2rmcWNnVICd6/e4u6cXjC+Yo5x1IoxpixmY1QutRuj0nxP2fxW1XktFAfm9rUuGNEbxcoXni2w==}
+
+  '@datafe-open/markdown-chart@0.4.1':
+    resolution: {integrity: sha512-NW/p6LkOWPZSIPXHZiApqsehwCCOacSkXh7CEZzTGTgobgFayqysJWn/YKBQiIlFCBhc5xin04/zJFm9F6zLjQ==}
 
   '@dotenvx/dotenvx@1.75.1':
     resolution: {integrity: sha512-/BITOC9dmS/edY2zQwZNicQ059O6RKabtQfyEafV0nGtfYRNHYy1DIPiYVcov40+tob9hfmBnbR963dS+EQ1DQ==}
@@ -3130,12 +3142,12 @@ packages:
     resolution: {integrity: sha512-AAFtGyjsI4LcNhuXavc3ALIeDGqV/1CMclg285rV6h0Wpf5DObZmn9D2fTKTgRHKyGcclVEWc1pt3eJ9KEiPIg==}
     engines: {node: '>=18'}
 
-  '@modelcontextprotocol/client@2.0.0':
-    resolution: {integrity: sha512-8f1OghQ2rjzIOfqgUCP+8GiUWqRs89njoWLNqAe8kWmDePv3s1fZXseej+QXemssEuuOvLLmLO/kqM3IQHtISw==}
+  '@modelcontextprotocol/client@2.4.0':
+    resolution: {integrity: sha512-LgrD2OphHuG12vfKFKz6SOnq7bKHQmhGJIAYdD+MZBn2npHEyry6uD8zvktodtl5CQM85MO0anUyD9JwmUmxww==}
     engines: {node: '>=20'}
 
-  '@modelcontextprotocol/core@2.0.0':
-    resolution: {integrity: sha512-pJCEwGG7Lfr/+PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG+RjhsvS1FKrDbKux+M1HhlnGWqcA==}
+  '@modelcontextprotocol/core@2.4.0':
+    resolution: {integrity: sha512-z8QBKqdfXLPzkLQuG4xp8hrVEMm1PZ1IgxMN2sMbJiFiAKOWXnAzogXn2W4aqIBlP1ea6U5yiqVquvUNM1Cj6Q==}
     engines: {node: '>=20'}
 
   '@modelcontextprotocol/ext-apps@1.7.5':
@@ -3511,6 +3523,7 @@ packages:
   '@opentelemetry/propagator-jaeger@2.10.0':
     resolution: {integrity: sha512-yw/IX8DL470dSMZJoE82ScfYGp7JWZ/G8kFJo35ZILUVTB2jFPTOaioN+8s09pH0RHsWNhweVZb+ZnjJJpCChg==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Package no longer supported. See https://github.com/open-telemetry/opentelemetry-js/pull/7077
     peerDependencies:
       '@opentelemetry/api': '>=1.0.0 <1.10.0'
 
@@ -3541,12 +3554,14 @@ packages:
   '@opentelemetry/sdk-trace-base@2.10.0':
     resolution: {integrity: sha512-GuYQQT7QD2EeO8lcZLRQzcbOyhqAzL+6WWTKTU9mSUBYBazkEDl+VrQcXQhbB08OWM9anD1aHleVadzulpOaUQ==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
   '@opentelemetry/sdk-trace-node@2.10.0':
     resolution: {integrity: sha512-GZK/G6oZyBLGlH1pUgeDch7D91KoHd2uotUGIkWCPi9GI5T9X0p4L7nNAMDR1BQjkRYoDqo+ddfVx9t5Uhys+Q==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.0.0 <1.10.0'
 
@@ -5574,6 +5589,15 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
+  ag-charts-types@14.2.0:
+    resolution: {integrity: sha512-4pDV6/4zbzPN7t607Gr1o6DO9RhmPafQGr+hIpTJBaerbaMoC+WOO3v/wkxFbvCNrHKOexEKSfNTH7PaAR4UzA==}
+
+  ag-grid-community@36.2.0:
+    resolution: {integrity: sha512-tK0Toj7t0fV/OMLPnDc0xlYKAqDbnCT3iJodYSn2TJ541caU8jPdYwWhMdW+AP2+pUNwFiJVgc04eJNfvBPsWw==}
+
+  ag-stack@36.2.0:
+    resolution: {integrity: sha512-f3XT2htFs9dUPcHni2z9ak69QNta5ODEpooHuuNvbjN98JkokpEqRQ9YLQHQJFdCcgi9Ybs/j3zkkvmNRamIPg==}
+
   agent-base@6.0.2:
     resolution: {integrity: sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==}
     engines: {node: '>= 6.0.0'}
@@ -6966,6 +6990,10 @@ packages:
   eventsource-parser@3.0.3:
     resolution: {integrity: sha512-nVpZkTMM9rF6AQ9gPJpFsNAMt48wIzB5TQgiTLdHiuO8XEDhUgZEhqKlZWXbIzo9VmJ/HvysHqEaVeD5v9TPvA==}
     engines: {node: '>=20.0.0'}
+
+  eventsource-parser@3.1.1:
+    resolution: {integrity: sha512-EKN1vKAMcZ8MlYMpaNuxN6R9yakzH6uajHcHVTqWJzvu5pWw9DyhbP35HH8MVBQ+dZjAfDxk+A8NiR9KWaXiyQ==}
+    engines: {node: '>=18.0.0'}
 
   eventsource@3.0.7:
     resolution: {integrity: sha512-CRT1WTyuQoD771GW56XEZFQ/ZoSfWid1alKGDYMmkt2yl8UXrVR4pspqWNEcqKvVIzg6PAltWjxcSSPrboA4iA==}
@@ -11509,16 +11537,22 @@ snapshots:
 
   '@csstools/css-tokenizer@3.0.4': {}
 
-  '@datafe-open/markdown-chart-echarts@0.1.12(echarts@6.1.0)':
+  '@datafe-open/markdown-chart-echarts@0.4.1(echarts@6.1.0)':
     dependencies:
-      '@datafe-open/markdown-chart': 0.1.12
+      '@datafe-open/markdown-chart': 0.4.1
       echarts: 6.1.0
       papaparse: 5.5.4
 
-  '@datafe-open/markdown-chart-react@0.1.12(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)':
+  '@datafe-open/markdown-chart-kpi@0.4.1':
     dependencies:
-      '@datafe-open/markdown-chart': 0.1.12
-      '@datafe-open/markdown-chart-echarts': 0.1.12(echarts@6.1.0)
+      '@datafe-open/markdown-chart': 0.4.1
+
+  '@datafe-open/markdown-chart-react@0.4.1(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)':
+    dependencies:
+      '@datafe-open/markdown-chart': 0.4.1
+      '@datafe-open/markdown-chart-echarts': 0.4.1(echarts@6.1.0)
+      '@datafe-open/markdown-chart-kpi': 0.4.1
+      '@datafe-open/markdown-chart-table': 0.4.1
       echarts: 6.1.0
       react: 19.2.4
       react-markdown: 9.1.0(@types/react@19.2.10)(react@19.2.4)(supports-color@7.2.0)
@@ -11526,7 +11560,12 @@ snapshots:
       - '@types/react'
       - supports-color
 
-  '@datafe-open/markdown-chart@0.1.12': {}
+  '@datafe-open/markdown-chart-table@0.4.1':
+    dependencies:
+      '@datafe-open/markdown-chart': 0.4.1
+      ag-grid-community: 36.2.0
+
+  '@datafe-open/markdown-chart@0.4.1': {}
 
   '@dotenvx/dotenvx@1.75.1':
     dependencies:
@@ -12351,17 +12390,17 @@ snapshots:
 
   '@mobilewright/protocol@0.0.53': {}
 
-  '@modelcontextprotocol/client@2.0.0':
+  '@modelcontextprotocol/client@2.4.0':
     dependencies:
-      '@modelcontextprotocol/core': 2.0.0
+      '@modelcontextprotocol/core': 2.4.0
       cross-spawn: 7.0.6
       eventsource: 3.0.7
-      eventsource-parser: 3.0.3
-      jose: 6.1.3
+      eventsource-parser: 3.1.1
+      jose: 6.2.12
       pkce-challenge: 5.0.0
       zod: 4.4.3
 
-  '@modelcontextprotocol/core@2.0.0':
+  '@modelcontextprotocol/core@2.4.0':
     dependencies:
       zod: 4.4.3
 
@@ -15155,6 +15194,15 @@ snapshots:
 
   acorn@8.18.0: {}
 
+  ag-charts-types@14.2.0: {}
+
+  ag-grid-community@36.2.0:
+    dependencies:
+      ag-charts-types: 14.2.0
+      ag-stack: 36.2.0
+
+  ag-stack@36.2.0: {}
+
   agent-base@6.0.2(supports-color@7.2.0):
     dependencies:
       debug: 4.4.3(supports-color@7.2.0)
@@ -16860,6 +16908,8 @@ snapshots:
   events@3.3.0: {}
 
   eventsource-parser@3.0.3: {}
+
+  eventsource-parser@3.1.1: {}
 
   eventsource@3.0.7:
     dependencies:

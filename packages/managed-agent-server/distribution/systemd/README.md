@@ -36,30 +36,52 @@ The control plane reads `application.yml` and `harness.env` as
 `0600`. The preflight warns, in its `config` and `credentials` rows, when a
 secret file is group- or world-readable; a WARN does not fail `--check`, so
 apply the `chmod 600` it prints. A `root`-owned `0600` `harness.env` would be
-unreadable to the service, which the `credentials` row reports as FAIL. `systemd`
-reads environment files as root, so `0640 root:qwen-managed-agent` is enough
-for `server.env`.
+unreadable to the service, which the `credentials` row reports as FAIL.
+`server.env` sets `QWEN_MANAGED_AGENT_SERVICE_USER=qwen-managed-agent`, so both
+rows check access as that account, including every directory on the file's
+path and along any symbolic link's target, even when `--check` runs as root;
+the `service-user` row shows the account and its groups. `systemd` reads
+environment files as root, so `0640 root:qwen-managed-agent` is enough for
+`server.env`.
 
 The Harness token and capability digest live only in `harness.env`:
 `server.env` points `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` at it, and
 the control plane refuses to start when that file is set together with
-`QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`.
-Keep each credential in `harness.env` as `KEY=value` on one line, with LF line
-endings, no whitespace around the `=`, and only letters, digits and `._:/+=-`
-in the value, and start comments with `#`. The control plane refuses anything
-else, such as a continuation, a `;` comment or text after a closing quote,
-since systemd or a shell would read it differently.
-If the Harness reports a port other than 4170 because the
-requested one was in use, update `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` in
-`server.env` before starting the control plane.
+`QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`,
+or when its Broker token is set together with
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`.
+Keep each credential, and the Broker URL, in `harness.env` as `KEY=value` on
+one line, with LF line endings, no whitespace around the `=`, and only letters,
+digits and `._:/+=-` in the value (the Broker URL may also use `[` and `]` to
+bracket an IPv6 literal, as in `http://[::1]:4182`), and start comments with
+`#`. The control plane refuses anything else, such as a continuation, a `;`
+comment or text after a closing quote, since systemd or a shell would read it
+differently.
+For the tool path, uncomment `QWEN_MANAGED_RUNTIME_BROKER_URL` and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` in `harness.env`. The control plane reads
+the same token from it, so `server.env` carries no Broker token. On an upgraded
+host, replace a `QWEN_HOSTED_HARNESS_BROKER_ARGS` line with these two: nothing
+reads it any more. The Harness never moves off port 4170: if the port is in
+use, it exits instead of running where `QWEN_MANAGED_AGENT_HARNESS_BASE_URL`
+cannot reach it, and systemd restarts it every 5 seconds;
+`journalctl -u qwen-hosted-harness` shows the port message.
 The Session Store needs no setting of its own: the control plane derives its
 URL from its own listener, which does not follow the Harness port, and its
 workspace ID from `QWEN_MANAGED_AGENT_WORKSPACE_CWD`, the directory created
 above.
 
-Alternatively, `../bin/qwen-managed-agent-bootstrap --directory
-/etc/qwen-managed-agent` generates all three files; adjust their ownership and
-mode for the service account afterwards.
+Alternatively, generate all three files with these owners and modes, as root:
+
+```bash
+../bin/qwen-managed-agent-bootstrap --directory /etc/qwen-managed-agent \
+  --service-user qwen-managed-agent
+mysql -u root < /etc/qwen-managed-agent/mysql-setup.sql
+rm /etc/qwen-managed-agent/mysql-setup.sql
+```
+
+The bootstrap also generates the database password into `server.env` and writes
+`mysql-setup.sql`, readable by root only, which creates the database and its
+account.
 
 4. Install and start:
 
@@ -78,19 +100,54 @@ Check with `readlink -f "$(command -v qwen)"`.
 
 ## Verify
 
-Load the same environment file the unit uses, then run the preflight while the
-service is stopped:
+Run the preflight while the service is stopped, the way the unit runs the
+server: as its account, with its environment file, in its working directory
+and inside its sandbox:
 
 ```bash
 sudo systemd-run --wait --pipe --collect \
   --property=User=qwen-managed-agent \
+  --property=Group=qwen-managed-agent \
   --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
+  --working-directory=/opt/qwen-managed-agent \
+  --property=StateDirectory=qwen-managed-agent \
+  --property=StateDirectoryMode=0750 \
+  --property="ReadWritePaths=/var/lib/qwen-managed-agent /srv/qwen-workspace" \
+  --property=NoNewPrivileges=true \
+  --property=PrivateTmp=true \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=true \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
-`--check` binds the configured ports, so it reports a false failure while the
-service is running.
+The preflight reads the configuration as the server does, and the server
+also reads `application.yml` and `config/application.yml` in its working
+directory beside the file `SPRING_CONFIG_ADDITIONAL_LOCATION` names, so
+`--working-directory` must match the unit's `WorkingDirectory`. The sandbox
+properties repeat the unit's, so the preflight sees the files the server sees:
+the unit hides `/home`, `/root`, `/run/user`, and the host's `/tmp` and
+`/var/tmp`, and writes only to its `ReadWritePaths`. Keep them in step when
+you change the unit. The preflight prints a `config` row for each file it
+read, and fails that row where the server would not start, or where this run
+cannot check what it reads:
+
+- a named file that does not exist;
+- a file the service account cannot read;
+- a file only the account running `--check` cannot read, or cannot reach past
+  a directory on its path; the fix is then to run it as the service account;
+- a YAML error, with its line, and with its file unless an import inside
+  another file named it.
+
+A file that holds a secret and that group or others can read gets a `WARN` row
+with its `chmod 600`; a `WARN` does not fail the check.
+
+`--check` binds the configured ports, and its `workers` row warns about Runtime
+workers still running from an earlier start, so run it while the service is
+stopped. While the service runs, add `--online`: the port rows then check that
+the server and Broker listen, and the `workers` row reports only workers a
+stopped server left behind, or is skipped for a durable Broker, which adopts
+them.
 
 ## Why the kill modes differ
 
@@ -105,9 +162,43 @@ keep the state directory and Workspace, and a following start races them. Reap
 them before restarting with
 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`.
 
+The JVM exits with status 143 after a clean shutdown on `SIGTERM`, so the unit
+sets `SuccessExitStatus=143`; without it, every stop leaves the unit failed.
+
+## Upgrade
+
+Upgrade with the new distribution's `bin/qwen-managed-agent-upgrade`, as the
+deployment guide's "Upgrade" section shows. It stops these units, reaps the
+Runtime workers, backs up the database, Runtime state and configuration, and
+starts the new release after its preflight passes. Its first `install` moves
+`/opt/qwen-managed-agent` to `/opt/qwen-managed-agent-releases/<version>` and
+puts a link in its place, so the units keep their paths. It never edits these
+units: when its `check` reports a changed template, carry the change over and
+run `systemctl daemon-reload` before `start`.
+
 ## Paths
 
-- `/opt/qwen-managed-agent` — extracted distribution (read-only).
+- `/opt/qwen-managed-agent` — extracted distribution (read-only); after the
+  first upgrade, a link to the installed release.
+- `/opt/qwen-managed-agent-releases` — releases the upgrade installed, the
+  previous one included.
 - `/etc/qwen-managed-agent` — credentials and `application.yml`.
 - `/var/lib/qwen-managed-agent` — Runtime state.
 - `/srv/qwen-workspace` — Workspace; adjust `ReadWritePaths` when it moves.
+
+## Extension execution
+
+Execution is disabled by default. Enable package publishing separately, then set
+`QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED=true`,
+`QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE=linux-cgroup`, an absolute private
+`QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY` outside Workspace storage, and
+`QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT` to a writable delegated cgroup-v2
+subtree on each LOCAL or SSH Runtime host. The service must receive delegation
+from its administrator; a writable ordinary directory is insufficient. Missing
+cgroup support fails activation; no process-group fallback is used.
+
+Native macOS LOCAL requires explicit `developer-process-group` mode and an empty
+cgroup root. Its receipt proves registered process groups only. It does not prove
+that detached descendants were reclaimed and is not a production process-tree
+profile. Recovery retains holds when the durable owner journal or stop proof is
+missing or uncertain.

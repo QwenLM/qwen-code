@@ -10,6 +10,7 @@ import type {
   ModToolCheckResult,
   ModToolResult,
 } from './tool-events.js';
+import type { ModRenderInput, ModRenderSite } from './render-tree.js';
 
 export const MOD_MAX_BYTES = 262_144;
 export const MOD_MAX_DEPTH = 512;
@@ -71,6 +72,82 @@ export interface ModLog {
   to: 'debug' | 'transcript';
 }
 
+export interface ModSessionUsage {
+  startedAt: number;
+  // Claude Code declares `tokens` optional; Qwen Code always reports it.
+  context: { tokens?: number; window: number; percent?: number };
+  rateLimits: Array<{ kind: string; percentUsed: number; resetsAt?: string }>;
+}
+
+/** Read on the main thread when a dispatch starts; `$.session` answers from it. */
+export interface ModSessionFacts {
+  id: string;
+  cwd: string;
+  root: string;
+  model: string;
+  turns: number;
+  usage: ModSessionUsage;
+}
+
+/** What a main-loop turn cost, in the API's spelling, and the last model. */
+export interface ModTurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  model: string;
+}
+
+export interface ModTurnStart {
+  text: string;
+  turnId: string;
+  /** Set when `text` kept only its head and tail to fit the Mod payload. */
+  isTextTruncated?: true;
+}
+
+/** Where a submitted prompt came from, in Claude Code's `PromptOrigin`. */
+export type ModPromptOrigin =
+  | { kind: 'composer' }
+  | { kind: 'sdk' }
+  | { kind: 'plugin'; name: string; asUser?: true };
+
+/**
+ * A prompt a Mod submitted with `$.prompt.submit`, as it arrived beneath the
+ * hooks: it waits for the session to be idle and then starts a turn.
+ */
+export interface ModQueuedPrompt {
+  plugin: string;
+  text: string;
+  context?: string[];
+  asUser?: true;
+}
+
+export interface ModPromptSubmit {
+  text: string;
+  wait: boolean;
+  origin: ModPromptOrigin;
+}
+
+/**
+ * How a submitted prompt fared: what arrived beneath the hooks, or why it
+ * did not enter. `byHook` tells a hook's own drop from one that answered
+ * without passing the prompt on.
+ */
+export type ModPromptSubmitted =
+  | { text: string; context?: string[] }
+  | { drop: string; byHook: boolean };
+
+export interface ModTurnComplete {
+  answer: string;
+  durationMs: number;
+  isAborted: boolean;
+  turnId: string;
+  reason: 'answer' | 'aborted' | 'error';
+  usage?: ModTurnUsage;
+  /** Set when `answer` kept only its head and tail to fit the Mod payload. */
+  isAnswerTruncated?: true;
+}
+
 export type ModRequest =
   | {
       type: 'load';
@@ -78,6 +155,12 @@ export type ModRequest =
       cwd: string;
       surface: 'terminal' | null;
       version: string;
+      /** The render sites this host draws; `ui.render` runs only where one is offered. */
+      sites?: readonly ModRenderSite[];
+      /** Whether the host raises `prompt.submit`; its hooks are skipped otherwise. */
+      prompts?: boolean;
+      /** Whether the host runs the prompts `$.prompt.submit` submits. */
+      submits?: boolean;
     }
   | {
       type: 'command';
@@ -95,7 +178,13 @@ export type ModRequest =
       input: ModToolCheckInput;
       verdict: ModToolCheckResult;
     }
-  | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' };
+  | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' }
+  | { type: 'turn-start'; input: ModTurnStart }
+  | { type: 'prompt-submit'; input: ModPromptSubmit }
+  | { type: 'turn-complete'; input: ModTurnComplete }
+  | { type: 'render'; input: ModRenderInput }
+  | { type: 'turn-abort-result'; id: number; error?: string }
+  | { type: 'prompt-queue-result'; id: number; refused?: string };
 
 export type ModReply =
   | { type: 'result'; json: string }
@@ -109,7 +198,14 @@ export type ModReply =
       result?: ModToolCheckResult;
       error?: string;
     }
+  | { type: 'turn-abort'; id: number; turnId: string }
+  | { type: 'prompt-queue'; id: number; prompt: ModQueuedPrompt }
+  | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 
-export type ModWorkerRequest = ModRequest & { root: number; phase: number };
+export type ModWorkerRequest = ModRequest & {
+  root: number;
+  phase: number;
+  facts?: ModSessionFacts;
+};
 export type ModWorkerReply = ModReply & { root: number; phase: number };

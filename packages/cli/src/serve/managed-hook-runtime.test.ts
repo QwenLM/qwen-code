@@ -149,6 +149,42 @@ async function settled(instance: ManagedHookRuntime, id = 'execution') {
   return view!;
 }
 describe('ManagedHookRuntime', () => {
+  it('keeps a Session package catalog out of a sibling Session', async () => {
+    const instance = new ManagedHookRuntime(
+      { ...key, workspaceGeneration: '1' },
+      async () => directory,
+      { version: 1, catalogs: [] },
+    );
+    runtimes.push(instance);
+    instance.installSessionManifest(key.sessionId, {
+      version: 1,
+      catalogs: [
+        {
+          ...pin,
+          tenantId: key.tenantId,
+          workspaceId: key.workspaceId,
+          hooks: [definition()],
+        },
+      ],
+    });
+    const query = {
+      kind: 'hook-catalog',
+      sessionKey: key,
+      operationId: 'catalog-lookup',
+      pin,
+    };
+    expect(
+      (await instance.control('runtime-a', query)).catalog?.hooks,
+    ).toHaveLength(1);
+    await expect(
+      instance.control('runtime-b', {
+        ...query,
+        sessionKey: { ...key, sessionId: 'other-session' },
+        operationId: 'other-lookup',
+      }),
+    ).rejects.toThrow('catalog_unavailable');
+  });
+
   it.each([1, 2])(
     'fences native hook dispatch when CSI seals during directory lookup %s',
     async (gateLookup) => {

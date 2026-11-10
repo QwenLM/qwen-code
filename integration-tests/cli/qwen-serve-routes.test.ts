@@ -47,6 +47,7 @@ import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
 } from '../../packages/cli/src/serve/local-path-open.js';
+import { isGitAvailable } from '../../packages/cli/src/serve/git-availability.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -86,6 +87,8 @@ let nativeDirectoryPickerAtBoot = false;
 let localPathOpenAtBoot = false;
 // Same boot-time probe pinning as above, for the workspace_local_terminal tag.
 let localTerminalOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the git_workspace_clone tag.
+let gitAvailableAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -165,6 +168,7 @@ beforeAll(async () => {
   nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
   localPathOpenAtBoot = isLocalPathOpenAvailable();
   localTerminalOpenAtBoot = isLocalTerminalAvailable();
+  gitAvailableAtBoot = isGitAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -348,11 +352,13 @@ describe('qwen serve — capabilities envelope', () => {
     // rate-limit opt-in, no `--channel`, no configured batch ASR model):
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
-    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `workspace_voice_transcription`, `rate_limit`.
     // `native_directory_picker` is host-conditional (the daemon host's GUI
     // environment, not a spawn flag) and is spliced at its registry
     // position below, using the boot-time probe captured when the daemon
     // was spawned rather than a fresh probe at assertion time.
+    // `git_workspace_clone` is host-conditional too (the daemon host's
+    // `git` binary) and is spliced the same way.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -364,11 +370,13 @@ describe('qwen serve — capabilities envelope', () => {
     // depends on the mounted runtime's bridge, which the bootstrap envelope
     // cannot see, so the tag appears only once the runtime app serves the
     // envelope.
+    // `channel_reload` also appears once the runtime channel manager mounts.
     expect(
       caps.features.filter(
         (feature) =>
           feature !== 'scheduled_task_session_reuse' &&
-          feature !== 'workspace_runtime_stop',
+          feature !== 'workspace_runtime_stop' &&
+          feature !== 'channel_reload',
       ),
     ).toEqual([
       'health',
@@ -383,6 +391,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_last_user_prompt_sort',
       'session_catalog_batch',
       'session_info',
       'session_source_metadata',
@@ -400,6 +409,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_artifacts',
       'session_artifacts_persistence',
       'session_artifact_library',
+      'workspace_artifact_library',
+      'workspace_artifact_library_stream',
       'session_sources',
       'slow_client_warning',
       'typed_event_schema',
@@ -416,6 +427,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_acp_status',
       'auth_provider_install',
       'workspace_memory',
+      'memory_import_v1',
       'workspace_memory_remember',
       'workspace_memory_remember_project_scope',
       'workspace_memory_remember_user_scope',
@@ -433,6 +445,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_agents',
       'session_agent_trace',
       'scheduled_task_gate',
+      'autofix_pr_watches',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
@@ -466,10 +479,13 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_tool_toggle',
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
+      'user_skill_activation',
       'workspace_session_refresh',
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',
       'workspace_skill_manage',
+      'skill_archive_install',
+      'skill_zip_file_source',
       'web_shell_brand',
       'workspace_settings',
       'workspace_permissions',
@@ -481,11 +497,13 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_github_setup',
       'workspace_github_prs',
       'workspace_git_worktrees',
+      'workspace_git_check_ignore',
       'workspace_mcp_restart',
       'session_recap',
       'session_generation',
       'workspace_generation',
       'session_btw',
+      'session_btw_stream',
       'mcp_workspace_pool',
       'mcp_pool_restart',
       'auth_device_flow',
@@ -509,11 +527,14 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
+      'workspace_order',
       'workspace_display_name',
       'scratch_workspace_registration',
+      ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
+      'workspace_directories',
       ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
       ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
@@ -526,6 +547,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_export',
       'workspace_archived_session_export',
       'workspace_session_live_state',
+      'workspace_session_live_state_batch',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',
