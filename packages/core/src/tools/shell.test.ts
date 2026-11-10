@@ -1564,6 +1564,19 @@ describe('ShellTool', () => {
         expectOpaqueFallback(result);
       });
 
+      it('keeps proven-off lastpipe off on a conditional shopt -u', async () => {
+        // lastpipe was never enabled, so a possible disable cannot turn it on;
+        // the state stays proven off. The piped readonly is child-only, the
+        // parent unset succeeds and the create resolves in the worktree. Making
+        // the state uncertain would keep the child readonly mark and fall back.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -u lastpipe; true && shopt -u lastpipe; true | readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
       it('ignores readonly inside an uncalled function defined in control flow', async () => {
         // helper is never called, so `readonly -f cd` in its dormant body never
         // executes; the unset succeeds and the create runs in the worktree.
@@ -1771,6 +1784,33 @@ describe('ShellTool', () => {
         expect(result.llmContent).not.toContain(
           SHELL_PR_BINDING_DIRECTORY_NOTICE,
         );
+      });
+
+      it('ignores a moving-child create inside an uncalled function in control flow', async () => {
+        // helper is never called, so the subshell create in its dormant body
+        // does not execute; the sole executed create is the outer one in the
+        // worktree. The moving-child scan must skip dormant bodies like the
+        // other scans, not drop this valid binding.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then helper() { (cd /test/dir/nested && gh pr create --fill); }; fi; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('flags a moving-child create when the enclosing function is called', async () => {
+        // Control: helper IS called, so its subshell create executes in the
+        // moving child's directory and must surface the fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then helper() { (cd /test/dir/nested && gh pr create --fill); }; helper; fi; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
       });
 
       it('ignores a create inside an uncalled function in a subshell', async () => {

@@ -369,6 +369,18 @@ CI 注记（已归因，非本 PR 回归）：Web Shell smoke shard 1/2 在 `web
 
 第十六轮验证：**537 passed**（523 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证在最终 head 重跑：R16-1（去移动-child-create 检查杀嵌套用例、create-外对照绿）、R16-2（去反斜杠解码杀 `c\d`/`\cd`、`$'cd'`/`c"d"` 绿）、R16-3（回退仅保证禁用杀条件用例、保证禁用与已证启用对照绿）。从字节级备份还原（最终 `shell.ts` SHA-256 `7e4bc24ad809057f97f85e8b967ecdff42c3a2565b30cebdde6e594b7ac4f6f8`）。
 
+### 第十七轮评审（2026-11-10，对精确 head `16371381225` 的复审）
+
+复审确认第十六轮三条修复绑定正确，另提两条紧邻其的 P2 回归。两条均在本 PR 内修复：
+
+**R17-1——moving-child 扫描 descend 进休眠函数体。** 对 `if true; then helper() { (cd WT && gh pr create); }; fi; cd WT && gh pr create`（helper 从未被调用），`subtreeHasCreateInMovingChild` 触达休眠 subshell 并计入其 create，丢掉有效 worktree 绑定。扫描现在计算 `invokedFunctionNames(node)`，跳过任何名字未被传递调用的函数体，与其它扫描一致。被调用的外层函数仍贡献其 moving-child create。
+
+**R17-2——条件禁用使 proven-off 的 lastpipe 变 uncertain。** `lastpipeUncertain = !guaranteed` 把已证 OFF 的选项在任何可能禁用时都转 uncertain，保留了 child-only readonly 标记、丢掉绑定。条件禁用现在**仅当先前状态可能为 on**（`lastpipeEnabled || lastpipeUncertain`）才引入不确定；已证 off 保持 off。保证禁用仍证 off。
+
+第十七轮验证：**540 passed**（526 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证在最终 head 重跑：R17-1（去休眠跳过杀未调用-helper 用例、被调用-helper 对照绿）、R17-2（条件禁用强制 uncertain 杀 proven-off 用例、启用后条件禁用对照绿）。从字节级备份还原（最终 `shell.ts` SHA-256 `bb44bac863e37ebacb9bab0c5937591971541e282fca3379b1ea5c61c3ce1f26`）。
+
+**多轮审计（无方向 + 对抗）。** 通读解析器 + 两组对抗探针（14 条新命令）未发现第十四~十七轮引入的回归：每条探针要么解析到 create 实际运行的目录、要么带 notice fail-closed。唯一复现的静默 miss——控制流体内的 `shopt -u lastpipe`（`if true; then true | shopt -u lastpipe; fi`）未使 proven-on 失效——在精确的 pre-第十七轮 `shell.ts` 上重跑行为相同，故为**先存的控制流建模局限、非回归**；default 臂刻意不建模控制流体内的命令（评审已明确不加控制流绑定支持）。另记录两条局限：程序名中的反斜杠-换行续行（`c\<newline>d`）在解码器看到之前已被 parser 消费（评审延后的 parser 工作）；`cd` **目标**中的反斜杠经 `literalCdTarget` fail-closed（安全过度保守、非静默 miss）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

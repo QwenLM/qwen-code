@@ -1287,11 +1287,18 @@ function subtreeMayChangeDirectoryInThisShell(node: ShellSyntaxNode): boolean {
  * create. Such a create runs in the child's changed directory, which this walk
  * does not attribute, so it must keep the visible fallback signal. A child-only
  * cd with the create OUTSIDE it is exempt (it provably did not move this shell).
+ * A child context inside a dormant (uncalled) function body does not execute, so
+ * it is skipped just like the other scans skip dormant bodies.
  */
 function subtreeHasCreateInMovingChild(node: ShellSyntaxNode): boolean {
+  const invoked = invokedFunctionNames(node);
   const stack: ShellSyntaxNode[] = [node];
   while (stack.length > 0) {
     const current = stack.pop()!;
+    if (current.type === 'function_definition') {
+      const name = current.childForFieldName('name')?.text;
+      if (name && !invoked.has(name)) continue;
+    }
     if (
       (current.type === 'subshell' ||
         current.type === 'command_substitution' ||
@@ -1697,9 +1704,11 @@ async function resolveGhPrCreateDirectory(
           // it as off would discard the final element's possible parent effects
           // and silently query a directory the create never ran in. A `shopt -u
           // lastpipe` invalidates any proven-on state: guaranteed it proves
-          // lastpipe off, conditional it may disable, so the state becomes
-          // uncertain. Leaving the flag set would grant a later final element
-          // current-shell semantics it no longer has.
+          // lastpipe off; conditional it may disable, so the state becomes
+          // uncertain ONLY if it could have been on — a possible disable cannot
+          // enable an option already proven off. Leaving a proven-on flag set
+          // would grant a later final element current-shell semantics it no
+          // longer has.
           if (
             program === 'shopt' &&
             node.namedChildren.some(
@@ -1719,8 +1728,13 @@ async function resolveGhPrCreateDirectory(
                 lastpipeUncertain = true;
               }
             } else if (disables) {
-              lastpipeEnabled = false;
-              lastpipeUncertain = !guaranteed;
+              if (guaranteed) {
+                lastpipeEnabled = false;
+                lastpipeUncertain = false;
+              } else {
+                lastpipeUncertain = lastpipeEnabled || lastpipeUncertain;
+                lastpipeEnabled = false;
+              }
             }
           }
           if (candidateRunsCreate) {

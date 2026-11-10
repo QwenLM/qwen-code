@@ -957,6 +957,49 @@ disable reds the conditional case while the guaranteed-disable and proven-on
 controls stay green). Restored from a byte-level backup (final `shell.ts` SHA-256
 `7e4bc24ad809057f97f85e8b967ecdff42c3a2565b30cebdde6e594b7ac4f6f8`).
 
+### Review round 17 (2026-11-10, re-review of exact head `16371381225`)
+
+The re-review confirmed all three round-16 fixes bind correctly and raised two
+P2 regressions adjacent to them. Both are fixed in this PR:
+
+**R17-1 — the moving-child scan descended into dormant function bodies.** For
+`if true; then helper() { (cd WT && gh pr create); }; fi; cd WT && gh pr create`
+with `helper` never called, `subtreeHasCreateInMovingChild` reached the dormant
+subshell and counted its create, dropping a valid worktree binding. The scan now
+computes `invokedFunctionNames(node)` and skips any function body whose name is
+not transitively invoked, exactly like the other scans. A called enclosing
+function still contributes its moving-child create.
+
+**R17-2 — a conditional disable made a proven-off lastpipe uncertain.**
+`lastpipeUncertain = !guaranteed` turned an already-proven-OFF option uncertain
+on any possible disable, preserving a child-only readonly mark and losing the
+binding. A conditional disable now introduces uncertainty ONLY if the prior
+state could have been on (`lastpipeEnabled || lastpipeUncertain`); a proven-off
+option stays off. A guaranteed disable still proves off.
+
+Round-17 verification: **540 passed** (526 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses re-run on the
+final head: R17-1 (drop the dormant skip reds the uncalled-helper case while the
+called-helper control stays green), R17-2 (force uncertain on conditional disable
+reds the proven-off case while the conditional-after-enable control stays green).
+Restored from a byte-level backup (final `shell.ts` SHA-256
+`bb44bac863e37ebacb9bab0c5937591971541e282fca3379b1ea5c61c3ce1f26`).
+
+**Multi-round audit (undirected + adversarial).** A full read of the resolver plus
+two adversarial probe batches (14 novel commands) found no regression introduced
+by rounds 14–17: every probe either resolved the directory the create actually
+ran in or failed closed with the notice. The one silent miss reproduced — a
+`shopt -u lastpipe` inside a control-flow body (`if true; then true | shopt -u
+lastpipe; fi`) not invalidating the proven-on state — was re-run against the exact
+pre-round-17 `shell.ts` and behaves identically, so it is a pre-existing
+control-flow-modeling limitation, not a regression; the default arm deliberately
+does not model commands inside control-flow bodies (the reviewer scoped out
+control-flow binding support). Two further limitations are recorded: a
+backslash-newline continuation in a program name (`c\<newline>d`) is consumed by
+the parser before the decoder sees it (reviewer-deferred parser work), and a
+backslash in a `cd` TARGET fails closed via `literalCdTarget` (safe
+over-conservatism, not a silent miss).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.
