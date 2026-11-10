@@ -270,10 +270,13 @@ Hosted Harness worker — ManagedMcpRuntime
 ## 开放问题
 
 1. 临时 server 汇入 `HostedWorkspaceToolTurn` 的确切内存 catalog 路径
-   （runtime 切片实现前必须点名每个消费者）。2026-11-10 已解决：worker 的
-   `installSessionDefinitions` 加现有 `mcp-configure` / `mcp-discover` /
-   `mcp-invoke` 控制即可承载临时定义，无需新传输；harness 持有 catalog 并
-   与 `HostedMcpSession.tools()` 并列汇入。
+   （runtime 切片实现前必须点名每个消费者）。2026-11-10 已解决（实现中修订）：
+   relay MCP 客户端放在 **harness** 而非 worker。worker 的 MCP 控制准入绑定
+   journal grant（`parseOperationGrant`、domain 与 workspace-generation
+   校验）；临时注册没有 journal 行，无法在不破坏不变量的前提下签发这些
+   grant。relay 客户端是纯 Streamable HTTP 客户端，无本地进程、无 Workspace
+   文件访问，因此作为 `HostedClientFilesSession` 与会话权威同处 harness，
+   工具轮把它的 catalog 与 `HostedMcpSession.tools()` 并列汇入。worker 不变。
 2. hosted MCP invoke 今天是否已走审批路径；若没有，不加宽其它 MCP server
    行为的最小接线是什么。2026-11-10 已解决：已走。MCP 名从不预批准，
    `hostedApprovalAsks` 在所有非 yolo 模式下询问，`permissionDecision` 按

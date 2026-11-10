@@ -340,10 +340,15 @@ feature for users.
 
 1. Exact in-memory catalog path into `HostedWorkspaceToolTurn` for ephemeral
    servers (runtime slice must name every consumer before implementing).
-   Resolved 2026-11-10: the worker's `installSessionDefinitions` plus the
-   existing `mcp-configure` / `mcp-discover` / `mcp-invoke` controls carry an
-   ephemeral definition without new transports; the harness holds the
-   catalog and merges it beside `HostedMcpSession.tools()`.
+   Resolved 2026-11-10 (revised during implementation): the relay MCP client
+   lives in the **harness**, not the worker. The worker's MCP control
+   admission is journal-grant-gated (`parseOperationGrant`, domain and
+   workspace-generation checks); an ephemeral registration has no journal
+   rows and cannot issue those grants without breaking the invariant. The
+   relay client is a pure Streamable HTTP client with no local process or
+   Workspace file access, so it runs beside the Session authority in the
+   harness as `HostedClientFilesSession`, and the tool turn merges its
+   catalog beside `HostedMcpSession.tools()`. The worker is unchanged.
 2. Whether hosted MCP invokes already traverse the approval path; if not,
    the minimal wiring that does not widen other MCP servers' behavior.
    Resolved 2026-11-10: they do. MCP names are never in the pre-approved
