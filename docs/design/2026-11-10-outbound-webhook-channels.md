@@ -84,11 +84,19 @@ not send a message or authenticate a long connection. Connected means locally
 ready to send, not that remote credentials were verified. Requests have a bounded
 timeout; disconnect cancels in-flight requests, and shutdown drains them.
 
-Use the existing shared 100,000-length delivery protection. Do not add another
-silent truncation layer, split long messages or invent an undocumented DingTalk
-message limit. Platform rejection, including oversized messages, is reported as
-failure. A recorded real-robot smoke test remains necessary to establish live
-platform behavior; local protocol tests must not be presented as that validation.
+The first-phase long-message policy is to keep the existing shared 100,000-length
+delivery protection and submit its result as one message. This is a local safety
+bound, not a guarantee that DingTalk accepts messages of that size. The adapter
+does not truncate again or split messages. If DingTalk rejects an oversized
+message, delivery fails with a sanitized error; no shortened copy or automatic
+retry is sent. This platform-rejection policy is an explicit first-phase tradeoff.
+
+The official [sending API](https://open.dingtalk.com/document/orgapp/custom-robots-send-group-messages)
+and message-type documentation checked on 2026-11-10 do not specify an exact
+Markdown size limit or its unit. The platform threshold remains unverified;
+establishing it requires authoritative protocol evidence or a recorded real-robot
+boundary probe. Local protocol tests and successful live Markdown rendering do
+not establish that threshold.
 
 ## Web behavior
 

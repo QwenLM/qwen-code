@@ -82,8 +82,11 @@ signing secret stay in Channel configuration.
 - Cancels in-flight sending when the Channel stops. Reload uses the updated
   saved configuration.
 - Keeps the shared delivery size protection, which marks truncated results.
-  The adapter does not add another silent truncation layer or split long messages;
-  platform rejection of oversized messages is reported as failure.
+  The first release sends that result as one message and lets DingTalk reject
+  oversized content. Rejection is reported as a delivery failure; the adapter
+  does not send a shortened copy, split messages or retry. DingTalk's exact
+  Markdown size limit and its unit have not been verified, so passing the shared
+  size check does not guarantee delivery. Keep scheduled reports concise.
 - Scheduled delivery retains its existing best-effort successful-final-result
   behavior. This does not introduce failure/cancellation alerts, a durable retry
   queue, attachments or a generic webhook payload contract.

@@ -51,9 +51,13 @@ export function parseDingtalkWebhookConfig(
   const signingSecret = config['signingSecret'];
   if (
     signingSecret !== undefined &&
-    (typeof signingSecret !== 'string' || !signingSecret.trim())
+    (typeof signingSecret !== 'string' ||
+      !signingSecret.trim() ||
+      signingSecret !== signingSecret.trim())
   ) {
-    throw new Error('DingTalk signing secret must be a non-empty string.');
+    throw new Error(
+      'DingTalk signing secret must be a non-empty string without surrounding whitespace.',
+    );
   }
   return {
     webhookUrl,

@@ -118,6 +118,13 @@ describe('channel registry', () => {
         defaultDeliveryTarget: { type: 'chat', id: 'x'.repeat(2049) },
       },
     },
+    ...[
+      'https://oapi.dingtalk.com/robot/send?access_token=private-token',
+      ' HTTPS://oapi.dingtalk.com/robot/send?access_token=private-token ',
+    ].map((id, index) => ({
+      name: `url-target-id-${index}`,
+      metadata: { defaultDeliveryTarget: { type: 'chat', id } },
+    })),
     {
       name: 'target-label',
       metadata: {

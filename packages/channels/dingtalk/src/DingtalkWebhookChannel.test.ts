@@ -79,6 +79,8 @@ describe('DingTalk webhook configuration', () => {
   it.each([
     undefined,
     '',
+    ` ${WEBHOOK_URL}`,
+    `${WEBHOOK_URL}\n`,
     '$UNRESOLVED_URL',
     'https://oapi.dingtalk.com/robot/send',
     'https://oapi.dingtalk.com/robot/send?access_token=',
@@ -99,12 +101,14 @@ describe('DingTalk webhook configuration', () => {
     },
   );
 
-  it.each(['', '   ', 42, null])(
+  it.each(['', '   ', ' secret ', `${SIGNING_SECRET}\n`, 42, null])(
     'rejects an invalid optional signing secret',
     (signingSecret) => {
       expect(() =>
         parseDingtalkWebhookConfig({ webhookUrl: WEBHOOK_URL, signingSecret }),
-      ).toThrow('DingTalk signing secret must be a non-empty string.');
+      ).toThrow(
+        'DingTalk signing secret must be a non-empty string without surrounding whitespace.',
+      );
     },
   );
 
@@ -164,6 +168,15 @@ describe('DingTalk webhook delivery', () => {
     await channel.deliverProactive(TARGET, 'second');
     const first = new URL(String(fetchMock.mock.calls[0]![0]));
     const second = new URL(String(fetchMock.mock.calls[1]![0]));
+    for (const url of [first, second]) {
+      expect([...url.searchParams.keys()].sort()).toEqual([
+        'access_token',
+        'sign',
+        'timestamp',
+      ]);
+      expect(url.searchParams.get('access_token')).toBe('private-token');
+      expect(url.href).not.toContain(SIGNING_SECRET);
+    }
     expect(first.searchParams.get('timestamp')).toBe('1700000000123');
     expect(first.searchParams.get('sign')).toBe(
       'C5cuHoQaMOGsCAIKR0GjupkFPEbOu7QC42oH2qVvkkc=',
@@ -273,14 +286,24 @@ describe('DingTalk webhook delivery', () => {
     const cancel = vi.fn();
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array(16_385));
+        const prefix = new TextEncoder().encode(
+          `${WEBHOOK_URL} ${SIGNING_SECRET}`,
+        );
+        controller.enqueue(prefix);
+        controller.enqueue(new Uint8Array(16_385 - prefix.byteLength));
       },
       cancel,
     });
     fetchMock.mockResolvedValueOnce(new Response(body));
     const { channel } = make();
     await channel.connect();
-    await expect(channel.deliverProactive(TARGET, 'message')).rejects.toThrow();
+    const result = channel.deliverProactive(TARGET, 'message');
+    await expect(result).rejects.toMatchObject({
+      disposition: 'transient',
+      message:
+        'DingTalk webhook request failed or returned an invalid response; delivery may have been accepted.',
+    });
+    await expect(result).rejects.not.toHaveProperty('cause');
     expect(cancel).toHaveBeenCalledOnce();
   });
 
@@ -350,7 +373,13 @@ describe('DingTalk webhook lifecycle', () => {
   it('cancels and drains concurrent sends on disconnect, then can reconnect', async () => {
     const { channel } = make();
     await channel.connect();
-    stall();
+    const releases: Array<() => void> = [];
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((_resolve, reject) => {
+          releases.push(() => reject(new Error(WEBHOOK_URL)));
+        }),
+    );
     const first = expect(
       channel.deliverProactive(TARGET, 'first'),
     ).rejects.toThrow('cancelled');
@@ -358,11 +387,26 @@ describe('DingTalk webhook lifecycle', () => {
       channel.deliverProactive(TARGET, 'second'),
     ).rejects.toThrow('cancelled');
     channel.disconnect();
-    await channel.waitForDisconnect();
-    await Promise.all([first, second]);
-    expect(
-      fetchMock.mock.calls.every(([, options]) => options?.signal?.aborted),
-    ).toBe(true);
+    let drained = false;
+    const drain = channel.waitForDisconnect().then(() => {
+      drained = true;
+    });
+    try {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(
+        fetchMock.mock.calls.every(([, options]) => options?.signal?.aborted),
+      ).toBe(true);
+      await new Promise(setImmediate);
+      expect(drained).toBe(false);
+      releases[0]!();
+      await first;
+      await new Promise(setImmediate);
+      expect(drained).toBe(false);
+    } finally {
+      for (const release of releases) release();
+      await Promise.all([first, second, drain]);
+    }
+    expect(drained).toBe(true);
     await expect(channel.sendMessage('default', 'text')).rejects.toThrow(
       'not ready',
     );
