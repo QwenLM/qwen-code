@@ -7081,8 +7081,82 @@ describe('LlmChat', async () => {
         expect(
           chat.getHistoryToolCallFingerprints(new Set(['fresh', 'loop-end'])),
         ).toEqual(new Map());
+
+        chat.setHistory(JSON.parse(JSON.stringify(history.slice(-2))));
+        expect(chat.getHistoryToolCallFingerprints()).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
       },
     );
+
+    it('chooses a retained provider alias before filtering to retry results', () => {
+      const rawId = 'reused';
+      const usedIds = new Set([rawId]);
+      const pair = (file: string, response: Record<string, unknown>) => {
+        const [call] = normalizeModelToolCallIds(
+          [readCall(rawId, file)],
+          usedIds,
+          new Set(),
+        );
+        return [
+          content('model', call),
+          content(
+            'user',
+            fnResponse('read_file', response, call.functionCall!.id),
+          ),
+        ];
+      };
+      const firstResult = pair('first.ts', { output: 'first' });
+      const secondResult = pair('second.ts', { output: 'second' });
+      const firstId = firstResult[0].parts![0].functionCall!.id!;
+      const secondId = secondResult[0].parts![0].functionCall!.id!;
+      const history = [...firstResult, ...secondResult];
+      const firstFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'first.ts',
+      });
+      const secondFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'second.ts',
+      });
+
+      chat.setHistory(history);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        firstFingerprint,
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([secondId]))).toEqual(
+        new Map([[secondId, secondFingerprint]]),
+      );
+
+      chat.setHistory([
+        ...history,
+        content('model', readCall(rawId, 'original.ts')),
+        content('user', fnResponse('read_file', { output: 'original' }, rawId)),
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'original.ts' }),
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([firstId]))).toEqual(
+        new Map([[firstId, firstFingerprint]]),
+      );
+
+      chat.setHistory([
+        firstResult[0],
+        content(
+          'user',
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            firstId,
+          ),
+        ),
+        ...secondResult,
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        secondFingerprint,
+      );
+    });
 
     it('keeps the first answered call for an id reused across turns and skips orphan response ids', () => {
       // The fingerprint is the replay oracle: a reused id keeps naming the

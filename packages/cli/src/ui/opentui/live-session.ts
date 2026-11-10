@@ -53,6 +53,7 @@ import {
 } from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
 import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { clearLoadedSkillTracking } from '@qwen-code/qwen-code-core/tools/skill-utils.js';
+import { FILE_PATH_TOOLS } from '@qwen-code/qwen-code-core/services/microcompaction/microcompact.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
@@ -1745,11 +1746,14 @@ export async function* livePromptEvents(
           clippedTools.add(canonicalToolName(tool?.name ?? request.name));
         }
       }
-      if (clippedTools.has(ToolNames.READ_FILE)) {
+      if ([...clippedTools].some((name) => FILE_PATH_TOOLS.has(name))) {
         // Keep prior-read rights while letting the model get the full body.
         config.getFileReadCache().markAllReadsEvictedFromHistory();
       }
-      if (clippedTools.has(ToolNames.SKILL)) {
+      if (
+        clippedTools.has(ToolNames.SKILL) ||
+        clippedTools.has(ToolNames.EXEC)
+      ) {
         clearLoadedSkillTracking(
           config.getToolRegistry(),
           'OpenTUI shared tool-output shrink',

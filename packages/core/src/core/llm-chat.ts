@@ -6502,9 +6502,8 @@ export class LlmChat {
         isLegacyLoopSkippedResponse(responses.get(id)),
       ),
     );
-    const skippedIds = new Set<string>();
     const handled = new Map<string, string>();
-    const aliasSources = onlyCallIds ? new Map<string, string>() : undefined;
+    const aliasSources = new Map<string, string>();
     for (const entry of this.history) {
       if (entry.role === 'user') continue;
       const parts = entry.parts ?? [];
@@ -6522,30 +6521,34 @@ export class LlmChat {
           response.partMetadata?.[TOOL_LOOP_SKIPPED_METADATA] === true ||
           (legacyStoppedBatch && isLegacyLoopSkippedResponse(response))
         ) {
-          skippedIds.add(functionCall.id);
           continue;
         }
-        const fingerprint = getFunctionCallFingerprint(functionCall);
-        handled.set(functionCall.id, fingerprint);
+        handled.set(functionCall.id, getFunctionCallFingerprint(functionCall));
         const providerId = partMetadata?.[PROVIDER_TOOL_CALL_ID_METADATA];
         if (
           typeof providerId === 'string' &&
-          skippedIds.has(providerId) &&
-          !handled.has(providerId)
+          !aliasSources.has(providerId) &&
+          !isSynthesizedRepairPart(response)
         ) {
-          // The original id is still reserved by its skipped pair. Let the
-          // first handled call under that id also answer provider replays.
-          handled.set(providerId, fingerprint);
-          aliasSources?.set(providerId, functionCall.id);
+          aliasSources.set(providerId, functionCall.id);
         }
       }
     }
-    if (onlyCallIds) {
-      for (const id of handled.keys()) {
-        if (!onlyCallIds.has(aliasSources?.get(id) ?? id)) handled.delete(id);
+    const selected = onlyCallIds
+      ? new Map([...handled].filter(([id]) => onlyCallIds.has(id)))
+      : handled;
+    // Compaction can keep a renamed call and its result after dropping the
+    // original id. Use the earliest retained result unless that id has its
+    // own result, including when selecting only a retried continuation.
+    for (const [providerId, callId] of aliasSources) {
+      if (
+        !handled.has(providerId) &&
+        (!onlyCallIds || onlyCallIds.has(callId))
+      ) {
+        selected.set(providerId, handled.get(callId)!);
       }
     }
-    return handled;
+    return selected;
   }
 
   /**

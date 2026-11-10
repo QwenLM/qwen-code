@@ -4601,14 +4601,16 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
   });
 
   it.each([
-    { field: 'output', clipped: true, cancelled: false },
-    { field: 'output', clipped: true, cancelled: true },
-    { field: 'output', clipped: false, cancelled: false },
-    { field: 'error', clipped: true, cancelled: false },
-    { field: 'error', clipped: false, cancelled: false },
+    { name: 'read_file', field: 'output', clipped: true, cancelled: false },
+    { name: 'read_file', field: 'output', clipped: true, cancelled: true },
+    { name: 'read_file', field: 'output', clipped: false, cancelled: false },
+    { name: 'read_file', field: 'error', clipped: true, cancelled: false },
+    { name: 'read_file', field: 'error', clipped: false, cancelled: false },
+    { name: 'write_file', field: 'output', clipped: true, cancelled: false },
+    { name: 'edit', field: 'output', clipped: true, cancelled: false },
   ])(
-    'updates residency for retained read $field (clipped: $clipped, cancelled: $cancelled)',
-    async ({ field, clipped, cancelled }) => {
+    'updates file residency for retained $name $field (clipped: $clipped, cancelled: $cancelled)',
+    async ({ name, field, clipped, cancelled }) => {
       const directory = await mkdtemp(
         path.join(tmpdir(), 'qwen-opentui-read-'),
       );
@@ -4618,12 +4620,16 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
         await writeFile(filePath, output);
         const stats = await stat(filePath);
         const cache = new FileReadCache();
-        cache.recordRead(filePath, stats, { full: true, cacheable: true });
+        if (name === 'read_file') {
+          cache.recordRead(filePath, stats, { full: true, cacheable: true });
+        } else {
+          cache.recordWrite(filePath, stats);
+        }
         const send = batchStream([
           { ...call('replay').value, providerCallId: 'old' },
           {
             callId: 'fresh',
-            name: 'read_file',
+            name,
             args: {
               file_path: filePath,
               __cancelled: cancelled,
@@ -4658,15 +4664,20 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     },
   );
 
-  it.each([true, false])(
-    'keeps loaded-skill tracking in sync with its retained body (clipped: %s)',
-    async (clipped) => {
+  it.each([
+    { name: 'skill', clipped: true },
+    { name: 'skill', clipped: false },
+    { name: 'exec', clipped: true },
+    { name: 'exec', clipped: false },
+  ])(
+    'keeps loaded-skill tracking in sync with retained $name output (clipped: $clipped)',
+    async ({ name, clipped }) => {
       const output = 'skill instructions\n'.repeat(80);
       const send = batchStream([
         { ...call('replay').value, providerCallId: 'old' },
         {
           callId: 'skill',
-          name: 'skill',
+          name,
           args: { __restoreResult: { output } },
         },
       ]);

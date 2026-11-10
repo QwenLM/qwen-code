@@ -61,6 +61,12 @@ export function collectToolCallIdsFromHistory(
     for (const part of content.parts ?? []) {
       addId(ids, part.functionCall?.id);
       addId(ids, part.functionResponse?.id);
+      const providerId = part.partMetadata?.[PROVIDER_TOOL_CALL_ID_METADATA];
+      // Keep the alias available for replay checks after compaction removes
+      // the call that originally occupied its raw id.
+      if (part.functionCall && typeof providerId === 'string') {
+        addId(ids, providerId);
+      }
     }
   }
   return ids;

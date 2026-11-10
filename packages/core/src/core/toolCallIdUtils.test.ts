@@ -89,6 +89,12 @@ describe('toolCallIdUtils', () => {
       'dup_id_0001',
     );
     expect(seenIds.has('dup_id_0001__qwen_dup_2')).toBe(true);
+    const compactedIds = collectToolCallIdsFromHistory([
+      { role: 'model', parts: normalized },
+    ]);
+    expect(reserveModelToolCallId('dup_id_0001', compactedIds, new Map())).toBe(
+      'dup_id_0001__qwen_dup_3',
+    );
   });
 
   it('generates stable non-empty ids for missing functionCall ids', () => {
