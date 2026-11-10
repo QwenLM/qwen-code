@@ -224,35 +224,6 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void initializesOnABusinessCatalogThatAlreadyHasItsOwnHistory() throws Exception {
-        // The shared-catalog contract: business objects and their Flyway history are
-        // left alone, while the Managed baseline is created beside them. Only a
-        // catalog that holds nothing but history is refused.
-        DataSource source = source();
-        try (var connection = source.getConnection();
-                var statement = connection.createStatement()) {
-            statement.execute("CREATE TABLE business_data (witness INT NOT NULL)");
-            statement.execute("INSERT INTO business_data VALUES (42)");
-            statement.execute("CREATE TABLE flyway_schema_history (installed_rank INT NOT NULL)");
-            statement.execute("INSERT INTO flyway_schema_history VALUES (1)");
-        }
-        ManagedSchema.initialize(source);
-        ManagedSchema.validate(source);
-        try (var connection = source.getConnection();
-                var statement = connection.createStatement();
-                var row = statement.executeQuery("SELECT witness FROM business_data")) {
-            assertTrue(row.next());
-            assertEquals(42, row.getInt(1));
-        }
-        try (var connection = source.getConnection();
-                var statement = connection.createStatement();
-                var row = statement.executeQuery("SELECT installed_rank FROM flyway_schema_history")) {
-            assertTrue(row.next());
-            assertEquals(1, row.getInt(1));
-        }
-    }
-
-    @Test
     void refusesAViewBackedFlywayHistory() throws Exception {
         // On a complete catalog a history *view* must still be refused: discovery
         // keeps `flyway_schema_history` in its filter for exactly this check, and a

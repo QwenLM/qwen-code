@@ -28,36 +28,16 @@ public final class ManagedSchema {
                 ManagedSchemaCatalog.validate(connection, ddl);
                 return;
             }
-            // Only a catalog that holds nothing but Flyway history is refused. An
-            // application database that also carries business objects is the shared
-            // catalog this initializer now supports, and its history stays untouched.
-            if (ManagedSchemaCatalog.hasHistory(connection)
-                    && ManagedSchemaCatalog.hasOnlyHistory(connection)) {
-                throw new SQLException("A history-only catalog is not a fresh Managed database");
+            if (ManagedSchemaCatalog.hasHistory(connection)) {
+                throw new SQLException(
+                        "A catalog that already holds a Flyway history table is not a"
+                                + " fresh Managed database");
             }
             execute(connection, ddl);
             ManagedSchemaCatalog.validate(connection, ddl);
         } catch (SQLException exception) {
             throw new IllegalStateException(
                     "Fresh Managed schema initialization failed", exception);
-        }
-    }
-
-    /**
-     * True when the catalog already holds Managed namespace tables. The Flyway
-     * strategy and the preflight use it to tell "this chain has applied its
-     * baseline" apart from "the catalog's history belongs to the host".
-     */
-    public static boolean hasManagedTables(Connection connection) throws SQLException {
-        return !ManagedSchemaCatalog.tables(connection).isEmpty();
-    }
-
-    /** Data-source form of {@link #hasManagedTables(Connection)}. */
-    public static boolean hasManagedTables(DataSource source) {
-        try (Connection connection = source.getConnection()) {
-            return hasManagedTables(connection);
-        } catch (SQLException exception) {
-            return false;
         }
     }
 

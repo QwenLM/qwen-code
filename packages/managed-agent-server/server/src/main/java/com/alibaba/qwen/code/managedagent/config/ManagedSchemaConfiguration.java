@@ -58,13 +58,6 @@ public class ManagedSchemaConfiguration {
             // Broker may have initialized the same canonical baseline first.
             if (populated) {
                 ManagedSchema.validate(source);
-                if (ManagedSchema.hasManagedTables(source)) {
-                    // This chain's baseline is already applied. The catalog may
-                    // carry the embedding application's own flyway history, so
-                    // baseline()/migrate() would read it as this chain's ledger;
-                    // validation above is the gate instead.
-                    return;
-                }
                 if (!history) {
                     org.flywaydb.core.Flyway.configure()
                             .configuration(flyway.getConfiguration())
