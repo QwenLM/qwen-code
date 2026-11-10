@@ -67,9 +67,10 @@ uses `msgtype: markdown`, derives `markdown.title` with the existing DingTalk
 `extractTitle` helper and preserves the supplied body in `markdown.text`. Plain
 text is also valid message content. The public Channel delivery contract remains
 a text string; no message-format setting or Markdown conversion is introduced.
-DingTalk supports only a [Markdown subset](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type).
-Tables are not among the officially listed elements, and this adapter does not
-convert them or promise full GitHub-flavored Markdown rendering.
+DingTalk documents a [Markdown subset](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type).
+The adapter preserves table syntax and other Markdown as supplied; rendering is
+handled by the DingTalk client. It does not convert tables or promise full
+GitHub-flavored Markdown rendering.
 
 When signing is configured, generate a fresh millisecond timestamp and
 HMAC-SHA256 signature using the documented DingTalk algorithm. Do not cache a
