@@ -355,6 +355,8 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git commit $FLAG',
     'git commit "${FLAG}"',
     'git commit -m msg $FLAG',
+    'git commit -S $FLAG',
+    'git commit --gpg-sign $FLAG',
     'git commit `printf "$FLAG"`',
     // Rule 3: an indirect word plus IFS assembly still carries a `$`, so the
     // text is unprovable and must ask rather than fall through to L5.3.
@@ -391,8 +393,6 @@ describe('isDestructiveCommand — git commit --amend', () => {
       '--reedit-message',
       '-t',
       '--template',
-      '-S',
-      '--gpg-sign',
       '--author',
       '--date',
     ]) {

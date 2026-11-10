@@ -236,6 +236,10 @@ function isUnprovableFlag(word: string): boolean {
   return /^-{1,2}/.test(word) && /[$`{]/.test(word);
 }
 
+// Only mandatory-value flags belong here. OPTARG flags such as
+// `-S[<keyid>]`/`--[no-]gpg-sign[=<key-id>]` and
+// `-u[<mode>]`/`--untracked-files[=<mode>]` do not consume the next token;
+// listing one would misclassify a following expansion and create a fail-open.
 const GIT_COMMIT_VALUE_FLAGS = new Set([
   '-m',
   '--message',
@@ -247,8 +251,6 @@ const GIT_COMMIT_VALUE_FLAGS = new Set([
   '--reedit-message',
   '-t',
   '--template',
-  '-S',
-  '--gpg-sign',
   '--author',
   '--date',
 ]);
