@@ -1003,3 +1003,5 @@ export type {
   ToolLifecycleRecord,
   ToolLifecycleOutcome,
 } from './telemetry/tool-lifecycle.js';
+
+// Surface the install-time cold-start diagnostics helper from the root manifest.
