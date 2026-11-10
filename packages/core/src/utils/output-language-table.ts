@@ -126,3 +126,11 @@ export function isKnownOutputLanguageDesignation(value: string): boolean {
 export function isBcp47LanguageTag(value: string): boolean {
   return BCP47_TAG.test(value.trim());
 }
+
+/**
+ * The machine-readable marker the CLI writes into `output-language.md`; its
+ * capture is the language token (`auto` or a designation). The token is
+ * untrusted until checked, see the module comment above.
+ */
+export const OUTPUT_LANGUAGE_MARKER =
+  /<!--\s*qwen-code:llm-output-language:\s*(.*?)\s*-->/i;

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFile } from 'node:fs/promises';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
@@ -13,6 +14,7 @@ import {
   getStartupContextLength,
   stripSystemReminderBlocks,
 } from '../core/environmentContext.js';
+import { OUTPUT_LANGUAGE_MARKER } from '../utils/output-language-table.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
@@ -36,11 +38,28 @@ const TITLE_PROMPT_EXAMPLE_TITLES = [
   '重构用户鉴权中间件',
 ];
 
+// Rules that make the title follow the conversation's language. They are sent
+// only when the output-language preference is `auto` or absent (#16793): the
+// English prompt otherwise pulls fast models into English titles for a Chinese
+// conversation, most often when the request is short or full of identifiers.
+// A fixed language gets the prompt unchanged: with these rules added, a fast
+// model broke a fixed English preference more often on Chinese conversations.
+const TITLE_LENGTH_RULE = '- 3-7 words.';
+const TITLE_LENGTH_RULE_ANY_SCRIPT =
+  '- 3-7 words, or about 8-20 characters for Chinese, Japanese or Korean.';
+const TITLE_CASE_RULE =
+  '- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.';
+const TITLE_CONVERSATION_LANGUAGE_RULES = [
+  `${TITLE_CASE_RULE} (Applies only to languages with letter case.)`,
+  "- Write the title in the main language of the user's messages in the conversation, not the language of these instructions. If a language preference is given below, it wins.",
+  '- Keep personal names, code identifiers, file paths and product names exactly as written; do not translate or transliterate them.',
+].join('\n');
+
 const TITLE_SYSTEM_PROMPT = `Generate a concise, sentence-case title (3-7 words) that captures what this programming-assistant session is about. Think of it as a git commit subject for the session.
 
 Rules:
-- 3-7 words.
-- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.
+${TITLE_LENGTH_RULE}
+${TITLE_CASE_RULE}
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
@@ -56,6 +75,31 @@ Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 Bad (trailing punctuation): {"title": "Fix login button."}
 
 Return ONLY a JSON object with a single "title" key. No preamble, no reasoning, no closing remarks.`;
+
+const TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE = TITLE_SYSTEM_PROMPT.replace(
+  `${TITLE_LENGTH_RULE}\n${TITLE_CASE_RULE}\n`,
+  `${TITLE_LENGTH_RULE_ANY_SCRIPT}\n${TITLE_CONVERSATION_LANGUAGE_RULES}\n`,
+);
+
+/**
+ * Whether the title should be written in the conversation's language, i.e.
+ * the output-language preference is `auto` or there is none. A fixed language,
+ * or a hand-written rule file without the `auto` marker, keeps the plain
+ * prompt and is applied by `runSideQuery` as usual.
+ */
+async function followsConversationLanguage(config: Config): Promise<boolean> {
+  const filePath = config.getOutputLanguageFilePath?.();
+  if (!filePath) return true;
+  let content: string;
+  try {
+    content = await readFile(filePath, 'utf8');
+  } catch {
+    return true;
+  }
+  if (!content.trim()) return true;
+  const token = content.match(OUTPUT_LANGUAGE_MARKER)?.[1]?.trim();
+  return token?.toLowerCase() === 'auto';
+}
 
 const TITLE_USER_PROMPT =
   'Generate the session title now. Populate the schema with a single short title string.';
@@ -165,7 +209,9 @@ export async function tryGenerateSessionTitle(
 
     const result = await runSideQuery<{ title?: string }>(config, {
       purpose: 'session-title',
-      systemInstruction: TITLE_SYSTEM_PROMPT,
+      systemInstruction: (await followsConversationLanguage(config))
+        ? TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE
+        : TITLE_SYSTEM_PROMPT,
       schema: TITLE_SCHEMA as unknown as Record<string, unknown>,
       contents: [
         {

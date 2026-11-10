@@ -11,6 +11,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import {
   isBcp47LanguageTag,
   isKnownOutputLanguageDesignation,
+  OUTPUT_LANGUAGE_MARKER,
 } from '../utils/output-language-table.js';
 import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
@@ -227,8 +228,6 @@ export function validateGoalVerifierText(text: string): string | null {
  * else as untrusted data, and raw prose appended at system priority would be
  * an instruction channel the working tree controls.
  */
-const OUTPUT_LANGUAGE_MARKER =
-  /<!--\s*qwen-code:llm-output-language:\s*(.*?)\s*-->/i;
 const OUTPUT_LANGUAGE_TOKEN_MAX_LENGTH = 64;
 
 /**

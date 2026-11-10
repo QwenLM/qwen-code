@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
@@ -29,6 +32,7 @@ interface MockOptions {
   fastModel?: string | undefined;
   history?: Content[];
   chat?: LlmChat;
+  outputLanguageFilePath?: string;
   generateJsonResult?:
     | Record<string, unknown>
     | ((...args: unknown[]) => Promise<Record<string, unknown>>);
@@ -55,6 +59,7 @@ function makeConfig(opts: MockOptions): {
       }),
     })),
     getBaseLlmClient: vi.fn(() => ({ generateJson })),
+    getOutputLanguageFilePath: vi.fn(() => opts.outputLanguageFilePath),
   } as unknown as Config;
 
   return { config, generateJson };
@@ -858,6 +863,97 @@ describe('tryGenerateSessionTitle', () => {
     expect(captured).not.toBeNull();
     expect(captured).toContain('END_MODEL_MARKER');
     expect(captured).not.toContain('BEGIN_HEAD');
+  });
+});
+
+describe('tryGenerateSessionTitle output language (#16793)', () => {
+  const CONVERSATION_LANGUAGE_RULE =
+    "Write the title in the main language of the user's messages";
+  const PLAIN_RULES =
+    '- 3-7 words.\n- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.\n- No trailing punctuation.';
+
+  async function systemInstructionFor(
+    outputLanguage: string | undefined | null,
+  ): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'session-title-lang-'));
+    try {
+      let outputLanguageFilePath: string | undefined;
+      if (outputLanguage !== undefined) {
+        outputLanguageFilePath = path.join(dir, 'output-language.md');
+        if (outputLanguage !== null) {
+          await writeFile(outputLanguageFilePath, outputLanguage);
+        }
+      }
+      const { config, generateJson } = makeConfig({
+        history: [
+          userText('请解释工作流依赖检查的原理'),
+          modelText('依赖检查会先解析工作流的依赖图。'),
+        ],
+        fastModel: 'qwen-turbo',
+        outputLanguageFilePath,
+        generateJsonResult: { title: '解释工作流依赖检查原理' },
+      });
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+      );
+      expect(outcome.ok).toBe(true);
+      const { systemInstruction } = generateJson.mock.calls[0][0] as {
+        systemInstruction: string;
+      };
+      return systemInstruction;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const AUTO_FILE = `# Output language preference: auto
+<!-- qwen-code:llm-output-language: auto -->
+
+## Rule
+Respond in the same language as the user's input.`;
+  const FIXED_FILE = `# Output language preference: English
+<!-- qwen-code:llm-output-language: English -->
+
+## Rule
+You MUST always respond in **English** regardless of the user's input language.`;
+
+  it('asks for the conversation language under the auto preference', async () => {
+    const instruction = await systemInstructionFor(AUTO_FILE);
+    expect(instruction).toContain(CONVERSATION_LANGUAGE_RULE);
+    expect(instruction).toContain(
+      '- 3-7 words, or about 8-20 characters for Chinese, Japanese or Korean.',
+    );
+    expect(instruction).toContain('do not translate or transliterate them');
+    expect(instruction).not.toContain(PLAIN_RULES);
+    // The preference itself is still appended after the title rules.
+    expect(instruction.indexOf(CONVERSATION_LANGUAGE_RULE)).toBeLessThan(
+      instruction.indexOf("Respond in the same language as the user's input."),
+    );
+  });
+
+  it.each([
+    ['no preference file is configured', undefined],
+    ['the configured file is missing', null],
+    ['the file is blank', '  \n'],
+  ])(
+    'asks for the conversation language when %s',
+    async (_label, outputLanguage) => {
+      const instruction = await systemInstructionFor(outputLanguage);
+      expect(instruction).toContain(CONVERSATION_LANGUAGE_RULE);
+      expect(instruction).not.toContain(PLAIN_RULES);
+    },
+  );
+
+  it.each([
+    ['a fixed language', FIXED_FILE],
+    ['a hand-written rule without the marker', '请始终用中文回答。'],
+  ])('keeps the plain title rules for %s', async (_label, outputLanguage) => {
+    const instruction = await systemInstructionFor(outputLanguage);
+    expect(instruction).toContain(PLAIN_RULES);
+    expect(instruction).not.toContain(CONVERSATION_LANGUAGE_RULE);
+    expect(instruction).not.toContain('Chinese, Japanese or Korean');
+    expect(instruction).toContain(outputLanguage.trim());
   });
 });
 
