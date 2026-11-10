@@ -147,12 +147,7 @@ import {
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
 import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
-import {
-  mergeSessionContentHits,
-  sessionMatchesGitQuery,
-  sessionMatchesSource as matchesSessionSource,
-} from './sessionSearch';
-import { useSessionContentSearch } from './useSessionContentSearch';
+import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
@@ -2059,28 +2054,9 @@ export function WebShellSidebar({
       sidebarMountedRef.current = false;
     };
   }, []);
-  const [searchQuery, setSearchQuery] = useState('');
   useEffect(() => {
     if (!searchOpen) onSearchQueryChange?.('');
   }, [onSearchQueryChange, searchOpen]);
-  // Order-insensitive membership key: poll-driven catalog updates change
-  // it only when the session-id set actually changes, so externally
-  // deleted/archived sessions invalidate content-search hits the same way
-  // local-handler token bumps do (without re-firing on every poll tick).
-  const sessionMembershipKey = useMemo(
-    () =>
-      sessions
-        .map((session) => session.sessionId)
-        .sort()
-        .join('|'),
-    [sessions],
-  );
-  const contentSearchHits = useSessionContentSearch(
-    workspace.client,
-    primaryWorkspaceCwd,
-    searchQuery,
-    `${workspaceSessionsReloadToken}:${sessionMembershipKey}`,
-  );
   const [isResizing, setIsResizing] = useState(false);
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => new Set(),
@@ -2221,7 +2197,6 @@ export function WebShellSidebar({
     if (!activityEnabled) return;
     if (!activityOpen) {
       setSearchOpen(false);
-      setSearchQuery('');
     }
     setActivityOpen((value) => !value);
     if (collapsed) onCollapsedChange(false);
@@ -2727,10 +2702,7 @@ export function WebShellSidebar({
     secondaryPinnedSessions,
     sessions,
   ]);
-  // Identities the Pinned section renders. Pinned rows have exactly one
-  // owner: content-search exemptions keep a pinned ghost in the list only
-  // when the Pinned section does NOT carry it — otherwise the session
-  // renders twice (or, for rename, nowhere that hosts the form).
+  // Track actual Pinned membership so duplicate rows share one rename form.
   const pinnedSectionIdentities = useMemo(
     () =>
       new Set(pinnedSessions.map((session) => getIdentityForSession(session))),
@@ -3841,25 +3813,20 @@ export function WebShellSidebar({
     if (railLayout) {
       if (homeHidden && !homePreviewOpen) {
         setSearchOpen(false);
-        setSearchQuery('');
         setCollapsedSessionsOpen(false);
         cancelRename();
         setGroupMenu(null);
       }
-      // The Live section unmounts the search field (the !liveView gate on
-      // it). Resetting here keeps a surviving searchOpen from remounting an
-      // autoFocus input on the way back and stealing focus. The Channels
-      // section keeps the field mounted, so its search stays open.
+      // Live disables search; clear its open state so returning does not
+      // reopen the dialog and steal focus. Channels still supports search.
       if (liveView) {
         setSearchOpen(false);
-        setSearchQuery('');
       }
       return;
     }
     if (!collapsed) {
       setCollapsedSessionsOpen(false);
       setSearchOpen(false);
-      setSearchQuery('');
       cancelRename();
       setGroupMenu(null);
     } else if (!collapsedSessionsOpen) {
@@ -3872,7 +3839,6 @@ export function WebShellSidebar({
       // group picker would likewise block dismissal of the next
       // hover-opened switcher.
       setSearchOpen(false);
-      setSearchQuery('');
       cancelRename();
       setGroupMenu(null);
     }
@@ -3890,7 +3856,6 @@ export function WebShellSidebar({
     if (projectFeaturesEnabled) return;
     setCollapsedSessionsOpen(false);
     setSearchOpen(false);
-    setSearchQuery('');
     cancelRename();
     setGroupMenu(null);
   }, [cancelRename, projectFeaturesEnabled]);
@@ -4887,64 +4852,15 @@ export function WebShellSidebar({
     ],
   );
 
-  const searchedSessions = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    // Keep the daemon catalog order: the organized bucketing below relies on
-    // it (pinned rows sort first there); the flat view re-sorts by recency on
-    // its own, so no sort here.
-    const sourceScopedSessions = sessions
-      .map(applyOptimisticPin)
-      .filter((session) =>
-        matchesSessionSource(session, selectedSessionSource),
-      );
-    if (!query) return sourceScopedSessions;
-    const localMatches = sourceScopedSessions.filter((session) => {
-      const label = getSessionLabel(session).toLowerCase();
-      return (
-        label.includes(query) ||
-        session.sessionId.toLowerCase().includes(query) ||
-        sessionMatchesGitQuery(session, query)
-      );
-    });
-    // Merge daemon transcript-content hits into the local fast-path
-    // matches (shared with WorkspaceSection's copy — see sessionSearch).
-    return mergeSessionContentHits(
-      sourceScopedSessions,
-      localMatches,
-      contentSearchHits,
-      selectedSessionSource,
-      applyOptimisticPin,
-    );
-  }, [
-    applyOptimisticPin,
-    contentSearchHits,
-    searchQuery,
-    selectedSessionSource,
-    sessions,
-  ]);
-  // Content-search hits the loaded catalog doesn't carry ("ghosts"). A
-  // pinned ghost must still render somewhere while its hit is active:
-  // the filters below drop pinned rows because loaded pinned sessions
-  // render in the Pinned section — but when the Pinned section DOES
-  // carry the session (pinned page settled, or an optimistic pin), the
-  // ghost must not be retained too: pinned rows have exactly one owner.
-  const searchGhostIds = useMemo(() => {
-    const catalogIds = new Set(sessions.map((session) => session.sessionId));
-    const ghosts = new Set<string>();
-    for (const hit of contentSearchHits.values()) {
-      if (catalogIds.has(hit.session.sessionId)) continue;
-      if (pinnedSectionIdentities.has(getIdentityForSession(hit.session))) {
-        continue;
-      }
-      ghosts.add(hit.session.sessionId);
-    }
-    return ghosts;
-  }, [
-    contentSearchHits,
-    getIdentityForSession,
-    pinnedSectionIdentities,
-    sessions,
-  ]);
+  const sourceScopedSessions = useMemo(
+    () =>
+      sessions
+        .map(applyOptimisticPin)
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        ),
+    [applyOptimisticPin, selectedSessionSource, sessions],
+  );
   const isPinnedSectionMember = useCallback(
     (session: DaemonSessionSummary) =>
       pinnedSectionIdentities.has(getIdentityForSession(session)),
@@ -4953,11 +4869,8 @@ export function WebShellSidebar({
   const filteredSessions = useMemo(() => {
     const unpinnedSessions =
       selectedSessionSource === 'channel'
-        ? searchedSessions
-        : searchedSessions.filter(
-            (session) =>
-              !session.isPinned || searchGhostIds.has(session.sessionId),
-          );
+        ? sourceScopedSessions
+        : sourceScopedSessions.filter((session) => !session.isPinned);
     const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled || sessionSort === 'lastUserPromptAt') {
       return nextSessions;
@@ -4976,15 +4889,14 @@ export function WebShellSidebar({
   }, [
     sessionSort,
     organizationEnabled,
-    searchGhostIds,
-    searchedSessions,
+    sourceScopedSessions,
     selectedSessionSource,
   ]);
 
   const sessionTree = useSessionTree(
     primaryWorkspaceExpansionId,
-    searchedSessions,
-    searchQuery.trim().length > 0,
+    sourceScopedSessions,
+    false,
   );
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -5008,7 +4920,6 @@ export function WebShellSidebar({
   );
 
   const sessionSections = useMemo<SessionSection[]>(() => {
-    const searching = searchQuery.trim().length > 0;
     const validGroupIds = new Set(groups.map((group) => group.id));
     const sessionsByColor = new Map<
       DaemonSessionGroupPresetColor,
@@ -5023,7 +4934,7 @@ export function WebShellSidebar({
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
-    // Bucket the search-filtered catalog in one pass, pinned rows included:
+    // Bucket the source-filtered catalog in one pass, pinned rows included:
     // they are lifted into the Pinned section, but their group/color section
     // must keep them, otherwise a section whose members are all pinned
     // rendered `· 0`, indistinguishable from lost memberships (#10391).
@@ -5031,7 +4942,7 @@ export function WebShellSidebar({
     // the pinned ones) preserves the daemon catalog order — pinned rows sort
     // first there — so a pinned member is never pushed behind its section's
     // preview limit by rows it sorts ahead of.
-    for (const session of searchedSessions) {
+    for (const session of sourceScopedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
       if (
@@ -5058,14 +4969,8 @@ export function WebShellSidebar({
       // On sources with a Pinned section, a pinned session without a
       // (renderable) group stays Pinned-section-only; it never spills into
       // Ungrouped. The channel source has no Pinned section, so its pinned
-      // rows keep the normal Ungrouped bucket. Pinned content-search ghosts
-      // are exempt: the Pinned section never sees them, so dropping them
-      // here would render the matching session nowhere.
-      if (
-        session.isPinned &&
-        selectedSessionSource !== 'channel' &&
-        !searchGhostIds.has(session.sessionId)
-      ) {
+      // rows keep the normal Ungrouped bucket.
+      if (session.isPinned && selectedSessionSource !== 'channel') {
         continue;
       }
       recentSessions.push(session);
@@ -5085,10 +4990,9 @@ export function WebShellSidebar({
         sessions: colorSessions,
       });
     }
-    // Named groups next (kept visible even when empty, unless searching).
+    // Named groups next, kept visible even when empty.
     for (const group of groups) {
       const groupSessions = sessionsByGroupId.get(group.id) ?? [];
-      if (searching && groupSessions.length === 0) continue;
       sections.push({
         id: `group:${group.id}`,
         kind: 'group',
@@ -5115,9 +5019,7 @@ export function WebShellSidebar({
   }, [
     groups,
     organizationEnabled,
-    searchGhostIds,
-    searchedSessions,
-    searchQuery,
+    sourceScopedSessions,
     selectedSessionSource,
     t,
   ]);
@@ -5139,13 +5041,11 @@ export function WebShellSidebar({
     const isInitialCatalog =
       awaitingInitialSessionCatalogBySourceRef.current[sessionSource];
     if (isInitialCatalog) {
-      // First-sync registration must reflect the full unfiltered catalog:
-      // sections hidden by an active search would never register and would
-      // later auto-collapse as mid-session additions. An empty first catalog
-      // keeps the latch so the first real sections still register as initial
+      // An empty first catalog keeps the latch so the first real sections
+      // still register as initial
       // — channel sessions are externally driven and can arrive while the
       // tab is open on an empty settle.
-      if (searchQuery.trim() || activeSections.length === 0) return;
+      if (activeSections.length === 0) return;
       awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = false;
       for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
       return;
@@ -5163,7 +5063,6 @@ export function WebShellSidebar({
     channelCatalogLoaded,
     channelSessionSections,
     organizationEnabled,
-    searchQuery,
     selectedSessionSource,
     sessionSections,
     sessionSource,
@@ -5377,9 +5276,7 @@ export function WebShellSidebar({
       const {
         isArchived = false,
         renameFormDisabled = false,
-        searchSnippet = searchQuery.trim()
-          ? contentSearchHits.get(session.sessionId)?.snippet
-          : undefined,
+        searchSnippet,
         standalone,
         tree,
         recent,
@@ -6209,7 +6106,6 @@ export function WebShellSidebar({
       canUseWorkspaceQualifiedActions,
       cancelRename,
       completedUnreadIds,
-      contentSearchHits,
       editingSessionIdentity,
       exportingSessionIds,
       getArchivedExportWorkspaceCwd,
@@ -6236,7 +6132,6 @@ export function WebShellSidebar({
       onAddSessionToSplitView,
       resolveSessionWorkspaceScope,
       saveRename,
-      searchQuery,
       sessionActionItems,
       inlineActionItems,
       livePresence,
@@ -6311,9 +6206,7 @@ export function WebShellSidebar({
       ) >= SIDEBAR_SESSION_PREVIEW_LIMIT;
     const renderFlatSessions = () => {
       const showAll =
-        showAllProjectSessions ||
-        Boolean(searchQuery.trim()) ||
-        editingSessionBeyondPreview(filteredSessions);
+        showAllProjectSessions || editingSessionBeyondPreview(filteredSessions);
       const treeRows = sessionTree.buildRows(filteredSessions);
       const displayedRows = showAll
         ? treeRows
@@ -6374,10 +6267,7 @@ export function WebShellSidebar({
             id={section.id}
             label={section.label}
             count={tree.rows.length}
-            limitSessions={
-              !editingSessionBeyondPreview(section.sessions) &&
-              !searchQuery.trim()
-            }
+            limitSessions={!editingSessionBeyondPreview(section.sessions)}
             expanded={!collapsedSessionSectionIds.has(section.id)}
             onToggle={() => toggleSessionSection(section.id)}
           >
@@ -6409,10 +6299,7 @@ export function WebShellSidebar({
               <CalendarClockIcon data-web-shell-scheduled-task-group />
             ) : undefined
           }
-          limitSessions={
-            !editingSessionBeyondPreview(section.sessions) &&
-            !searchQuery.trim()
-          }
+          limitSessions={!editingSessionBeyondPreview(section.sessions)}
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
           onRename={
@@ -6436,10 +6323,7 @@ export function WebShellSidebar({
                 // Pinned members also render in the Pinned section; while that
                 // section is expanded its row hosts the rename form, so this
                 // duplicate row must not mount a second autofocused input.
-                // Gate on the Pinned section actually carrying the row —
-                // content-search ghosts never appear there, so without the
-                // membership check no row would host the form at all and
-                // rename would be silently inoperable for them.
+                // The separately paged Pinned catalog may not carry this row.
                 renameFormDisabled:
                   Boolean(row.session.isPinned) &&
                   pinnedExpanded &&
@@ -6474,7 +6358,6 @@ export function WebShellSidebar({
     reload,
     renderSessionRow,
     sessionTree,
-    searchQuery,
     selectedSessionSource,
     sessionSections,
     sessionsPage,
@@ -7228,7 +7111,6 @@ export function WebShellSidebar({
           }}
           onClose={() => {
             setSearchOpen(false);
-            setSearchQuery('');
             onSearchQueryChange?.('');
           }}
           onSelect={({ session, workspaceCwd }) => {
@@ -8454,7 +8336,6 @@ export function WebShellSidebar({
                             onOpenCommit={
                               projectFeaturesEnabled ? onOpenCommit : undefined
                             }
-                            searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
                             autoExpandKey={
                               autoExpandWorkspace?.id === ws.id
@@ -8788,8 +8669,7 @@ export function WebShellSidebar({
                                   }
                             }
                           />
-                          {ws.primary &&
-                          (projectExpanded || searchQuery.trim()) ? (
+                          {ws.primary && projectExpanded ? (
                             <div
                               className={styles.workspaceSessionBody}
                               style={
@@ -8828,7 +8708,6 @@ export function WebShellSidebar({
                     refreshKey={
                       standaloneRefreshKey + standaloneSessionsReloadToken
                     }
-                    searchQuery={searchQuery}
                     renderSession={(session, standalone) =>
                       renderSessionRow(session, {
                         isArchived: standalone.isArchived,

@@ -115,7 +115,7 @@ export function useSessionSearch({
         let cursor: string | undefined;
         const cursors = new Set<string>();
         do {
-          const page = await client.listWorkspaceSessionsPage(cwd, {
+          const options = {
             pageSize: 50,
             ...(organizationEnabled
               ? {
@@ -125,7 +125,10 @@ export function useSessionSearch({
                 }
               : {}),
             ...(cursor ? { cursor } : {}),
-          });
+          };
+          const page = await (qualified
+            ? client.workspaceByCwd(cwd).listWorkspaceSessionsPage(options)
+            : client.listWorkspaceSessionsPage(cwd, options));
           if (controller.signal.aborted) return;
           for (const session of page.sessions)
             add({ session, workspaceCwd: cwd });

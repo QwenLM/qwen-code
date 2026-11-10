@@ -53,6 +53,20 @@ dialog.
 - Keep the ordinary sidebar unfiltered when the daemon search dialog is open.
   Search results are navigation targets, not an additional editing surface.
 
+The sidebar's retired inline-query state, content-search subscription and ghost
+merging are removed. Workspace lists use the qualified SDK client when the daemon
+advertises qualified routing, with the legacy client retained for older daemons.
+
+Non-empty queries intentionally traverse the catalog to find older title, ID and
+Git matches; a fixed page cap would silently omit those sessions. Each workspace
+is paged sequentially in batches of 50 after a 300ms debounce. An empty query reads
+only the first page. Changing the query aborts content search and prevents further
+catalog pages or stale results; the SDK cannot abort a catalog page already in
+flight. For two workspaces and standalone with eight pages each, a query reads 24
+catalog pages plus two content requests for queries of at least two characters.
+This is a request-count test, not a production latency benchmark. Multi-page and
+cancel-between-pages regressions preserve these explicit semantics.
+
 ## Files and constraints
 
 Changes are confined to Web Shell sidebar components, their tests, translations,

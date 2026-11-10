@@ -9,7 +9,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonClient, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import { DaemonClient, type DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   useSessionSearch,
   type SessionSearchOptions,
@@ -27,6 +27,11 @@ const searchWorkspaceSessions =
   vi.fn<DaemonClient['searchWorkspaceSessions']>();
 const client = {
   listWorkspaceSessionsPage,
+  workspaceByCwd: (cwd: string) => ({
+    listWorkspaceSessionsPage: (
+      options: Parameters<DaemonClient['listWorkspaceSessionsPage']>[1],
+    ) => listWorkspaceSessionsPage(cwd, options),
+  }),
   listStandaloneSessionsPage,
   searchWorkspaceSessions,
 } as unknown as DaemonClient;
@@ -86,6 +91,96 @@ afterEach(async () => {
 });
 
 describe('useSessionSearch', () => {
+  it.each([true, false])(
+    'uses the SDK route for qualified=%s',
+    async (qualified) => {
+      const requests: string[] = [];
+      const actualClient = new DaemonClient({
+        baseUrl: 'http://127.0.0.1:4170',
+        fetch: async (input) => {
+          requests.push(new URL(String(input)).pathname);
+          return new Response(JSON.stringify({ sessions: [] }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+      });
+      await render({ client: actualClient, qualified });
+      await advance();
+      expect(requests).toEqual(
+        qualified
+          ? ['/workspaces/%2Fa/sessions', '/workspaces/%2Fb/sessions']
+          : ['/workspace/%2Fa/sessions'],
+      );
+      expect(result.failed).toBe(false);
+    },
+  );
+
+  it('does not fall back to a legacy route when a qualified workspace fails', async () => {
+    const requests: string[] = [];
+    const actualClient = new DaemonClient({
+      baseUrl: 'http://127.0.0.1:4170',
+      fetch: async (input) => {
+        requests.push(new URL(String(input)).pathname);
+        return new Response(
+          JSON.stringify({ error: 'Workspace unavailable' }),
+          {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      },
+    });
+    await render({ client: actualClient, workspaces: [{ cwd: '/a' }] });
+    await advance();
+    expect(requests).toEqual(['/workspaces/%2Fa/sessions']);
+    expect(result.failed).toBe(true);
+    expect(result.loading).toBe(false);
+  });
+
+  it('stops old workspace and standalone pagination when the query changes', async () => {
+    let resolveWorkspace: (page: {
+      sessions: [];
+      nextCursor: string;
+    }) => void = () => {};
+    let resolveStandalone: (page: {
+      sessions: [];
+      nextCursor: string;
+    }) => void = () => {};
+    listWorkspaceSessionsPage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveWorkspace = resolve;
+        }),
+    );
+    listStandaloneSessionsPage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStandalone = resolve;
+        }),
+    );
+    const options = { workspaces: [{ cwd: '/a' }], includeStandalone: true };
+    await render({ ...options, query: 'old' });
+    await advance();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
+    await render({ ...options, query: 'new' });
+    await advance();
+    await act(async () => {
+      resolveWorkspace({ sessions: [], nextCursor: 'old-page-2' });
+      resolveStandalone({ sessions: [], nextCursor: 'old-page-2' });
+    });
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(2);
+    expect(
+      listWorkspaceSessionsPage.mock.calls.map(([, page]) => page?.cursor),
+    ).toEqual([undefined, undefined]);
+    expect(
+      listStandaloneSessionsPage.mock.calls.map(([page]) => page?.cursor),
+    ).toEqual([undefined, undefined]);
+    expect(result.entries).toEqual([]);
+    expect(result.loading).toBe(false);
+  });
+
   it('keeps duplicate IDs qualified and never reads untrusted workspaces', async () => {
     listWorkspaceSessionsPage.mockImplementation(async (cwd) => ({
       sessions: [session('same', cwd)],
