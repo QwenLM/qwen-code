@@ -12,7 +12,9 @@ import {
   ManagedRuntimeTerminals,
   MANAGED_RUNTIME_TERMINAL_ROUTE,
   MAX_MANAGED_SESSION_TERMINALS,
+  TERMINAL_RELEASE_EXIT_CODE,
 } from './managed-runtime-terminal.js';
+import { WebTerminalRegistry } from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
 
 const IDENTITY = { token: 'test-token', leaseId: 'lease-1', epoch: 7 };
 const WORKSPACE_CWD = process.cwd();
@@ -233,16 +235,46 @@ describe('ManagedRuntimeTerminals control', () => {
   it('reports running live, exited after terminate, and stays exited', async () => {
     const port = await start();
     const ws = await attachAndEcho(port, 'ctl-1', 'session-a');
+    // The hold's wire contract requires a running answer to name its unit and
+    // an exited answer to carry non-null exit evidence; a bare state or an
+    // all-null evidence is rejected and would wedge the hold forever.
     expect(
       terminals!.control(op('terminal-status', 'ctl-1', 'session-a')),
-    ).toMatchObject({ state: 'running' });
+    ).toEqual({ operationId: 'ctl-1', state: 'running', unitName: 'ctl-1' });
     expect(
       terminals!.control(op('terminal-terminate', 'ctl-1', 'session-a')),
-    ).toMatchObject({ state: 'exited' });
+    ).toEqual({
+      operationId: 'ctl-1',
+      state: 'exited',
+      evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
+    });
     expect(
       terminals!.control(op('terminal-status', 'ctl-1', 'session-a')),
-    ).toMatchObject({ state: 'exited' });
+    ).toEqual({
+      operationId: 'ctl-1',
+      state: 'exited',
+      evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
+    });
     ws.terminate();
+  });
+
+  it('pins the release exit code to the registry release receipt', async () => {
+    // The worker answers a released terminal with TERMINAL_RELEASE_EXIT_CODE;
+    // read the producer's actual receipt so the two sides cannot drift.
+    const registry = new WebTerminalRegistry();
+    const created = await registry.create({
+      terminalId: 'pin-release',
+      workspaceCwd: WORKSPACE_CWD,
+      env: process.env,
+    });
+    expect('error' in created).toBe(false);
+    let receipt: { exitCode: number; signal?: number } | undefined;
+    registry.addExitListener('pin-release', (e) => {
+      receipt = e;
+    });
+    registry.release('pin-release', WORKSPACE_CWD);
+    expect(receipt?.exitCode).toBe(TERMINAL_RELEASE_EXIT_CODE);
+    registry.dispose();
   });
 
   it('answers unknown for a terminal it never admitted', async () => {

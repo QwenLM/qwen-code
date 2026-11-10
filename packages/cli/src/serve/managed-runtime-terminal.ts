@@ -33,6 +33,15 @@ export const MANAGED_RUNTIME_TERMINAL_ROUTE = Object.freeze({
 /** Per-Session terminal cap within the worker-wide registry limit. */
 export const MAX_MANAGED_SESSION_TERMINALS = 4;
 
+/**
+ * The exit receipt WebTerminalRegistry.release() reports for a live PTY it
+ * terminates (128 + SIGTERM). The hold's wire contract rejects an `exited`
+ * answer whose evidence is entirely null, so a released terminal must carry
+ * this proven code rather than a bare end. Kept in sync with the registry's
+ * release() exit listener; a test pins the two together.
+ */
+export const TERMINAL_RELEASE_EXIT_CODE = 143;
+
 const MAX_SELECTOR_LENGTH = 256;
 
 function equalSecret(a: string, b: string): boolean {
@@ -280,6 +289,7 @@ export class ManagedRuntimeTerminals {
   control(value: unknown): {
     operationId: string;
     state: 'exited' | 'running' | 'unknown';
+    unitName?: string;
     evidence?: { exitCode: number | null; exitSignal: string | null };
   } {
     const operation = parseTerminalOperation(value);
@@ -292,29 +302,35 @@ export class ManagedRuntimeTerminals {
     const snapshot = this.registry.readSnapshot(terminalId);
     if (snapshot && !snapshot.exited && !snapshot.failed) {
       if (operation.kind === 'terminal-status') {
-        return { operationId: terminalId, state: 'running' };
+        return {
+          operationId: terminalId,
+          state: 'running',
+          unitName: terminalId,
+        };
       }
       this.registry.release(terminalId, this.workspaceCwd);
       return {
         operationId: terminalId,
         state: 'exited',
-        evidence: { exitCode: null, exitSignal: null },
+        evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
       };
     }
-    if (snapshot) {
+    if (snapshot && snapshot.exitCode !== undefined) {
       return {
         operationId: terminalId,
         state: 'exited',
-        evidence: { exitCode: snapshot.exitCode ?? null, exitSignal: null },
+        evidence: { exitCode: snapshot.exitCode, exitSignal: null },
       };
     }
-    if (owner !== undefined) {
+    if (owner !== undefined && !snapshot) {
       return {
         operationId: terminalId,
         state: 'exited',
-        evidence: { exitCode: null, exitSignal: null },
+        evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
       };
     }
+    // A failed spawn, or anything else without provable exit evidence, must
+    // not claim an end the wire contract would accept as settled.
     return { operationId: terminalId, state: 'unknown' };
   }
 
