@@ -108,6 +108,11 @@ export function ChannelQrLogin({
     setBusy(true);
     setError(undefined);
     try {
+      // The daemon reattaches a pending login for the same channel and returns
+      // the identical view, so asking again without cancelling would leave the
+      // stale code and its original deadline on screen. Cancel first so a retry
+      // really produces a new code, and so it does not consume a second slot.
+      if (loginId) await actions.cancel(loginId);
       const result = await actions.start(channelName);
       if (mounted.current) setView(result);
     } catch (startError) {
@@ -121,7 +126,7 @@ export function ChannelQrLogin({
     } finally {
       if (mounted.current) setBusy(false);
     }
-  }, [actions, busy, channelName, t]);
+  }, [actions, busy, channelName, loginId, t]);
 
   const cancel = useCallback(async () => {
     if (!loginId || busy) return;

@@ -193,6 +193,22 @@ describe('ChannelQrLogin', () => {
     expect(container.querySelector('img')).toBeNull();
   });
 
+  it('cancels the stale session before asking for a new code', async () => {
+    // The daemon reattaches a pending login and returns the identical view, so
+    // a retry that does not cancel first would leave the old code on screen.
+    const a = actions({ start: async () => ({ ...START, attached: true }) });
+    await render({ actions: a });
+    await click('Scan to bind');
+    expect(a.cancel).not.toHaveBeenCalled();
+    await click('New code');
+    expect(a.cancel).toHaveBeenCalledWith('login-1');
+    expect(a.start).toHaveBeenCalledTimes(2);
+    // Cancel must precede the second start, not follow it.
+    const cancelOrder = a.cancel.mock.invocationCallOrder[0]!;
+    const secondStart = a.start.mock.invocationCallOrder[1]!;
+    expect(cancelOrder).toBeLessThan(secondStart);
+  });
+
   it('treats a missing session as expired', async () => {
     const a = actions({
       state: async () => {
