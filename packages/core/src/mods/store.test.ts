@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ModStore } from './store.js';
+import { MOD_STORE_MAX_BYTES, ModStore } from './store.js';
 
 describe('ModStore', () => {
   const dirs: string[] = [];
@@ -56,6 +56,16 @@ describe('ModStore', () => {
     expect((await one.keys('mod')).sort()).toEqual(
       Array.from({ length: 30 }, (_, i) => `k${i}`).sort(),
     );
+  });
+
+  it('refuses a write that takes the store over 4 MiB, keeping what it had', async () => {
+    const dir = storeDir();
+    const store = new ModStore(dir);
+    await store.set('mod', 'kept', 1);
+    await expect(
+      store.set('mod', 'big', 'x'.repeat(MOD_STORE_MAX_BYTES)),
+    ).rejects.toThrow(/over 4194304 bytes/);
+    expect(await store.keys('mod')).toEqual(['kept']);
   });
 
   it('names the file after the plugin, without case, and only inside its directory', async () => {

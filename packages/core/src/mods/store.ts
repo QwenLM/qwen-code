@@ -15,11 +15,12 @@ import { isNodeError } from '../utils/errors.js';
 export const MOD_STORE_MAX_BYTES = 4 * 1024 * 1024;
 
 // Two sessions of one plugin write the same file, so a write holds a lock
-// on it across processes and re-reads it under that lock. Stale after a
-// crash, the lock is taken over.
+// on it across processes and re-reads it under that lock. A lock a crashed
+// process left goes stale after five seconds and is taken over; the retries
+// wait longer than that.
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
-  retries: { retries: 40, minTimeout: 5, maxTimeout: 100, randomize: true },
+  retries: { retries: 80, minTimeout: 5, maxTimeout: 100, randomize: true },
   stale: 5000,
 };
 

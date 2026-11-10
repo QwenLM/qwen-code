@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1743,11 +1743,6 @@ describe('ModRuntime with the real QuickJS worker', () => {
         `await $.store.get(7)`,
         /takes a string key/,
       ],
-      [
-        'a store over 4 MiB',
-        `const big = 'x'.repeat(200000); for (let i = 0; i < 25; i++) await $.store.set('k' + i, big)`,
-        /over 4194304 bytes/,
-      ],
     ])('rejects %s and keeps what was stored', async (_name, body, error) => {
       const runtime = await createStore(
         [
@@ -1785,6 +1780,53 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(readFileSync(join(dir, 'mod-0.json'), 'utf8')).toBe(
         '{"not": "a store"}',
       );
+    });
+
+    it('finishes a write the session closes on before it is closed', async () => {
+      const dir = storeDir();
+      let started: () => void = () => {};
+      const writing = new Promise<void>((resolve) => (started = resolve));
+      // A store slow enough that the close comes while the write runs.
+      class SlowStore extends ModStore {
+        override async set(plugin: string, key: string, value: unknown) {
+          started();
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return super.set(plugin, key, value);
+        }
+      }
+      const runtime = await ModRuntime.createGroup(
+        [
+          {
+            id: 'mod-0',
+            name: 'mod-0',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source: command(`await $.store.set('k', 1); return 'set';`),
+            },
+            options: {},
+          },
+        ],
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        null,
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        new SlowStore(dir),
+      );
+      const ran = runtime.runCommand('go-mod-0', '', signal());
+      void ran.catch(() => {});
+      await writing;
+      await runtime.dispose();
+      await expect(ran).rejects.toThrow();
+      expect(await new ModStore(dir).get('mod-0', 'k')).toBe(1);
+      expect(existsSync(join(dir, 'mod-0.json.lock'))).toBe(false);
     });
 
     it("runs the store calls through the other plugins' hooks", async () => {

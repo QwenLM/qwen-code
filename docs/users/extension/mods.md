@@ -603,8 +603,10 @@ leaves its store in place.
   256 KiB limit on what a Mod passes to Qwen Code.
 - A store file Qwen Code cannot read fails every call on that store, and the
   file is left as it is.
-- A `set` or `delete` whose dispatch ends while it runs still finishes, but its
-  promise rejects, so the caller cannot tell whether it landed.
+- A `set` or `delete` whose dispatch ends while it runs rejects, so the caller
+  cannot tell whether it landed. The session waits for it before it closes; a
+  write the process is killed during may or may not land, and the file is
+  never left half-written.
 
 The calls are API events, so another plugin's hooks hear them with `{key}` or
 `{key, value}`. A hook may pass on another `value` for `store.set`, answer with

@@ -87,6 +87,8 @@ function workerEntry(): URL | string {
 
 export class ModRuntime {
   private readonly worker: Worker;
+  // The $.store calls the host is answering.
+  private readonly storeCalls = new Set<Promise<void>>();
   private failure?: Error;
   private pending?: (reply: ModReply) => void;
   private commands: Array<ModCommand & { plugin: string }> = [];
@@ -156,8 +158,11 @@ export class ModRuntime {
         this.answerTurnAbort(reply, root.id);
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
-      else if (reply.type === 'store') void this.answerStore(reply, root.id);
-      else if (reply.type === 'invalidate') {
+      else if (reply.type === 'store') {
+        const task = this.answerStore(reply, root.id);
+        this.storeCalls.add(task);
+        void task.finally(() => this.storeCalls.delete(task));
+      } else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
         else if (this.renders.includes(reply.plugin))
@@ -720,11 +725,13 @@ export class ModRuntime {
   async dispose(): Promise<void> {
     this.fail(new Error('Mod runtime is closed.'));
     await this.worker.terminate();
-    await Promise.allSettled(
-      [...(this.tool?.operations.values() ?? [])].map(
+    await Promise.allSettled([
+      ...[...(this.tool?.operations.values() ?? [])].map(
         (operation) => operation.task,
       ),
-    );
+      // A write the session's end cut off still finishes before it closes.
+      ...this.storeCalls,
+    ]);
   }
 
   private fail(error: Error): void {
