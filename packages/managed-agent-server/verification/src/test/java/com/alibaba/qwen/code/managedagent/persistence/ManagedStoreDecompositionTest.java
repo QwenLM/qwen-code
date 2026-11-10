@@ -154,7 +154,7 @@ class ManagedStoreDecompositionTest {
                 appendPublicEventIfAbsent/7::REQUIRED:DEFAULT:false appendLiveSessionEventIfAbsent/5::REQUIRED:DEFAULT:false findLastVisibleStatusBeforeDelete/2:-
                 requireSession/2:- readBinding/1:- insertSessionCommand/9::REQUIRED:DEFAULT:false
                 listOwnedSessions/7:- ownsSession/3:- requireSessionOwnership/3:-
-                requireSessionAuthority/3:- requireSessionReadAuthority/3:-
+                requireSessionAuthority/3:- requireSessionReadAuthority/3:- requireSessionReadAuthority/3:-
                 insertSessionCommand/10::REQUIRED:DEFAULT:false insertSessionCommand/11::REQUIRED:DEFAULT:false
                 insertTurnCommand/8::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false
                 beginSessionRename/7::REQUIRED:DEFAULT:false beginSessionMutation/8::REQUIRED:DEFAULT:false
@@ -230,6 +230,7 @@ class ManagedStoreDecompositionTest {
                 "insertSessionCommand/11::REQUIRED:DEFAULT:false",
                 "requireSessionOwnership/3:-",
                 "requireSessionAuthority/3:-",
+                "requireSessionReadAuthority/3:-",
                 "requireSessionReadAuthority/3:-",
                 "ownsSession/3:-",
                 "insertTurnCommand/8::REQUIRED:DEFAULT:false",

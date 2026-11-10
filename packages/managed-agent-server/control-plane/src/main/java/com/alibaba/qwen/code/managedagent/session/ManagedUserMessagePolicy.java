@@ -58,13 +58,13 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
-        // Same split as the read grant: the bound arm compares the raw
-        // actor (code-point bounded by the filter); only the unbound
-        // ownership arm needs a byte-bounded principal.
+        // Same split as the read grant: both arms compare the raw actor
+        // (code-point bounded by the filter). The unified write authority is
+        // the read authority, so this gate takes the raw-actor twin instead
+        // of constructing a byte-bounded principal (R7-1).
         if (session.workspace() == null) {
-            store.requireSessionAuthority(session.tenantId(),
-                    session.sessionId(),
-                    principalOf(session.tenantId(), actorId));
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
             return;
         }
         if (!workspaces.accessOf(session.tenantId(), actorId,
@@ -96,9 +96,11 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
             throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions accept only their delegated input");
         }
         if (session.workspace() == null) {
-            store.requireSessionAuthority(session.tenantId(),
-                    session.sessionId(),
-                    principalOf(session.tenantId(), actorId));
+            // Raw-actor twin, as in requireSubmitterRole: this gate answers
+            // a recorded outcome before any write needs a digest principal
+            // (R7-1).
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
             return;
         }
         if (!maySubmitWorkspaceTurn(session, actorId)) {
@@ -200,9 +202,11 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
         if (session.workspace() == null) {
-            store.requireSessionAuthority(session.tenantId(),
-                    session.sessionId(),
-                    principalOf(session.tenantId(), actorId));
+            // The refusal path for a legacy Session is a gate too: the
+            // unified write authority is the read authority, so no
+            // byte-bounded principal is built here (R7-1).
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
             return;
         }
         requireBoundLegacyWorkspace(session, actorId);

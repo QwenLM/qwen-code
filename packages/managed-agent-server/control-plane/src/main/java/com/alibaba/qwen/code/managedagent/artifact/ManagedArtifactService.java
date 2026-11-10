@@ -156,8 +156,11 @@ public class ManagedArtifactService {
 
     private SessionRecord session(TenantContext tenant, String sessionId) {
         tenant.requireActorId();
+        // The read gate takes the filter-admitted actor: requirePrincipal()
+        // here would 400 a long non-ASCII actor the filter admits before
+        // the Workspace read grant ever ran (R7-1).
         SessionRecord session = sessions.requireReadableSession(
-                tenant.requirePrincipal(), sessionId);
+                tenant.tenantId(), tenant.actorId(), sessionId);
         if (!settings.isEnabled() || !reader.supported() || session.workspace() == null
                 || "DELETING".equals(session.status())) {
             throw notFound();

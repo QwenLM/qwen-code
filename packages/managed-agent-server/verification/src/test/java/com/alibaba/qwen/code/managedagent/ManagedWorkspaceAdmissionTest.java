@@ -3102,6 +3102,69 @@ class ManagedWorkspaceAdmissionTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(mapper.writeValueAsString(Map.of("sessionId", session))))
                 .andExpect(status().isOk());
+        // R7-1 (round 10): the artifact and tool-details read gates take the
+        // filter-admitted actor too; requirePrincipal() answered 400
+        // invalid_actor before the route could answer its own 404.
+        mvc.perform(get("/v1/agents/sessions/{sessionId}/artifacts/{artifactId}",
+                        session, "missing-artifact")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor)))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("artifact_not_found"));
+        mvc.perform(post("/api/agent/web-shell/v1/tool-details/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, longActor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(mapper.writeValueAsString(Map.of(
+                                "sessionId", session, "itemId", "missing-item"))))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("tool_details_not_found"));
+    }
+
+    @Test
+    void legacyCancelGateServesAnActorThePrincipalByteBoundWouldReject() {
+        // R7-1 (round 10): the raw-actor cancel gates no longer build a
+        // byte-bounded principal before any ownership row exists. On a
+        // legacy (row-less) Session the answer is the route's own 404, not
+        // 400 invalid_actor.
+        String longActor = "界".repeat(512);
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = store.insertSessionCommand(tenant, "CREATE_SESSION",
+                "legacy-create", "sha256:" + "d".repeat(64), "qwen-code",
+                null, null, List.of(), null).sessionId();
+        jdbc.update("UPDATE ma_session SET status = 'DELETED'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        assertThatThrownBy(() -> service.cancelTurn(tenant, longActor,
+                "legacy-cancel", session, "turn-legacy"))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode())
+                                .isEqualTo("session_not_found"));
+    }
+
+    @Test
+    void crossSessionReplayProbeServesAnActorThePrincipalByteBoundWouldReject() {
+        // R7-1 (round 10): requireSubmitterRole and
+        // requireRecordedSessionGrant gate a tenant-global key reused across
+        // Sessions with the raw actor; the recorded Session's ownership
+        // probe must not construct a byte-bounded principal first. The
+        // answer is the key conflict, not 400 invalid_actor.
+        String longActor = "界".repeat(512);
+        String tenant = "tenant-" + UUID.randomUUID();
+        String requested = store.insertSessionCommand(tenant, "CREATE_SESSION",
+                "probe-requested", "sha256:" + "e".repeat(64), "qwen-code",
+                null, null, List.of(), null).sessionId();
+        String recorded = store.insertSessionCommand(tenant, "CREATE_SESSION",
+                "probe-recorded", "sha256:" + "f".repeat(64), "qwen-code",
+                null, null, List.of(), null).sessionId();
+        new TransactionTemplate(transactionManager).executeWithoutResult(status ->
+                store.beginSessionMutation(tenant, "RENAME_SESSION",
+                        "probe-reused-key", "sha256:" + "1".repeat(64),
+                        recorded, SessionMutationKind.RENAME, "actor-a"));
+        assertThatThrownBy(() -> service.renameSession(tenant, longActor,
+                "probe-reused-key", requested, "renamed"))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode())
+                                .isEqualTo("idempotency_conflict"));
     }
 
     private ManagedAgentService boundService(boolean workspaceFiles) {

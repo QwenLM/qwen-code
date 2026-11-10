@@ -2432,12 +2432,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // at all.
     private void requireReplayCreator(SessionRecord session,
             String actorId) {
-        // Same split as requireReadGrant: the bound arm compares the raw
-        // actor; only the unbound ownership arm needs a principal.
+        // Same split as requireReadGrant: both arms compare the raw actor.
+        // The unified write authority is the read authority, so the unbound
+        // arm takes its raw-actor twin and never builds a principal for a
+        // replay that may answer before any write (R7-1).
         if (session.workspace() == null) {
-            store.requireSessionAuthority(session.tenantId(),
-                    session.sessionId(),
-                    principalOf(session.tenantId(), actorId));
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
             return;
         }
         requireBoundReplayCreator(session, actorId);
@@ -2480,12 +2481,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // cancel still answers through an outage — the same split as submit.
     private void requireCancellerRole(SessionRecord session,
             String actorId) {
-        // Same split as requireReadGrant: the bound arm compares the raw
-        // actor; only the unbound ownership arm needs a principal.
+        // Same split as requireReadGrant: both arms compare the raw actor.
+        // The unified write authority is the read authority
+        // (SessionAdmissionStore#requireSessionAuthority), so the unbound
+        // arm uses its raw-actor twin rather than building a byte-bounded
+        // principal the tenant filter never required (R7-1).
         if (session.workspace() == null) {
-            store.requireSessionAuthority(session.tenantId(),
-                    session.sessionId(),
-                    principalOf(session.tenantId(), actorId));
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
             return;
         }
         if (!workspaces.accessOf(session.tenantId(), actorId,
@@ -2514,9 +2517,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private void requireCancellerShape(SessionRecord session,
             String actorId) {
         if (session.workspace() == null) {
-            store.requireSessionAuthority(session.tenantId(),
-                    session.sessionId(),
-                    principalOf(session.tenantId(), actorId));
+            // Raw-actor twin, as in requireCancellerRole: the write
+            // authority is the read authority, and a gate-only path must
+            // not construct a principal the filter never required (R7-1).
+            store.requireSessionReadAuthority(session.tenantId(),
+                    session.sessionId(), actorId);
             return;
         }
         if (!inputPolicy.maySubmitShape(session, null)) {
@@ -2578,8 +2583,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             }
             return;
         }
-        requireTaskCanceller(session,
-                principalOf(session.tenantId(), actorId));
+        // Raw-actor twin: the unified write authority is the read
+        // authority, and this gate constructs no principal (R7-1).
+        store.requireSessionReadAuthority(session.tenantId(),
+                session.sessionId(), actorId);
     }
 
     void requireTaskCanceller(SessionRecord session,
@@ -2927,10 +2934,16 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 throw new ManagedAgentException(404,
                         "session_not_found", "The Session was not found.");
             }
-            store.requireSessionAuthority(requested.tenantId(),
-                    command.sessionId(), principal == null
-                            ? principalOf(requested.tenantId(), rawActorId)
-                            : principal);
+            if (principal == null) {
+                // Raw-actor twin: the write authority is the read
+                // authority, so an ownership-row probe never needs the
+                // byte-bounded principal the filter did not require (R7-1).
+                store.requireSessionReadAuthority(requested.tenantId(),
+                        command.sessionId(), rawActorId);
+            } else {
+                store.requireSessionAuthority(requested.tenantId(),
+                        command.sessionId(), principal);
+            }
         } else {
             // Bound Workspace Sessions share their workspace context: gate on
             // the caller's own requested Session, never the recorded Session's
