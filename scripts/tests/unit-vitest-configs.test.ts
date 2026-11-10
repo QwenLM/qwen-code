@@ -30,6 +30,7 @@ import weixinConfig from '../../packages/channels/weixin/vitest.config.js';
 import chromeExtensionConfig from '../../packages/chrome-extension/vitest.config.js';
 import cliConfig from '../../packages/cli/vitest.config.js';
 import coreConfig from '../../packages/core/vitest.config.js';
+import documentGenerationConfig from '../../packages/document-generation/vitest.config.js';
 import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
@@ -76,6 +77,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/chrome-extension': chromeExtensionConfig,
   'packages/cli': cliConfig,
   'packages/core': coreConfig,
+  'packages/document-generation': documentGenerationConfig,
   'packages/node-repl': nodeReplConfig,
   'packages/sdk-typescript': sdkTypescriptConfig,
   'packages/vscode-ide-companion': vscodeCompanionConfig,
@@ -171,6 +173,8 @@ const configModules: Record<
     import('../../packages/chrome-extension/vitest.config.js'),
   'packages/cli': () => import('../../packages/cli/vitest.config.js'),
   'packages/core': () => import('../../packages/core/vitest.config.js'),
+  'packages/document-generation': () =>
+    import('../../packages/document-generation/vitest.config.js'),
   'packages/node-repl': () =>
     import('../../packages/node-repl/vitest.config.js'),
   // qwen-live's ceiling is unconditional (its config carries a flat 60s), so
@@ -249,6 +253,7 @@ describe('shared-pool test timeout', () => {
     'packages/channels/wecom',
     'packages/channels/weixin',
     'packages/chrome-extension',
+    'packages/document-generation',
     'packages/web-shell',
   ] as const;
 
