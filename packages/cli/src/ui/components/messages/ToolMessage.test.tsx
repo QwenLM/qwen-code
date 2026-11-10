@@ -710,6 +710,29 @@ describe('<ToolMessage />', () => {
 
       expect(lastFrame()).not.toContain('MockMarkdown:');
     });
+
+    it('falls back when a bullet wraps one row past the content width', () => {
+      // contentWidth 80 → innerWidth 78. A bullet's text box is 78 - 1
+      // (padding) - 2 (marker) = 75 cols, so 76 chars of text wrap to 2 rows
+      // while a full-width charge calls the line one row. 14 such rows is 28
+      // rendered rows against a budget of 14.
+      const bullets = Array.from(
+        { length: 14 },
+        () => `- ${'x'.repeat(76)}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={bullets}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
   });
 
   describe('fullDetail (§4.9 transcript) data-source switch', () => {

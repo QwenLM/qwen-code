@@ -38,6 +38,16 @@ export const TABLE_SEPARATOR_RE =
   /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
 /** A fenced code block delimiter. Group 1 is the fence (``` or ~~~ run). */
 export const CODE_FENCE_RE = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+/** A list item: indent (1), marker (2), then the item text (3). */
+export const LIST_ITEM_RE = /^([ \t]*)([-*+]|\d+\.) +(.*)$/;
+/** A blockquote line: `> text`. Group 1 is the quoted text. */
+export const BLOCKQUOTE_LINE_RE = /^ *> ?(.*)$/;
+
+// Mirrors MarkdownDisplay's own prefixes. They are re-declared rather than
+// imported because MarkdownDisplay imports this module.
+const LIST_ITEM_PREFIX_PADDING = 1;
+const BLOCKQUOTE_PREFIX_PADDING = 1;
+const BLOCKQUOTE_MARKER_WIDTH = 2; // "│ "
 
 function readTableInlineMathSpan(row: string, index: number): string | null {
   return readInlineMathSpanAt(row, index);
@@ -107,6 +117,39 @@ export function splitMarkdownTableRow(row: string): string[] {
 export function estimateWrappedRows(line: string, width: number): number {
   if (width <= 0) return 1;
   return Math.max(1, Math.ceil(getCachedStringWidth(line) / width));
+}
+
+/**
+ * How many rows a plain (non-table, non-code-fence) source line renders at
+ * `contentWidth`. List items and blockquotes share only part of that width:
+ * MarkdownDisplay insets the item text by its marker + padding, so charging the
+ * whole line at `contentWidth` under-counts a wide bullet by a row (#13956).
+ * Charges the narrowest width the line can render at, so the estimate stays an
+ * upper bound.
+ */
+export function estimateLineRows(line: string, contentWidth: number): number {
+  if (contentWidth <= 0) return 1;
+  const listItem = LIST_ITEM_RE.exec(line);
+  if (listItem) {
+    const markerWidth = getCachedStringWidth(listItem[2]!) + 1;
+    if (getCachedStringWidth(listItem[1]!) > 0) {
+      // Nested items add their own indent; the estimator already charges the
+      // source line's leading spaces once, so only the prefix inset applies.
+      return estimateWrappedRows(line, contentWidth);
+    }
+    return estimateWrappedRows(
+      listItem[3]!,
+      contentWidth - LIST_ITEM_PREFIX_PADDING - markerWidth,
+    );
+  }
+  const blockquote = BLOCKQUOTE_LINE_RE.exec(line);
+  if (blockquote) {
+    return estimateWrappedRows(
+      blockquote[1]!,
+      contentWidth - BLOCKQUOTE_PREFIX_PADDING - BLOCKQUOTE_MARKER_WIDTH,
+    );
+  }
+  return estimateWrappedRows(line, contentWidth);
 }
 
 /**
@@ -188,7 +231,7 @@ export function fitPendingSlice(
       ) {
         codeFence = '';
       }
-      rendered += estimateWrappedRows(line, contentWidth);
+      rendered += estimateLineRows(line, contentWidth);
       if (rendered > budget) {
         kept = i;
         break;
@@ -198,7 +241,7 @@ export function fitPendingSlice(
     }
     if (fenceMatch) {
       codeFence = fenceMatch[1]!;
-      rendered += estimateWrappedRows(line, contentWidth);
+      rendered += estimateLineRows(line, contentWidth);
       if (rendered > budget) {
         kept = i;
         break;
@@ -323,7 +366,7 @@ export function fitPendingSlice(
         break;
       }
     } else {
-      rendered += estimateWrappedRows(line, contentWidth);
+      rendered += estimateLineRows(line, contentWidth);
       if (rendered > budget) {
         kept = i;
         break;
