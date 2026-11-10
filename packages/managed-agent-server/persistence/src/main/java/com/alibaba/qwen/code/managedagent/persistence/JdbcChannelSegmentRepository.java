@@ -53,6 +53,12 @@ public final class JdbcChannelSegmentRepository
                     JdbcChannelDeliveryRepository.receiptJson(
                             segment.providerReceipt()),
                     now, now);
+            // INSERT IGNORE keeps an existing row untouched, so a resumed
+            // plan also backfills a receipt the row is still missing — never
+            // overwriting one it already holds.
+            if (segment.providerReceipt() != null) {
+                receiptOnce(key, segment.ordinal(), segment.providerReceipt());
+            }
         }
     }
 
@@ -68,6 +74,10 @@ public final class JdbcChannelSegmentRepository
         }
         String key = JdbcChannelDeliveryRepository.deliveryKey(tenantId,
                 channelInstanceId, deliveryId);
+        return receiptOnce(key, ordinal, providerReceipt);
+    }
+
+    private boolean receiptOnce(String key, int ordinal, String providerReceipt) {
         return jdbc.update("UPDATE ma_channel_segment SET provider_receipt_json = ?,"
                         + " gmt_modified = ? WHERE delivery_key = ?"
                         + " AND segment_ordinal = ? AND provider_receipt_json IS NULL",

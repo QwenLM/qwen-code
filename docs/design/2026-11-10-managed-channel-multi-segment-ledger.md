@@ -97,8 +97,7 @@ Uniqueness `uk_ma_channel_segment_identity (delivery_key, segment_id)`; an
 index `(delivery_key, segment_ordinal)` serves ordered reads. The table is
 registered in `ManagedSchemaContract.TABLES` and the
 `WorkspaceCsiApplicationInventory` catalogue, following `ma_delivery` into the
-whole-tenant sweep bucket (`new Query("1 = 1", ...)`), exactly as the recently
-added `ma_side_query` table did.
+whole-tenant sweep bucket (`new Query("1 = 1", ...)`).
 
 ### Repository
 
@@ -107,8 +106,9 @@ A new `ChannelSegmentRepository` (contracts) with a
 repositories:
 
 - `plan(tenantId, channelId, deliveryId, segments)` — idempotently inserts the
-  segment plan (`INSERT IGNORE`), carrying any receipt the record already
-  holds (a resumed `partial`). Existing rows are never overwritten.
+  segment plan (`INSERT IGNORE`) and backfills a receipt an existing row is
+  still missing, carrying any receipt the record already holds (a resumed
+  `partial`). A stored receipt is never overwritten.
 - `receipt(tenantId, channelId, deliveryId, ordinal, providerReceipt)` — the
   write-once `UPDATE`; returns whether it wrote. A replayed or conflicting
   receipt leaves the stored one intact.
@@ -124,7 +124,10 @@ and delivery identity.
   receipts), not just the first unsent one. The delivery-level
   `findOrCreate` is unchanged.
 - `receipt` records the per-ordinal receipt into the segment ledger after the
-  Harness commits and `stepLedger` moves the delivery state.
+  Harness commits and **before** `stepLedger` can move the delivery to a
+  terminal state. The reconciler skips terminal deliveries, so the receipt
+  must be durable before the delivery line closes; a failed receipt write
+  leaves the delivery open and recoverable.
 - `resend` plans the new chain's carried (unsent) segments.
 - `reconcileClaim` converges **each** segment receipt from the committed
   record into the segment ledger, instead of only the last receipt. The

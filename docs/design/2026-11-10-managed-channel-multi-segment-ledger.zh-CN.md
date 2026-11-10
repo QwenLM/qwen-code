@@ -46,13 +46,13 @@ Java 控制面台账之上的每一层都已支持 1–64 段的交付：
 | `provider_receipt_json`       | `LONGTEXT`        | 写一次的 provider 回执；未回执前为 null。    |
 | `gmt_create` / `gmt_modified` | `BIGINT UNSIGNED` | 数据库时钟的 epoch 毫秒。                    |
 
-唯一性 `uk_ma_channel_segment_identity (delivery_key, segment_id)`；索引 `(delivery_key, segment_ordinal)` 服务有序读取。该表登记进 `ManagedSchemaContract.TABLES` 与 `WorkspaceCsiApplicationInventory` 清单，跟随 `ma_delivery` 进入整租户清扫桶（`new Query("1 = 1", ...)`），与近期新增的 `ma_side_query` 表完全一致。
+唯一性 `uk_ma_channel_segment_identity (delivery_key, segment_id)`；索引 `(delivery_key, segment_ordinal)` 服务有序读取。该表登记进 `ManagedSchemaContract.TABLES` 与 `WorkspaceCsiApplicationInventory` 清单，跟随 `ma_delivery` 进入整租户清扫桶（`new Query("1 = 1", ...)`）。
 
 ### 仓储
 
 新增 `ChannelSegmentRepository`（contracts）与 `JdbcChannelSegmentRepository`（persistence），与既有 channel 仓储并列：
 
-- `plan(tenantId, channelId, deliveryId, segments)` —— 幂等插入分段计划（`INSERT IGNORE`），携带记录已持有的任何回执（恢复的 `partial`）。既有行绝不被覆盖。
+- `plan(tenantId, channelId, deliveryId, segments)` —— 幂等插入分段计划（`INSERT IGNORE`），并回填既有行仍缺失的回执，携带记录已持有的任何回执（恢复的 `partial`）。已存回执绝不被覆盖。
 - `receipt(tenantId, channelId, deliveryId, ordinal, providerReceipt)` —— 写一次的 `UPDATE`；返回是否写入。重放或冲突的回执保持已存回执不变。
 - `list(tenantId, channelId, deliveryId)` —— 按 ordinal 有序的分段。
 
@@ -61,7 +61,7 @@ Java 控制面台账之上的每一层都已支持 1–64 段的交付：
 ### 服务接线（`ManagedChannelService`）
 
 - `claimOne` 规划记录的**全部**分段（带其当前回执），而非仅第一个未发送的。交付级 `findOrCreate` 不变。
-- `receipt` 在 Harness 提交、`stepLedger` 移动交付状态之后，把按 ordinal 的回执记入分段台账。
+- `receipt` 在 Harness 提交之后、`stepLedger` 可能把交付移到终态**之前**，把按 ordinal 的回执记入分段台账。对账器跳过终态交付，因此回执必须在交付线关闭前持久化；回执写入失败会让交付保持开放、可恢复。
 - `resend` 规划新链携带的（未发送）分段。
 - `reconcileClaim` 把已提交记录中**每个**分段回执收敛进分段台账，而非仅最后一个。交付级代表回执不变。
 

@@ -301,12 +301,16 @@ public class ManagedChannelService {
             throw translate(error);
         }
         String state = deliveryState(result);
-        ChannelDelivery row = stepLedger(tenantId, channelId, deliveryId,
-                state, providerReceipt);
+        // Persist the segment receipt before the delivery line can reach a
+        // terminal state: the reconciler skips terminal deliveries, so a
+        // receipt written after stepLedger closed the delivery would leave a
+        // gap no recovery entry can reach.
         if ("accepted".equals(request.outcome())) {
             segments.receipt(tenantId, channelId, deliveryId,
                     request.ordinal(), request.providerMessageId());
         }
+        ChannelDelivery row = stepLedger(tenantId, channelId, deliveryId,
+                state, providerReceipt);
         return view(row, claim.sessionId());
     }
 

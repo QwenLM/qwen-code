@@ -93,6 +93,21 @@ class JdbcChannelSegmentRepositoryTest {
     }
 
     @Test
+    void aResumedPlanBackfillsAMissingReceiptOnAnExistingRow() {
+        segments.plan(tenant, channel, "d1", List.of(new SegmentLedger("d1:0", 0, null)));
+        assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt()).isNull();
+        // A resumed plan carries the receipt the record now holds; it
+        // backfills the existing row instead of leaving it null.
+        segments.plan(tenant, channel, "d1", List.of(new SegmentLedger("d1:0", 0, "m0")));
+        assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt())
+                .isEqualTo("m0");
+        // A later plan never overwrites the stored receipt.
+        segments.plan(tenant, channel, "d1", List.of(new SegmentLedger("d1:0", 0, "other")));
+        assertThat(segments.list(tenant, channel, "d1").get(0).providerReceipt())
+                .isEqualTo("m0");
+    }
+
+    @Test
     void isolatesTenantsChannelsAndDeliveries() {
         segments.plan(tenant, channel, "d1", List.of(new SegmentLedger("d1:0", 0, null)));
         segments.receipt(tenant, channel, "d1", 0, "m0");

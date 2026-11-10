@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.RouteScope;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
@@ -434,6 +435,55 @@ class ManagedChannelServiceTest {
                         "<m2@example.com>");
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("delivered");
+    }
+
+    @Test
+    void aFailedLastSegmentReceiptKeepsTheDeliveryRecoverable() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:93", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        FailingSegments failing = new FailingSegments(segmentLedger);
+        ManagedChannelService failingService = new ManagedChannelService(
+                instances, new JdbcChannelRouteRepository(jdbc),
+                new JdbcChannelDeliveryRepository(jdbc), failing, sessions,
+                workspaces, harness, mapper, Duration.ofMinutes(10), clock::get);
+        failingService.claimDeliveries(TENANT, channel, 16);
+        failingService.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        failingService.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 1, "<m1@example.com>", null));
+        // The last receipt's record commit lands, but its ledger write fails
+        // before the delivery line can move.
+        failing.failNextReceipt = true;
+        assertThatThrownBy(() -> failingService.receipt(TENANT, channel,
+                deliveryId, new ReceiptRequest("accepted", 2,
+                        "<m2@example.com>", null)))
+                .isInstanceOf(IllegalStateException.class);
+        // The delivery must not reach a terminal state: the reconciler skips
+        // terminal deliveries, so closing the line here would strand the
+        // missing receipt beyond every recovery entry.
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("partial");
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>", null);
+        // The reconciler still reaches the open delivery and converges the
+        // missing receipt from the committed record.
+        mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 3);
+        clock.addAndGet(Duration.ofMinutes(11).toMillis());
+        jdbc.update("UPDATE ma_delivery SET claimed_at=?"
+                        + " WHERE tenant_id=? AND delivery_id=?",
+                clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
+                deliveryId);
+        failingService.reconcile();
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("delivered");
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>",
+                        "<m2@example.com>");
     }
 
     @Test
@@ -1341,6 +1391,40 @@ class ManagedChannelServiceTest {
             }
             delivery.put("segments", segments);
             return delivery;
+        }
+    }
+
+    /** A segment ledger that fails one receipt write, to inject the crash
+     * window between the record commit and the ledger write. */
+    private static final class FailingSegments implements ChannelSegmentRepository {
+        private final ChannelSegmentRepository delegate;
+        boolean failNextReceipt;
+
+        FailingSegments(ChannelSegmentRepository delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void plan(String tenantId, String channelInstanceId,
+                String deliveryId, List<SegmentLedger> segments) {
+            delegate.plan(tenantId, channelInstanceId, deliveryId, segments);
+        }
+
+        @Override
+        public boolean receipt(String tenantId, String channelInstanceId,
+                String deliveryId, int ordinal, String providerReceipt) {
+            if (failNextReceipt) {
+                failNextReceipt = false;
+                throw new IllegalStateException("segment receipt write failed");
+            }
+            return delegate.receipt(tenantId, channelInstanceId, deliveryId,
+                    ordinal, providerReceipt);
+        }
+
+        @Override
+        public List<SegmentLedger> list(String tenantId, String channelInstanceId,
+                String deliveryId) {
+            return delegate.list(tenantId, channelInstanceId, deliveryId);
         }
     }
 }
