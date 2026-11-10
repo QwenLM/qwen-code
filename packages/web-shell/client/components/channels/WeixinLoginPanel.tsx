@@ -28,6 +28,7 @@ export interface WeixinLoginApi {
   revoke: () => Promise<void>;
 }
 
+/** Pinned against the daemon's abandonment bound by `weixin-auth.test.ts`. */
 const POLL_INTERVAL_MS = 1500;
 
 function isTerminal(status: DaemonWeixinLoginFlow['status']): boolean {

@@ -168,10 +168,17 @@ Flow lifecycle:
   the response finished) — otherwise a page refresh mid-login would hold a slot
   for the flow's whole deadline.
 - A client that vanishes _after_ the `201` is covered by a per-flow watchdog:
-  every poll re-arms a 15 s bound, and a live flow nobody polls is cancelled.
-  The bound is ten times the panel's 1.5 s interval, so jitter cannot cancel a
-  login mid-scan, and an orphan no longer polls upstream for its whole 480 s
-  deadline. Terminal views are governed by the retention timer instead.
+  every poll re-arms a 120 s bound, and a live flow nobody polls is cancelled,
+  so an orphan no longer polls upstream for its whole 480 s deadline. The bound
+  is sized against the worst gap between two _serviced_ polls, not the cadence:
+  the panel schedules its next poll only after the previous one settles and
+  each request carries a 15 s budget (16.5 s from one stalled request), and a
+  tab hidden for five minutes is throttled to about one timer per minute
+  (~75 s). Sizing it against the 1.5 s interval alone would reap a login the
+  operator is still watching, and the panel would read the resulting 404 as
+  "logged out" with no error. Terminal views are governed by the retention
+  timer instead, so a client that stops polling just before the login
+  completes still finds the outcome.
 - Starting a flow calls `startLogin`, renders `qrcodeUrl` to `qrText`, and stores
   the view. A response that carries a QR id but no scannable URL is treated as a
   failed mint (`502 qr_unavailable`, slot released) rather than a live flow: with

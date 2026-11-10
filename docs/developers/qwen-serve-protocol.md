@@ -1476,11 +1476,14 @@ count against that cap — and is then dropped, after which the poll returns
 `DELETE /auth/weixin/flows/:id` aborts a flow and returns `204`; clients are
 expected to call it when they stop watching a live flow, because the daemon
 keeps polling the upstream whether or not anyone is. A live flow that goes
-**unpolled for 15 seconds** is cancelled as abandoned, so a client that reloads
+**unpolled for 120 seconds** is cancelled as abandoned, so a client that reloads
 without sending `DELETE` cannot hold a slot for the whole login deadline; every
-poll re-arms that bound, which sits far above the Web Shell's 1.5 s interval.
-Daemon shutdown aborts every in-flight flow, including a QR mint still in
-flight.
+poll re-arms that bound. It is sized against the worst gap between two
+_serviced_ polls, not against the poll cadence: a client that schedules its next
+poll only after the previous one settles can be silent for its whole request
+budget, and a backgrounded tab is throttled to roughly one timer per minute.
+Clients must keep their interval plus request budget well under it. Daemon
+shutdown aborts every in-flight flow, including a QR mint still in flight.
 
 On `ready` the daemon persists the credential itself. **No response on any of
 these routes carries the bot token**, and no request field can redirect the

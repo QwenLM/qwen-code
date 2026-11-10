@@ -23,11 +23,22 @@ const MAX_FLOWS = 4;
 /** How long a terminal view stays readable so a polling client can observe it. */
 const TERMINAL_RETENTION_MS = 60_000;
 /**
- * How long a live flow may go unpolled before it is treated as abandoned. The
- * browser polls every 1.5 s, so this is ten missed polls — far above any jitter
- * and far below the 480 s deadline an orphan would otherwise poll upstream for.
+ * How long a live flow may go unpolled before it is treated as abandoned.
+ *
+ * Sized against the worst gap between two polls the daemon actually serves,
+ * not against the poll cadence. The panel schedules its next poll only after
+ * the previous one settles, and each request carries its own 15 s budget, so
+ * one stalled request alone puts 16.5 s between served polls. A hidden tab is
+ * worse: Chromium throttles a page hidden for five minutes to one timer per
+ * minute, so a backgrounded login can go ~75 s without a served poll. Reaping
+ * inside either window would cancel a login the operator is still watching,
+ * and the panel would take the 404 path back to "Not logged in" with no error.
+ *
+ * 120 s clears both and still reaps an orphan four times over before its 480 s
+ * login deadline. Exported for the contract test that reads the client's two
+ * constants and checks them against this one.
  */
-const UNWATCHED_FLOW_MS = 15_000;
+export const UNWATCHED_FLOW_MS = 120_000;
 
 const TERMINAL_STATUSES = new Set<DaemonWeixinLoginFlow['status']>([
   'ready',

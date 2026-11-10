@@ -15,11 +15,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { registerWeixinAuthRoutes } from './weixin-auth.js';
+import { registerWeixinAuthRoutes, UNWATCHED_FLOW_MS } from './weixin-auth.js';
 
 const BOT_TOKEN = 'ilink-bot-token-must-never-leak';
 
@@ -575,9 +576,10 @@ describe('weixin auth routes', () => {
   });
 
   it('does not reap a flow a client is still polling', async () => {
-    // The bound must sit far above the browser's 1.5 s interval, or the sweep
-    // would cancel a live login mid-scan. Poll faster than the bound here and
-    // the flow must survive several of its windows.
+    // The bound must exceed the worst gap between served polls, or the sweep
+    // cancels a live login mid-scan. Poll faster than the bound here and the
+    // flow must survive several of its windows; the sizing arithmetic itself
+    // is pinned by the contract case below.
     const watched = mount(fake, { unwatchedFlowMs: 300 });
     const started = await auth(
       request(watched).post('/auth/weixin/flows'),
@@ -589,6 +591,59 @@ describe('weixin auth routes', () => {
       const view = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
       expect(view.status).toBe(200);
     }
+  });
+
+  it('keeps the abandonment bound above the client worst-case poll gap', () => {
+    // The panel schedules its next poll only after the previous one settles,
+    // so one request that stalls for its whole budget delays the next poll
+    // this daemon serves by that much. A bound sized against the cadence alone
+    // reaps a login the operator is still watching, and the panel reads the
+    // resulting 404 as "logged out" with no error.
+    //
+    // Read from the client source rather than mirrored as a literal: a copy
+    // here would stay green when either side moved. Same cross-package
+    // contract pattern as `workspace-settings-i18n.test.ts`.
+    const read = (file: string, name: string): number => {
+      const source = readFileSync(
+        fileURLToPath(
+          new URL(
+            `../../../../web-shell/client/components/channels/${file}`,
+            import.meta.url,
+          ),
+        ),
+        'utf8',
+      );
+      const match = new RegExp(`const ${name} = ([\\d_]+);`).exec(source);
+      if (!match?.[1]) throw new Error(`Cannot locate ${name} in ${file}`);
+      return Number(match[1].replaceAll('_', ''));
+    };
+    const interval = read('WeixinLoginPanel.tsx', 'POLL_INTERVAL_MS');
+    const requestBudget = read(
+      'weixin-auth-api.ts',
+      'WEIXIN_REQUEST_TIMEOUT_MS',
+    );
+
+    expect(interval + requestBudget).toBeLessThan(UNWATCHED_FLOW_MS);
+  });
+
+  it('keeps a terminal view readable past the abandonment bound', async () => {
+    // A client that stops polling just before the login completes must still
+    // find the outcome: terminal views belong to the retention timer, not to
+    // the watchdog. Without the clear in `finish()` this reads 404 long before
+    // the documented 60 s retention is up.
+    fake.statusResponses = [{ status: 'confirmed', bot_token: BOT_TOKEN }];
+    const watched = mount(fake, { unwatchedFlowMs: 300 });
+    const started = await auth(
+      request(watched).post('/auth/weixin/flows'),
+    ).send({});
+    const id = started.body['id'] as string;
+    await waitForStatus(watched, id, 'ready');
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    const view = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
+    expect(view.status).toBe(200);
+    expect(view.body).toMatchObject({ status: 'ready' });
   });
 
   it('aborts the upstream mint when the daemon shuts down mid-mint', async () => {

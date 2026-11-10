@@ -22,6 +22,14 @@ export interface WeixinAuthTarget {
   client?: DaemonClient;
 }
 
+/**
+ * Per-request budget. The daemon's abandonment bound has to exceed it: the
+ * panel schedules its next poll only after this one settles, so a stalled
+ * request delays the next poll the daemon can see by this much. Pinned against
+ * that bound by `weixin-auth.test.ts` in the CLI package.
+ */
+const WEIXIN_REQUEST_TIMEOUT_MS = 15_000;
+
 export class WeixinAuthError extends Error {
   constructor(
     message: string,
@@ -47,7 +55,7 @@ async function send<T>(
     headers: new Headers(
       target.token ? { Authorization: `Bearer ${target.token}` } : undefined,
     ),
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(WEIXIN_REQUEST_TIMEOUT_MS),
   });
   // A daemon that predates these routes answers 404; callers render that as
   // "unsupported" rather than as a failure.
