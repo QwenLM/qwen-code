@@ -162,6 +162,54 @@ describe('Mod session band renders', () => {
     expect(host.draw).toHaveBeenCalledWith(line('80'), 'token-weather');
   });
 
+  it.each(['clear', 'resume'] as const)(
+    'cancels a pending render and suppresses its result on %s',
+    async (reason) => {
+      const { session, config, runtime, host } = setup();
+      await session.initialize(new AbortController().signal);
+      runtime.render.mockImplementationOnce(async (_input, signal) => {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return { tree: line('old-session'), notes: [] };
+      });
+      session.setRenderInput(input());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledOnce();
+      const renderSignal = runtime.render.mock.calls[0][1];
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession(reason);
+      expect(renderSignal.aborted).toBe(true);
+      expect(host.draw).not.toHaveBeenCalledWith(
+        line('old-session'),
+        'token-weather',
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(host.draw).toHaveBeenLastCalledWith(line('80'), 'token-weather');
+    },
+  );
+
+  it('renders again when a session switch is rolled back', async () => {
+    const { session, runtime, host } = setup();
+    await session.initialize(new AbortController().signal);
+    runtime.render.mockImplementationOnce(async (_input, signal) => {
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { tree: line('cancelled'), notes: [] };
+    });
+    session.setRenderInput(input());
+    await vi.advanceTimersByTimeAsync(0);
+    session.invalidateTools();
+    await session.restoreTools();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(host.draw).not.toHaveBeenCalledWith(
+      line('cancelled'),
+      'token-weather',
+    );
+    expect(host.draw).toHaveBeenLastCalledWith(line('80'), 'token-weather');
+  });
+
   it('offers no site and renders nothing where the terminal draws none', async () => {
     const { session, runtime, renderHost } = setup({ sites: [] });
     await session.initialize(new AbortController().signal);
