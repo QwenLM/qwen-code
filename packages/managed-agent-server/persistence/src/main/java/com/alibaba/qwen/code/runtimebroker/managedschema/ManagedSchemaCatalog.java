@@ -33,6 +33,58 @@ final class ManagedSchemaCatalog {
     private static final Pattern FOREIGN =
             Pattern.compile("FOREIGN KEY \\(([^)]+)\\)\\s*REFERENCES (ma_[a-z_]+) \\(([^)]+)\\)");
 
+    private static final Set<String> LEGACY_TABLES =
+            Set.of(
+                    "managed_session_create_scope",
+                    "managed_session_rename_delivery",
+                    "managed_workspace_access",
+                    "managed_workspace_create_command",
+                    "managed_workspace_csi_registration",
+                    "managed_workspace_csi_retirement",
+                    "managed_workspace_csi_worker_ack",
+                    "managed_workspace_default",
+                    "managed_workspace_execution_lease",
+                    "managed_workspace_migration",
+                    "managed_workspace_operator_recovery",
+                    "managed_workspace_recovery_operation",
+                    "managed_workspace_recovery_session",
+                    "managed_workspace_recovery_work",
+                    "managed_workspace_registry",
+                    "qwen_managed_automation_command",
+                    "qwen_managed_automation_occurrence",
+                    "qwen_managed_automation_schedule",
+                    "qwen_managed_channel_binding",
+                    "qwen_managed_channel_claim",
+                    "qwen_managed_channel_delivery",
+                    "qwen_managed_channel_instance",
+                    "qwen_managed_channel_route",
+                    "qwen_managed_child_result_relay",
+                    "qwen_managed_child_workspace",
+                    "qwen_managed_session_extension_record",
+                    "qwen_managed_session_journal_head",
+                    "qwen_managed_session_journal_tx",
+                    "qwen_managed_session_message_relay",
+                    "qwen_managed_session_resource",
+                    "qwen_managed_session_resource_collection",
+                    "qwen_managed_session_resource_ref",
+                    "qwen_managed_session_task_journal",
+                    "qwen_managed_session_task_journal_cursor",
+                    "qwen_output_put_attempt",
+                    "qwen_output_read_lease",
+                    "qwen_output_session_retirement",
+                    "qwen_runtime_binding",
+                    "qwen_runtime_binding_slot",
+                    "qwen_runtime_harness_drain",
+                    "qwen_runtime_placement_guard",
+                    "qwen_runtime_session",
+                    "qwen_runtime_storage_fence",
+                    "qwen_tool_execution",
+                    "qwen_tool_publication",
+                    "qwen_tool_publication_object",
+                    "qwen_tool_publication_operation",
+                    "qwen_tool_publication_seal",
+                    "qwen_tool_publication_tenant");
+
     private ManagedSchemaCatalog() {}
 
     static void requireApplicationCatalog(Connection connection) throws SQLException {
@@ -77,7 +129,12 @@ final class ManagedSchemaCatalog {
                                 "%",
                                 new String[] {"TABLE", "VIEW"})) {
             while (result.next()) {
-                tables.put(lower(result.getString("TABLE_NAME")), result.getString("TABLE_TYPE"));
+                String name = lower(result.getString("TABLE_NAME"));
+                // 共享应用库允许其他业务表；旧 Managed 表仍不得被当作空库初始化。
+                if (name.startsWith("ma_") || name.startsWith("managed_agent_")
+                        || LEGACY_TABLES.contains(name) || "flyway_schema_history".equals(name)) {
+                    tables.put(name, result.getString("TABLE_TYPE"));
+                }
             }
         }
         String history = tables.remove("flyway_schema_history");
@@ -101,26 +158,7 @@ final class ManagedSchemaCatalog {
     }
 
     static void validate(Connection connection, String ddl) throws SQLException {
-        validate(connection, ddl, false);
-    }
-
-    static void validateSharedCatalog(Connection connection, String ddl) throws SQLException {
-        validate(connection, ddl, true);
-    }
-
-    private static void validate(Connection connection, String ddl, boolean sharedCatalog) throws SQLException {
         Map<String, String> actual = tables(connection);
-        if (sharedCatalog) {
-            // Keep the closed target set plus every name the predecessor
-            // generations used (R6-1). A prefix test let 49 of the 63 legacy
-            // names fall out before the comparison, so a half-migrated catalog
-            // validated; it also made an unrelated `managed_agent_*` business
-            // table fail forever.
-            actual.entrySet()
-                    .removeIf(entry -> !entry.getKey().startsWith("ma_")
-                            && !ManagedSchemaContract.TABLES.contains(entry.getKey())
-                            && !ManagedSchemaContract.LEGACY_TABLES.contains(entry.getKey()));
-        }
         if (!actual.keySet().equals(ManagedSchemaContract.TABLES)
                 || actual.values().stream()
                         .anyMatch(type -> type.toUpperCase(Locale.ROOT).contains("VIEW"))) {
