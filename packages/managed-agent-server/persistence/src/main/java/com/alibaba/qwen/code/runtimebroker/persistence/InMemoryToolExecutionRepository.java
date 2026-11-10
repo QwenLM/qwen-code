@@ -257,6 +257,23 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized ToolExecutionRecord attachMeasurements(
+            ToolExecutionRecord expected, Map<String, Object> metadata) {
+        ToolExecutionRecord current = recordsById.get(expected.getExecutionCallId());
+        if (current == null
+                || !current.sameIdentity(expected)
+                || !current.sameAuthorization(expected)
+                || current.getVersion() != expected.getVersion()
+                || !current.isSettled()) {
+            return null;
+        }
+        ToolExecutionRecord updated =
+                current.withMeasurements(metadata).withVersion(current.getVersion() + 1);
+        recordsById.put(updated.getExecutionCallId(), updated);
+        return updated;
+    }
+
+    @Override
     public synchronized ToolExecutionRecord resolveUnknown(
             ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {

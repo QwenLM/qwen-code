@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.HistoricalScan;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Row;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -35,7 +36,7 @@ final class CsiActivityDiagnosticProjection {
         String tenant = original.getScope().getTenantId();
         String workspace = original.getScope().getWorkspaceId();
         String session = original.getIsolationKey();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         Map<String, Row> source = new HashMap<>();
         for (Row row : resources) {
             if (row.membership() == Membership.ORIGINAL) {

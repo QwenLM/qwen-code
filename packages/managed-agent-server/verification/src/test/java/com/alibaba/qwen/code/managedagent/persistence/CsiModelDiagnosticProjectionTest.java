@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Row;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -25,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class CsiModelDiagnosticProjectionTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String SESSION = "00000000-0000-4000-8000-000000000001";
-    private static final String SCOPE = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", SESSION);
+    private static final String SCOPE = ManagedSessionStore.sessionScopeKey("tenant", SESSION);
     private static final String KEY = ManagedExtensionProjection.recordKey(SESSION, ManagedModelDiagnostics.STATS_DOMAIN, "latest");
 
     @Test
@@ -151,6 +152,6 @@ class CsiModelDiagnosticProjectionTest {
     }
 
     private static String resourceKey(String id) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(SCOPE, id);
+        return ManagedSessionStore.resourceKey(SCOPE, id);
     }
 }

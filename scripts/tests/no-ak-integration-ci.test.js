@@ -440,18 +440,18 @@ describe('no-AK integration CI wiring', () => {
       );
     }
 
-    // The gate runs as three shards over test_build's tree; the aggregate
+    // The gate runs as two shards over test_build's tree; the aggregate
     // job carries the required check name and fails when the build or any
     // shard fails.
     expect(gateJob).toContain(
-      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'",
+      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/2)'",
     );
     expect(gateJob).toContain(
       "    needs:\n      - 'classify_pr'\n      - 'test_build'\n",
     );
-    expect(gateJob).toContain('        shard: [1, 2, 3]');
+    expect(gateJob).toContain('        shard: [1, 2]');
     expect(gateJob).toContain(
-      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/3`,
+      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/2`,
     );
     const resultJob = getWorkflowJob(workflow, 'integration_no_ak_result');
     expect(resultJob).toContain(
