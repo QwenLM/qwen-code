@@ -68,6 +68,7 @@ describe('built-in channel registry', () => {
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
     ).toEqual([
+      'weixin',
       'dws',
       'email',
       'wecom',

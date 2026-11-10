@@ -9,6 +9,7 @@ import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 export const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
   dws: 'DWS',
+  weixin: 'WX',
   wecom: 'W',
   'wecom-callback': 'WC',
   feishu: 'F',
@@ -21,6 +22,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
 const SUPPORTED_CHANNEL_TYPES = new Set([
   'dingtalk',
   'dws',
+  'weixin',
   'wecom',
   'wecom-callback',
   'feishu',
@@ -35,6 +37,7 @@ export function isSupportedChannelType(
 ): type is
   | 'dingtalk'
   | 'dws'
+  | 'weixin'
   | 'wecom'
   | 'wecom-callback'
   | 'feishu'

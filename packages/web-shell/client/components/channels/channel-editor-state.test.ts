@@ -1033,6 +1033,51 @@ describe('GitHub watch events require bound delivery', () => {
   });
 });
 
+describe('GitHub requireBoundWatch requires bound delivery', () => {
+  const BOUND: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+      },
+      {
+        key: 'requireBoundWatch',
+        label: 'Require Active Watch For Review/Verify Sessions',
+        kind: 'boolean',
+      },
+    ],
+  };
+
+  function draftWithGate(on: boolean): ChannelEditorDraft {
+    const draft = createChannelEditorDraft(BOUND);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.values.requireBoundWatch = on;
+    return draft;
+  }
+
+  it('refuses the gate while bound delivery is off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(true), [])).toEqual({
+      requireBoundWatch: 'requiresBoundDeliveryForWatchGate',
+    });
+  });
+
+  it('allows the gate once bound delivery is on', () => {
+    const draft = draftWithGate(true);
+    draft.values.deliverToBoundSessions = true;
+    expect(validateChannelEditorDraft(BOUND, draft, [])).toEqual({});
+  });
+
+  it('leaves the gate off alone with delivery off', () => {
+    expect(validateChannelEditorDraft(BOUND, draftWithGate(false), [])).toEqual(
+      {},
+    );
+  });
+});
+
 describe('Descriptor-driven privatePolicy', () => {
   it('defaults enum fields to the first option for new channels', () => {
     const draft = createChannelEditorDraft(GITHUB);

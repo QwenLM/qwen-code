@@ -18,15 +18,18 @@ representable and was dropped.
 **Not implemented:** the shared `requireMention` control. **Not verified:** the
 panel has not been driven in a real browser, and no human has scanned a code.
 
-Measured at the current head: login-session lifecycle 18 cells, channel
-management service 68, workspace channel routes 36, channel registry 52, SDK
-descriptor mirror 2, the QQ adapter package 898, and the Web Shell channel and
-workspace suites 633 — including 11 QR-panel cells and one editor bind cell.
-Typecheck is at zero errors for the QQ adapter and Web Shell, and build / ESLint /
-Prettier are clean on changed files. A real `qwen serve` daemon was driven over
-HTTP against a throwaway workspace: it reached Tencent's `create_bind_task`, the
-daemon-rendered code was decoded back to the live bind URL, and a re-bind was
-measured on the real settings store.
+Measured on the tree merged with main at `8736cfa015`: login-session lifecycle 18
+cells, QR credential persistence 8, channel management service 68, workspace
+channel routes 36, channel settings store 155, channel registry 52 plus 2 built-in
+catalog cells, SDK descriptor mirror 2, the QQ adapter package 898, the WeChat
+adapter package 111, and the Web Shell channel, workspace and i18n suites 729
+across 26 files — including 11 QR-panel cells and 144 editor cells. Typecheck is
+at zero errors for the CLI and Web Shell, and ESLint / Prettier are clean on every
+file this change touches. A real `qwen serve` daemon was driven over HTTP against
+a throwaway workspace: it reached Tencent's `create_bind_task`, the daemon-rendered
+code was decoded back to the live bind URL, and a re-bind was measured on the real
+settings store. That live pass predates the merge; everything after it is unit-
+and mutation-verified only.
 
 **Still missing:** a committed route-level test for the three QR routes, a
 completed scan-to-bind, and a browser-driven panel run. The credential write has
@@ -79,10 +82,21 @@ and `email` declares `management` but is absent from the allowlist. Adapters are
 onboarded to the management surface one at a time; the precedent is commit
 `41f0e3ca5d0` ("add Web Shell management support for GitHub and GitLab", #8310).
 
-The counts above are the 2026-11-09 snapshot. Main has since added `email` to the
-allowlist, and this change adds `qq`, so it now holds nine entries — all nine
-declare `management`. Regression scope is therefore written as "every other type
-in `SUPPORTED_CHANNEL_TYPES`" rather than a number that drifts with each merge.
+The counts above are the 2026-11-09 snapshot. Main has since added `email` and
+`weixin` to the allowlist, and this change adds `qq`, so it now holds ten entries
+— all ten declare `management`, which the registry suite pins. Regression scope
+is therefore written as "every other type in `SUPPORTED_CHANNEL_TYPES`" rather
+than a number that drifts with each merge.
+
+Main also shipped in-browser QR login for WeChat (#16736) while this change was
+in flight. The two share no mechanism: WeChat's credential is one process-global
+account, so its routes sit outside the workspace-scoped channel management
+surface and its panel is a separate component. QQ's credential belongs to one
+workspace's channel, so it goes through the shared `qrLogin` capability and the
+workspace-scoped session resource. The editor renders whichever panel the
+descriptor asks for — `descriptor.type === 'weixin'` for WeChat,
+`descriptor.supportsQrLogin` for QQ — and WeChat declares no `qrLogin`, so exactly
+one panel can appear.
 
 ### Today's QR path is terminal-only
 

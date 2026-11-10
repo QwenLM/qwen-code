@@ -69,6 +69,7 @@ import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
 import { ChannelQrLogin } from './ChannelQrLogin';
 import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
+import { WeixinLoginPanel, type WeixinLoginApi } from './WeixinLoginPanel';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
@@ -103,6 +104,9 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientId: 'channels.editor.field.dingtalk.clientId',
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
   },
+  weixin: {
+    groupPolicy: 'channels.editor.field.weixin.groupPolicy',
+  },
   wecom: {
     botId: 'channels.editor.field.wecom.botId',
     secret: 'channels.editor.field.wecom.secret',
@@ -126,6 +130,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     repoFilter: 'channels.editor.field.github.repoFilter',
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
+    requireBoundWatch: 'channels.editor.field.github.requireBoundWatch',
     prCommentWatch: 'channels.editor.field.github.prCommentWatch',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
     prWatchLimit: 'channels.editor.field.github.prWatchLimit',
@@ -181,6 +186,7 @@ const SHARED_SESSION_FIELD_KEYS = new Set([
 // something with bound delivery enabled.
 const BOUND_SESSION_FIELD_KEYS = new Set([
   'deliverToBoundSessions',
+  'requireBoundWatch',
   'prCommentWatch',
   'prWatchEvents',
   'prWatchLimit',
@@ -293,6 +299,12 @@ export interface ChannelEditorDialogProps {
     name: string,
     request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
+  /**
+   * WeChat login is process-global rather than workspace-scoped, so it arrives
+   * as its own injected API instead of riding the channel management client.
+   * Absent when the host cannot supply it; the panel then does not render.
+   */
+  weixinLogin?: WeixinLoginApi;
 }
 
 function configuredAllowedUsers(instance?: DaemonChannelInstanceSnapshot) {
@@ -393,6 +405,7 @@ export function ChannelEditorDialog({
   approvePairingRequest,
   listPairingApprovals,
   revokePairingApproval,
+  weixinLogin,
 }: ChannelEditorDialogProps) {
   const { t } = useI18n();
   const formId = useId();
@@ -553,6 +566,8 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.invalidOption');
     if (code === 'requiresBoundDelivery')
       return t('channels.editor.validation.requiresBoundDelivery');
+    if (code === 'requiresBoundDeliveryForWatchGate')
+      return t('channels.editor.validation.requiresBoundDeliveryForWatchGate');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
@@ -806,13 +821,25 @@ export function ChannelEditorDialog({
       const isLocalGhSwitch =
         field.key === 'useLocalGh' &&
         isRepositoryOnlyChannelType(descriptor.type);
+      // Same prerequisite gate as prWatchEvents: name it at the field
+      // instead of letting the daemon reject the whole draft after submit.
+      // A stored true stays switchable OFF while gated, so turning delivery
+      // off never strands the operator with a flag they cannot clear.
+      const gateField =
+        field.key === 'requireBoundWatch' && descriptor.type === 'github';
+      const gatedBoundWatch =
+        gateField && draft.values['deliverToBoundSessions'] !== true;
       const updateSwitch = (checked: boolean) => {
-        if (field.key === 'deliverToBoundSessions') {
+        if (
+          field.key === 'deliverToBoundSessions' ||
+          field.key === 'requireBoundWatch'
+        ) {
           // Both directions re-derive shown errors: on retires the dependency
           // instruction, off keeps a shown one instead of dropping it silently.
+          // Unticking the gate is itself a remedy for its dependency error.
           refreshErrors({
             ...draft.values,
-            deliverToBoundSessions: checked,
+            [field.key]: checked,
           });
         }
         if (!isLocalGhSwitch) {
@@ -858,12 +885,23 @@ export function ChannelEditorDialog({
           label={fieldLabel(field)}
           required={field.required}
           description={fieldDescription(field)}
+          hint={
+            gatedBoundWatch
+              ? t('channels.editor.field.github.requireBoundWatch.disabledHint')
+              : undefined
+          }
+          // Keep the live region mounted from first render (keyed off the
+          // field, not the gated state): a region that enters the DOM already
+          // filled is never announced when the hint appears.
+          hintId={gateField ? `${id}-disabled-hint` : undefined}
           error={error}
         >
           <Switch
             id={id}
             checked={value === true}
             aria-required={field.required}
+            disabled={gatedBoundWatch && value !== true}
+            aria-describedby={gateField ? `${id}-disabled-hint` : undefined}
             onCheckedChange={updateSwitch}
           />
         </FieldShell>
@@ -1613,6 +1651,15 @@ export function ChannelEditorDialog({
                 </Select>
               </FieldShell>
             </section>
+
+            {descriptor.type === 'weixin' && weixinLogin ? (
+              <section className={styles.section}>
+                <h3 className={styles.sectionHeading}>
+                  {t('channels.editor.section.credentials')}
+                </h3>
+                <WeixinLoginPanel api={weixinLogin} />
+              </section>
+            ) : null}
 
             {(['credentials', 'connection'] as const).map((section) => {
               const sectionFields = credentialFields.filter(

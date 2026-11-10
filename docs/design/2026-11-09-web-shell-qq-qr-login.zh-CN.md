@@ -14,12 +14,14 @@ Web Shell 白名单、扫码绑定面板及其中英文案均已就位,QQ 现在
 **尚未实现:** 共享 `requireMention` 控件。**尚未验证:** 面板未在真实浏览器中驱动过、
 也无人扫码。
 
-在当前 head 上实测:登录会话生命周期 18 格、渠道管理服务 68 格、workspace 渠道路由 36 格、
-channel registry 52 格、SDK 描述符镜像 2 格、QQ 适配器包 898 格、Web Shell 渠道与
-workspace 套件 633 格(其中扫码面板 11 格、编辑器绑定 1 格)。QQ 适配器与 Web Shell
-类型检查零错误,改动文件的构建 / ESLint / Prettier 全绿。另起真实 `qwen serve` daemon,
-指向一次性工作区并通过 HTTP 驱动:它真的调用了腾讯 `create_bind_task`,daemon 渲染的
-二维码被解码回真实绑定 URL,并在真实 settings store 上实测了换绑。
+在与 main(`8736cfa015`)合并后的树上实测:登录会话生命周期 18 格、扫码凭据持久化 8 格、
+渠道管理服务 68 格、workspace 渠道路由 36 格、渠道 settings store 155 格、channel registry
+52 格另加内建目录 2 格、SDK 描述符镜像 2 格、QQ 适配器包 898 格、微信适配器包 111 格、
+Web Shell 渠道 / workspace / i18n 套件 729 格(26 个文件,其中扫码面板 11 格、编辑器 144 格)。
+CLI 与 Web Shell 类型检查零错误,本改动触及的每个文件 ESLint / Prettier 全绿。另起真实
+`qwen serve` daemon,指向一次性工作区并通过 HTTP 驱动:它真的调用了腾讯 `create_bind_task`,
+daemon 渲染的二维码被解码回真实绑定 URL,并在真实 settings store 上实测了换绑。该次实跑
+早于本次合并;其后的改动只有单元与变异验证。
 
 **仍然缺失:** 三条扫码路由的提交级路由测试、一次完成的扫码绑定、以及浏览器里面板的
 实跑。凭据写入已在服务层与真实 settings store 上验证过,但从未由一次真实扫码触发。
@@ -65,9 +67,15 @@ QQ Bot 适配器已经存在且可用,但完全无法从 Web Shell 配置,而它
 `email` 声明了 `management` 但不在白名单里。适配器是逐个接入管理面的;先例是提交
 `41f0e3ca5d0`("add Web Shell management support for GitHub and GitLab",#8310)。
 
-以上计数是 2026-11-09 的快照。main 此后已把 `email` 加入白名单,本改动再加入 `qq`,
-因此白名单现为九项,且九项都声明了 `management`。回归范围因此写成
-「`SUPPORTED_CHANNEL_TYPES` 中的其余每个类型」,而不是一个随每次合并漂移的数字。
+以上计数是 2026-11-09 的快照。main 此后已把 `email` 与 `weixin` 加入白名单,本改动再加入
+`qq`,因此白名单现为十项,且十项都声明了 `management`(由 registry 套件钉住)。回归范围因此
+写成「`SUPPORTED_CHANNEL_TYPES` 中的其余每个类型」,而不是一个随每次合并漂移的数字。
+
+本改动在途期间,main 也上线了微信的浏览器内扫码登录(#16736)。两者不共用机制:微信的凭据
+是单一进程级账号,因此其路由位于按 workspace 隔离的渠道管理面之外,面板也是独立组件。
+QQ 的凭据属于某一个 workspace 的渠道,因此走共享的 `qrLogin` 能力与按 workspace 隔离的
+会话资源。编辑器按描述符决定渲染哪个面板——微信看 `descriptor.type === 'weixin'`,
+QQ 看 `descriptor.supportsQrLogin`——而微信未声明 `qrLogin`,因此只会出现一个面板。
 
 ### 今天的扫码路径只能在终端进行
 
