@@ -26473,6 +26473,7 @@ export function App({
                       {!CustomFooter &&
                         tokenUsageHeaderItemVisible &&
                         !isChatEmptyState &&
+                        connection.status === 'connected' &&
                         connection.sessionId && (
                           <ComposerUsageStats
                             sessionId={connection.sessionId}

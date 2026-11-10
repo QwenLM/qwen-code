@@ -267,3 +267,100 @@ test('composer usage follows background work and refreshes when it settles @smok
   await page.clock.runFor(6_000);
   expect(reads).toBe(settledReads);
 });
+
+test('composer usage waits for a historical session to finish loading @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.clock.install({ time: new Date('2026-11-10T00:00:00Z') });
+  await page.clock.pauseAt(new Date('2026-11-10T01:00:00Z'));
+  const replayFor = (label: string, id: number, sessionId?: string) => [
+    userTextEvent(`${label} question`, { id, sessionId }),
+    {
+      ...assistantTextEvent(`${label} answer`, { id: id + 1, sessionId }),
+      data: {
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${label} answer` },
+          _meta: { usage: { inputTokens: 100, outputTokens: 20 } },
+        },
+      },
+    },
+    turnCompleteEvent(`${label}-turn`, { id: id + 2, sessionId }),
+  ];
+  const scenario = createWebShellDaemonScenario({ events: replayFor('A', 1) });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  let ready = false;
+  let loadStarted = false;
+  let releaseLoad!: () => void;
+  const loadGate = new Promise<void>((resolve) => {
+    releaseLoad = resolve;
+  });
+  const reads: boolean[] = [];
+  await page.route('**/session/*/stats', (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-2)!;
+    if (id === 'previous-session') {
+      reads.push(ready);
+      if (!ready) {
+        return route.fulfill({
+          status: 404,
+          json: { code: 'session_not_found', sessionId: id },
+        });
+      }
+    }
+    return route.fulfill({
+      json: statsFor(
+        id,
+        scenario.workspaceCwd,
+        id === 'previous-session' ? 8_000_000 : 4_080_000,
+      ),
+    });
+  });
+  await page.route('**/session/previous-session/load', async (route) => {
+    loadStarted = true;
+    await loadGate;
+    ready = true;
+    await route.fulfill({
+      json: {
+        sessionId: 'previous-session',
+        workspaceCwd: scenario.workspaceCwd,
+        attached: true,
+        clientId: scenario.clientId,
+        createdAt: new Date().toISOString(),
+        hasActivePrompt: false,
+        state: { ...scenario.state, displayName: 'Previous Session' },
+        compactedReplay: replayFor('B', 101, 'previous-session'),
+        liveJournal: [],
+        lastEventId: 103,
+      },
+    });
+  });
+
+  await page.goto(`/session/${scenario.sessionId}?language=en`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: scenario.sessionId, replayedCount: 3 }),
+  );
+  const bar = page.locator('[data-web-shell-composer-usage]');
+  await expect(bar).toContainText('4.2M tok');
+  await page
+    .locator('[data-sidebar-shell]')
+    .getByText('Previous Session', { exact: true })
+    .click();
+  await expect.poll(() => loadStarted).toBe(true);
+  await page.clock.runFor(1_500);
+  const readsWhileLoading = [...reads];
+  releaseLoad();
+  await daemon.sse.waitForConnection('previous-session');
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: 'previous-session', replayedCount: 3 }),
+  );
+  await expect(page.getByText('B answer', { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/session\/previous-session/);
+  await page.clock.runFor(1_000);
+  await expect(bar).toContainText('8.12M tok');
+  expect(readsWhileLoading).toEqual([]);
+  expect(reads.every(Boolean)).toBe(true);
+});
