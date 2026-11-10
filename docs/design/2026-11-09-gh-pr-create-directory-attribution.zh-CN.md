@@ -283,6 +283,18 @@ bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修
 
 第九轮验证：**501 passed**（487 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AJ（去 readonly 检查）、AK（重定向透传 `guaranteed`）各自杀掉点名用例、其余对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `30e1e6dc8b945c15dd4e5642d0059749c6f1700cfdcf7a6c989e397816fd4ac9`）。
 
+### 第十轮评审（2026-11-10，复评 `3702125c45`）
+
+复评确认第九轮修复（16 条保留见证通过），并报出三条 P2，均在第九轮 readonly/declaration 处理里：
+
+1. **组合声明选项。** `declare -rf cd` / `typeset -fr cd` 不产生分离的 `-r`/`-f` 词，整词匹配使 `readonlyFunctions` 为空、unset 错误解除阴影。该分支现在从每个旗标词解码选项**字符**，从而识别组合形式。
+2. **readonly 状态泄漏出普通管道。** `readonly -f cd | cat` 只在管道子 shell 里把函数标记 readonly，但 `readonlyFunctions` 集合在作用域恢复后仍残留，强制启动归因。管道分支现在在离开「不在当前 shell 运行」的管道时，随 `shadowed` 一并恢复 `readonlyFunctions`。
+3. **declaration 子树丢了 worktree 守卫。** 新 declaration 分支返回时未做子树扫描，`export WT="$(git worktree add …)"` 被静默判 resolved（丢 notice）。该分支现在套用与 default 分支相同的 `subtreeMayChangeDirectory` 守卫。
+
+第十轮验证：**505 passed**（491 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AL（组合选项解码）、AM（管道 readonly 恢复）、AN（declaration 子树守卫）各自杀掉点名用例、其余对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `d7116bfb38138eb223721f89c85353b6825a4c018196e7b73850754636e5cb65`）。
+
+**CI（base，非本 diff）。** Linux build / TUI / 原生 Windows 前置失败是 document-export 渲染器超字节预算（2,066,342 对 2,060,000）。本 PR 只改 `packages/core` shell 归因与文档、不碰任何 web 构建输入，故该失败属 main，且已被 main 上的 `4c84f269d1`（#16774「lift the export renderer budget to the merged size」）修复；合入当前 main 即带入该修复。本 PR 不改 web-templates。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

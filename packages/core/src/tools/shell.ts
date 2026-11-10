@@ -1315,15 +1315,19 @@ async function resolveGhPrCreateDirectory(
           // `shopt -s lastpipe` the last element runs in THIS shell instead.
           const pipelineInCurrentShell = lastpipeEnabled;
           const inheritedShadowed = new Set(shadowed);
+          const inheritedReadonly = new Set(readonlyFunctions);
           // Pipeline elements run in subshells: an `unset -f` there cannot lift
           // a shadow in this shell, so never treat it as guaranteed.
           for (const child of node.namedChildren) visit(child, dir, false);
           if (!pipelineInCurrentShell) {
-            // Function definitions and shopt inside ordinary pipeline
-            // elements die with their subshell and cannot affect outer cd.
+            // Function definitions, readonly marks and shopt inside ordinary
+            // pipeline elements die with their subshell and cannot affect the
+            // outer shell, so restore both pieces of function state.
             lastpipeEnabled = false;
             shadowed.clear();
             for (const name of inheritedShadowed) shadowed.add(name);
+            readonlyFunctions.clear();
+            for (const name of inheritedReadonly) readonlyFunctions.add(name);
           }
           if (lastpipeEnabled && subtreeMayChangeDirectory(node)) opaque = true;
           return dir;
@@ -1351,21 +1355,30 @@ async function resolveGhPrCreateDirectory(
           // `readonly -f cd` / `declare -r -f cd` mark a function readonly; a
           // later `unset -f` cannot remove it, so its shadow must survive.
           // Marking conservatively (even if the declaration is skipped) only
-          // ever keeps a shadow, which is the safe direction.
+          // ever keeps a shadow, which is the safe direction. Bash accepts
+          // clustered options (`declare -rf cd`, `typeset -fr cd`), so decode
+          // the option characters rather than matching whole flag words.
           const keyword = node.firstChild?.text;
-          const flags = node.namedChildren
-            .filter((c) => c.type === 'word')
-            .map((c) => c.text);
+          const optionChars = new Set<string>();
+          for (const c of node.namedChildren) {
+            if (c.type === 'word' && c.text.startsWith('-')) {
+              for (const ch of c.text.slice(1)) optionChars.add(ch);
+            }
+          }
           const marksReadonly =
-            (keyword === 'readonly' && flags.includes('-f')) ||
+            (keyword === 'readonly' && optionChars.has('f')) ||
             ((keyword === 'declare' || keyword === 'typeset') &&
-              flags.includes('-r') &&
-              flags.includes('-f'));
+              optionChars.has('r') &&
+              optionChars.has('f'));
           if (marksReadonly) {
             for (const c of node.namedChildren) {
               if (c.type === 'variable_name') readonlyFunctions.add(c.text);
             }
           }
+          // A declaration can create a worktree inside a command substitution
+          // (`export WT="$(git worktree add …)"`); keep the same subtree guard
+          // the default arm applies so that is not silently resolved.
+          if (subtreeMayChangeDirectory(node)) opaque = true;
           return dir;
         }
         case 'unset_command': {

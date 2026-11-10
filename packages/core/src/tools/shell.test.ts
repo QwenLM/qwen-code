@@ -1420,20 +1420,48 @@ describe('ShellTool', () => {
       it.each([
         'cd() { :; }; readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
         'cd() { :; }; declare -r -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; declare -rf cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; typeset -fr cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
         'cd() { :; }; unset -f cd > /missing-parent/output; cd /test/dir/nested && gh pr create --fill',
       ])(
         'keeps the function shadow when the unset cannot provably succeed: %s',
         async (command) => {
-          // A readonly function cannot be unset, and a failed output
-          // redirection means the unset never runs; in both the no-op function
-          // survives, so the later cd does NOT move the shell. Keep the shadow
-          // and fall back conservatively instead of clearing it from the
-          // execution-order flag alone.
+          // A readonly function cannot be unset (including clustered options
+          // like `declare -rf`), and a failed output redirection means the
+          // unset never runs; in both the no-op function survives, so the later
+          // cd does NOT move the shell. Keep the shadow and fall back
+          // conservatively instead of clearing it from the execution-order flag
+          // alone.
           mockCreatedPr(77);
           const result = await runShell(command, PR_77);
           expectOpaqueFallback(result);
         },
       );
+
+      it('does not leak a pipeline-subshell readonly mark into the parent', async () => {
+        // `readonly -f cd | cat` marks cd readonly only in the pipeline
+        // subshell; the parent function stays mutable, so the later unset
+        // succeeds and the create runs in the worktree. The readonly state must
+        // be restored with the shadow state when leaving the pipeline.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; readonly -f cd | cat; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('fails closed for a worktree created inside a declaration substitution', async () => {
+        // `export WT="$(git worktree add …)"` creates the worktree before the
+        // snapshot; the declaration arm must keep the subtree worktree guard so
+        // this is opaque (with a notice), not silently resolved.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'export WT_CREATED="$(git worktree add /test/dir/new -b fix/w)" && cd /test/dir/new && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
 
       it('binds from launch without a notice when only a subshell cds', async () => {
         // R3-8: a subshell's cd cannot leak to this shell, so the create

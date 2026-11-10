@@ -677,6 +677,39 @@ their named cases with the other controls green; restored from a byte-level
 backup (final `shell.ts` SHA-256
 `30e1e6dc8b945c15dd4e5642d0059749c6f1700cfdcf7a6c989e397816fd4ac9`).
 
+### Review round 10 (2026-11-10, re-review of `3702125c45`)
+
+The re-review confirmed the round-9 fixes (16 retained witnesses pass) and
+reported three P2s, all in the round-9 readonly/declaration handling:
+
+1. **Clustered declaration options.** `declare -rf cd` / `typeset -fr cd` do not
+   produce separate `-r`/`-f` words, so the whole-word match left
+   `readonlyFunctions` empty and the unset wrongly lifted the shadow. The arm now
+   decodes option CHARACTERS from each flag word, so clustered forms are recognised.
+2. **Readonly state leaked out of an ordinary pipeline.** `readonly -f cd | cat`
+   marks the function readonly only in the pipeline subshell, but the
+   `readonlyFunctions` set survived the scope restoration, forcing launch
+   attribution. The pipeline arm now restores `readonlyFunctions` together with
+   `shadowed` when leaving a pipeline that does not run in the current shell.
+3. **Worktree guard lost for declaration subtrees.** The new declaration arm
+   returned without the subtree scan, so `export WT="$(git worktree add …)"` was
+   silently resolved (lost notice). The arm now applies the same
+   `subtreeMayChangeDirectory` guard the default arm uses.
+
+Round-10 verification: **505 passed** (491 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses AL (clustered-option
+decode), AM (pipeline readonly restore) and AN (declaration subtree guard) each red
+their named cases with the other controls green; restored from a byte-level backup
+(final `shell.ts` SHA-256
+`d7116bfb38138eb223721f89c85353b6825a4c018196e7b73850754636e5cb65`).
+
+**CI (base, not this diff).** The Linux build / TUI / native-Windows prerequisite
+failures were the document-export renderer exceeding its byte budget
+(2,066,342 vs 2,060,000). This PR touches only `packages/core` shell attribution and
+docs — no web build input — so the failure is main's, already fixed on main by
+`4c84f269d1` (#16774, "lift the export renderer budget to the merged size"); merging
+current main brings that fix in. No web-templates change is made in this PR.
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.
