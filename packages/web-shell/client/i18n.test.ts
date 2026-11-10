@@ -75,6 +75,15 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
 ].map((suffix) => `scheduledTasks.delivery.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
+  it('localizes the scheduled-task workspace host-lock hint', () => {
+    expect(getTranslator('en')('scheduledTasks.workspaceFixedByHost')).toBe(
+      'Fixed by host',
+    );
+    expect(getTranslator('zh-CN')('scheduledTasks.workspaceFixedByHost')).toBe(
+      '由宿主固定',
+    );
+  });
+
   it('keeps every scheduled-task delivery translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

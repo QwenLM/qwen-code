@@ -400,7 +400,7 @@ public class ManagedChannelService {
             return;
         }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("operationId", com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.reconciliationOperationId(claim));
+        body.put("operationId", ChannelInstanceStore.reconciliationOperationId(claim));
         body.put("kind", "settle_delivery");
         body.put("deliveryId", deliveryId);
         body.put("outcome", "unknown");

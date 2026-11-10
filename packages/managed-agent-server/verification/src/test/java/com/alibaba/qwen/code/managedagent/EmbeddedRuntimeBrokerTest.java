@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -616,7 +618,7 @@ class EmbeddedRuntimeBrokerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("need Git");
         properties.getRuntimeBroker().setChildWorkspaceGit("git");
-        var probe = new com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit("git",
+        var probe = new ChildWorktreeGit("git",
                 java.time.Duration.ofSeconds(30));
         try {
             probe.requireSupportedVersion();
@@ -664,7 +666,7 @@ class EmbeddedRuntimeBrokerTest {
                 new InMemoryRuntimeBindingRepository(),
                 new InMemoryRuntimeSessionRepository(),
                 new InMemoryToolExecutionRepository(),
-                mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.class));
+                mock(JdbcWorkspaceExecutionStore.class));
     }
 
     private static ManagedAgentProperties properties() throws Exception {
