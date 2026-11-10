@@ -16,7 +16,13 @@ import {
   validToolResult,
   validToolCheck,
 } from './tool-events.js';
-import { INVALIDATABLE_EVENTS, validateRenderTree } from './render-tree.js';
+import {
+  INVALIDATABLE_EVENTS,
+  MOD_RENDER_PINNED_PROPS,
+  invalidRenderText,
+  validateRenderTree,
+  type ModRenderSite,
+} from './render-tree.js';
 
 export const MOD_METHODS = [
   'clock.now',
@@ -452,7 +458,8 @@ function validateStoreInput(
     throw new Error('Mod hook changed pinned event fields.');
 }
 
-// The envelope and `props.view` are pinned; the other props keep their kind.
+// The envelope and each site's pinned props are pinned; the other props keep
+// their kind, and a row's text keeps a tree's text rules.
 function validateRenderInput(value: ModInput, original: ModInput): void {
   const props = value['props'];
   const before = original['props'] as ModInput;
@@ -463,7 +470,9 @@ function validateRenderInput(value: ModInput, original: ModInput): void {
     !only(value, ['surface', 'component', 'requestId', 'viewport', 'props']) ||
     !record(props) ||
     !isDeepStrictEqual(Object.keys(props).sort(), Object.keys(before).sort()) ||
-    !isDeepStrictEqual(props['view'], before['view'])
+    (
+      MOD_RENDER_PINNED_PROPS[original['component'] as ModRenderSite] ?? []
+    ).some((key) => !isDeepStrictEqual(props[key], before[key]))
   )
     throw new Error('Mod hook changed pinned event fields.');
   for (const key of Object.keys(before)) {
@@ -473,6 +482,14 @@ function validateRenderInput(value: ModInput, original: ModInput): void {
       throw new Error(
         `Mod ui.render props.${key} is ${kindOf(props[key])}, not ${kindOf(before[key])}.`,
       );
+  }
+  // Checked only once rewritten: the reply's own text may hold anything.
+  if (
+    original['component'] === 'AssistantMessage' &&
+    props['text'] !== before['text']
+  ) {
+    const why = invalidRenderText(props['text'] as string);
+    if (why) throw new Error(`Mod ui.render props.text ${why}.`);
   }
 }
 

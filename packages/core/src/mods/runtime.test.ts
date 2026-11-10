@@ -2333,6 +2333,41 @@ describe('ModRuntime with the real QuickJS worker', () => {
       await expect(tool).resolves.toEqual({ result: { decision: 'allow' } });
     });
 
+    it('settles a dispatch abandoned while its hook awaits a model call', async () => {
+      const cut: boolean[] = [];
+      let started!: () => void;
+      const running = new Promise<void>((resolve) => (started = resolve));
+      const runtime = await createModels(
+        [
+          fixture(
+            "return {text: JSON.stringify([await $.model.complete({model: 'm', prompt: e.args})])};",
+          ),
+        ],
+        (input, hostSignal) =>
+          input.prompt === 'slow'
+            ? new Promise((resolve) => {
+                started();
+                hostSignal.addEventListener('abort', () => {
+                  cut.push(true);
+                  resolve({ isAnswered: true, text: 'late', usage });
+                });
+              })
+            : Promise.resolve({ isAnswered: true, text: 'fast', usage }),
+      );
+      const session = new AbortController();
+      const abandoned = runtime.runCommand('hello', 'slow', session.signal);
+      await running;
+      const before = Date.now();
+      session.abort();
+      await expect(abandoned).rejects.toThrow(/cancelled/);
+      expect(Date.now() - before).toBeLessThan(1000);
+      expect(cut).toEqual([true]);
+      // The worker survived: the next dispatch runs and calls the host again.
+      expect(
+        JSON.parse(await runtime.runCommand('hello', 'fast', signal())),
+      ).toEqual([{ isAnswered: true, text: 'fast', usage }]);
+    });
+
     it('lists model.complete as a method only where the host runs it', async () => {
       const version = fixture(
         'return {text: JSON.stringify((await $.session.version()).qwen.methods)};',

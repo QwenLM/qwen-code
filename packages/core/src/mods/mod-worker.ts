@@ -195,6 +195,9 @@ class Realm {
   readonly vm = this.runtime.newContext();
   readonly guest: QuickJSHandle;
   patterns: string[] = [];
+  // Beside each pattern, the render sites its matcher's component allows;
+  // null where it names no component.
+  renderSites: Array<readonly string[] | null> = [];
   private sliceDeadline = Infinity;
   private executingCall?: ModInvocation;
   private notifying = false;
@@ -420,13 +423,15 @@ class Realm {
     const register = this.vm.getProp(namespace, 'register');
     const options = this.vm.newString(JSON.stringify(this.plugin.options));
     try {
-      this.patterns = (await this.settle(
+      const hooks = (await this.settle(
         this.execute(() =>
           this.vm.unwrapResult(
             this.vm.callMethod(this.guest, 'load', [register, options]),
           ),
         ),
-      )) as string[];
+      )) as Array<{ event: string; sites: string[] | null }>;
+      this.patterns = hooks.map((hook) => hook.event);
+      this.renderSites = hooks.map((hook) => hook.sites);
     } finally {
       register.dispose();
       options.dispose();
@@ -1305,7 +1310,24 @@ port.on('message', async (request: ModWorkerRequest) => {
         turnStart: hooked('turn.start').length > 0,
         promptSubmit: hooked('prompt.submit'),
         turnComplete: hooked('turn.complete'),
-        render: hooked('ui.render'),
+        // Per site the host draws, the plugins with a hook that may hear it.
+        render: Object.fromEntries(
+          sites.map((site) => [
+            site,
+            supported.includes('ui.render')
+              ? realms
+                  .filter((realm) =>
+                    realm.patterns.some(
+                      (pattern, index) =>
+                        patternMatches(pattern, 'ui.render') &&
+                        (realm.renderSites[index] === null ||
+                          realm.renderSites[index]!.includes(site)),
+                    ),
+                  )
+                  .map((realm) => realm.plugin.name)
+              : [],
+          ]),
+        ),
       };
     } else if (request.type === 'command') {
       if (!commands.has(request.command))
@@ -1369,13 +1391,20 @@ port.on('message', async (request: ModWorkerRequest) => {
     } else if (request.type === 'render') {
       if (!sites.includes(request.input.component))
         throw new Error('This host draws no ' + request.input.component + '.');
-      result = await dispatch(
+      // The engine draws with the props that last reached it.
+      let props: unknown = request.input.props;
+      const tree = await dispatch(
         'ui.render',
         { ...request.input },
         engineOrigin,
         [],
-        async () => ENGINE_NODE,
+        async (e) => {
+          props = e['props'];
+          return ENGINE_NODE;
+        },
       );
+      result =
+        request.input.component === 'AssistantMessage' ? { tree, props } : tree;
     } else if (request.type === 'turn-complete') {
       result = await dispatch(
         'turn.complete',
