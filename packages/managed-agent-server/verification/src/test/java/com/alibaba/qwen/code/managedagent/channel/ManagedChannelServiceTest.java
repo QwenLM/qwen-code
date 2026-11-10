@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRe
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDeliverySegment;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
@@ -403,6 +404,19 @@ class ManagedChannelServiceTest {
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly("<m0@example.com>", "<m1@example.com>",
                         "<m2@example.com>");
+        // The public read model exposes every segment with its own receipt.
+        PublicChannelDelivery viewed = service.getDelivery(TENANT, ACTOR,
+                channel, deliveryId);
+        assertThat(viewed.segments())
+                .extracting(PublicChannelDeliverySegment::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1",
+                        deliveryId + ":2");
+        assertThat(viewed.segments())
+                .extracting(PublicChannelDeliverySegment::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>",
+                        "<m2@example.com>");
+        assertThat(service.listDeliveries(TENANT, ACTOR, channel, null, 10)
+                .data().getFirst().segments()).hasSize(3);
     }
 
     @Test

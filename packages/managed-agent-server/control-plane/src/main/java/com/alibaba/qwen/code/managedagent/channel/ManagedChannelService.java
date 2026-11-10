@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDeliverySegment;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelRoute;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
@@ -332,14 +333,9 @@ public class ManagedChannelService {
         Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
         String resentId = String.valueOf(delivery.get("deliveryId"));
         List<?> resentSegments = (List<?>) delivery.get("segments");
-        Map<?, ?> first = (Map<?, ?>) resentSegments.getFirst();
-        ChannelDelivery row = deliveries.findOrCreate(new ChannelDelivery(
-                tenantId, channelId, resentId,
-                String.valueOf(first.get("segmentId")),
-                ((Number) first.get("ordinal")).intValue(), "planned", null,
-                0, 0));
         // The new chain carries only the segments proven unsent, so none of
-        // them holds a receipt yet.
+        // them holds a receipt yet. Plan them before the delivery row is
+        // visible, so a public read never sees an empty segments array.
         List<SegmentLedger> plan = new ArrayList<>();
         for (Object entry : resentSegments) {
             Map<?, ?> segment = (Map<?, ?>) entry;
@@ -347,6 +343,12 @@ public class ManagedChannelService {
                     ((Number) segment.get("ordinal")).intValue(), null));
         }
         segments.plan(tenantId, channelId, resentId, plan);
+        Map<?, ?> first = (Map<?, ?>) resentSegments.getFirst();
+        ChannelDelivery row = deliveries.findOrCreate(new ChannelDelivery(
+                tenantId, channelId, resentId,
+                String.valueOf(first.get("segmentId")),
+                ((Number) first.get("ordinal")).intValue(), "planned", null,
+                0, 0));
         instances.claim(tenantId, channelId, resentId, claim.sessionId());
         return new ResendResponse(resentId, deliveryId, true,
                 view(row, claim.sessionId()));
@@ -516,7 +518,9 @@ public class ManagedChannelService {
         DeliveryPage page = deliveries.listByChannel(tenantId, channelId,
                 decoded, limit);
         List<PublicChannelDelivery> data = page.deliveries().stream()
-                .map(ManagedChannelService::publicDelivery).toList();
+                .map(row -> publicDelivery(row,
+                        segments.list(tenantId, channelId, row.deliveryId())))
+                .toList();
         String next = null;
         if (page.hasMore() && !page.deliveries().isEmpty()) {
             ChannelDelivery last = page.deliveries().getLast();
@@ -529,7 +533,8 @@ public class ManagedChannelService {
             String channelId, String deliveryId) {
         requireReadableInstance(tenantId, actorId, channelId);
         return deliveries.find(tenantId, channelId, deliveryId)
-                .map(ManagedChannelService::publicDelivery)
+                .map(row -> publicDelivery(row,
+                        segments.list(tenantId, channelId, deliveryId)))
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "delivery_not_found", "The delivery was not found."));
     }
@@ -880,11 +885,17 @@ public class ManagedChannelService {
     }
 
     private static PublicChannelDelivery publicDelivery(
-            ChannelDelivery row) {
+            ChannelDelivery row, List<SegmentLedger> segmentLedger) {
+        List<PublicChannelDeliverySegment> segments = segmentLedger.stream()
+                .map(segment -> new PublicChannelDeliverySegment(
+                        segment.segmentId(), segment.ordinal(),
+                        segment.providerReceipt()))
+                .toList();
         return new PublicChannelDelivery(row.deliveryId(),
                 "agent.channel.delivery", row.channelInstanceId(),
                 row.segmentId(), row.ordinal(), row.state(),
-                row.providerReceipt(), row.createdAt(), row.updatedAt());
+                row.providerReceipt(), segments, row.createdAt(),
+                row.updatedAt());
     }
 
     private static String encodeCursor(long createdAt, String id) {
