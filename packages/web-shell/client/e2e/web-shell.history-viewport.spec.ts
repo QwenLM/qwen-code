@@ -299,15 +299,17 @@ for (const pageRecords of [16, 200]) {
     expect(await readingAnchor(viewport)).toEqual(anchor);
     await expect(viewport).not.toContainText('BACKGROUND LIVE answer');
     // The live locator matches nothing until React commits the returnToLive()
-    // transition, so it is bounded by the global 20s expect window rather
-    // than the test budget (#15697).
+    // transition, so the assertion below carries its own window.
     await restoreCPUThrottle();
     await page
       .getByRole('button', { name: /Scroll to bottom|回到底部/ })
       .click();
     const liveViewport = page.locator('[data-history-viewport="live"]');
+    // Only the throttled iteration raises the test budget to 300s, so only it
+    // can afford the 120s window. The 16-record iteration keeps Playwright's
+    // 60s budget and must stay inside it (#15697).
     await expect(liveViewport).toContainText('BACKGROUND LIVE answer', {
-      timeout: 120_000,
+      timeout: pageRecords === 200 ? 120_000 : undefined,
     });
   });
 }
