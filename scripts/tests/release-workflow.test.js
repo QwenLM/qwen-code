@@ -2612,6 +2612,7 @@ describe('release workflow', () => {
     inspectTimesOut = false,
     buildFails = false,
     suiteFailures = 0,
+    failSuite = 'cli',
     stepElapsedSeconds = 0,
     aptDefaultRate,
     aptAliyunRate,
@@ -2696,16 +2697,18 @@ fi`,
       'npx',
       `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"
 if [ "$SUITE_FAILURES" -gt 0 ]; then
-  count_file="$CALLS_LOG.npx-failures"
-  count=0
-  if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
-  count=$((count + 1))
-  printf '%s' "$count" > "$count_file"
-  if [ "$count" -le "$SUITE_FAILURES" ]; then
-    case "$*" in
-      *" cli") exit 1 ;;
-    esac
-  fi
+  case "$*" in
+    *" $FAIL_SUITE")
+      count_file="$CALLS_LOG.npx-failures"
+      count=0
+      if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$count_file"
+      if [ "$count" -le "$SUITE_FAILURES" ]; then
+        exit 1
+      fi
+      ;;
+  esac
 fi`,
     );
     // Deterministic stand-in for the probe's range reads so the suite stays
@@ -2759,6 +2762,7 @@ esac`,
         BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true',
         BUILD_FAILS: buildFails ? '1' : '0',
         SUITE_FAILURES: String(suiteFailures),
+        FAIL_SUITE: failSuite,
         STUB_DATE_START: '1000000',
         STUB_DATE_NOW: String(1000000 + stepElapsedSeconds),
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
@@ -2903,6 +2907,29 @@ esac`,
             line.startsWith('npx vitest') && line.endsWith(' interactive'),
         ),
       ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries the suite that failed, not the one before it',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      expect(
+        lines.filter(
+          (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+        ),
+      ).toHaveLength(1);
+      expect(
+        lines.filter(
+          (line) =>
+            line.startsWith('npx vitest') && line.endsWith(' interactive'),
+        ),
+      ).toHaveLength(2);
     },
   );
 
