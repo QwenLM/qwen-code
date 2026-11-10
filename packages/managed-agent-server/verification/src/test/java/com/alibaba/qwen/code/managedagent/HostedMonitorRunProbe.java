@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -173,7 +174,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     // case), so each later letter polls slower. The record read leads with
     // the same key.
     private String scopeKey(String sessionId) {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        return ManagedSessionStore.sessionScopeKey(tenant, sessionId);
     }
 
     // FG8c: the in-JVM embedded broker spawns each binding's managed worker

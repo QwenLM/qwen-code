@@ -8,6 +8,10 @@ import type {
   ManagedExtensionSelection,
   ManagedExtensionImportMetadata,
   ManagedExtensionInspection,
+  ManagedRuntimeSkillCandidates,
+  ManagedRuntimeSkillSnapshot,
+  ManagedRuntimeSkillImport,
+  ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type {
@@ -504,6 +508,25 @@ export interface ManagedAgentProvider {
       source: Blob,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedExtensionInspection>;
+    runtimeSkillCandidates?(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillCandidates>;
+    runtimeSkillSnapshot?(
+      sessionId: string,
+      input: {
+        owner: ManagedRuntimeSkillOwner;
+        path: string;
+        digest: string;
+        target: ManagedExtensionImportMetadata['target'];
+      },
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedRuntimeSkillSnapshot>;
+    importRuntimeSkill?(
+      sessionId: string,
+      input: ManagedRuntimeSkillImport & { extensionId?: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedExtensionPackageOperation>;
     inspect?(
       workspaceId: string,
       pin: ManagedExtensionPin,
