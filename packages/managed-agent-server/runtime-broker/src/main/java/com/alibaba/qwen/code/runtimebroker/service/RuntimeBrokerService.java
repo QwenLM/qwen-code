@@ -1441,11 +1441,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      * (a reconnect) returns the existing hold.
      */
     public CompletionStage<ToolExecutionRecord> admitTerminalHold(
-            String harnessSessionId, String runtimeSessionId, String terminalId) {
+            String harnessSessionId, String terminalId) {
         requireOpen(closed);
-        String harness = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
-        String runtime = BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
-        String terminal = BrokerValues.requireId(terminalId, "terminalId");
+        String harness = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                "harnessSessionId");
+        String terminal = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
+        // A terminal owns a deterministic Runtime Session of its own, so the
+        // relay never has to resolve one and a reconnect reuses the same hold.
+        String runtime = "terminal-" + terminal;
         String invocationId = "terminal-attach:" + terminal;
         String processId = invocationId + ":process";
         return mapStoreFailure(safeStage(() -> {
@@ -1454,7 +1459,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 requireTerminalHoldOwner(existing, harness, runtime);
                 return CompletableFuture.completedFuture(existing);
             }
-            return bindingRegistry.requireReadySession(harness, runtime)
+            return acquire(harness, runtime, "bootstrap", null, null)
+                    .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
                     .thenApply(context -> {
                         context.lock();
                         try {

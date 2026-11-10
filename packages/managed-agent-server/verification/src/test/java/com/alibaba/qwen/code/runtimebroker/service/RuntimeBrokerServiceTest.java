@@ -2027,22 +2027,22 @@ class RuntimeBrokerServiceTest {
     @Test
     void terminalHoldAdmitsSettledAttachAndProcessRow() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
             ToolExecutionRecord hold = join(fixture.service.admitTerminalHold(
-                    "harness", "runtime", "term-1"));
+                    "harness", "term-1"));
             assertEquals("terminal-attach:term-1:process", hold.getExecutionCallId());
             assertEquals("web_terminal_process", hold.getReference().get("dispatchMode"));
             assertEquals("terminal-attach:term-1", hold.getReference().get("processOf"));
+            assertEquals("terminal-term-1", hold.getRuntimeSessionId());
             assertEquals(ToolExecutionRecord.State.PREPARED, hold.getState());
             // The attach invocation settles through the never-dispatched path.
             awaitExecution(fixture.executionRepository, "terminal-attach:term-1",
                     ToolExecutionRecord.State.SETTLED);
             // Re-admitting the same terminal (a reconnect) returns the same hold.
             assertEquals(hold.getExecutionCallId(), join(fixture.service.admitTerminalHold(
-                    "harness", "runtime", "term-1")).getExecutionCallId());
-            // The hold keeps the Runtime against a routine release.
+                    "harness", "term-1")).getExecutionCallId());
+            // The hold keeps the terminal's Runtime Session against a routine release.
             assertEquals("runtime_session_held",
-                    failure(fixture.service.release("harness", "runtime")).getCode());
+                    failure(fixture.service.release("harness", "terminal-term-1")).getCode());
             // The worker's exit evidence settles the hold, then release succeeds.
             Map<String, Object> exited = new LinkedHashMap<>();
             exited.put("operationId", "term-1");
@@ -2050,30 +2050,27 @@ class RuntimeBrokerServiceTest {
             exited.put("evidence", Map.of("exitCode", 0));
             fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
             ToolExecutionRecord settled = join(fixture.service.observeBackgroundProcess(
-                    "harness", "runtime", "terminal-attach:term-1"));
+                    "harness", "terminal-term-1", "terminal-attach:term-1"));
             assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
             assertEquals("exited", settled.getResult().get("state"));
-            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertTrue(join(fixture.service.release("harness", "terminal-term-1")));
         }
     }
 
     @Test
     void terminalHoldIsScopedToItsSession() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
-            join(fixture.service.acquire("harness-b", "runtime-b", "bootstrap"));
-            join(fixture.service.admitTerminalHold("harness", "runtime", "term-1"));
+            join(fixture.service.admitTerminalHold("harness", "term-1"));
             assertEquals("runtime_terminal_hold_conflict",
                     failure(fixture.service.admitTerminalHold(
-                            "harness-b", "runtime-b", "term-1")).getCode());
+                            "harness-b", "term-1")).getCode());
         }
     }
 
     @Test
     void terminalHoldStopProvesExitWithTerminalKinds() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
-            join(fixture.service.admitTerminalHold("harness", "runtime", "term-1"));
+            join(fixture.service.admitTerminalHold("harness", "term-1"));
             Map<String, Object> exited = new LinkedHashMap<>();
             exited.put("operationId", "term-1");
             exited.put("state", "exited");
@@ -2092,7 +2089,7 @@ class RuntimeBrokerServiceTest {
                             .map(operation -> operation.get("kind")).toList());
             assertEquals("term-1", fixture.transport.controls.get(1)
                     .get("targetOperationId"));
-            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertTrue(join(fixture.service.release("harness", "terminal-term-1")));
         }
     }
 

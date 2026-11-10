@@ -24,15 +24,17 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
         name = "enabled", havingValue = "true")
 public class TerminalWebSocketConfig implements WebSocketConfigurer {
     private final WorkspaceTerminalRelayService relay;
+    private final RuntimeBrokerService broker;
 
     public TerminalWebSocketConfig(ManagedAgentService sessions,
             RuntimeBrokerService broker, ManagedAgentSettings settings) {
         this.relay = new WorkspaceTerminalRelayService(sessions, broker, settings);
+        this.broker = broker;
     }
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        registry.addHandler(new TerminalRelayHandler(),
+        registry.addHandler(new TerminalRelayHandler(broker),
                         "/api/agent/web-shell/v1/sessions/*/terminal")
                 .addInterceptors(new TerminalRelayHandshakeInterceptor(relay));
     }

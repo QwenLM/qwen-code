@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
@@ -35,12 +36,14 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler {
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
 
     private final HttpClient client;
+    private final RuntimeBrokerOperations broker;
 
-    public TerminalRelayHandler() {
-        this(HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build());
+    public TerminalRelayHandler(RuntimeBrokerOperations broker) {
+        this(broker, HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build());
     }
 
-    TerminalRelayHandler(HttpClient client) {
+    TerminalRelayHandler(RuntimeBrokerOperations broker, HttpClient client) {
+        this.broker = broker;
         this.client = client;
     }
 
@@ -60,6 +63,20 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler {
         Relay relay = new Relay(session);
         session.getAttributes().put(RELAY_ATTRIBUTE, relay);
         URI workerUri = workerUri(lease.getEndpoint(), sessionId, terminalId);
+        // Admit the durable hold before the worker terminal exists, so a close
+        // racing the attach can never release the Runtime out from under it.
+        broker.admitTerminalHold(sessionId, terminalId).whenComplete((hold, holdError) -> {
+            if (holdError != null) {
+                relay.fail();
+                closeQuietly(session, CloseStatus.SERVER_ERROR);
+                return;
+            }
+            openWorker(session, relay, lease, workerUri);
+        });
+    }
+
+    private void openWorker(WebSocketSession session, Relay relay,
+            RuntimeLease lease, URI workerUri) {
         try {
             client.newWebSocketBuilder()
                     .header("Authorization", "Bearer " + lease.getToken())

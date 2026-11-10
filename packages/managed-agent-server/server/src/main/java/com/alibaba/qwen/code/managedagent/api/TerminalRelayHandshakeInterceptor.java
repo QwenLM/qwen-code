@@ -33,6 +33,9 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
     private static final Pattern SESSION_PATH = Pattern.compile(
             "^/api/agent/web-shell/v1/sessions/([^/]+)/terminal$");
     private static final int MAX_TERMINAL_ID_LENGTH = 256;
+    /** The hold derives a Runtime Session id from the terminal id, so it must
+     * be path-safe, not merely bounded. */
+    private static final Pattern TERMINAL_ID = Pattern.compile("[A-Za-z0-9._-]+");
 
     private final WorkspaceTerminalRelayService relay;
 
@@ -62,7 +65,9 @@ public final class TerminalRelayHandshakeInterceptor implements HandshakeInterce
         String sessionId = matcher.group(1);
         String terminalId = http.getParameter("terminalId");
         if (terminalId == null || terminalId.isEmpty()
-                || terminalId.length() > MAX_TERMINAL_ID_LENGTH) {
+                || terminalId.length() > MAX_TERMINAL_ID_LENGTH
+                || !TERMINAL_ID.matcher(terminalId).matches()
+                || !TERMINAL_ID.matcher(sessionId).matches()) {
             response.setStatusCode(HttpStatus.BAD_REQUEST);
             return false;
         }
