@@ -789,7 +789,11 @@ describe('HostedMonitorWakeScheduler deferral', () => {
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
     expect(nextCalls).toBe(1);
+    // A deferral timer is armed, and close must actually clear it — not
+    // merely rely on the closed kick guard swallowing the late fire.
+    expect(vi.getTimerCount()).toBe(1);
     scheduler.close();
+    expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(3_600_000);
     expect(nextCalls).toBe(1);
   });
