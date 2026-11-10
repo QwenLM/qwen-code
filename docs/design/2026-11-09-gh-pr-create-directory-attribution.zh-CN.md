@@ -315,6 +315,20 @@ bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修
 
 第十二轮验证：**511 passed**（497 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AS（去 subshell 内 create 判定）杀掉 create-内用例、create-外对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `4abc04141add1d39574aff5a18c615d84f97cb8ee9b4e369e601728df5b58dad`）。
 
+### 第十三轮评审（2026-11-10，对精确 head `de260ad133c` 的复审）
+
+对第十二轮精确 head 的复审确认移动 subshell 通知在其目标形状上生效，但发现第十一轮的三条 P2 在第十一轮修复未覆盖的边界上**仍然复现**，且第十二轮新加的子树扫描引入了**一条额外的 P2 绑定回归**。四条共享同一主题：休眠的函数体、或执行不被保证的语句，不得贡献*已执行*的效果。四条均在本 PR 内修复：
+
+**F1——lastpipe 启用必须被证明。** 只要解析到 `shopt -s lastpipe` 就置 `lastpipeEnabled`，即便它处在 `false && …` 之后根本不会执行。lastpipe 实际关闭时，管道里的 `unset -f cd` 跑在 child 中、no-op `cd` 函数存活，于是给末元素当前 shell 语义会清掉 shadow、静默查询 worktree。`shopt` 臂现在仅在该命令 `guaranteed` 于本 shell 执行时才启用 lastpipe。
+
+**F2——休眠函数体不贡献 readonly。** 控制流扫描会 descend 进函数定义的 body，把从未被调用的函数里的 `readonly -f cd` 当作已执行，留住 shadow 并回退——尽管 unset 成功、create 跑在 worktree。扫描现在预收集 compound 内被调用的命令名，跳过任何**未被调用**函数的 body。同一改动里闭合了被调用的兄弟形状：在控制流内**既定义又被调用**的函数确实执行其 body，故记录其 readonly 标记（跳过它会清掉 shadow、静默查询 worktree）。两个方向都由变异钉住。
+
+**F3——控制流内 lastpipe 末元素。** 把每个嵌套 pipeline 都判为 child 上下文，会在 lastpipe 开启时丢掉其末元素的 readonly 标记，尽管 Bash 把该末元素跑在父 shell。控制流扫描现在镜像顶层 pipeline 臂：当前 shell 上下文且 lastpipe 开启时，末元素按当前 shell 走查，其余元素仍隔离。
+
+**F4——休眠函数体不贡献已执行的 create。** 第十二轮的 `subtreeRunsGhPrCreate` 把未被调用函数里的 `gh pr create` 当成 subshell 执行的 create，在可证的外层 cd 之前就置 `opaque`、丢掉 worktree 绑定。扫描现在收集被调用的命令名，跳过子树内未被调用函数的 body；**被调用**的函数仍贡献其 create，故移动 subshell 通知得以保留。
+
+第十三轮验证：**519 passed**（505 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。四条发现的变异见证均在最终 head 重跑（F2 双臂——恒 descend 杀掉休眠用例、恒 skip 杀掉被调用用例）；每条 named 用例变红而其兄弟对照保持绿。从字节级备份还原（最终 `shell.ts` SHA-256 `e22ac5278bf33d8a1dc78dff6c7ebadee0920589d5da81921281fa2d5365b39e`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

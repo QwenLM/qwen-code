@@ -770,6 +770,53 @@ create-outside control stays green; restored from a byte-level backup (final
 `shell.ts` SHA-256
 `4abc04141add1d39574aff5a18c615d84f97cb8ee9b4e369e601728df5b58dad`).
 
+### Review round 13 (2026-11-10, re-review of exact head `de260ad133c`)
+
+A re-review of the exact round-12 head confirmed the moving-subshell notice works
+for its intended case but found that the three round-11 P2s STILL reproduce at
+boundaries the round-11 fixes did not cover, and that round-12's new subtree scan
+introduced one additional P2 binding regression. All four share one theme: a
+dormant function body, or a statement whose execution is not guaranteed, must not
+contribute an _executed_ effect. Each was fixed in this PR:
+
+**F1 — lastpipe enablement must be proven.** `lastpipeEnabled` was set whenever a
+`shopt -s lastpipe` was parsed, even behind `false && …` where it never runs. With
+lastpipe actually off, the piped `unset -f cd` runs in a child and the no-op `cd`
+function survives, so granting the final element current-shell semantics cleared
+the shadow and silently queried the worktree. The `shopt` arm now enables
+lastpipe only when the command is `guaranteed` to execute in this shell.
+
+**F2 — dormant function bodies contribute no readonly.** The control-flow scan
+descended into a function definition's body and applied `readonly -f cd` from a
+function that is never called, retaining the shadow and falling back although the
+unset succeeds and the create runs in the worktree. The scan now pre-collects the
+command names invoked in the compound and skips the body of any function that is
+NOT called there. The called sibling was closed in the same change: a function
+defined AND called inside the control flow does execute its body, so its readonly
+mark is recorded (skipping it would clear the shadow and silently query the
+worktree). Both directions are pinned by mutation.
+
+**F3 — lastpipe final element inside control flow.** Classifying every nested
+pipeline as a child context dropped the readonly mark of its final element when
+lastpipe is enabled, although Bash runs that final element in the parent shell.
+The control-flow scan now mirrors the top-level pipeline arm: with lastpipe in
+current-shell context the final element is visited as current-shell and every
+preceding element stays isolated.
+
+**F4 — dormant function bodies contribute no executed create.** Round-12's
+`subtreeRunsGhPrCreate` counted a `gh pr create` inside an uncalled function as a
+create executed by the subshell, setting `opaque` before the provable outer cd and
+losing the worktree binding. The scan now collects invoked command names and
+skips the body of any function not called in the subtree; a function that IS
+called still contributes its create, so the moving-subshell notice is preserved.
+
+Round-13 verification: **519 passed** (505 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses re-run on the
+final head for all four findings (F2 with two arms — always-descend reds the
+dormant case, always-skip reds the called case); each named case reds while its
+sibling controls stay green. Restored from a byte-level backup (final `shell.ts`
+SHA-256 `e22ac5278bf33d8a1dc78dff6c7ebadee0920589d5da81921281fa2d5365b39e`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

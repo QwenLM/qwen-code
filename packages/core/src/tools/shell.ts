@@ -1043,11 +1043,28 @@ function subtreeCreatesWorktree(node: ShellSyntaxNode): boolean {
   return false;
 }
 
-/** Whether a subtree contains a `gh pr create` invocation. */
+/**
+ * Whether a subtree contains a `gh pr create` invocation that actually
+ * executes. A function definition does not run its body, so a create inside a
+ * function counts only when that function is also called somewhere in the
+ * subtree; a bare definition is dormant and must not cost an outer create its
+ * binding.
+ */
 function subtreeRunsGhPrCreate(node: ShellSyntaxNode): boolean {
+  const invoked = new Set<string>();
+  const collect: ShellSyntaxNode[] = [node];
+  while (collect.length > 0) {
+    const current = collect.pop()!;
+    if (current.type === 'command') invoked.add(commandNodeProgram(current));
+    collect.push(...current.namedChildren);
+  }
   const stack: ShellSyntaxNode[] = [node];
   while (stack.length > 0) {
     const current = stack.pop()!;
+    if (current.type === 'function_definition') {
+      const name = current.childForFieldName('name')?.text;
+      if (name && !invoked.has(name)) continue;
+    }
     if (
       current.type === 'command' &&
       commandRunsGhPrCreate(createCandidateText(current))
@@ -1526,7 +1543,12 @@ async function resolveGhPrCreateDirectory(
             opaque = true;
             return dir;
           }
+          // Only a GUARANTEED `shopt -s lastpipe` actually enables lastpipe.
+          // Behind `&&` / `||` / `&` (e.g. `false && shopt -s lastpipe`) it may
+          // be skipped, so the final pipeline element still runs in a child and
+          // must not be granted current-shell shadow-removing semantics.
           if (
+            guaranteed &&
             program === 'shopt' &&
             node.namedChildren.some(
               (c) => c.type === 'word' && c.text === '-s',
@@ -1681,6 +1703,15 @@ async function resolveGhPrCreateDirectory(
           // declaration in current-shell control flow (`if true; then readonly
           // -f cd; fi`) also blocks a later unset, so record it — but not when it
           // sits inside a nested child context, whose effects die with it.
+          // A function body executes only when the function is called, so its
+          // readonly marks count only for functions invoked in this subtree.
+          const invoked = new Set<string>();
+          const collect: ShellSyntaxNode[] = [node];
+          while (collect.length > 0) {
+            const c = collect.pop()!;
+            if (c.type === 'command') invoked.add(commandNodeProgram(c));
+            collect.push(...c.namedChildren);
+          }
           const stack: Array<{ n: ShellSyntaxNode; child: boolean }> = [
             { n: node, child: false },
           ];
@@ -1689,13 +1720,16 @@ async function resolveGhPrCreateDirectory(
             if (current.type === 'function_definition') {
               const name = current.childForFieldName('name')?.text;
               if (name) shadowed.add(name);
+              // An uncalled body is dormant: its readonly declarations have not
+              // executed and must not block a later unset. A called body runs in
+              // this shell, so descend to record its readonly marks.
+              if (name && !invoked.has(name)) continue;
             }
             const nowChild =
               child ||
               current.type === 'subshell' ||
               current.type === 'command_substitution' ||
-              current.type === 'process_substitution' ||
-              current.type === 'pipeline';
+              current.type === 'process_substitution';
             if (!nowChild) {
               const readonlyDecl = readonlyFunctionDeclaration(current);
               if (readonlyDecl) {
@@ -1706,6 +1740,20 @@ async function resolveGhPrCreateDirectory(
                     readonlyFunctions.add(t);
                 }
               }
+            }
+            if (current.type === 'pipeline') {
+              // With lastpipe in current-shell context the FINAL element runs
+              // in THIS shell, so its readonly mark survives; every preceding
+              // element is still a child. Mirror the top-level pipeline arm.
+              const elements = current.namedChildren;
+              for (let i = 0; i < elements.length; i++) {
+                const isLast = i === elements.length - 1;
+                stack.push({
+                  n: elements[i]!,
+                  child: nowChild || !(isLast && lastpipeEnabled),
+                });
+              }
+              continue;
             }
             for (const c of current.namedChildren) {
               stack.push({ n: c, child: nowChild });

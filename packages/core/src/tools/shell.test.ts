@@ -1466,6 +1466,80 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
+      it('keeps the shadow when lastpipe enablement is skipped', async () => {
+        // `false && shopt -s lastpipe` never enables lastpipe, so the piped
+        // `unset -f cd` runs in a child and the no-op cd function survives;
+        // granting the final element current-shell semantics would clear the
+        // shadow and silently query a directory the create never ran in.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; false && shopt -s lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('lifts the shadow when lastpipe is provably enabled', async () => {
+        // Control for the skipped-enablement case: a guaranteed `shopt -s
+        // lastpipe` runs the final `unset -f cd` in this shell, so the shadow is
+        // lifted and the create resolves in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -s lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('ignores readonly inside an uncalled function defined in control flow', async () => {
+        // helper is never called, so `readonly -f cd` in its dormant body never
+        // executes; the unset succeeds and the create runs in the worktree.
+        // Applying the dormant readonly would keep the shadow and fall back.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('retains readonly inside a function called in control flow', async () => {
+        // Control for the dormant case: helper IS called, so its `readonly -f
+        // cd` executes in this shell and the later unset is rejected; skipping
+        // the called body would clear the shadow and silently query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; helper; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('retains a lastpipe readonly mark from a pipeline inside control flow', async () => {
+        // With lastpipe on, the final element of `true | readonly -f cd` inside
+        // the if runs in THIS shell, so cd becomes readonly and the later unset
+        // is rejected; dropping the mark would clear the shadow and silently
+        // query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; shopt -s lastpipe; if true; then true | readonly -f cd; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('isolates a non-final lastpipe readonly inside control flow', async () => {
+        // Control: the readonly mark is in the FIRST element (a child), so it
+        // does not reach the parent; the unset succeeds and the create resolves
+        // in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -s lastpipe; if true; then readonly -f cd | true; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
       it('fails closed for a worktree created inside a declaration substitution', async () => {
         // `export WT="$(git worktree add …)"` creates the worktree before the
         // snapshot; the declaration arm must keep the subtree worktree guard so
@@ -1529,6 +1603,32 @@ describe('ShellTool', () => {
         expect(result.llmContent).not.toContain(
           SHELL_PR_BINDING_DIRECTORY_NOTICE,
         );
+      });
+
+      it('ignores a create inside an uncalled function in a subshell', async () => {
+        // The first subshell only DEFINES helper; its body's create never runs.
+        // The sole executed create is the outer one in the worktree, so counting
+        // the dormant create would wrongly fall back and lose that binding.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('still flags a create inside a subshell function that is called', async () => {
+        // Control: helper IS called in the subshell, so its create executes in
+        // the moving subshell's directory and must surface the fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }; helper); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
       });
 
       it.each([
