@@ -835,10 +835,12 @@ describe('tryGenerateSessionTitle', () => {
     // A session that pivots mid-conversation — the final topic is what the
     // title should reflect. Feeding the head risks titling the session by
     // what the user opened with rather than what they ended up doing.
-    const longUserText = 'BEGIN_HEAD ' + 'x'.repeat(3000) + ' END_TAIL_MARKER';
+    const longUserText = 'BEGIN_HEAD ' + 'x'.repeat(3000);
     const history: Content[] = [
-      { role: 'user', parts: [{ text: longUserText }] },
-      { role: 'model', parts: [{ text: 'END_MODEL_MARKER' }] },
+      userText(longUserText),
+      modelText('Old topic'),
+      userText('RECENT_USER_MARKER'),
+      modelText('END_MODEL_MARKER'),
     ];
 
     let captured: string | null = null;
@@ -861,6 +863,7 @@ describe('tryGenerateSessionTitle', () => {
     await tryGenerateSessionTitle(config, new AbortController().signal);
 
     expect(captured).not.toBeNull();
+    expect(captured).toContain('User: RECENT_USER_MARKER');
     expect(captured).toContain('END_MODEL_MARKER');
     expect(captured).not.toContain('BEGIN_HEAD');
   });
@@ -872,7 +875,14 @@ describe('tryGenerateSessionTitle output language (#16793)', () => {
   const PLAIN_RULES =
     '- 3-7 words.\n- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.\n- No trailing punctuation.';
 
-  async function titleRequestFor(outputLanguage: string | undefined | null) {
+  async function titleRequestFor(
+    outputLanguage: string | undefined | null,
+    history = [
+      userText('请解释工作流依赖检查的原理'),
+      modelText('依赖检查会先解析工作流的依赖图。'),
+    ],
+    userDisplayTexts: readonly string[] = [],
+  ) {
     const dir = await mkdtemp(path.join(tmpdir(), 'session-title-lang-'));
     try {
       let outputLanguageFilePath: string | undefined;
@@ -883,10 +893,7 @@ describe('tryGenerateSessionTitle output language (#16793)', () => {
         }
       }
       const { config, generateJson } = makeConfig({
-        history: [
-          userText('请解释工作流依赖检查的原理'),
-          modelText('依赖检查会先解析工作流的依赖图。'),
-        ],
+        history,
         fastModel: 'qwen-turbo',
         outputLanguageFilePath,
         generateJsonResult: { title: '解释工作流依赖检查原理' },
@@ -894,14 +901,20 @@ describe('tryGenerateSessionTitle output language (#16793)', () => {
       const outcome = await tryGenerateSessionTitle(
         config,
         new AbortController().signal,
+        userDisplayTexts,
       );
       expect(outcome.ok).toBe(true);
       const request = generateJson.mock.calls[0][0] as {
         systemInstruction: string;
         schema: { properties: { title: { description: string } } };
+        contents: Content[];
       };
+      const transcript = request.contents[0]?.parts?.[0]?.text?.match(
+        /^Conversation so far:\n([\s\S]*)\n\nGenerate the session title now\./,
+      )?.[1];
       return {
         ...request,
+        transcript,
         preferencePathReads: vi.mocked(config.getOutputLanguageFilePath).mock
           .calls.length,
       };
@@ -944,6 +957,31 @@ You MUST always respond in **English** regardless of the user's input language.`
   it('uses one preference snapshot to choose the prompt and append the rule', async () => {
     const request = await titleRequestFor(AUTO_FILE);
     expect(request.preferencePathReads).toBe(1);
+  });
+
+  it('keeps the question and latest log details in a long projected user turn', async () => {
+    const question = '请排查工作流失败的原因。';
+    const logs = 'Dependency check did not complete.\n'.repeat(50);
+    const { transcript } = await titleRequestFor(AUTO_FILE, DIALOG_HISTORY, [
+      `${question}\n${logs}LATEST_LOG_ENTRY`,
+    ]);
+
+    expect(transcript).toContain(question);
+    expect(transcript).toContain('LATEST_LOG_ENTRY');
+    expect(transcript).toHaveLength(1000);
+  });
+
+  it('keeps the human prompt when an assistant reply fills the transcript budget', async () => {
+    const question = '¿Por qué falló el flujo de trabajo?';
+    const answer = 'The dependency checker stopped. '.repeat(50);
+    const { transcript } = await titleRequestFor(undefined, [
+      userText(question),
+      modelText(answer + 'LATEST_REPLY_DETAIL'),
+    ]);
+
+    expect(transcript).toContain(question);
+    expect(transcript).toContain('LATEST_REPLY_DETAIL');
+    expect(transcript).toHaveLength(1000);
   });
 
   it('finds a complete marker after an unterminated marker', async () => {
@@ -994,8 +1032,16 @@ You MUST always respond in **English** regardless of the user's input language.`
     ['a fixed language', FIXED_FILE],
     ['a hand-written rule without the marker', '请始终用中文回答。'],
   ])('keeps the plain title rules for %s', async (_label, outputLanguage) => {
-    const { systemInstruction: instruction, schema } =
-      await titleRequestFor(outputLanguage);
+    const answer =
+      'The dependency checker stopped. '.repeat(50) + 'Latest detail';
+    const {
+      systemInstruction: instruction,
+      schema,
+      transcript,
+    } = await titleRequestFor(outputLanguage, [
+      userText('请排查工作流失败的原因。'),
+      modelText(answer),
+    ]);
     expect(instruction).toContain(PLAIN_RULES);
     expect(instruction).not.toContain(CONVERSATION_LANGUAGE_RULE);
     expect(instruction).not.toContain('Chinese, Japanese or Korean');
@@ -1003,6 +1049,7 @@ You MUST always respond in **English** regardless of the user's input language.`
     expect(schema.properties.title.description).toBe(
       'A concise sentence-case session title, 3-7 words, no trailing punctuation.',
     );
+    expect(transcript).toBe(answer.slice(-1000));
   });
 });
 

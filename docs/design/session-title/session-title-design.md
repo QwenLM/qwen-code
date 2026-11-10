@@ -201,8 +201,8 @@ toward implementation noise like "Called grep on auth module".
 `filterToDialog` keeps only `user` / `model` entries with non-empty text
 and no `thought` / `thoughtSignature` parts. `takeRecentDialog` slices to
 the last 20 messages and refuses to start on a dangling model/tool
-response. `flattenToTail` converts to "Role: text" lines and slices the
-last 1000 characters.
+response. `flattenToTail` converts messages to "Role: text" lines and caps
+the transcript at 1,000 UTF-16 code units.
 
 ### The 1000-character tail slice
 
@@ -210,14 +210,19 @@ A session that starts with `help me debug X` but pivots to refactoring Y
 should be titled about Y. Titling by the head locks in the opening
 framing; titling by the tail captures what the session became.
 
+When the title follows the conversation language and the tail cuts off the
+start of the latest user message, the transcript keeps a labeled sample of
+up to 200 code units from that message. It uses the filtered or projected
+user text. The rest of the budget carries the latest transcript details.
+Fixed and custom language preferences use the original tail.
+
 ### UTF-16 surrogate handling
 
-`.slice(-1000)` on a UTF-16 code-unit boundary can orphan a high or low
-surrogate if a CJK supplementary char or emoji gets cut. Some providers
-respond to the resulting invalid UTF-16 with a 400 — which, without
-handling, would burn an attempt for no reason. `flattenToTail` drops a
-leading orphaned low surrogate; `sanitizeTitle` scrubs any orphaned
-surrogate after the max-length trim on the output path too.
+Slicing on a UTF-16 code-unit boundary can orphan a surrogate when it cuts
+through a CJK supplementary character or emoji. Some providers reject the
+resulting invalid UTF-16. `flattenToTail` drops a trailing high surrogate
+from the user sample and a leading low surrogate from the tail.
+`sanitizeTitle` scrubs orphaned surrogates after truncating the output.
 
 ## Persistence
 

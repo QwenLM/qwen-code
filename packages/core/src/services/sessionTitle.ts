@@ -25,6 +25,7 @@ import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
 const debugLogger = createDebugLogger('SESSION_TITLE');
 
 const MAX_CONVERSATION_CHARS = 1000;
+const MAX_USER_LANGUAGE_SAMPLE_CHARS = 200;
 const RECENT_MESSAGE_WINDOW = 20;
 
 // The "Good examples" shown to the model in TITLE_SYSTEM_PROMPT, and the
@@ -196,18 +197,18 @@ export async function tryGenerateSessionTitle(
       return { ok: false, reason: 'empty_history' };
     }
 
-    const conversationText = flattenToTail(
-      recentHistory,
-      MAX_CONVERSATION_CHARS,
-    );
-    if (!conversationText.trim()) return { ok: false, reason: 'empty_history' };
-
     const preference = await readOutputLanguagePreference(
       config.getOutputLanguageFilePath?.(),
     );
     const isAuto =
       parseOutputLanguageMarker(preference ?? '')?.toLowerCase() === 'auto';
     const useConversationLanguage = preference === undefined || isAuto;
+    const conversationText = flattenToTail(
+      recentHistory,
+      useConversationLanguage,
+    );
+    if (!conversationText) return { ok: false, reason: 'empty_history' };
+
     const titlePrompt = useConversationLanguage
       ? TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE
       : TITLE_SYSTEM_PROMPT;
@@ -404,25 +405,43 @@ function takeRecentDialog(history: Content[], windowSize: number): Content[] {
 }
 
 /**
- * Flatten filtered dialog to labeled plain text, then tail-slice to the last
- * N characters. Tail (rather than head) captures what the session has become,
- * not just how it opened — e.g. a session that starts with "help me debug X"
- * but ends up refactoring Y should get a title about Y.
+ * Keep the recent tail for the title topic. When the title follows the user's
+ * language, reserve space for a user sample if the tail cuts off the start of
+ * their latest message.
  */
-function flattenToTail(history: Content[], maxChars: number): string {
-  const lines: string[] = [];
+function flattenToTail(
+  history: Content[],
+  preserveUserLanguage: boolean,
+): string {
+  let transcript = '';
+  let latestUser: { offset: number; text: string } | undefined;
   for (const msg of history) {
-    const role = msg.role === 'user' ? 'User' : 'Assistant';
+    const role = msg.role === 'user' ? 'User: ' : 'Assistant: ';
     const text = (msg.parts ?? [])
       .map((p) => p.text ?? '')
       .join('')
       .trim();
     if (!text) continue;
-    lines.push(`${role}: ${text}`);
+    if (transcript) transcript += '\n';
+    if (msg.role === 'user') {
+      latestUser = { offset: transcript.length + role.length, text };
+    }
+    transcript += `${role}${text}`;
   }
-  const joined = lines.join('\n');
-  if (joined.length <= maxChars) return joined;
-  let tail = joined.slice(-maxChars);
+
+  const overflow = transcript.length - MAX_CONVERSATION_CHARS;
+  if (overflow <= 0) return transcript;
+
+  const userSample =
+    preserveUserLanguage && latestUser && latestUser.offset < overflow
+      ? latestUser.text
+          .slice(0, MAX_USER_LANGUAGE_SAMPLE_CHARS)
+          .replace(/[\uD800-\uDBFF]$/, '')
+      : '';
+  const prefix = userSample
+    ? `User (language sample): ${userSample}\n\nRecent conversation excerpt:\n`
+    : '';
+  let tail = transcript.slice(overflow + prefix.length);
   // `.slice` on a UTF-16 code-unit boundary can strand a lone low-surrogate
   // at the start (if the slice cut through a CJK supplementary char or emoji).
   // JSON-serializing that to the LLM produces an invalid surrogate that some
@@ -435,5 +454,5 @@ function flattenToTail(history: Content[], maxChars: number): string {
       tail = tail.slice(1);
     }
   }
-  return tail;
+  return prefix + tail;
 }
