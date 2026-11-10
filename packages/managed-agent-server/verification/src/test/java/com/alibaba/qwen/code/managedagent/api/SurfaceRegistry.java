@@ -23,6 +23,57 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    PUBLIC_SIDE_QUERY_CREATE(Method.POST, "/v1/agents/sessions/{sessionId}/side-queries",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_OPERATOR, EnumSet.of(Capability.SIDE_QUERY_CREATE)),
+    WEBSHELL_SIDE_QUERY_CREATE(Method.POST, "/api/agent/web-shell/v1/session-side-queries/create",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_OPERATOR, EnumSet.of(Capability.SIDE_QUERY_CREATE)),
+    PUBLIC_SIDE_QUERY_LIST(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_LIST)),
+    WEBSHELL_SIDE_QUERY_LIST(Method.POST, "/api/agent/web-shell/v1/session-side-queries/list",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_LIST)),
+    PUBLIC_SIDE_QUERY_CONTEXT(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries/context",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CONTEXT)),
+    WEBSHELL_SIDE_QUERY_CONTEXT(Method.POST, "/api/agent/web-shell/v1/session-side-queries/context",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CONTEXT)),
+    PUBLIC_SIDE_QUERY_GET(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries/{queryId}",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_GET)),
+    WEBSHELL_SIDE_QUERY_GET(Method.POST, "/api/agent/web-shell/v1/session-side-queries/get",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_GET)),
+    PUBLIC_SIDE_QUERY_CANCEL(Method.POST, "/v1/agents/sessions/{sessionId}/side-queries/{queryId}/cancel",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CANCEL)),
+    WEBSHELL_SIDE_QUERY_CANCEL(Method.POST, "/api/agent/web-shell/v1/session-side-queries/cancel",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CANCEL)),
+    PUBLIC_SIDE_QUERY_STREAM(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries/{queryId}/events",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
+    WEBSHELL_SIDE_QUERY_STREAM(Method.POST, "/api/agent/web-shell/v1/session-side-queries/stream",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
+    INTERNAL_SIDE_QUERY_INPUT(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_TRANSACTIONS(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/transactions",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RESOURCES_READ(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/resources/read",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_MODEL_CONFIG(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/model-config",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RESOURCES_STAGE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/resources/stage",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_INPUT_READY(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input-ready",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RUNNING(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/running",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RESULT(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/result",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_HEARTBEAT(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/heartbeat",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
     PUBLIC_MEMORY_STORE_CREATE(Method.POST, "/v1/agents/memory-stores",
             Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_CREATE)),
     PUBLIC_MEMORY_STORE_LIST(Method.GET, "/v1/agents/memory-stores",
@@ -765,6 +816,8 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        SIDE_QUERY_CREATE, SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT, SIDE_QUERY_GET, SIDE_QUERY_CANCEL, SIDE_QUERY_STREAM,
+        STORE_SIDE_QUERY,
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
         SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
@@ -884,6 +937,12 @@ public enum SurfaceRegistry {
      * acceptance suite walks these classes to build its probe matrix.
      */
     public enum RuleClass {
+        /** Current execution authority; busy Turns and Runtime placement do not apply. */
+        SIDE_QUERY_OPERATOR,
+        /** Current Session visibility and exact actor-private query ownership. */
+        SIDE_QUERY_ACTOR,
+        /** Query-scoped claim, boot and generation; never a Session writer grant. */
+        INTERNAL_SIDE_QUERY,
         /** Authenticated tenant actor, restricted to that actor's personal Store. */
         PERSONAL_MEMORY,
         SESSION_WORKTREE,

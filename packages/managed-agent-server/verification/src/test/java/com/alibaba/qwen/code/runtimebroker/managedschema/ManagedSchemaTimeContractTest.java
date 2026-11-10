@@ -36,6 +36,7 @@ class ManagedSchemaTimeContractTest {
             "ma_resource_ref=gmt_create",
             "ma_output_capture=expires_at,collected_at,gmt_create,gmt_modified",
             "ma_request_receipt=gmt_create,gmt_modified",
+            "ma_side_query=read_deadline_at,deadline_at,gmt_create,gmt_modified",
             "ma_operation=claim_until,available_at,deadline,recovery_deadline,"
                     + "verification_next_at,gmt_create,gmt_modified,completed_at",
             "ma_operation_work=gmt_create,gmt_modified",
@@ -58,7 +59,7 @@ class ManagedSchemaTimeContractTest {
     }
 
     @Test
-    void all75PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
+    void allPersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
         Map<String, String> declarations = declarations();
         List<Executable> checks = new ArrayList<>();
         int count = 0;
@@ -75,7 +76,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(75, count);
+        assertEquals(79, count);
         assertAll(checks);
     }
 

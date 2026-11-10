@@ -95,6 +95,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -153,7 +155,19 @@ class ManagedAgentApiContractTest {
     private static final String RESYNC = "agent.session.resync_required";
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
-            Map.ofEntries(
+            Map.<Class<?>, List<String>>ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.PublicCreate.class, List.of("SideQueryCreateRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.PublicPrefix.class, List.of("SideQueryPrefix")),
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.PublicQuery.class, List.of("SideQuery")),
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.PublicContext.class, List.of("SideQueryContext")),
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.PublicPage.class, List.of("SideQueryPage")),
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.WebShellCreate.class, List.of("WebShellSideQueryCreateRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.WebShellQuery.class, List.of("WebShellSideQueryGetRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.model.SideQueryApiModels.WebShellList.class, List.of("WebShellSideQueryListRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.Prefix.class, List.of("WebShellSideQueryPrefix")),
+                    entry(com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.Query.class, List.of("WebShellSideQuery")),
+                    entry(com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.Context.class, List.of("WebShellSideQueryContext")),
+                    entry(com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.Page.class, List.of("WebShellSideQueryPage")),
                     entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.Store.class,
                             List.of("MemoryStore")),
                     entry(com.alibaba.qwen.code.managedagent.contracts.memory.MemoryModels.StoreList.class,
@@ -1739,12 +1753,47 @@ class ManagedAgentApiContractTest {
                 post("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), "{}");
         exchange(drift, "listPersonalMemoryStores", 503,
                 get("/v1/agents/memory-stores").header(TENANT, tenant).principal(actor(tenant)), null);
+        String sideSession = "11111111-1111-4111-8111-111111111111";
+        String sideQuery = "22222222-2222-4222-8222-222222222222";
+        String sideBase = "/v1/agents/sessions/" + sideSession + "/side-queries";
+        exchange(drift, "createSessionSideQuery", 404,
+                post(sideBase).header(TENANT, tenant).principal(actor(tenant)).header(IDEMPOTENCY_KEY, "side-probe"),
+                "{\"kind\":\"btw\",\"question\":\"probe\"}");
+        exchange(drift, "listSessionSideQueries", 404, get(sideBase).header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "getSessionSideQueryContext", 404, get(sideBase + "/context").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "getSessionSideQuery", 404, get(sideBase + "/" + sideQuery).header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "cancelSessionSideQuery", 404, post(sideBase + "/" + sideQuery + "/cancel").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "streamSessionSideQuery", 404, get(sideBase + "/" + sideQuery + "/events").header(TENANT, tenant).principal(actor(tenant)), null);
+        for (String sideAction : List.of("create", "list", "context", "get", "cancel", "stream")) {
+            String sideBody = sideAction.equals("create")
+                    ? "{\"sessionId\":\"" + sideSession + "\",\"kind\":\"btw\",\"question\":\"probe\",\"idempotencyKey\":\"side-probe\"}"
+                    : sideAction.equals("list") || sideAction.equals("context")
+                            ? "{\"sessionId\":\"" + sideSession + "\"}"
+                            : "{\"sessionId\":\"" + sideSession + "\",\"queryId\":\"" + sideQuery + "\"}";
+            exchange(drift, sideAction + "WebShellSessionSideQuery", 404,
+                    post(WEB_SHELL + "/session-side-queries/" + sideAction).header(TENANT, tenant).principal(actor(tenant)), sideBody);
+        }
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    @Test
+    void activityMeasurementsExtendEveryClosedDetailSchemaWithoutExposingPrivateEvidence() throws Exception {
+        JsonNode fixture = json(Files.readString(Path.of("..", "..", "core", "src", "managed-runtime", "contracts", "managed-tool-measurements-v1.fixtures.json")));
+        ObjectNode call = objectMapper.createObjectNode().put("id", "call").put("name", "edit");
+        ObjectNode fact = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.request("tenant", "session", "message", 0, call, 1, 1000);
+        fact.set("measurements", com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.publicMeasurements(fixture.path("evidence"), 2));
+        assertThat(CONTRACT.validate("/components/schemas/ManagedActivityInvocation", fact)).isEmpty();
+        fact.put("_measurementEvidenceDigest", "a".repeat(64));
+        assertThat(CONTRACT.validate("/components/schemas/ManagedActivityInvocation", fact)).isNotEmpty();
+        for (String schema : List.of("ManagedActivityFilesPage", "ManagedActivitySkillsPage")) {
+            assertThat(CONTRACT.node("/components/schemas/" + schema + "/properties/items/items/properties/measurements/$ref").asText())
+                    .isEqualTo("#/components/schemas/ManagedActivityMeasurement");
+        }
     }
 
     private void exchangeDiagnostics(Map<String, String> drift, String tenant, String otherTenant,
@@ -3016,7 +3065,7 @@ class ManagedAgentApiContractTest {
             JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
-                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false}
+                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false,"btw":false,"recap":false}
                     """);
             assertThat(session.get("capabilities")).isEqualTo(capabilities);
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
@@ -3034,7 +3083,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }

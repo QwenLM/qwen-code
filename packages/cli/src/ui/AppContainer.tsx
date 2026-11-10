@@ -271,6 +271,7 @@ import { useAttentionNotifications } from './hooks/useAttentionNotifications.js'
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { shouldShowBtwTip } from './utils/btw-tip.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
@@ -2339,6 +2340,10 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
+    isCommandCancellationBlocked,
+    isCommandCommitting,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -2352,7 +2357,6 @@ export const AppContainer = (props: AppContainerProps) => {
     loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
-    isProcessing,
     setIsProcessing,
     isIdleRef,
     setMemoryFileCount,
@@ -2664,6 +2668,7 @@ export const AppContainer = (props: AppContainerProps) => {
     midTurnRestoreRef,
     goalQueueRef,
     returnPrompt,
+    isCommandCancellationBlocked,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -4851,6 +4856,16 @@ export const AppContainer = (props: AppContainerProps) => {
     hasExecutingTool,
   );
 
+  const loadingPhrase = shouldShowBtwTip({
+    tipHistory,
+    elapsedTime,
+    streamingState,
+  })
+    ? t(
+        'Tip: Use /btw to ask a quick side question without interrupting the current work',
+      )
+    : currentLoadingPhrase;
+
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -4986,15 +5001,29 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // 3. Cancel in-flight btw side-question
-      if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+      if (
+        btwItem &&
+        (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+        !dialogsVisibleRef.current
+      ) {
         cancelBtw();
         return; // Btw cancelled, end processing
       }
 
       // 4. Cancel ongoing requests
-      if (streamingState === StreamingState.Responding) {
+      if (
+        streamingState === StreamingState.Responding &&
+        !isCommandCancellationBlocked()
+      ) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
+      }
+      if (
+        streamingState === StreamingState.Idle &&
+        submissionInFlightRef.current &&
+        cancelOngoingRequest?.()
+      ) {
+        return;
       }
 
       // 5. Clear input buffer (if has content)
@@ -5017,6 +5046,7 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       streamingState,
       cancelOngoingRequest,
+      isCommandCancellationBlocked,
       buffer,
       activeWorktree,
     ],
@@ -5033,6 +5063,23 @@ export const AppContainer = (props: AppContainerProps) => {
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
+        return;
+      }
+
+      if (
+        isCommandCommitting() &&
+        (keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
+          keyMatchers[Command.ESCAPE](key))
+      ) {
+        return;
+      }
+
+      if (
+        (shellConfirmationRequest || confirmationRequest) &&
+        (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key) ||
+          keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key))
+      ) {
         return;
       }
 
@@ -5055,7 +5102,11 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       } else if (keyMatchers[Command.EXIT](key)) {
         // Cancel in-flight btw even when buffer has text (Ctrl+D)
-        if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+        if (
+          btwItem &&
+          (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+          !dialogsVisibleRef.current
+        ) {
           cancelBtw();
           return;
         }
@@ -5084,8 +5135,7 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Skip if shell is focused (to allow shell's own escape handling)
-        if (embeddedShellFocused) {
+        if (embeddedShellFocused || dialogsVisibleRef.current) {
           return;
         }
 
@@ -5105,28 +5155,24 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Input is empty, cancel request immediately (no double-press needed)
-        // Skip when a dialog (background tasks, etc.) is open — ESC should
-        // close the dialog, not cancel the running request.
-        if (
-          streamingState === StreamingState.Responding &&
-          !dialogsVisibleRef.current
-        ) {
+        const isResponding = streamingState === StreamingState.Responding;
+        const requestCancelled =
+          (isResponding ||
+            (streamingState === StreamingState.Idle &&
+              submissionInFlightRef.current)) &&
+          cancelOngoingRequest?.();
+        const commandCancelled = cancelSlashCommand();
+        if (isResponding || requestCancelled || commandCancelled) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
           }
-          cancelOngoingRequest?.();
           setEscapePressedOnce(false);
           return;
         }
 
         // Input is empty and idle — double-ESC opens rewind selector
-        if (
-          streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current &&
-          !config.getIdeMode()
-        ) {
+        if (streamingState === StreamingState.Idle && !config.getIdeMode()) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
@@ -5143,21 +5189,6 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         setEscapePressedOnce(false);
         return;
-      }
-
-      // Dismiss completed btw side-question on Space or Enter,
-      // but only when btw is visible and the input buffer is empty.
-      if (
-        btwItem &&
-        !btwItem.btw.isPending &&
-        !dialogsVisibleRef.current &&
-        !contextMenuOpenRef.current &&
-        buffer.text.length === 0
-      ) {
-        if (key.name === 'return' || key.sequence === ' ') {
-          setBtwItem(null);
-          return;
-        }
       }
 
       // Note: Ctrl+C/D btw cancellation is handled inside handleExit
@@ -5265,6 +5296,9 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       ideContextState,
       handleExit,
+      isCommandCommitting,
+      shellConfirmationRequest,
+      confirmationRequest,
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
@@ -5276,12 +5310,12 @@ export const AppContainer = (props: AppContainerProps) => {
       escapeTimerRef,
       streamingState,
       cancelOngoingRequest,
+      cancelSlashCommand,
       buffer,
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
       btwItem,
-      setBtwItem,
       cancelBtw,
       // `settings` is a stable LoadedSettings instance (not recreated on render).
       // ESLint requires it here because the callback calls settings.setValue().
@@ -5416,6 +5450,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5445,7 +5480,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      currentLoadingPhrase: loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
@@ -5568,6 +5603,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5597,7 +5633,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
