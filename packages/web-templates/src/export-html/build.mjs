@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_054_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_067_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -90,7 +90,11 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_054_000;
 // and its transitive inputs. The AG Grid graph the adapter now imports is
 // dead in document mode and stubbed out below, so it contributes no bytes
 // here.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_060_000;
+// After merging that upgrade, main a34557ec26 measures 2,066,342 bytes in
+// both Linux CI and a clean local build. The branch measurement above did
+// not cover the merged transcript and its shared locale table. Keep 8,658
+// bytes of headroom while retaining the forbidden dependency checks below.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_075_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
