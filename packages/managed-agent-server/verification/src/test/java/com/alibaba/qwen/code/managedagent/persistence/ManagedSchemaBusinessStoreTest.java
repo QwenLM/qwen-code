@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepo
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -53,14 +55,14 @@ public class ManagedSchemaBusinessStoreTest {
 
     @Test
     void definitionAndAutomationReceiptsHaveSeparateNamespacesAndExactReplay() {
-        ManagedAgentDefinitionStore definitions = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
+        JdbcManagedAgentDefinitionStore definitions = new JdbcManagedAgentDefinitionStore(jdbc, new RequestDigests());
         var admitted = definitions.create(tenant, "same-key", "request-1", "agent", "digest", "{}", 1);
         assertThat(definitions.create(tenant, "same-key", "request-1", "ignored", "other", "{}", 2).replayed()).isTrue();
         assertThat(admitted.revision().agentId()).isEqualTo("agent");
         assertThatThrownBy(() -> definitions.create(tenant, "same-key", "request-2", "ignored", "other", "{}", 2))
                 .hasMessageContaining("different request");
-        AutomationLedgerStore automation = new AutomationLedgerStore(jdbc);
-        var command = new AutomationLedgerStore.CommandRow(tenant, "same-key", "actor", "request-3", "schedule", "{}");
+        JdbcAutomationLedgerStore automation = new JdbcAutomationLedgerStore(jdbc);
+        var command = new JdbcAutomationLedgerStore.CommandRow(tenant, "same-key", "actor", "request-3", "schedule", "{}");
         assertThat(automation.claimCommand(session, command, 3)).isTrue();
         assertThat(automation.claimCommand(session, command, 4)).isFalse();
         assertThat(automation.settleCommand(tenant, "same-key", "request-3", "actor", "{\"accepted\":true}")).isTrue();
@@ -74,7 +76,7 @@ public class ManagedSchemaBusinessStoreTest {
         var references = new java.util.HashMap<String, JsonNode>();
         for (String ownerSession : List.of(session, session + " ")) {
             byte[] bytes = ownerSession.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, ownerSession);
+            String scope = ManagedSessionStore.sessionScopeKey(tenant, ownerSession);
             references.put(ownerSession, new ObjectMapper().createObjectNode()
                     .put("resourceId", resourceId).put("kind", "automation-definition")
                     .put("schemaVersion", 1).put("byteLength", bytes.length)
@@ -84,7 +86,7 @@ public class ManagedSchemaBusinessStoreTest {
                     ManagedSchemaKeys.key(scope, resourceId), scope, tenant, ownerSession, resourceId,
                     bytes.length, ToolPublicationContract.sha256(bytes), bytes);
         }
-        ManagedExtensionRecordStore records = new ManagedExtensionRecordStore(jdbc);
+        JdbcManagedExtensionRecordStore records = new JdbcManagedExtensionRecordStore(jdbc);
         for (String ownerSession : references.keySet()) {
             assertThat(new String(records.readCommittedResource(tenant, ownerSession,
                     references.get(ownerSession)).bytes(), java.nio.charset.StandardCharsets.UTF_8))
@@ -121,22 +123,22 @@ public class ManagedSchemaBusinessStoreTest {
     void anotherTenantDeliveryCannotHideAnIdenticallyNamedPendingMessage() {
         String foreignTenant = tenant + "-foreign";
         for (String ownerTenant : List.of(tenant, foreignTenant)) {
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(ownerTenant, session);
+            String scope = ManagedSessionStore.sessionScopeKey(ownerTenant, session);
             jdbc.update(
                     "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, revision, record_resource_id, delivery_target, delivery_state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'session_message', 'message', 1, 'body', 'session', 'planned', 0)",
                     scope, ManagedExtensionProjection.recordKey(session, "session_message", "message"), ownerTenant, session);
         }
-        SessionMessageRelayStore relay = new SessionMessageRelayStore(jdbc);
+        JdbcSessionMessageRelayStore relay = new JdbcSessionMessageRelayStore(jdbc);
         var foreignClaim = relay.claim(foreignTenant, session, "message", "worker", 1000, 1);
         relay.classify(foreignClaim, "worker", "done", null, 2);
         assertThat(relay.findPendingMessages("worker", 3, 10)).singleElement()
-                .extracting(SessionMessageRelayStore.PendingMessage::tenantId).isEqualTo(tenant);
+                .extracting(JdbcSessionMessageRelayStore.PendingMessage::tenantId).isEqualTo(tenant);
         assertThat(relay.currentRecord(tenant, session, "session_message", "message").deliveryState()).isEqualTo("planned");
     }
 
     @Test
     void messageDeliverySettlementRequiresTheCurrentClaimGeneration() {
-        SessionMessageRelayStore relay = new SessionMessageRelayStore(jdbc);
+        JdbcSessionMessageRelayStore relay = new JdbcSessionMessageRelayStore(jdbc);
         var old = relay.claim(tenant, session, "message", "same-owner", 1000, 1);
         var current = relay.claim(tenant, session, "message", "same-owner", 2000, 2);
         assertThat(current.claimGeneration()).isGreaterThan(old.claimGeneration());
@@ -153,7 +155,7 @@ public class ManagedSchemaBusinessStoreTest {
     @Test
     void childResultReadsTheImmutableBodyOfALargeLatestMessage() throws Exception {
         new TransactionTemplate(manager).executeWithoutResult(status -> ToolPublicationRetentionStore.lockSession(jdbc, tenant, session));
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String text = "large-child-result-".repeat(4096);
         var json = new ObjectMapper();
         var parts = json.createArrayNode();
@@ -168,7 +170,7 @@ public class ManagedSchemaBusinessStoreTest {
         jdbc.update(
                 "INSERT INTO ma_message (tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, parts_json, body_resource_key) VALUES (?, ?, 'item', 'turn', 'message', 'assistant', 'completed', '{}', 1, 1, 0, 0, '[]', ?)",
                 tenant, session, resource);
-        ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
+        JdbcChildResultRelayStore relay = new JdbcChildResultRelayStore(jdbc);
         assertThat(relay.terminalResultText(tenant, session, "turn")).isEqualTo(text);
         jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_key = ?", "f".repeat(64), resource);
         assertThatThrownBy(() -> relay.terminalResultText(tenant, session, "turn")).hasMessageContaining("unavailable or corrupt");
@@ -176,14 +178,14 @@ public class ManagedSchemaBusinessStoreTest {
 
     @Test
     void childCloseDebtSurvivesResultDeliveryCompletionInItsOwnOperation() {
-        ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
+        JdbcChildResultRelayStore relay = new JdbcChildResultRelayStore(jdbc);
         var start = relay.claim(tenant, session, "run", "creation", "worker", 1000, 1);
         relay.advance(start, "worker", "close_debt", "child", 10, "close unavailable", 1000, 2);
         var debt = relay.find(tenant, session, "run");
         assertThat(debt.operationKind()).isEqualTo("CHILD_SESSION_CLOSE");
         assertThat(debt.state()).isEqualTo("close_debt");
         assertThat(relay.findPendingChildren("worker", 11, 10)).singleElement()
-                .extracting(ChildResultRelayStore.PendingChild::childRunId).isEqualTo("run");
+                .extracting(JdbcChildResultRelayStore.PendingChild::childRunId).isEqualTo("run");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ?",
                 Long.class, tenant)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT transport_state FROM ma_delivery WHERE tenant_id = ?",
@@ -270,7 +272,7 @@ public class ManagedSchemaBusinessStoreTest {
         var collector = new SessionResourceCollectionCollector(jdbc, manager, properties,
                 () -> Duration.ofMinutes(2).toNanos());
         var retention = new ToolPublicationRetentionStore(jdbc, manager);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         byte[] bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         String resource = ManagedSchemaKeys.key(scope, "resource");
         jdbc.update(
@@ -310,7 +312,7 @@ public class ManagedSchemaBusinessStoreTest {
         var collector = new SessionResourceCollectionCollector(jdbc, manager, properties,
                 () -> Duration.ofMinutes(2).toNanos());
         new TransactionTemplate(manager).executeWithoutResult(status -> ToolPublicationRetentionStore.lockSession(jdbc, tenant, session));
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         byte[] bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         String digest = ToolPublicationContract.sha256(bytes);
         String resource = ManagedSchemaKeys.key(scope, "projection-body");
@@ -349,7 +351,7 @@ public class ManagedSchemaBusinessStoreTest {
 
     @Test
     void scheduleReadsPreserveBoundedAndAbsentCatchUpLimits() {
-        AutomationLedgerStore automation = new AutomationLedgerStore(jdbc);
+        JdbcAutomationLedgerStore automation = new JdbcAutomationLedgerStore(jdbc);
         for (String policy : List.of("bounded", "none")) {
             Long limit = policy.equals("bounded") ? 7L : null;
             jdbc.update(
@@ -368,7 +370,9 @@ public class ManagedSchemaBusinessStoreTest {
 
     @Test
     void schedulePagesUseCurrentRootPermissionsThroughoutTheChildWorkspaceChain() {
-        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "operator");
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                + " VALUES (?,?,'qwen-code',1,1)", tenant, session);
+        byte[] actor = ManagedWorkspaceRegistry.actorKey(tenant, "operator");
         String parent = null;
         for (String workspace : List.of("root", "child", "grandchild", "foreign")) {
             boolean child = workspace.equals("child") || workspace.equals("grandchild");
@@ -388,12 +392,12 @@ public class ManagedSchemaBusinessStoreTest {
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
                         + " (?, 'root', ?, 'READER')",
                 tenant, actor);
-        AutomationLedgerStore automation = new AutomationLedgerStore(jdbc);
+        JdbcAutomationLedgerStore automation = new JdbcAutomationLedgerStore(jdbc);
         var first = automation.listReadableSchedules(tenant, "operator", null, 2);
         assertThat(first.hasMore()).isTrue();
-        assertThat(first.rows()).extracting(AutomationLedgerStore.ScheduleRow::workspaceId).containsExactly("grandchild", "child");
-        var second = automation.listReadableSchedules(tenant, "operator", new AutomationLedgerStore.ScheduleCursor(2, "schedule-child"), 2);
-        assertThat(second.rows()).extracting(AutomationLedgerStore.ScheduleRow::workspaceId).containsExactly("root");
+        assertThat(first.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::workspaceId).containsExactly("grandchild", "child");
+        var second = automation.listReadableSchedules(tenant, "operator", new JdbcAutomationLedgerStore.ScheduleCursor(2, "schedule-child"), 2);
+        assertThat(second.rows()).extracting(JdbcAutomationLedgerStore.ScheduleRow::workspaceId).containsExactly("root");
         assertThat(automation.listReadableSchedules(tenant, "Operator", null, 2).rows()).isEmpty();
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", tenant, "root");
         assertThat(automation.listReadableSchedules(tenant, "operator", null, 2).rows()).isEmpty();

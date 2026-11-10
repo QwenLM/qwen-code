@@ -11,13 +11,15 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
@@ -85,12 +87,12 @@ class ToolPublicationStoreTest {
     private PublicationJournalFixture journal;
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
-    private ManagedSessionStore sessions;
-    private ManagedToolResultStore publicResults;
+    private JdbcManagedSessionStore sessions;
+    private JdbcManagedToolResultStore publicResults;
     private ManagedAgentStore publicSessions;
     private ManagedAgentProperties projectionProperties;
-    private ManagedWorkspaceRegistry publicWorkspaces;
-    private ManagedArtifactReader apiReader;
+    private JdbcManagedWorkspaceRegistry publicWorkspaces;
+    private ToolPublicationArtifactReader apiReader;
     private Map<String, byte[]> apiObjects;
     private String apiFailNextObject;
     private ToolPublicationDataStore apiPublications;
@@ -135,10 +137,10 @@ class ToolPublicationStoreTest {
         manager = new DataSourceTransactionManager(source);
         projectionProperties = new ManagedAgentProperties();
         projectionProperties.getArtifacts().setEnabled(true);
-        publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
+        publicWorkspaces = org.mockito.Mockito.mock(JdbcManagedWorkspaceRegistry.class);
         publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
                 publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
+        publicResults = new JdbcManagedToolResultStore(jdbc, manager, publicSessions);
         journal = diagnostics ? PublicationJournalFixture.createWithExecutionDiagnostics(source, objects, publicResults)
                 : PublicationJournalFixture.create(source, csiRegistration, objects, publicResults);
         jdbc = journal.jdbc;
@@ -166,7 +168,7 @@ class ToolPublicationStoreTest {
         // tenant guard (design 2026-11-04-managed-publication-placement).
         try (var pool = Executors.newSingleThreadExecutor()) {
             new TransactionTemplate(manager).executeWithoutResult(status -> {
-                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
+                JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
                 String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
                 jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
                         + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
@@ -988,7 +990,7 @@ class ToolPublicationStoreTest {
             // 2026-11-04-managed-publication-tenant-guards and -placement).
             assertThat(lockOrder).isEmpty();
         }
-        var diagnostics = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc);
+        var diagnostics = new JdbcManagedExtensionRecordStore(jdbc);
         JsonNode statistics = diagnostics.findActivityStatistics("tenant-1", "session-1").deepCopy();
         assertThat(statistics.path("tools").path("requested").asLong()).isEqualTo(1);
         assertThat(statistics.path("coverageReasons")).contains(JSON.getNodeFactory().textNode("receipt_outcome_not_inline"));
@@ -1294,7 +1296,7 @@ class ToolPublicationStoreTest {
                 assertThat(projected.has("preview")).isFalse();
                 assertThat(projected.path("artifacts")).isEmpty();
                 apiPublications = data;
-                apiReader = new ManagedArtifactReader(publicationProvider(data));
+                apiReader = new ToolPublicationArtifactReader(publicationProvider(data));
                 return;
             }
             assertThat(projected.path("preview").path("text").asText()).isEqualTo("abc");
@@ -1308,7 +1310,7 @@ class ToolPublicationStoreTest {
             assertThat(remaining.hasMore()).isFalse();
             assertThat(publicResults.findArtifact("other-tenant", "session-1", last.descriptor().path("id").asText())).isEmpty();
             var provider = publicationProvider(data);
-            var publicReader = new ManagedArtifactReader(provider);
+            var publicReader = new ToolPublicationArtifactReader(provider);
             var stdout = publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts()
                     .stream().filter(artifact -> artifact.streamId().equals("stdout")).findFirst().orElseThrow();
             jdbc.update("UPDATE ma_session_head SET writer_lease_until = ?",
@@ -1408,7 +1410,7 @@ class ToolPublicationStoreTest {
         }
     }
 
-    private ManagedToolResultStore.Artifact preparePublicReader() {
+    private JdbcManagedToolResultStore.Artifact preparePublicReader() {
         keepApiFixture = true;
         publishesImmutableSegmentAndResourceUnderOriginalAuthorization("intact");
         return publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts().stream()
@@ -2736,9 +2738,9 @@ class ToolPublicationStoreTest {
                 sessionKey, v);
     }
 
-    record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,
-            ManagedAgentStore sessions, ManagedArtifactReader reader, ManagedAgentProperties properties,
-            ManagedArtifactPolicy policy, ManagedWorkspaceRegistry workspaces,
+    record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, JdbcManagedToolResultStore results,
+            ManagedAgentStore sessions, ToolPublicationArtifactReader reader, ManagedAgentProperties properties,
+            ManagedArtifactPolicy policy, JdbcManagedWorkspaceRegistry workspaces,
             ToolPublicationDataStore publications) {}
 
     static ApiFixture largeApiFixture(int total) throws Exception {
@@ -3045,7 +3047,7 @@ class ToolPublicationStoreTest {
                         results,
                         jdbc,
                         provider,
-                        new ManagedArtifactReader(provider),
+                        new ToolPublicationArtifactReader(provider),
                         policy,
                         properties)
                 .project(results.claim().orElseThrow());
@@ -3054,7 +3056,7 @@ class ToolPublicationStoreTest {
                 manager,
                 results,
                 fixture.publicSessions,
-                new ManagedArtifactReader(provider),
+                new ToolPublicationArtifactReader(provider),
                 properties,
                 policy,
                 fixture.publicWorkspaces,
@@ -3126,7 +3128,7 @@ class ToolPublicationStoreTest {
         var artifacts = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.ARTIFACT.columns() + " FROM ma_artifact");
         var events = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event");
         var projection =
-                new ManagedToolResultStore.Projection(
+                new JdbcManagedToolResultStore.Projection(
                         JSON.createObjectNode(),
                         "pub-1",
                         JSON.createObjectNode(),
@@ -3160,8 +3162,8 @@ class ToolPublicationStoreTest {
         var claim = fixture.results().claim().orElseThrow();
         var source = claim.source();
         var foreign =
-                new ManagedToolResultStore.Claim(
-                        new ManagedToolResultStore.Source(
+                new JdbcManagedToolResultStore.Claim(
+                        new JdbcManagedToolResultStore.Source(
                                 source.id(),
                                 "foreign",
                                 source.workspaceId(),
@@ -3184,7 +3186,7 @@ class ToolPublicationStoreTest {
         var artifacts = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.ARTIFACT.columns() + " FROM ma_artifact");
         var events = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event");
         var projection =
-                new ManagedToolResultStore.Projection(
+                new JdbcManagedToolResultStore.Projection(
                         JSON.createObjectNode(),
                         "pub-1",
                         JSON.createObjectNode(),
@@ -3261,7 +3263,7 @@ class ToolPublicationStoreTest {
                                 + " retirement_generation = 1, retired_at = 1, is_recovery_protected ="
                                 + " FALSE WHERE tenant_id = X'74656e616e742d31' AND session_id ="
                                 + " X'73657373696f6e2d31'");
-        var projection = new ManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
+        var projection = new JdbcManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
                 artifact.binding(), artifact.manifestRef(), List.of(artifact), fixture.policy().version());
         assertThat(fixture.results().complete(claim, projection, fixture.policy().version())).isFalse();
         assertThat(fixture.jdbc().queryForMap(
@@ -3298,7 +3300,7 @@ class ToolPublicationStoreTest {
                         "UPDATE ma_operation SET state='PENDING', available_at=0 WHERE"
                                 + " operation_kind = 'TOOL_RESULT_PROJECTION'");
         new ManagedToolResultProjector(fixture.results(), fixture.jdbc(), provider,
-                new ManagedArtifactReader(provider), fixture.policy(), fixture.properties())
+                new ToolPublicationArtifactReader(provider), fixture.policy(), fixture.properties())
                 .project(fixture.results().claim().orElseThrow());
         assertThat(fixture.jdbc().queryForObject(
                                         "SELECT state FROM ma_operation WHERE operation_kind ="
@@ -3393,7 +3395,7 @@ class ToolPublicationStoreTest {
         var policy = org.mockito.Mockito.spy(publicationPolicy());
         org.mockito.Mockito.doReturn("policy-before", "policy-after").when(policy).version();
         var provider = publicationProvider(null);
-        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider), policy,
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider), policy,
                 projectionProperties).project(publicResults.claim().orElseThrow());
         assertThat(jdbc.queryForMap(
                                 "SELECT state, failure_code FROM ma_operation WHERE operation_kind"
@@ -3409,7 +3411,7 @@ class ToolPublicationStoreTest {
         insertPublicSession();
         jdbc.update("DELETE FROM ma_output_capture");
         var provider = publicationProvider(null);
-        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider),
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider),
                 publicationPolicy(), projectionProperties).project(publicResults.claim().orElseThrow());
         assertThat(jdbc.queryForMap(
                                 "SELECT state, failure_code FROM ma_operation WHERE operation_kind"
@@ -3463,7 +3465,7 @@ class ToolPublicationStoreTest {
         insertPublicSession();
         jdbc.update("UPDATE ma_session SET status = 'DELETING'");
         var provider = publicationProvider(null);
-        var reader = org.mockito.Mockito.mock(ManagedArtifactReader.class);
+        var reader = org.mockito.Mockito.mock(ToolPublicationArtifactReader.class);
         var policy = org.mockito.Mockito.mock(ManagedArtifactPolicy.class);
         new ManagedToolResultProjector(publicResults, jdbc, provider, reader, policy,
                 projectionProperties).project(publicResults.claim().orElseThrow());
@@ -3489,7 +3491,7 @@ class ToolPublicationStoreTest {
             public boolean readOriginal(String tenant, String actor, String workspace, String session) { return true; }
         };
         var provider = publicationProvider(null);
-        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider), policy,
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider), policy,
                 projectionProperties).project(publicResults.claim().orElseThrow());
         assertThat(jdbc.queryForObject(
                                 "SELECT state FROM ma_operation WHERE operation_kind ="
@@ -3529,7 +3531,7 @@ class ToolPublicationStoreTest {
                         publicResults,
                         jdbc,
                         provider,
-                        new ManagedArtifactReader(provider),
+                        new ToolPublicationArtifactReader(provider),
                         publicationPolicy(),
                         projectionProperties)
                 .project(claim);
@@ -3556,7 +3558,7 @@ class ToolPublicationStoreTest {
                         publicResults,
                         jdbc,
                         provider,
-                        new ManagedArtifactReader(provider),
+                        new ToolPublicationArtifactReader(provider),
                         publicationPolicy(),
                         projectionProperties)
                 .project(publicResults.claim().orElseThrow());
@@ -3573,7 +3575,7 @@ class ToolPublicationStoreTest {
         insertPublicSession();
         var provider = publicationProvider(null);
         var projector = new ManagedToolResultProjector(publicResults, jdbc, provider,
-                new ManagedArtifactReader(provider), publicationPolicy(), projectionProperties);
+                new ToolPublicationArtifactReader(provider), publicationPolicy(), projectionProperties);
         projectionProperties.getArtifacts().setEnabled(false);
         projector.tick();
         assertThat(jdbc.queryForObject(
@@ -3611,7 +3613,7 @@ class ToolPublicationStoreTest {
     private JsonNode projectPublicReceipt(ToolPublicationDataStore data) {
         insertPublicSession();
         var provider = publicationProvider(data);
-        var projector = new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider),
+        var projector = new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider),
                 publicationPolicy(), projectionProperties);
         var crashedClaim = publicResults.claim().orElseThrow();
         jdbc.update("UPDATE ma_operation SET claim_until = 1000 WHERE operation_id = ?", crashedClaim.source().id());

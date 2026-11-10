@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentReclamation;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.ResidentWorkspace;
 import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -185,7 +186,7 @@ public final class ResidentWorkspaceRetirementStore implements com.alibaba.qwen.
         require(rows.size() == 1 && List.of("ACTIVE", "DRAINING").contains(rows.getFirst()));
         require(jdbc.queryForList("SELECT role FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?"
                 + " AND actor_id = ?" + (lock ? " FOR UPDATE" : ""), String.class, request.tenantId(), request.workspaceId(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(request.tenantId(), request.actorId())).equals(List.of("OWNER")));
+                ManagedWorkspaceRegistry.actorKey(request.tenantId(), request.actorId())).equals(List.of("OWNER")));
         return selected;
     }
 
