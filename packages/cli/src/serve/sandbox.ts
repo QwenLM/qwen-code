@@ -161,7 +161,10 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
 }
 
 function isTruthyEnvFlag(value: string | undefined): boolean {
-  return value === 'true' || value === '1';
+  // Normalize the same way as `SANDBOX_SET_UID_GID` above, so one function
+  // does not answer "is this flag on" two different ways.
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'true' || normalized === '1';
 }
 
 /**

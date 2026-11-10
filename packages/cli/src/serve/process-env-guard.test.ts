@@ -477,13 +477,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The sandbox launcher assembles the sandboxed child environment: ' +
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
-        'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move.',
+        'variables. Every debugger decision funnels through one ' +
+        '`isDebugEnabled()` read of DEBUG. It entered the scanned serve/ ' +
+        'layer via the #9146 leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
         'key:BUILD_SANDBOX': 2,
         'key:COLORTERM': 2,
-        'key:DEBUG': 5,
+        'key:DEBUG': 1,
         'key:DEBUG_MODE': 1,
         'key:DEBUG_PORT': 2,
         'key:GEMINI_API_KEY': 2,
