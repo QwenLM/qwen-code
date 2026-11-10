@@ -299,6 +299,17 @@ export interface ChannelBoundSessions {
     prompt: string,
     idempotencyKey?: string,
   ): Promise<void>;
+  /**
+   * The set of GitHub comment identifiers the session has itself posted,
+   * canonical as `ic:<id>` (conversation comment) or `rc:<id>` (inline review
+   * comment). The bound PR comment watch uses it to withhold a comment from
+   * the session that wrote it while delivering every other author's comment,
+   * including the same GitHub account used by a different session/agent.
+   * Fail-open: an unavailable lookup resolves to an empty set so delivery is
+   * never suppressed on missing evidence. Optional: absent in standalone
+   * mode, where no suppression is applied.
+   */
+  postedCommentIds?(sessionId: string): Promise<ReadonlySet<string>>;
 }
 
 export interface ObservedChannelIdentity {

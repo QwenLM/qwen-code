@@ -214,6 +214,14 @@ interface PreflightInboundOptions {
    * public replies. Every other group, sender and pairing check still runs.
    */
   waiveGroupMention?: boolean;
+  /**
+   * Admit a private bound delivery that only fails the sender gate. For the
+   * comment watch delivering the channel account's own comments: the sender
+   * allowlist guidance excludes that account, but the watch is operator opt-in
+   * and private. Group, DM, pairing and route checks still run; only the sender
+   * gate is waived. The public path never sets this.
+   */
+  waiveGroupSender?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -6489,6 +6497,13 @@ export abstract class ChannelBase {
       this.privatePolicy === 'pairing' &&
       !senderGate.isAllowed(envelope.senderId)
     ) {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
+    // Private comment-watch delivery of the channel account's own comments: the
+    // group/DM/route checks above already ran; only the sender gate is waived.
+    if (options.waiveGroupSender === true) {
       this.markPreflighted(envelope);
       return true;
     }

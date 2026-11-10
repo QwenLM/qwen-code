@@ -7,8 +7,9 @@
 ## 问题陈述
 
 GitHub channel 开启 `deliverToBoundSessions` 后，每个绑定了某 PR 的 daemon
-会话都会收到该 PR 的事件：通知评论、`prWatchEvents` 状态迁移，以及（配置了
-模板时的）role-aware 扇出。绑定由 backfill 自动铸造——任何跑过
+会话都会收到该 PR 的事件：通知评论、默认开启的评论监视（`prCommentWatch`，
+同账号评论）、`prWatchEvents` 状态迁移，以及（配置了模板时的）role-aware
+扇出。绑定由 backfill 自动铸造——任何跑过
 `/review <n>` 或 `/verify-pr <n>` 的会话都会被绑上，而这两个一次性命令的会话
 事后并不监视该 PR。它们持续收到自己从未要求的事件：验证会话跑完一轮后仍被
 之后的每条评论和 CI 迁移唤醒；legacy 模式（未配 `boundSessionActions`）下
@@ -69,8 +70,10 @@ GitHub channel 开启 `deliverToBoundSessions` 后，每个绑定了某 PR 的 d
 - PR 状态 watch 的轮询集合不变：不合格绑定仍被轮询（保留基线与终态观察），
   其事件在 drain 处经既有无候选路径退役。省掉它们的 `pulls.get` 是可能的
   后续优化，不属于本次改动。
-- 本分支没有 comment-watch（`prCommentWatch`）特性；设计针对此处现有的
-  通知/评论 lane 与 PR 状态 watch。
+- 评论监视（`prCommentWatch`，默认开启）经同一目标解析覆盖：其扇出消费
+  `resolveBoundTargets`，所有绑定目标都不合格（或评论由它们全部发出）的
+  评论走既有 `comment_watch_no_target` 日志行跳过并推进游标——私下退役，
+  绝不公开回复。
 - 检测是尽力而为且 fail-open（决策 D3）：它是噪音门，不是安全边界。
 
 ## 提议的改动
@@ -179,6 +182,12 @@ watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤）
 本就无候选即退役（`watch_no_target` / `watch_no_candidate`，role-aware drain
 退役）。
 
+评论监视（`watchPrComments`）也无需新代码：它经同一个已门控的
+`resolveBoundTargets` 解析目标，对原始跟随者集合（而非仅目标）查询已发评论
+归属（保证 Gone 回退的排除集完整），其可投递过滤本就把无剩余目标的评论经
+`comment_watch_no_target` 日志行跳过、再推进游标。门开启时，全不合格的跟随者
+集合落入同一跳过——私下退役、游标推进、无公开回复。
+
 ## 关键设计决策
 
 - **D1 — 按 role 门控，按 (会话, PR) 判定。** 用户把门限定在 `/review` 与
@@ -241,7 +250,8 @@ watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤）
 
 1. 门关闭（默认）：所有既有测试原样通过；投递行为字节级一致。
 2. 门开启：`watching === false` 的 role `review`/`verify` 绑定在两种模式、
-   任何路径（新派发、Gone 回退、恢复、watch drain、复核）下都不是投递目标。
+   任何路径（新派发、Gone 回退、恢复、watch drain、评论监视、复核）下都不是
+   投递目标。
 3. 门开启：同一会话对该 PR 有活跃 watch（`watching === true`）时照旧接收。
 4. 门开启：PR 有跟随者但无合格目标的事件私下退役并留日志行；绝不为它产生
    公开回复。
@@ -250,5 +260,5 @@ watch 事件无需新代码：检测冻结 `resolveBoundDelivery`（已过滤）
 
 ## 开放问题
 
-无阻塞项。后续（非本次改动）：在活跃轮询集合中跳过不合格绑定；comment-watch
-特性落到本分支后把门扩展过去。
+无阻塞项。后续（非本次改动）：在活跃轮询集合中跳过不合格绑定，省掉它们的
+`pulls.get` 预算。

@@ -7,7 +7,8 @@ Status: proposed (2026-11-09)
 ## Problem statement
 
 With the GitHub channel's `deliverToBoundSessions` enabled, every daemon
-session bound to a PR receives that PR's events: notification comments,
+session bound to a PR receives that PR's events: notification comments, the
+default-on comment watch (`prCommentWatch`, same-account comments),
 `prWatchEvents` state transitions, and (where configured) role-aware fan-out.
 Bindings are minted automatically by the backfill for any session that ran
 `/review <n>` or `/verify-pr <n>` — one-shot commands whose sessions are not
@@ -77,9 +78,11 @@ but are not delivery targets.
   polled (they keep baselines and terminal observation), and their events
   retire at drain through the existing no-candidate paths. Skipping their
   `pulls.get` is a possible follow-up optimization, not part of this change.
-- This branch has no comment-watch (`prCommentWatch`) feature; the design
-  targets the notification/comment lanes and the PR-state watch as they exist
-  here.
+- The comment watch (`prCommentWatch`, default-on) is covered through the
+  same target resolution: its fan-out consumes `resolveBoundTargets`, and a
+  comment whose every bound target is ineligible (or authored by all of
+  them) is skipped with the existing `comment_watch_no_target` journal row
+  and the cursor advances — private, never a public reply.
 - Detection is best-effort and fail-open (decision D3): it is a noise gate,
   not a security boundary.
 
@@ -213,6 +216,14 @@ Watch events need no new code: detection freezes `resolveBoundDelivery`
 (filtered), and both drains already retire without a candidate
 (`watch_no_target` / `watch_no_candidate`, role-aware drain retire).
 
+The comment watch (`watchPrComments`) needs no new code either: it resolves
+targets through the same gated `resolveBoundTargets`, queries posted-comment
+attribution over the RAW follower set (so the Gone fallback's exclusions stay
+complete), and its deliverable filter already skips a comment with no
+remaining target via the `comment_watch_no_target` journal row before
+advancing the cursor. Under the gate, an all-ineligible follower set lands
+in that same skip — private retirement, cursor progress, no public reply.
+
 ## Key design decisions
 
 - **D1 — gate by role, per (session, PR).** The user scoped the gate to
@@ -286,7 +297,7 @@ Watch events need no new code: detection freezes `resolveBoundDelivery`
    behavior byte-identical.
 2. Gate on: a role `review`/`verify` binding with `watching === false` is
    never a delivery target in either mode, on any path (fresh dispatch,
-   gone-fallback, recovery, watch drain, revalidation).
+   gone-fallback, recovery, watch drain, comment watch, revalidation).
 3. Gate on: the same session with an active watch on that PR
    (`watching === true`) receives events as today.
 4. Gate on: an event whose PR has followers but no eligible target retires
@@ -297,6 +308,5 @@ Watch events need no new code: detection freezes `resolveBoundDelivery`
 
 ## Open questions
 
-None blocking. Follow-ups (not this change): skip ineligible bindings in the
-active poll set; extend the gate to comment-watch when that feature lands on
-this branch.
+None blocking. Follow-up (not this change): skip ineligible bindings in the
+active poll set to save their `pulls.get` budget.

@@ -123,8 +123,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
     requireBoundWatch: 'channels.editor.field.github.requireBoundWatch',
+    prCommentWatch: 'channels.editor.field.github.prCommentWatch',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
     prWatchLimit: 'channels.editor.field.github.prWatchLimit',
+    prWatchBudgetReserve: 'channels.editor.field.github.prWatchBudgetReserve',
     boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
@@ -154,8 +156,10 @@ const SHARED_SESSION_FIELD_KEYS = new Set([
 const BOUND_SESSION_FIELD_KEYS = new Set([
   'deliverToBoundSessions',
   'requireBoundWatch',
+  'prCommentWatch',
   'prWatchEvents',
   'prWatchLimit',
+  'prWatchBudgetReserve',
   'boundSessionActions',
 ]);
 
