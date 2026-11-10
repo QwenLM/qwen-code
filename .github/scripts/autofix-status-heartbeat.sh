@@ -149,13 +149,13 @@ run_loop() {
   exec >> "${HB_WORKDIR}/heartbeat.log" 2>&1 < /dev/null
   echo "$$" > "${HB_WORKDIR}/heartbeat.pid"
   local interval="${HB_INTERVAL_SECONDS:-600}"
-  # Just past setup + the 250-minute self-hosted address step: the gate
-  # kills the loop, so the job envelope is not the bound; a live round's
-  # loop dies at the gate or finalize, so only a crash-leftover orphan
-  # ever reaches the cap — and the cap bounds how long that orphan holds
-  # the PAT in /proc/<pid>/environ, so it stays tight. Raising the step
-  # cap past ~330 minutes requires raising this default and widening the
-  # [19800, 21600] magnitude guard below in the same change.
+  # 340 minutes: ~83 past setup + the 250-minute self-hosted address
+  # step, kept inside the [19800, 21600] magnitude guard below, which is
+  # what actually bounds the orphan's PAT window. The gate kills the
+  # loop, so the job envelope is not the bound; a live round's loop dies
+  # at the gate or finalize, so only a crash-leftover orphan ever reaches
+  # the cap. Raising the step cap past ~330 minutes requires raising this
+  # default and widening the guard in the same change.
   local max_age="${HB_MAX_AGE_SECONDS:-20400}"
   # Numeric guards: a malformed or zero override must degrade to the
   # defaults, never into a sleep-less busy loop hammering the API.
@@ -166,9 +166,9 @@ run_loop() {
   # age cap that bounds an orphan's PAT window becomes unreachable),
   # while a tiny age cap silently kills the pulse after the first
   # sleep — the frozen comment this feature eliminates. Bound the
-  # magnitude too; the cap's floor is setup + the 250-minute self-hosted
-  # address step (the gate kills the loop), so a live round's pulse
-  # always outlives the round. The digit bound
+  # magnitude too; the accepted band's floor (19800s = 330m) sits above
+  # setup + the 250-minute self-hosted address step, so a live round's
+  # pulse always outlives the round. The digit bound
   # runs FIRST: bash arithmetic wraps modulo 2^64, so a 20+-digit plant
   # would pass the comparisons on its wrapped value while the original
   # string still reaches sleep — the loop never wakes again (R16-2).

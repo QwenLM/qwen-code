@@ -122,13 +122,14 @@ orphan loops unacceptable):
    `heartbeat.pid` at the same path, which an existence check would let
    the orphan pass (reading the file here is safe: the loop only
    self-identifies, it never kills anything); stop if `heartbeat-stop`
-   exists, or at a hard age cap set just past setup + the 250-minute
-   self-hosted address step (the gate kills the loop, so the job envelope
-   is not the bound; a live round's loop dies at the gate or finalize,
-   so only a crash orphan ever reaches the cap — and the cap bounds how
-   long that orphan holds the PAT in `/proc/<pid>/environ`; raising the
-   step cap past ~330 minutes requires raising HB_MAX_AGE_SECONDS and
-   widening its [19800, 21600] magnitude guard in the same change);
+   exists, or at a hard age cap of 340 minutes (20400s) — ~83 past
+   setup + the 250-minute self-hosted address step, kept inside the
+   [19800, 21600] magnitude guard, which is what actually bounds the
+   orphan's PAT window (the gate kills the loop, so the job envelope is
+   not the bound; a live round's loop dies at the gate or finalize, so
+   only a crash orphan ever reaches the cap; raising the step cap past
+   ~330 minutes requires raising HB_MAX_AGE_SECONDS and widening the
+   guard in the same change);
    each tick's `gh` call is wrapped in `timeout 60` so a
    black-holed connection cannot stall the loop past the cap.
 
@@ -272,14 +273,16 @@ comment is never worse than today.
   any same-UID process on that host — including another PR's round
   running its gate's host-side build/tests — reads it directly (the
   pool's ptrace scope gates ptrace attach, not this read; witnessed on
-  the pool's host class). The cap therefore sits just past setup + the
-  250-minute self-hosted address step (the gate kills the loop, so the
-  job envelope is not the bound), bounding the orphan's token window to
-  roughly one address phase; the alternative — a cross-run kill keyed
-  on a WORKDIR pid — reopens the untrusted-kill-target hole.
+  the pool's host class). The cap is 340 minutes — ~83 past setup + the
+  250-minute self-hosted address step, kept inside the magnitude guard
+  (the gate kills the loop, so the job envelope is not the bound) —
+  bounding the orphan's token window to roughly one address phase plus
+  margin; the alternative — a cross-run kill keyed on a WORKDIR pid —
+  reopens the untrusted-kill-target hole.
 
 ## Open questions
 
-None blocking. Cadence (10 min) and the age cap (just past setup + the
-250-minute self-hosted address step) are repo-variable-friendly
-constants but ship as literals until a reason to configure appears.
+None blocking. Cadence (10 min) and the age cap (340 minutes, sized
+past setup + the 250-minute self-hosted address step and kept inside
+the magnitude guard) are repo-variable-friendly constants but ship as
+literals until a reason to configure appears.

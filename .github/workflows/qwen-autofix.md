@@ -4029,22 +4029,25 @@ holds the bot PAT in /proc/<pid>/environ until the cap,
 and any same-UID process on that host — including another
 PR's round running its gate's host-side build/tests —
 reads it directly; the pool's ptrace scope does not gate
-this read, as witnessed above. The cap therefore sits past
-setup + the 250-minute self-hosted address step — the gate
-kills the loop, so the job envelope is not the bound — and
-only a crash orphan ever reaches it, so the cap IS the bound
-on its token window. Raising the address step cap past ~330
-minutes requires raising HB_MAX_AGE_SECONDS and widening its
-[19800, 21600] magnitude guard in the same change.
-A cross-run kill keyed on a WORKDIR pid would
+this read, as witnessed above. The cap is 340 minutes
+(20400s) — ~83 past setup + the 250-minute self-hosted
+address step, kept inside the [19800, 21600] magnitude
+guard, which is what actually bounds the orphan's PAT
+window; the gate kills the loop, so the job envelope is not
+the bound. Only a crash orphan ever reaches the cap, so the
+cap IS the bound on its token window. Raising the address
+step cap past ~330 minutes requires raising
+HB_MAX_AGE_SECONDS and widening the guard in the same
+change. A cross-run kill keyed on a WORKDIR pid would
 reopen the untrusted-kill-target hole, so reclamation
 stays host-local). Reading the file to self-identify is
 safe (the loop never kills anything); the
 killers never read it, which is what keeps the
 untrusted-target hole closed — no cross-run kill. The other
-bounds: a heartbeat-stop marker, or the age cap just past
-setup + the 250-minute self-hosted address step (the gate
-kills the loop; see above); each tick's gh call is
+bounds: a heartbeat-stop marker, or the 340-minute age cap
+(sized past setup + the 250-minute self-hosted address step
+and kept inside the magnitude guard; the gate kills the
+loop — see above); each tick's gh call is
 additionally wrapped in a 60s timeout so a black-holed
 connection cannot stall the loop past the cap. Killers that
 run in-round touch the stop marker BEFORE killing so a

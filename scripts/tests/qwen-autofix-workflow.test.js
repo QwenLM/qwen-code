@@ -642,6 +642,43 @@ describe('qwen-autofix workflow', () => {
     // aged out mid-flight.
     expect(reviewScanJob).toContain('PENDING_STALE_MIN=375');
     expect(reviewScanJob).toContain('PENDING_LONG_STALE_MIN=495');
+    // The long cutoff must be DERIVED from the long constant: a copy-paste
+    // slip feeding it PENDING_STALE_MIN collapses the tiers in production
+    // while every constant pin and every literal-injecting replay stays
+    // green. Pin the line, then execute both derivations and require the
+    // timestamps to differ by exactly the constants' gap.
+    expect(reviewScanJob).toContain(
+      'PENDING_LONG_CUTOFF="$(date -u -d "${PENDING_LONG_STALE_MIN} minutes ago"',
+    );
+    const derivLines = reviewScanJob.match(
+      /PENDING_CUTOFF="\$\(date[^\n]*\n\s*PENDING_LONG_CUTOFF="\$\(date[^\n]*\n/,
+    )?.[0];
+    expect(derivLines, 'staleness cutoff derivation lines').toBeTruthy();
+    const staleMinConst = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
+    const longMinConst = reviewScanJob.match(
+      /PENDING_LONG_STALE_MIN=(\d+)/,
+    )?.[1];
+    const derivOut = execFileSync(
+      'bash',
+      [
+        '-c',
+        `${derivLines}\nprintf '%s %s' "$PENDING_CUTOFF" "$PENDING_LONG_CUTOFF"`,
+      ],
+      {
+        env: {
+          ...process.env,
+          PENDING_STALE_MIN: staleMinConst,
+          PENDING_LONG_STALE_MIN: longMinConst,
+        },
+        encoding: 'utf8',
+      },
+    )
+      .trim()
+      .split(' ');
+    const derivGapMin =
+      (new Date(derivOut[0]).getTime() - new Date(derivOut[1]).getTime()) /
+      60000;
+    expect(derivGapMin).toBe(Number(longMinConst) - Number(staleMinConst));
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than its row's cutoff. Asserting `> $rowcut`
     // too means a flipped comparison (which would age out live checks →
@@ -5315,9 +5352,10 @@ describe('qwen-autofix workflow', () => {
     // No rollup entries → dispatchable.
     expect(runMarkerCheck([])).toBe('pass');
 
-    // A stranded marker must NOT keep blocking through the 495-minute
-    // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
-    // over fixture rollups.
+    // A stranded marker must NOT keep blocking through the
+    // HAS_PENDING_CHECKS gate after its TTL expired — it is exempt by its
+    // own dispatch context BEFORE the staleness tiers apply: replay the
+    // gate's jq over fixture rollups.
     const pendingGate = reviewScanJob.match(
       /HAS_PENDING_CHECKS="\$\(jq -r --arg cut "\$\{PENDING_CUTOFF\}" \\[\s\S]*?' <<< "\$\{CHECKS_JSON\}"\)"/,
     )?.[0];
@@ -5367,7 +5405,9 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
       ]),
     ).toBe('true');
-    // ...a check stuck past the 495-minute horizon is aged out...
+    // ...a non-autofix check stuck past the GENERAL 375-minute horizon is
+    // aged out (the 495-minute long tier applies only to review-address
+    // rows, proven by the between-cutoffs fixtures below)...
     expect(
       runPendingGate([
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
@@ -5443,7 +5483,40 @@ describe('qwen-autofix workflow', () => {
       workflow.match(
         /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
       )?.[0] ?? '';
+    // Fail closed on BOTH sides: a step rename plus a doc reword would
+    // otherwise leave NaN === NaN, which Object.is (toBe) passes.
+    expect(addressStepText, 'Triage and address step block').toBeTruthy();
+    expect(Number.isFinite(heartbeatStepMin), 'heartbeat doc step length').toBe(
+      true,
+    );
     expect(heartbeatStepMin).toBe(stepCapsOf(addressStepText).selfHosted);
+
+    // The age cap must outlive setup + the address step (the gate kills
+    // the loop, so the job envelope is not the bound), and the shipped
+    // default must sit inside the magnitude guard that actually bounds
+    // the orphan's PAT window — derive both from the script so the prose
+    // and the constants cannot re-drift (R1-2 round 3).
+    const heartbeatScript = readFileSync(
+      '.github/scripts/autofix-status-heartbeat.sh',
+      'utf8',
+    );
+    const hbDefaultS = Number(
+      heartbeatScript.match(/HB_MAX_AGE_SECONDS:-(\d+)/)?.[1],
+    );
+    expect(Number.isFinite(hbDefaultS), 'HB_MAX_AGE_SECONDS default').toBe(
+      true,
+    );
+    const setupRowMin = Number(designDoc.match(/\n {2}setup +(\d+)\n/)?.[1]);
+    expect(Number.isFinite(setupRowMin), 'af-050 setup row').toBe(true);
+    expect(hbDefaultS / 60).toBeGreaterThan(
+      setupRowMin + stepCapsOf(addressStepText).selfHosted,
+    );
+    const hbGuard = heartbeatScript.match(
+      /\(\( max_age >= (\d+) && max_age <= (\d+) \)\)/,
+    );
+    expect(hbGuard, 'max_age magnitude guard').toBeTruthy();
+    expect(hbDefaultS).toBeGreaterThanOrEqual(Number(hbGuard[1]));
+    expect(hbDefaultS).toBeLessThanOrEqual(Number(hbGuard[2]));
 
     // Writer/reader identity: all three status writes and both readers bind
     // the SAME context variable — a mismatch on any site leaves the marker
@@ -18670,8 +18743,9 @@ exit 1
     );
     expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS');
     expect(heartbeatScript).toContain('HB_INTERVAL_SECONDS');
-    // The default age cap sits just past the 330-minute job envelope: a
-    // live round's loop dies at the gate or finalize well inside the job,
+    // The default age cap is 340 minutes (20400s): ~83 past setup + the
+    // 250-minute self-hosted address step, kept inside the [19800, 21600]
+    // magnitude guard. A live round's loop dies at the gate or finalize,
     // so only a crash orphan reaches it — and the cap bounds how long that
     // orphan holds the PAT in /proc/<pid>/environ. A 12h default would
     // reopen the window this cap exists to shrink.
