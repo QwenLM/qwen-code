@@ -1136,11 +1136,14 @@ export class HostedMcpSession {
   }
 
   async closeResources(opts: { terminal?: boolean } = {}): Promise<void> {
-    // The default is non-terminal (R14-1): a v1 detach or an extension discard
-    // may be followed by a reload that acquires this owner again, so it hands
-    // the mount back and leaves the rows drained. A delete and a lifecycle
-    // close pass terminal and persist the RELEASED tombstone, since nothing
-    // acquires the owner after either.
+    // The default is non-terminal (R14-1), for a v1 detach or an extension
+    // discard, which a reload may follow; the branch below says why. A delete
+    // and a lifecycle close pass terminal, and the RELEASED tombstone it
+    // leaves meets no later acquire of this owner, or of a Hook owner sharing
+    // its broker: the release runs in settle_resources, the last phase; a
+    // reload of a closing Session carries its lifecycle authority, which sets
+    // mcpClosing; and a retried close finds the rows released, while the
+    // Broker answers a release of a released owner too.
     const terminal = opts.terminal ?? false;
     if (
       this.hasPendingOperations() ||

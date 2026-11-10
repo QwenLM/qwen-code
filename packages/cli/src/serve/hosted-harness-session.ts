@@ -8532,11 +8532,9 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // A Hook owner of its own is released here only on a delete; a close
-          // hands its mount back, and Spring's drain after this phase
-          // releases its Runtime Session. The MCP owner below is released
-          // here on both, and so is a Hook owner that shares its broker: the
-          // tombstone is inert, since nothing acquires either after a close.
+          // A Hook owner of its own is released here only on a delete; on a
+          // close Spring's drain after this phase releases it. One that shares
+          // the MCP broker is released with the MCP owner below.
           await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
           // Neither an unprovable drain nor a Session whose own settlement
@@ -8555,13 +8553,8 @@ export function registerHostedHarnessSessionRoutes(
             await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          // The MCP owner is released for good on a close as on a delete, and
-          // its rows end released, as the release fault gates require. The
-          // R13-1 tombstone only hurts a later acquire, and none follows: no
-          // operation reopens a closed Session, a lifecycle load sets
-          // mcpClosing, and a retried close only releases, which the Broker
-          // answers for a released owner too. Spring releases the Harness
-          // Session's Runtime Sessions after this phase in any case.
+          // Terminal on a close as on a delete; HostedMcpSession.closeResources
+          // says why that is safe.
           await session.mcp?.closeResources({ terminal: true });
         }
         res.json({
