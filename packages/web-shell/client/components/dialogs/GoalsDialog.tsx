@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
+import { composeGoalBudgetReason } from '../../utils/goalBudgetReason';
 import { canResumeGoal } from '../../utils/goalGate';
 import {
   useWorkspaceActions,
@@ -46,7 +47,7 @@ export function GoalsDialog({
   onOpenSession,
   onError,
 }: GoalsDialogProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const actions = useWorkspaceActions();
 
   const [goals, setGoals] = useState<DaemonGoal[] | null>(null);
@@ -439,7 +440,8 @@ export function GoalsDialog({
                   <span className={styles.reasonLabel}>
                     {t('goal.lastCheck')}:
                   </span>{' '}
-                  {goal.lastReason}
+                  {composeGoalBudgetReason(goal, language, t) ??
+                    goal.lastReason}
                 </div>
               )}
 
