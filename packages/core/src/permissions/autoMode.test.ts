@@ -1579,11 +1579,15 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
     if (decision.via === 'fallback') {
       expect(decision.reason).toBe('safety_check');
       expect(decision.requiresHumanDecision).toBe(true);
+      // R23-3: the message is what makes the scheduler record the fallback
+      // and decorate the dialog with `hideAlwaysAllow`.
+      expect(decision.message).toContain('requires manual approval');
     }
     const { result } = apply(decision, counters(0, 0, 0, 0));
     expect(result.kind).toBe('fallback');
     if (result.kind === 'fallback') {
       expect(result.requiresHumanDecision).toBe(true);
+      expect(result.message).toContain('requires manual approval');
     }
   });
 

@@ -4287,6 +4287,26 @@ export class CoreToolScheduler {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): target outside workspace.`,
                   );
+                } else if (
+                  // A human-only floor must not offer "always allow": the
+                  // dialog is decorated with the fallback record below, which
+                  // is what hides the option (R23-3). The amend guard is the
+                  // one `safety_check` fallback that sets the bit; a future
+                  // human-only floor must extend this arm (and the
+                  // confirmation's reason union) deliberately rather than
+                  // inherit the suppression by accident.
+                  outcome.reason === 'safety_check' &&
+                  outcome.requiresHumanDecision === true &&
+                  outcome.message
+                ) {
+                  this.autoModeFallbackCallIds.add(reqInfo.callId);
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
+                  debugLogger.warn(
+                    'Auto mode fallback to manual approval (safety_check): human-only floor.',
+                  );
                 }
                 break;
               default: {

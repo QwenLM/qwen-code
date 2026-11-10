@@ -43,8 +43,8 @@ import { ShellTool, ShellToolInvocation } from './shell.js';
 import { ToolNames } from './tool-names.js';
 import { evaluateAutoMode } from '../permissions/autoMode.js';
 import {
-  amendNeedsApproval,
   clearSessionCommits,
+  isAmendOfSessionCommit,
 } from '../permissions/destructive-commands.js';
 
 // Runs the command for real in the requested cwd, shaped like
@@ -98,9 +98,16 @@ describe.skipIf(process.platform === 'win32')(
     // `afterEach`.
     let tempDirs: string[];
 
-    /** Amend decision: `true` when the guard routes this amend to approval. */
+    /**
+     * Registry state in the shape these tests already assert: `true` when the
+     * guard would ask for approval, i.e. when this repository's HEAD is NOT a
+     * registered session commit. R23-2 stopped the guard from reading the
+     * registry (every amend now asks), so this mirrors the old exemption on
+     * the registry itself; the guard's own verdict is covered by
+     * destructive-commands.test.ts.
+     */
     function amendVerdict(): boolean {
-      return amendNeedsApproval(AMEND_COMMAND, repoDir);
+      return !isAmendOfSessionCommit(repoDir);
     }
 
     /** Runs `git <args>` bypassing ShellTool; returns trimmed stdout. */

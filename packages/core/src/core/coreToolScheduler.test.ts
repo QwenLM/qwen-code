@@ -5934,6 +5934,19 @@ describe('CoreToolScheduler', () => {
         'awaiting_approval',
       ),
     );
+    // R23-3: the dialog must not offer "always allow" — the option would
+    // persist a rule that waives the guard. The fallback record with its
+    // message is what the decorator keys on.
+    const waiting = reportedCalls(harness.onToolCallsUpdate).find(
+      (call) => call.status === 'awaiting_approval',
+    ) as WaitingToolCall;
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'safety_check',
+        message: expect.stringContaining('requires manual approval'),
+      },
+    });
     expect(onConfirmSpy).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });

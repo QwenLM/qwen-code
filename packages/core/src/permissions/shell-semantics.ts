@@ -266,6 +266,17 @@ function tokenize(
   return tokens;
 }
 
+/**
+ * The words of one simple shell command after quote removal, ANSI-C `$'…'`
+ * decoding and `\`-newline joining. Thin public wrapper over {@link tokenize}
+ * for guards that reason lexically instead of by regular expression (the
+ * `git commit --amend` guard, #13570); analysis code keeps using
+ * {@link extractShellOperations}.
+ */
+export function shellWords(command: string): string[] {
+  return tokenize(command);
+}
+
 function pushToken(
   tokens: string[],
   token: string,

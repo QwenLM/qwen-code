@@ -8,7 +8,8 @@
  * Runs BEFORE the L5.3 LLM classifier as a Layer 0 guard. The classifier is
  * non-deterministic and can fail due to API unavailability, timeout, or poor
  * judgment on ambiguous prompts like "clean up the git state". This module
- * provides deterministic regex-based blocking that cannot be bypassed by
+ * provides deterministic blocking (patterns plus a lexical `git commit
+ * --amend` guard) that cannot be bypassed by
  * classifier failures on the denying call itself: the block is hard until
  * denial tracking reaches the consecutive-block or session-total cap, at which
  * point `applyAutoModeDecision` escalates to a confirmation only a human can
@@ -21,6 +22,9 @@
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
 
+import { splitCompoundCommand } from './rule-parser.js';
+import { shellWords } from './shell-semantics.js';
+
 /**
  * Destructive git commands that discard local work.
  * These are blocked unless the user explicitly mentions discarding work.
@@ -31,15 +35,6 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+clean\s+-[a-zA-Z]*f/,
   /\bgit\s+stash\s+drop\b/,
 ]);
-
-/**
- * Fail-closed literal backstop for the amend guard (#13570): the parsed
- * recognizer in shell-semantics decides what IS an invocation, and this
- * pattern keeps every literal mention the recognizer did not confirm
- * blocked unless a narrow prover shows each occurrence is inert data.
- * The recognizer can therefore only add denials, never relax one.
- */
-const GIT_AMEND_PATTERN = /\bgit\b[^\n]*?\bcommit\s+--amend\b/;
 
 /**
  * IaC destroy commands that tear down infrastructure.
@@ -146,54 +141,102 @@ export function getSessionCommitGeneration(): number {
 
 /**
  * Register a commit SHA made by the agent during this session.
- * Used to allow `git commit --amend` when the target commit was made
- * by the agent in the current session.
+ *
+ * @deprecated The amend guard no longer reads the session-commit registry:
+ * every `git commit --amend` mention now requires manual approval, because the
+ * cwd-based exemption could not be bounded (R14-1/R23-2). The registry and its
+ * shell/config wiring stay for API compatibility — `registerSessionCommit` is
+ * a published export of this package — and removing them needs its own
+ * follow-up.
  */
 export function registerSessionCommit(sha: string): void {
   sessionCommitShas.add(sha.trim());
 }
 
 /**
- * Whether a literal `git commit --amend` mention must go to manual approval.
+ * Whether a `git commit --amend` mention must go to manual approval.
  *
- * The guard cannot prove that a mention inside shell text is data rather than a
- * program — hand-scanning shell syntax to prove inertness was tried for seven
- * rounds without converging (issue #13570). Instead of hard-blocking, AUTO mode
- * routes an unproven mention to the approval path, where the user decides.
- * A commit this session created needs no approval: it is the agent's own work.
+ * Always `true`. The guard cannot prove that a mention inside shell text is
+ * data rather than a program — hand-scanning shell syntax to prove inertness
+ * was tried for seven rounds without converging (issue #13570) — and the
+ * exemption for a commit this session created produced two leaks in a row
+ * (R14-1, R23-2): it resolved the target from the decision-time `cwd`, which
+ * wrappers (`env --chdir`, `sudo -D`) and same-repository history moves
+ * (`git checkout HEAD~1 && git commit --amend`) can disagree with, and that
+ * class of wrapper is not enumerable. So an amend is always an approval, and
+ * the `cwd` parameter is gone with the exemption.
  *
  * This confirmation is human-only: AUTO mode marks the fallback
- * `requiresHumanDecision`, so a `PermissionRequest` hook (or a stream-json
- * host) answering `allow` cannot waive it. That is deliberate — the guard
- * exists to stop an unattended rewrite of a commit the agent did not make, and
- * a hook that could auto-allow it would restore exactly the bypass the guard
- * is for.
+ * `requiresHumanDecision` and attaches a `message`, so the scheduler records
+ * an `autoModeFallback` and hides "always allow"; a `PermissionRequest` hook
+ * (or a stream-json host) answering `allow` cannot waive it. That is
+ * deliberate — the guard exists to stop an unattended rewrite of a commit the
+ * agent did not make, and a hook that could auto-allow it would restore
+ * exactly the bypass the guard is for.
  */
-/**
- * Spellings that can move the amend away from `cwd`: a directory change, the
- * git relocation options, or the relocation environment prefixes. Deliberately
- * a shape test, not an attempt to resolve the real target.
- */
-const REPOSITORY_RELOCATION =
-  /(?:^|[\s;&|(])(?:cd|pushd)\s|\bgit\b[^\n]*?\s(?:-C|--git-dir|--work-tree)(?=[\s=])|\bGIT_DIR=|\bGIT_WORK_TREE=/;
+export function amendNeedsApproval(command: string): boolean {
+  // Two readings: the raw text, and the payload of a shell wrapper
+  // (`bash -c '…'`) with its quotes stripped, so a nested mention is seen too.
+  return (
+    mentionsGitCommitAmend(command) ||
+    mentionsGitCommitAmend(stripShellQuotes(command))
+  );
+}
 
-export function amendNeedsApproval(
-  command: string,
-  cwd: string = process.cwd(),
-): boolean {
-  const expanded = command + ' ' + stripShellQuotes(command);
-  if (!GIT_AMEND_PATTERN.test(expanded)) return false;
-  // The exemption is resolved against `cwd` (R14-1). A command that changes
-  // directory first or relocates the repository makes the amend's target
-  // unattributable, so fail closed instead of certifying another repository's
-  // commit with this one's registered HEAD.
-  if (REPOSITORY_RELOCATION.test(expanded)) return true;
-  return !isAmendOfSessionCommit(cwd);
+/**
+ * Lexical detection over words, not a regular expression (R23-1). Words are
+ * split by the same tokenizer the rest of the guard family uses, so quotes,
+ * ANSI-C `$'…'` and line continuations are already resolved, and git's
+ * unambiguous option abbreviations are accepted.
+ */
+function mentionsGitCommitAmend(command: string): boolean {
+  for (const segment of splitCompoundCommand(command)) {
+    // Quote removal makes a quoted mention one token (`echo "git commit
+    // --amend"`), so split each token again: the guard cannot prove such a
+    // mention inert either, and asking is the fail-closed direction.
+    const words = shellWords(segment).flatMap((word) =>
+      word.split(/\s+/).filter(Boolean),
+    );
+    for (let start = 0; start < words.length; start++) {
+      if (!isGitWord(words[start]!)) continue;
+      let inCommit = false;
+      for (let index = start + 1; index < words.length; index++) {
+        const word = words[index]!;
+        if (inCommit) {
+          if (isAmendFlag(word)) return true;
+        } else if (word === 'commit') {
+          inCommit = true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function isGitWord(word: string): boolean {
+  const base = word.slice(word.lastIndexOf('/') + 1).toLowerCase();
+  return base === 'git' || base === 'git.exe';
+}
+
+/**
+ * `--amend` or a git-accepted unambiguous abbreviation of it. The prefix floor
+ * is four characters (`--am`) because git resolves that prefix uniquely for
+ * `commit`; `--a` is excluded because it is ambiguous with `--all`/`--author`.
+ * A `--amend=…` spelling is read as its flag name.
+ */
+function isAmendFlag(word: string): boolean {
+  const flag = word.split('=', 1)[0]!;
+  return (
+    flag.startsWith('--') && flag.length >= 4 && '--amend'.startsWith(flag)
+  );
 }
 
 /**
  * Check whether a `git commit --amend` targets a commit made this session.
- * Reads the current HEAD commit SHA and checks against registered session commits.
+ *
+ * @deprecated No longer consulted: `amendNeedsApproval` always asks for
+ * approval (R23-2). Kept as a published export for API compatibility, together
+ * with the registry it reads; removal is a separate follow-up.
  */
 export function isAmendOfSessionCommit(cwd: string): boolean {
   if (sessionCommitShas.size === 0) return false;
@@ -214,6 +257,11 @@ export function isAmendOfSessionCommit(cwd: string): boolean {
  * Clear all session commit tracking. Called on session end or mode switch.
  * Also bumps the generation counter, which is how a deferred writer
  * learns that the registry it decided against no longer exists.
+ *
+ * @deprecated The amend guard no longer reads this registry (R23-2: every
+ * amend asks for approval), but this is a published export of
+ * `@qwen-code/qwen-code-core` and its shell/config wiring stays. Removing it
+ * needs a separate follow-up.
  */
 export function clearSessionCommits(): void {
   sessionCommitShas.clear();

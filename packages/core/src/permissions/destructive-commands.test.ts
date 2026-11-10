@@ -16,6 +16,7 @@ import {
   extractLastUserPrompt,
   registerSessionCommit,
   clearSessionCommits,
+  isAmendOfSessionCommit,
 } from './destructive-commands.js';
 import { modelText, userText } from '../test-utils/model-fixtures.js';
 
@@ -35,11 +36,11 @@ function expectBlocked(cmd: string, prompt: string, reasonPart?: string) {
  * Asserts the guard routes the command to manual approval: the hard block is
  * gone, and the AUTO-mode fallback asks the user.
  */
-function expectNeedsApproval(cmd: string, cwd?: string) {
+function expectNeedsApproval(cmd: string) {
   expect(isDestructiveCommand(cmd, 'amend the commit')?.blocked ?? false).toBe(
     false,
   );
-  expect(amendNeedsApproval(cmd, cwd)).toBe(true);
+  expect(amendNeedsApproval(cmd)).toBe(true);
 }
 
 function expectAllowed(commands: string[], prompt: string) {
@@ -295,55 +296,14 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectNeedsApproval(command);
   });
 
-  it('needs approval when the command relocates the repository', () => {
-    // R14-1: the exemption reads `cwd`'s HEAD, so an amend aimed at another
-    // repository must not inherit it.
-    const a = mkdtempSync(join(tmpdir(), 'amend-repo-a-'));
-    const b = mkdtempSync(join(tmpdir(), 'amend-repo-b-'));
-    try {
-      // Distinct messages, not distinct timestamps: two commits with the same
-      // author, time and message are the same object, so the SHAs would collide
-      // whenever both land in the same second (CI does, a slow local run may
-      // not) and the control below would certify B with A's registration.
-      execSync(
-        'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m repo-a',
-        { cwd: a, stdio: 'ignore' },
-      );
-      execSync(
-        'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m repo-b',
-        { cwd: b, stdio: 'ignore' },
-      );
-      const headA = execSync('git rev-parse HEAD', {
-        cwd: a,
-        encoding: 'utf-8',
-      }).trim();
-      const headB = execSync('git rev-parse HEAD', {
-        cwd: b,
-        encoding: 'utf-8',
-      }).trim();
-      // The premise, asserted: this case is meaningless if the two repos share
-      // a HEAD, and a collision must fail loudly rather than look like a
-      // product regression.
-      expect(headA).not.toBe(headB);
-      registerSessionCommit(headA);
-      expect(amendNeedsApproval('git commit --amend', a)).toBe(false);
-      expect(amendNeedsApproval('git commit --amend', b)).toBe(true);
-      for (const command of [
-        `cd ${b} && git commit --amend --no-edit`,
-        `git -C ${b} commit --amend --no-edit`,
-        `git --git-dir=${b}/.git --work-tree=${b} commit --amend`,
-      ]) {
-        expect(amendNeedsApproval(command, a)).toBe(true);
-      }
-    } finally {
-      rmSync(a, { recursive: true, force: true });
-      rmSync(b, { recursive: true, force: true });
-    }
-  });
-
-  it('allows an amend of a commit this session created', () => {
-    // The registry is keyed by HEAD, so this needs a real repository.
+  it('requires approval even for a commit this session created', () => {
+    // R23-2: the cwd-based exemption is gone, so the registry no longer
+    // removes the approval even when it names the current HEAD. The process
+    // cwd is moved into the repository so a mutation that restored the old
+    // `!isAmendOfSessionCommit(process.cwd())` return would answer `false`
+    // here and fail the test.
     const dir = mkdtempSync(join(tmpdir(), 'amend-session-'));
+    const originalCwd = process.cwd();
     try {
       execSync(
         'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m one',
@@ -354,11 +314,48 @@ describe('isDestructiveCommand — git commit --amend', () => {
         encoding: 'utf-8',
       }).trim();
       registerSessionCommit(head);
+      process.chdir(dir);
+      expect(isAmendOfSessionCommit(dir)).toBe(true);
       expect(isDestructiveCommand('git commit --amend', 'amend')).toBeNull();
-      expect(amendNeedsApproval('git commit --amend', dir)).toBe(false);
+      expect(amendNeedsApproval('git commit --amend')).toBe(true);
     } finally {
+      process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // R23-1: the guard is lexical now. Every spelling below reached the
+  // classifier unasked before; all of them must ask.
+  it.each([
+    'git commit -a --amend',
+    'git commit --no-edit --amend',
+    'git commit -m "x" --amend',
+    'git commit -C HEAD --amend',
+    'git commit \\\n --amend --no-edit',
+    'git commit "--amend"',
+    "git commit --'amend'",
+    "git commit $'--amend'",
+    'git commit --amen',
+    'git commit --am',
+    'git -C /elsewhere commit --amend',
+    "bash -c 'git commit --amend'",
+    'env --chdir=/elsewhere git commit --amend',
+    'sudo -D /elsewhere git commit --amend',
+    'env -C /elsewhere git commit --amend',
+    'git checkout HEAD~1 && git commit --amend',
+    'git switch some-branch && git commit --amend',
+    '/usr/bin/git commit --amend',
+  ])('routes the %s spelling to approval', (command) => {
+    expectNeedsApproval(command);
+  });
+
+  it.each([
+    'git status',
+    'git commit -m "a normal commit"',
+    'git log --grep=amend',
+    'git commit --all',
+  ])('leaves a non-amend command alone: %s', (command) => {
+    expect(amendNeedsApproval(command)).toBe(false);
   });
 });
 

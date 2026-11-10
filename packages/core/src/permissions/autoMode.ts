@@ -520,6 +520,12 @@ export type AutoModeDecision =
        * `PermissionRequest` hook answering `allow` must not waive it.
        */
       requiresHumanDecision?: boolean;
+      /**
+       * The approval-dialog explanation for this fallback. The scheduler only
+       * records an `autoModeFallback` (and hides "always allow") when one is
+       * present, so a human-only floor must carry it (R23-3).
+       */
+      message?: string;
     };
 
 /**
@@ -682,7 +688,7 @@ export function applyAutoModeDecision(
         recordAllow(denialState, actionFingerprint),
       );
       return { kind: 'approved' };
-    case 'fallback':
+    case 'fallback': {
       if (
         actionFingerprint !== undefined &&
         denialState.pendingManualRetryFingerprint === actionFingerprint
@@ -705,16 +711,20 @@ export function applyAutoModeDecision(
             'Commands outside the workspace require manual approval in AUTO mode.',
         };
       }
+      const message =
+        decision.message ??
+        (isDenialFallbackReason(decision.reason)
+          ? formatDenialFallbackMessage(decision.reason)
+          : undefined);
       return {
         kind: 'fallback',
         reason: decision.reason,
         ...(decision.requiresHumanDecision
           ? { requiresHumanDecision: true }
           : {}),
-        ...(isDenialFallbackReason(decision.reason)
-          ? { message: formatDenialFallbackMessage(decision.reason) }
-          : {}),
+        ...(message ? { message } : {}),
       };
+    }
     default: {
       const _exhaustive: never = decision;
       // Make unexpected JS/interop values visible at runtime.
@@ -902,26 +912,19 @@ export async function evaluateAutoMode(
         reason: destructiveResult.reason,
       };
     }
-    // An `git commit --amend` mention the guard cannot prove is either a
+    // A `git commit --amend` mention the guard cannot prove is either a
     // program or data (issue #13570) goes to the user instead of being
-    // hard-blocked: the approval path lets them decide. `ctx.cwd` is only set
-    // when the call passes `directory`; otherwise the shell runs in the
-    // session's target dir, which is also where `ShellToolInvocation`
-    // registers session commits. Passing `undefined` through lands on
-    // `process.cwd()` inside `isAmendOfSessionCommit`'s `git rev-parse` — in a
-    // process hosting several sessions (ACP, daemon) or several worktrees that
-    // is a different repo, so one repo's registry could exempt an amend
-    // happening in another.
-    if (
-      amendNeedsApproval(
-        command,
-        input.ctx.cwd ?? input.config.getTargetDir?.(),
-      )
-    ) {
+    // hard-blocked: the approval path lets them decide. Since R23-2 there is
+    // no cwd-based exemption — the target repository is not knowable from the
+    // command (`env --chdir`, `sudo -D`, `git checkout HEAD~1 && …`), so every
+    // amend asks. The message is what makes the scheduler record the fallback
+    // and hide "always allow" (R23-3).
+    if (amendNeedsApproval(command)) {
       return {
         via: 'fallback',
         reason: 'safety_check',
         requiresHumanDecision: true,
+        message: 'Rewriting a commit requires manual approval in AUTO mode.',
       };
     }
   }
