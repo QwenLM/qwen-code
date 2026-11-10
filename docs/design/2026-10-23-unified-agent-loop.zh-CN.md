@@ -433,6 +433,26 @@ Ctrl+Y 的重试已经走共享轮次，并从 PR 3b-2b 起等待自己的工具
 
 PR 3c-2 覆盖 TUI 自己发起的轮次：Goal 的续发、后台任务的通知、cron 触发和 teammate 的报告。每一种都是 TUI 的空闲调度以自己的发送类型发起的一次 `submitQuery` 调用，因此都已经走共享轮次和共享工具批，并且从 PR 3c-1 起由轮次发出工具批之后接着的那一轮。这些轮次外围的调度仍归 TUI，和其他入口一样。PR 3c-2 在 Ink 对拍套件中为每种轮次加入一个场景，轮次里都有一个工具批。这些场景无需改动即通过，因此 TUI 的代码不变。
 
+### OpenTUI 迁到共享 loop（PR 4）
+
+OpenTUI 的 live 轮次，即 `live-session.ts` 中的 `livePromptEvents`，已经是 loop 的形状：它发出一轮，在一个新的 `InteractiveModToolScheduler` 上运行这一轮的调用，再把结果作为下一轮发出，直到某一轮不再调用工具。OpenTUI 目前还不会自己发起轮次：它没有 Goal 续发、后台通知、cron 和 teammate 轮次。它分以下几步迁移：
+
+| 步骤 | 内容                                                                                                    |
+| ---- | ------------------------------------------------------------------------------------------------------- |
+| 4a   | 每个模型轮都走 loop 的 `runModelRound`；轮次保留自己的工具步骤；对拍套件也在 OpenTUI 上运行             |
+| 4b   | 一轮的工具调用作为一个共享工具批，在 `InteractiveModToolScheduler` 上运行，由 loop 完成 finalize 和记录 |
+| 4c   | 轮次走 loop，其下一轮取走排队到工具边界的 steering 输入；重试                                           |
+| 4d   | 默认开启，然后删除现有 loop                                                                             |
+
+PR 4a 让 live 轮次的每个模型轮都通过 `runModelRound` 发出。轮次像读取 client 的流一样，逐个读取这一轮的事件，并照旧映射每个事件。如果轮次不再读取（因为被更新的轮次取代或被取消），就结束这一轮，并关闭 client 的流。迁移的部分：
+
+| OpenTUI 现在                                                                   | 开启设置后                                          |
+| ------------------------------------------------------------------------------ | --------------------------------------------------- |
+| 轮次收集 `tool_call_request` 事件，遇到 `retry` 和 `model_fallback` 时丢弃它们 | 由 `runModelRound` 收集和丢弃                       |
+| 响应在检测到循环之前发出的调用仍会运行                                         | 任何停止原因都会让这一轮的调用不再运行，与 Ink 相同 |
+
+对拍套件在 `QWEN_E2E_RENDERER` 选定的渲染器上运行。在 OpenTUI 上，它不运行 OpenTUI 不会发起的那些轮次的场景，并检查只有开启设置的那次运行在共享 loop 上发送模型轮；它的工具批在 PR 4b 之前仍归 OpenTUI 自己。
+
 ## 迁移计划
 
 | PR    | 内容                                                                                                      |
@@ -455,12 +475,15 @@ PR 3c-2 覆盖 TUI 自己发起的轮次：Goal 的续发、后台任务的通�
 | 3c-1  | Ink TUI：工具边界的输入改走 loop 的下一轮；retry                                                          |
 | 3c-2  | Ink TUI：cron、后台通知、teammate 和 Goal 轮次                                                            |
 | 3d    | Ink TUI：默认开启，随后删除现有 loop                                                                      |
-| 4     | OpenTUI                                                                                                   |
+| 4a    | OpenTUI：每个模型轮都走 loop 的模型轮；轮次保留自己的工具步骤；对拍套件在 OpenTUI 上运行                  |
+| 4b    | OpenTUI：一轮的工具调用作为一个共享工具批                                                                 |
+| 4c    | OpenTUI：轮次走 loop，在工具边界取走 steering 输入；重试                                                  |
+| 4d    | OpenTUI：默认开启，然后删除其现有 loop                                                                    |
 | 5     | AgentCore 改用基于 `Turn` 的模型轮（subagent、后台与 fork agent、workflow）                               |
 | 6     | speculation                                                                                               |
 | —     | Hosted Harness：单独评估                                                                                  |
 
-PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两步。
+PR 5 和 6 每一项之后，同样各自跟随默认开启和删除旧 loop 两步。
 
 一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
 
@@ -521,7 +544,7 @@ PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 
 续发请求在现有 loop 上使用自己的 prompt id，在共享 loop 上沿用这一轮的 prompt id；对拍测试把两者视为相同。
 
-**Ink 场景**（`integration-tests/interactive/ink-agent-loop-parity.test.ts`）。TUI 在伪终端里对着假服务器运行。测试比较两次运行实际发送的请求体（包括 system prompt、提供的工具和每条消息的 `reasoning_content`）以及会话的聊天记录（包括 usage）。它还检查每次运行的请求数，并通过 debug 日志确认只有开启设置的那次运行在共享 loop 上发送模型轮、运行工具批，且数目等于场景规定的数目。对于既不发送也不记录任何内容的场景（例如被拦截的 prompt），改为检查每次运行最后屏幕上的提示；除此之外不比较屏幕，因为屏幕按定时器重绘：
+**TUI 场景**（`integration-tests/interactive/tui-agent-loop-parity.test.ts`）。`QWEN_E2E_RENDERER` 选定的 TUI（Ink 或 OpenTUI）在伪终端里对着假服务器运行。测试比较两次运行实际发送的请求体（包括 system prompt、提供的工具和每条消息的 `reasoning_content`）以及会话的聊天记录（包括 usage）。它还检查每次运行的请求数，并通过 debug 日志确认只有开启设置的那次运行在共享 loop 上发送模型轮、运行工具批，且数目等于场景规定的数目。对于既不发送也不记录任何内容的场景（例如被拦截的 prompt），改为检查每次运行最后屏幕上的提示；除此之外不比较屏幕，因为屏幕按定时器重绘：
 
 - 纯文本，以及带 thought 的流式文本；
 - 先有 thought 再调用工具，第二个请求会回传这段 reasoning；
@@ -543,7 +566,9 @@ PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - 拦截的 UserPromptSubmit hook；
 - 拦截一次的 Stop hook。
 
-对拍测试在 integration 任务中运行。每晚的 E2E 运行（以及手动触发的运行）还会在一个不带沙箱的 Linux 分支上，在设置开启的情况下运行完整的集成测试；入口修改默认值时等待的就是这个定时任务。
+在 OpenTUI 上，套件不运行 Goal、后台通知、cron 和 teammate 场景，因为 OpenTUI 不会发起这些轮次；在 PR 4b 之前，它也不期望共享 loop 上有工具批。
+
+对拍测试在 integration 任务中运行，TUI 套件在 Ink 上运行；OpenTUI 交互 E2E 任务在 main 和每晚运行，在 OpenTUI 上运行 TUI 套件。每晚的 E2E 运行（以及手动触发的运行）还会在一个不带沙箱的 Linux 分支上，在设置开启的情况下运行完整的集成测试；入口修改默认值时等待的就是这个定时任务。
 
 ## 兼容性
 
@@ -594,6 +619,9 @@ PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - 设置开启后，Ink TUI 与现在有以下预期差异，与其他入口相同：
   - 从 PR 3b-1 起，plan mode 入口被跳过的同批调用不再计入会话完成的工具调用数；
   - 从 PR 3b-2a 起，在 Goal 轮次之外，结束轮次的工具也会结束轮次。
+
+- 设置开启后，OpenTUI 与现在有以下预期差异：
+  - 从 PR 4a 起，响应在检测到循环之前发出的调用不再运行，与 Ink 和 headless 相同。
 
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
