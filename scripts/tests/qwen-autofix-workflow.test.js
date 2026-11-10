@@ -11987,7 +11987,7 @@ exit 1
     // it also fires on the empty-PAT and WORKDIR-pre-clean exits, where
     // FLEET_FILE does not exist yet (R3-1).
     expect(reviewScanJob).toContain(
-      'trap \'rm -f "${FLEET_FILE:-}"; rm -rf "${WORKDIR:-}"; rm -rf "${GH_CONFIG_DIR}"\' EXIT',
+      'trap \'rm -f "${FLEET_FILE:-}" || true; rm -rf "${WORKDIR:-}" || true; rm -rf "${GH_CONFIG_DIR}" || true\' EXIT',
     );
     // Installed at the mint, ahead of every early exit in the step — not
     // down by FLEET_FILE, where two exit paths precede it and leak the dir.
@@ -12863,7 +12863,7 @@ exit 1
     const commandPreambles = [routeStep, ...commandSteps].map((step) =>
       (
         step.match(
-          /export GH_HOST=github\.com[\s\S]*?trap 'rm -rf "\$\{GH_CONFIG_DIR\}"' EXIT\n/,
+          /export GH_HOST=github\.com[\s\S]*?trap 'rm -rf "\$\{GH_CONFIG_DIR\}" \|\| true' EXIT\n/,
         )?.[0] ?? ''
       )
         .split('\n')
@@ -13381,12 +13381,21 @@ exit 1
     for (const { name, env, workdir } of cases) {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-scan-exit-'));
       try {
+        // The step runs a host-wide `find /tmp … -exec rm -rf {} +` age sweep
+        // before the pre-clean. Stub ONLY find: with the real one this test
+        // would delete the developer's own /tmp/autofix* entries. mktemp, rm
+        // and mkdir stay real so the residue assertion still means something.
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(join(bin, 'find'), '#!/bin/bash\nexit 0\n');
+        chmodSync(join(bin, 'find'), 0o755);
         const proc = spawnSync(
           'bash',
           ['-e', '-o', 'pipefail', '-c', block.replace(/^ {10}/gm, '')],
           {
             env: {
               ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
               RUNNER_TEMP: dir,
               WORKDIR: workdir ?? join(dir, 'workdir'),
               GITHUB_OUTPUT: join(dir, 'github-output'),
@@ -13410,19 +13419,21 @@ exit 1
   });
 
   it('makes every gh config mint site either self-cleaning or a recorded leak', () => {
-    // af-163. The census kept growing siblings (R2-1 -> R3-2 -> R4-2) because
-    // it enumerated sources and spellings by hand and judged the script half
-    // with a file-wide predicate. All three are fixed at the root here:
-    //   - the mint pattern tolerates the RUNNER_TEMP spelling, so the
-    //     heartbeat's `${RUNNER_TEMP:-/tmp}` form is no longer invisible;
-    //   - every source that mints is walked, not a hand-picked two;
-    //   - each site is judged on its OWN region, so a cleanup added at one
-    //     site can never vouch for another.
-    // Both lists are asserted exactly: a new site cannot join unnoticed and
-    // a fixed one cannot leave a stale entry.
-    const MINT =
-      /mktemp -d "\$\{RUNNER_TEMP(?::-[^}]*)?\}\/autofix-gh-config\.XXXXXX"/g;
-    const CLEAN = /rm -rf "\$\{(?:GH_CONFIG_DIR|gh_config_dir|cfg)\}"/;
+    // af-163. This census grew a sibling finding per round (R2-1 -> R3-2 ->
+    // R4-2 -> R5-1) because each fix widened one hand-maintained list. The
+    // shape it settles on removes the lists instead of extending them:
+    //   - match the mint by SHAPE, not by one RUNNER_TEMP spelling, so
+    //     `$RUNNER_TEMP`, `${RUNNER_TEMP}` and `${RUNNER_TEMP:-/tmp}` all land;
+    //     the literal `autofix-gh-config.XXXXXX` keeps unrelated temp dirs
+    //     (weaken.*, qwen-font-probe.*) out of scope;
+    //   - DISCOVER the script sources by scanning .github/scripts/*.sh rather
+    //     than naming two of them;
+    //   - judge each site on its own region AND require the cleanup to remove
+    //     that site's OWN variable, so an unrelated later `rm` cannot vouch
+    //     for it.
+    // Both lists stay exact: an unrecognised site lands in `leaking` and
+    // forces a recorded decision.
+    const MINT = /mktemp[^\n]*autofix-gh-config\.XXXXXX/g;
     const jobStarts = [...workflow.matchAll(/\n {2}([a-z][a-z0-9-]*):\n/g)];
     const stepStarts = [...workflow.matchAll(/\n {6}- name: '([^']+)'/g)];
     const ownerOf = (starts, pos) => {
@@ -13433,10 +13444,21 @@ exit 1
       }
       return current;
     };
+    const lineAt = (text, pos) =>
+      text.slice(
+        text.lastIndexOf('\n', pos) + 1,
+        text.indexOf('\n', pos) === -1 ? text.length : text.indexOf('\n', pos),
+      );
+    const variableOf = (text, pos) =>
+      /(\w+)="\$\(mktemp/.exec(lineAt(text, pos))?.[1] ?? null;
     const cleaned = [];
     const leaking = [];
-    const record = (key, region) =>
-      (CLEAN.test(region) ? cleaned : leaking).push(key);
+    const record = (key, region, variable) =>
+      (variable !== null &&
+      new RegExp(`rm -rf "\\$\\{${variable}\\}"`).test(region)
+        ? cleaned
+        : leaking
+      ).push(key);
     // Workflow: the mint's own step is the region.
     for (const m of workflow.matchAll(MINT)) {
       const pos = m.index;
@@ -13454,23 +13476,28 @@ exit 1
           before[before.length - 1].index,
           after.length ? Math.min(...after) : workflow.length,
         ),
+        variableOf(workflow, pos),
       );
     }
-    // Scripts have no job/step structure. Each site owns the span up to the
-    // NEXT mint (or EOF), and is keyed by its assigned variable and form so
-    // two sites in one file can never collapse to one verdict.
-    for (const [name, text] of [
-      ['autofix-push-and-report.sh', pushAndReportScript],
-      ['autofix-status-heartbeat.sh', heartbeatScript],
-    ]) {
+    // Scripts: discovered, not named. Each site owns the span up to the next
+    // mint (or EOF) and is keyed by variable and form.
+    const scriptDir = '.github/scripts';
+    for (const file of readdirSync(scriptDir).filter((f) =>
+      f.endsWith('.sh'),
+    )) {
+      const text = readFileSync(join(scriptDir, file), 'utf8');
       const sites = [...text.matchAll(MINT)];
       for (const [i, m] of sites.entries()) {
-        const lineStart = text.lastIndexOf('\n', m.index) + 1;
-        const line = text.slice(lineStart, text.indexOf('\n', m.index));
-        const variable = /(\w+)="\$\(mktemp/.exec(line)?.[1] ?? 'unknown';
-        const form = line.trimStart().startsWith('if !') ? 'guarded' : 'export';
+        const variable = variableOf(text, m.index);
+        const form = lineAt(text, m.index).trimStart().startsWith('if !')
+          ? 'guarded'
+          : 'export';
         const end = i + 1 < sites.length ? sites[i + 1].index : text.length;
-        record(`${name} · ${variable} ${form}`, text.slice(m.index, end));
+        record(
+          `${file} · ${variable} ${form}`,
+          text.slice(m.index, end),
+          variable,
+        );
       }
     }
     expect(cleaned.sort()).toEqual(

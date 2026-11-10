@@ -5100,18 +5100,29 @@ gained a trap is pinned to exactly ONE EXIT handler (R3-3):
 a second one silently replaces the first, and neither the
 census nor the lazy preamble match would notice.
 
-The census itself took three rounds to get right, and the
-shape it settled on is the point. It matches the mint with a
-pattern tolerant of the RUNNER_TEMP spelling — the heartbeat
-writes `${RUNNER_TEMP:-/tmp}`, which a single literal never
-matched (R3-2) — walks every source that mints rather than a
-hand-picked subset, and judges each site on its OWN region:
-a step body in the workflow, the span up to the next mint in
-a script. A file-wide predicate let one site's cleanup vouch
-for another, so fixing the first would have flipped both into
-the cleaned list and recorded a lie (R4-2). Both lists are
-asserted exactly, so a new site cannot join unnoticed and a
-fixed one cannot leave a stale entry.
+Every removal in those traps carries `|| true`. Under the
+runner's `bash -e` a genuinely failing `rm` inside an EXIT
+handler both aborts the rest of the handler and replaces the
+step's own status — probed on bash 5 with a permission-denied
+removal: the second removal never ran and a deliberate
+`exit 0` came out as 1. Cleanup is best-effort; it must not
+decide the step's verdict, and in the chained scan trap it
+must not stop the gh config dir from being removed.
+
+The census took four rounds to get right, and the shape it
+settled on is the point — each earlier fix had widened one
+hand-maintained list, which is why the finding kept growing
+siblings. It now matches the mint by SHAPE rather than by one
+RUNNER_TEMP spelling, so `$RUNNER_TEMP`, `${RUNNER_TEMP}` and
+`${RUNNER_TEMP:-/tmp}` all land, while the literal
+`autofix-gh-config.XXXXXX` keeps unrelated temp dirs
+(weaken.*, qwen-font-probe.*) out of scope. It DISCOVERS the
+script sources by scanning .github/scripts/*.sh instead of
+naming two. And it judges each site on its own region AND
+requires the cleanup to remove that site's OWN variable, so
+an unrelated later `rm` cannot vouch for it. Both lists stay
+exact: an unrecognised site lands in `leaking` and forces a
+recorded decision.
 
 One bound on all of this: an EXIT trap covers bash's own
 exits, not a SIGKILLed shell. That is why the scan lane also

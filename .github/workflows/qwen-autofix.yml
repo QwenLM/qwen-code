@@ -222,7 +222,7 @@ jobs:
           fi
           export GH_CONFIG_DIR
           # Step-scoped cleanup. Full rationale → qwen-autofix.md#af-163
-          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
+          trap 'rm -rf "${GH_CONFIG_DIR}" || true' EXIT
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
@@ -1636,7 +1636,7 @@ jobs:
           fi
           export GH_CONFIG_DIR
           # Step-scoped cleanup. Full rationale → qwen-autofix.md#af-163
-          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
+          trap 'rm -rf "${GH_CONFIG_DIR}" || true' EXIT
           api_error_file="$(mktemp)"
           if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
             api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
@@ -1905,7 +1905,7 @@ jobs:
           fi
           export GH_CONFIG_DIR
           # Step-scoped cleanup. Full rationale → qwen-autofix.md#af-163
-          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
+          trap 'rm -rf "${GH_CONFIG_DIR}" || true' EXIT
           # The marker only counts when the AUTOFIX_BOT authored it (both the
           # scan and the address-side recheck filter markers by that login), so
           # a mis-scoped PAT would post a comment that silently does nothing.
@@ -1976,7 +1976,7 @@ jobs:
           fi
           export GH_CONFIG_DIR
           # Step-scoped cleanup. Full rationale → qwen-autofix.md#af-163
-          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
+          trap 'rm -rf "${GH_CONFIG_DIR}" || true' EXIT
           api_error_file="$(mktemp)"
           if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
             api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
@@ -2126,7 +2126,7 @@ jobs:
           # would otherwise leave this dir on the pool for good (af-163).
           # One EXIT handler per shell, so all three removals ride one trap;
           # FLEET_FILE does not exist yet on those paths, hence the :- defaults.
-          trap 'rm -f "${FLEET_FILE:-}"; rm -rf "${WORKDIR:-}"; rm -rf "${GH_CONFIG_DIR}"' EXIT
+          trap 'rm -f "${FLEET_FILE:-}" || true; rm -rf "${WORKDIR:-}" || true; rm -rf "${GH_CONFIG_DIR}" || true' EXIT
 
           # Every lane that reaches this scan is supposed to hold the PAT:
           # route now declines the one event GitHub is known to run without
