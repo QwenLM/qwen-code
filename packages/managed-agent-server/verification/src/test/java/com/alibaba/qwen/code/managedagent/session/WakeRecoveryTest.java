@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.persistence.WakeRecoveryStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWakeRecoveryStore;
 import com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore.Candidate;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
@@ -16,9 +16,9 @@ import java.util.Optional;
 import static org.mockito.Mockito.*;
 
 class WakeRecoveryTest {
-    private final WakeRecoveryStore store = mock(WakeRecoveryStore.class);
+    private final JdbcWakeRecoveryStore store = mock(JdbcWakeRecoveryStore.class);
     private final HarnessConnector harness = mock(HarnessConnector.class);
-    private final ChildResultRelayStore records = mock(ChildResultRelayStore.class);
+    private final JdbcChildResultRelayStore records = mock(JdbcChildResultRelayStore.class);
     private final ManagedAgentProperties properties = new ManagedAgentProperties();
 
     private WakeRecovery recovery() {

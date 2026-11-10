@@ -1333,7 +1333,13 @@ bounded by the retention cap,
 while the watch-guard rows (`watch_reconcile_blocked`,
 `watch_pending_unreconciled`, `watch_reconcile_recovered`) carry `reason`; a
 blocking row also carries `error` when the watch state could not be read or
-reconciliation failed (the recovered row carries no error). A GitHub poll that filters more than 20 notifications journals
+reconciliation failed (the recovered row carries no error). The watch-budget
+rows `watch_budget_low` and `watch_budget_recovered` are edge-triggered: the
+low row carries `detail.remaining` and `detail.reserve` (both REST request
+counts) naming the budget that skipped the watch pass, and the recovered row
+carries neither detail nor error. Both keep `outcome: 'degraded'` on the wire
+(the outcome vocabulary is unchanged); the reason names the recovery so a
+client labels it as recovered rather than as an ongoing failure. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. While the cursor is held, a comment the
@@ -4926,9 +4932,9 @@ v1: `qwen-oauth`.
 
 > [!note]
 >
-> Qwen OAuth free tier was discontinued on 2026-04-15. Treat `qwen-oauth` as the
-> legacy v1 provider identifier in this protocol; new clients should prefer a
-> currently supported auth provider when one is available.
+> For new integrations, use [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli). `GET /auth/subscription?paywallScene=cli` returns the purchase link as `plansUrl`. Start browser sign-in separately with `POST /auth/subscription/flows?paywallScene=cli` and poll `GET /auth/subscription/flows/:id` for `authorizationUrl`.
+>
+> Qwen OAuth free tier was discontinued on 2026-04-15. `qwen-oauth` is the legacy v1 provider identifier for the routes below.
 
 **Runtime locality.** The daemon never spawns a browser — even if it can. The client decides whether to call `open(verificationUri)` locally; on a headless pod (the canonical Mode B deployment) the user opens the URL on whatever device they have a browser on. See `docs/users/qwen-serve.md` for the recommended UX.
 

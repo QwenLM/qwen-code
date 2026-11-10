@@ -8473,6 +8473,51 @@ describe('AppContainer State Management', () => {
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/quit');
     });
 
+    it('cancels a btw request shown behind a browsed answer on Ctrl+C', () => {
+      const cancelBtw = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand: vi.fn(),
+        slashCommands: [],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+        btwItem: {
+          id: 1,
+          type: MessageType.BTW,
+          btw: {
+            question: 'older question',
+            answer: 'older answer',
+            isPending: false,
+            ownRequestPending: true,
+          },
+        },
+        cancelBtw,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+      handleKeypress!({
+        name: 'c',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x03',
+      });
+
+      expect(cancelBtw).toHaveBeenCalledTimes(1);
+    });
+
     it('should reset Ctrl+C state after timeout', () => {
       vi.useFakeTimers();
 

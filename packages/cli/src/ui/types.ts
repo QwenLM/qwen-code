@@ -658,8 +658,24 @@ export type HistoryItemInsightProgress = HistoryItemBase & {
 
 export interface BtwProps {
   question: string;
+  /** Streamed text while pending, the final answer once settled. */
   answer: string;
   isPending: boolean;
+  /** The answer is an error message rather than model output. */
+  isError?: boolean;
+  /** Retry status shown while a pending request waits to retry. */
+  retryStatus?: string;
+  /** Earlier answered side questions that can be browsed. */
+  historyCount?: number;
+  /** 1-based position among the earlier answers while browsing them. */
+  browsePosition?: number;
+  /** True while ←/→ browse mode is active, which enables `c` and `x`. */
+  browsing?: boolean;
+  /** The view's own request is still running, even while an earlier answer
+   *  is shown, so Space/Enter do not dismiss it. */
+  ownRequestPending?: boolean;
+  /** Short-lived status line, e.g. after copying the answer. */
+  notice?: { text: string; isError?: boolean };
 }
 
 export type HistoryItemBtw = HistoryItemBase & {
