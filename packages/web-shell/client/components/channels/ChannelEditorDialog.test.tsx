@@ -4397,6 +4397,29 @@ describe('Email channel editor', () => {
     );
   });
 
+  it('files mailbox tuning under Advanced, not Credentials', async () => {
+    await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
+    await expandAdvancedSettings();
+
+    // The polled folder and the three size caps are rarely changed tuning,
+    // not credentials. Each must live in the advanced disclosure panel; if a
+    // key drops out of ADVANCED_FIELD_KEYS it falls back to Credentials and
+    // this assertion goes red.
+    for (const label of [
+      'IMAP Folder',
+      'Message Size Limit (bytes)',
+      'Attachment Size Limit (bytes)',
+      'Text Character Limit',
+    ]) {
+      const control = fieldByLabel(label);
+      expect(control).not.toBeNull();
+      const panel = control?.closest('[data-slot="collapsible"]');
+      expect(panel).not.toBeNull();
+      expect(panel?.textContent).toContain('Advanced settings');
+      expect(sectionHeadingOf(control)).not.toBe('Credentials');
+    }
+  });
+
   it('offers no group control for a private-only channel', async () => {
     await renderDialog({ descriptor: EMAIL, instance: EMAIL_INSTANCE });
 

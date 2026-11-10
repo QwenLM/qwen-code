@@ -39,7 +39,7 @@ GitLab (#8310)`）。
 
 `packages/cli/src/commands/channel/channel-registry.ts` 中的
 `supportedChannelCatalog()` 以 `manageable: management !== undefined` 上报。Email
-插件声明了带十七个字段和一个 `validateConfig` 钩子的 `management`，因此 daemon 一直
+插件声明了带十八个字段和一个 `validateConfig` 钩子的 `management`，因此 daemon 一直
 在把 Email 作为可管理类型上报。前端白名单是唯一的闸门。
 
 ### 共享准入字段按“插件未声明才注入”的规则追加
@@ -115,8 +115,9 @@ Email 是唯一的例外。
 
 范围外，及原因：
 
-- **放开 `telegram`、`weixin`、`qqbot`。** 白名单存在的意义就是每个平台在其编辑器
-  体验被验证后才接入。一次放开四个平台会把下文每条风险都乘以四。
+- **放开 `telegram`、`weixin`、`qq`。** 白名单存在的意义就是每个平台在其编辑器
+  体验被验证后才接入。一次放开四个平台会把下文每条风险都乘以四。（`qq` 是 QQ
+  插件的 `channelType`；`qqbot` 只是注册表里的 loader 名。）
 - **Provider OAuth（XOAUTH2）、富 HTML 输出、Email 的 pairing。** 明确属于适配器
   当前版本之外；任何前端改动都无法提供它们。
 - **`multiSession` 的门控。** 被注入的开关与 `chat_thread` 默认值在 `github`、
@@ -170,11 +171,13 @@ Email 是唯一的例外。
 ### 翻译
 
 `packages/web-shell/client/i18n.tsx`：在英文与中文两张表中，为未被
-`SHARED_FIELD_LABEL_KEYS` 覆盖的十七个 Email 自声明字段新增
-`channels.editor.field.email.*` 标签键。仅在能承载标签之外信息的地方新增
-`.description` 条目，例如两个 TLS 开关上的 STARTTLS 回退说明，以及
-`proactiveRecipients` 的精确匹配规则。即每种语言 17 个标签键加 3 个描述键，
-共 40 条。
+`SHARED_FIELD_LABEL_KEYS` 覆盖的 Email 自声明字段新增
+`channels.editor.field.email.*` 标签键，**并**刻意覆盖两个共享键：
+`allowedUsers` 与 `operators`。共享文案写的是“稳定的用户 ID……无需配对”，但
+Email 适配器只接受裸邮箱地址、且拒绝 pairing，因此这两个键获得 Email 专属的标签
+与描述，而不是被跳过。仅在能承载标签之外信息的地方新增 `.description` 条目，
+例如两个 TLS 开关上的 STARTTLS 回退说明，以及 `proactiveRecipients` 的精确匹配
+规则。即每种语言 19 个标签键加 5 个描述键，共 48 条。
 
 ### Email 插件 descriptor
 
@@ -268,9 +271,10 @@ web-shell 计数的变化是 385 → 449 → 451 → 453 → 454：下文代码�
 "存量 STARTTLS 选择在无关保存后存活"后是 454。
 
 **收敛：** 共跑三轮对抗审计。第 1 轮（四个视角）发现并修复了下列各项；第 2、3
-轮均干净，构成对当前 diff 的连续两轮干净。第 3 轮还补测了当时没有 committed
-用例覆盖的"存量 false"TLS 一格；该探针现已成为上面的 committed 用例。评审期间
-一次完整的 `packages/web-shell` 运行报告 15598 通过；
+轮各自都没有新发现。第 3 轮还补测了当时没有 committed 用例覆盖的"存量 false"
+TLS 一格，并把该探针提升为上面的 committed 用例，因此 diff 在第 3 轮期间发生了
+变化；两次干净判决分别覆盖探针前与探针后的 diff，而不是对同一份 diff 的两次
+走查。评审期间一次完整的 `packages/web-shell` 运行报告 15598 通过；
 `packages/cli` 在无关文件上超时，且失败集合在两次运行之间漂移——该套件本轮无判决，
 不归因于本次改动。
 

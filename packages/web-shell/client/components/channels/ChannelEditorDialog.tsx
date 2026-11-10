@@ -236,7 +236,11 @@ const ADVANCED_FIELD_KEYS = new Set([
   'defaultMessageRoute',
   'multiSession',
   'instructions',
-  // Email size caps are rarely changed tuning, not credentials.
+  // Email tuning: the polled mailbox folder (defaults to INBOX) and the size
+  // caps are rarely changed, not credentials. `folder` is a plain string, so
+  // unlike an enum it is not pre-filled on a fresh draft and does not auto-open
+  // this panel.
+  'folder',
   'maxMessageBytes',
   'maxAttachmentBytes',
   'maxTextLength',

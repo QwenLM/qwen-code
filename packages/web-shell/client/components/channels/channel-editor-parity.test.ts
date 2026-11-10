@@ -489,7 +489,11 @@ describe('Email parity (real plugin vs editor projection)', () => {
     };
     for (const [key, max] of Object.entries(expected)) {
       const field = emailManagement.fields.find((f) => f.key === key);
-      expect(field?.maximum).toBe(max);
+      // `maximum` lives only on the number variant of the descriptor union;
+      // narrow by kind so the bound is read from the right shape (and a field
+      // that stops being numeric fails here rather than silently skipping).
+      expect(field?.kind).toBe('number');
+      expect(field?.kind === 'number' ? field.maximum : undefined).toBe(max);
 
       const over = emailDraft();
       over.values[key] = String(max + 1);

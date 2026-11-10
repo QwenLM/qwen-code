@@ -45,7 +45,7 @@ received an explicit front-end admission change, for example `41f0e3ca5d0`
 `supportedChannelCatalog()` in
 `packages/cli/src/commands/channel/channel-registry.ts` reports
 `manageable: management !== undefined`. The Email plugin declares `management`
-with seventeen fields and a `validateConfig` hook, so the daemon has been
+with eighteen fields and a `validateConfig` hook, so the daemon has been
 advertising Email as a manageable type all along. The front-end allowlist is the
 only gate.
 
@@ -131,9 +131,10 @@ and the seven raw-key labels in the Email plugin descriptor.
 
 Out of scope, with reasons:
 
-- **Admitting `telegram`, `weixin`, `qqbot`.** The allowlist exists so each
+- **Admitting `telegram`, `weixin`, `qq`.** The allowlist exists so each
   platform is admitted once its editor experience is verified. Admitting four
-  platforms at once would multiply every risk below by four.
+  platforms at once would multiply every risk below by four. (`qq` is the QQ
+  plugin's `channelType`; `qqbot` is only the registry loader name.)
 - **Provider OAuth (XOAUTH2), rich HTML output, pairing for Email.** Explicitly
   outside the adapter's current version; no front-end change can supply them.
 - **`multiSession` gating.** The injected toggle has the same interaction with a
@@ -195,12 +196,15 @@ discard user data.
 ### Translations
 
 `packages/web-shell/client/i18n.tsx`: add `channels.editor.field.email.*` label
-keys in both the English and Chinese tables for the seventeen Email-declared
-fields that are not covered by `SHARED_FIELD_LABEL_KEYS`. Add a `.description`
-entry only where it carries information the label does not, such as the
-STARTTLS fallback on the two TLS switches and the exact-match rule on
-`proactiveRecipients`. That is 17 label keys plus 3 description keys per
-language, 40 entries in total.
+keys in both the English and Chinese tables for the Email-declared fields that
+are not covered by `SHARED_FIELD_LABEL_KEYS`, **plus** deliberate overrides of
+two shared keys: `allowedUsers` and `operators`. The shared copy says "stable
+user IDs … without pairing", but the Email adapter accepts only bare mailbox
+addresses and rejects pairing, so those two keys get Email-specific labels and
+descriptions rather than being skipped. Add a `.description` entry only where it
+carries information the label does not, such as the STARTTLS fallback on the two
+TLS switches and the exact-match rule on `proactiveRecipients`. That is 19 label
+keys plus 5 description keys per language, 48 entries in total.
 
 ### Email plugin descriptor
 
@@ -305,10 +309,12 @@ added the no-group-descriptor variant and the per-locale pins, and 454 after
 pinning that a stored STARTTLS choice survives an unrelated save.
 
 **Convergence:** three adversarial audit rounds were run. Round 1 (four lenses)
-found and fixed the issues listed below; rounds 2 and 3 were both clean, giving
-two consecutive clean rounds over the current diff. Round 3 additionally probed
-the stored-`false` TLS case that no committed test then covered; that probe is
-now the committed case above.
+found and fixed the issues listed below; rounds 2 and 3 each returned no new
+findings. Round 3 additionally probed the stored-`false` TLS case that no
+committed test then covered and promoted that probe into the committed case
+above, so the diff changed during round 3; the two clean verdicts therefore
+cover the pre-probe and post-probe diffs respectively, not two passes over one
+identical diff.
 A full `packages/web-shell` run during review reported 15598 passed, and
 `packages/cli` timed out on unrelated files whose failure set drifted between
 runs — no verdict for that suite, not attributed to this change.
