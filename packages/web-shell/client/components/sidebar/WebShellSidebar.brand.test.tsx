@@ -65,7 +65,12 @@ function renderSidebar(
   branding?: false | { render?: () => ReactNode },
   sessionProps?: Pick<
     ComponentProps<typeof WebShellSidebar>,
-    'sessionContent' | 'sessionHeader' | 'onNewSession' | 'primaryNav'
+    | 'sessionContent'
+    | 'sessionHeader'
+    | 'onNewSession'
+    | 'primaryNav'
+    | 'hideProjectHeader'
+    | 'collapsed'
   >,
 ) {
   act(() => {
@@ -217,14 +222,22 @@ describe('sidebar brand', () => {
     },
   );
 
-  it.each([undefined, false] as const)(
-    'keeps sorting reachable without the session action row with branding=%s',
-    (branding) => {
+  it.each([
+    { branding: undefined, hideProjectHeader: false },
+    { branding: false, hideProjectHeader: false },
+    { branding: undefined, hideProjectHeader: true },
+    { branding: false, hideProjectHeader: true },
+  ] as const)(
+    'keeps sorting visible without newTask: %j',
+    ({ branding, hideProjectHeader }) => {
       mocks.connection.capabilities = {
         qwenCodeVersion: '1.2.3',
         features: ['session_last_user_prompt_sort'],
       };
-      renderSidebar(undefined, branding, { primaryNav: { items: [] } });
+      renderSidebar(undefined, branding, {
+        primaryNav: { items: [] },
+        hideProjectHeader,
+      });
 
       expect(
         container.querySelector('button[aria-label="Select sessions"]'),
@@ -234,12 +247,41 @@ describe('sidebar brand', () => {
       );
       expect(sorts).toHaveLength(1);
       expect(
+        sorts[0].parentElement!.parentElement!.querySelector(
+          'button[aria-label="New session"]',
+        ),
+      ).toBeNull();
+      expect(
         sorts[0].parentElement!.querySelector(
           'button[aria-label="Collapse all workspaces"]',
         ),
-      ).not.toBeNull();
+      ).toBeNull();
     },
   );
+
+  it('keeps sorting reachable in the collapsed session popover', async () => {
+    mocks.connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_last_user_prompt_sort'],
+    };
+    renderSidebar(undefined, undefined, { collapsed: true });
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => clickSidebarElement(trigger!));
+    const sorts = document.querySelectorAll<HTMLElement>(
+      'button[aria-label="Sort sessions"]',
+    );
+    expect(sorts).toHaveLength(1);
+    expect(
+      sorts[0].parentElement!.querySelector(
+        'button[aria-label="Collapse all workspaces"]',
+      ),
+    ).not.toBeNull();
+    await act(async () => clickSidebarElement(sorts[0], true));
+    expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(2);
+  });
 
   it('renders the built-in name and inline mark when no brand is configured', () => {
     renderSidebar();

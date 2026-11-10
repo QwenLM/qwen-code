@@ -6742,6 +6742,10 @@ export function WebShellSidebar({
     standaloneSessionsVisible,
     t,
   ]);
+  const sessionActionControlsVisible =
+    !sectionView && sessionContent === undefined && (!collapsed || mobileOpen);
+  const sessionActionButtonClassName =
+    'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent';
   const searchEnabled = !liveView && !hideProjectHeader;
   // The activity panel replaces the session list, so a query typed there
   // filters rows the panel never shows.
@@ -7857,7 +7861,9 @@ export function WebShellSidebar({
             </>
           )}
           {!sectionView &&
-            (selectionMode || primaryNavItems.has('newTask')) && (
+            (selectionMode ||
+              primaryNavItems.has('newTask') ||
+              (questionSortSupported && sessionActionControlsVisible)) && (
               <div
                 className={cx(
                   styles.newTaskNav,
@@ -7881,7 +7887,7 @@ export function WebShellSidebar({
                       <XIcon size={18} />
                     </button>
                   </div>
-                ) : (
+                ) : primaryNavItems.has('newTask') ? (
                   <button
                     className={styles.newChatButton}
                     type="button"
@@ -7897,33 +7903,35 @@ export function WebShellSidebar({
                       <span>{t('sidebar.newTask')}</span>
                     )}
                   </button>
-                )}
-                {sessionContent === undefined && (!collapsed || mobileOpen) && (
+                ) : null}
+                {sessionActionControlsVisible && (
                   <div className="ml-auto flex shrink-0 items-center gap-1">
                     {questionSortSupported && (
                       <SessionSortMenu
                         value={sessionSort}
                         onChange={changeSessionSort}
-                        triggerClassName="size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent"
+                        triggerClassName={sessionActionButtonClassName}
                       />
                     )}
-                    <button
-                      className={cx(
-                        'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent',
-                        styles.activityToggle,
-                      )}
-                      type="button"
-                      title={t('sidebar.selectSessions')}
-                      aria-label={t('sidebar.selectSessions')}
-                      aria-pressed={selectionMode}
-                      disabled={bulkWorking}
-                      onClick={() => {
-                        if (selectionMode) exitSelection();
-                        else setSelectionMode(true);
-                      }}
-                    >
-                      <ListChecksIcon size={18} strokeWidth={1.5} />
-                    </button>
+                    {(selectionMode || primaryNavItems.has('newTask')) && (
+                      <button
+                        className={cx(
+                          sessionActionButtonClassName,
+                          styles.activityToggle,
+                        )}
+                        type="button"
+                        title={t('sidebar.selectSessions')}
+                        aria-label={t('sidebar.selectSessions')}
+                        aria-pressed={selectionMode}
+                        disabled={bulkWorking}
+                        onClick={() => {
+                          if (selectionMode) exitSelection();
+                          else setSelectionMode(true);
+                        }}
+                      >
+                        <ListChecksIcon size={18} strokeWidth={1.5} />
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -8185,8 +8193,8 @@ export function WebShellSidebar({
                     <IconChevron expanded={projectsExpanded} />
                   </button>
                   <div className={styles.projectsHeaderActions}>
-                    {((!primaryNavItems.has('newTask') && !selectionMode) ||
-                      (searchInProjectHeader && collapsed && !mobileOpen)) &&
+                    {searchInProjectHeader &&
+                      !sessionActionControlsVisible &&
                       !sectionView &&
                       questionSortSupported &&
                       sessionContent === undefined && (
