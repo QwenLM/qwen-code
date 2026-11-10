@@ -59,6 +59,8 @@ import java.util.concurrent.TimeUnit;
 final class WorkspaceCsiApplicationInventory {
     static final int MAX_ROWS = 4096;
     static final int MAX_BYTES = 32 * 1024 * 1024;
+    private static final java.util.regex.Pattern LOOKUP_FIELD =
+            java.util.regex.Pattern.compile("(\\w+)\\s*=\\s*\\?");
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -2518,14 +2520,10 @@ final class WorkspaceCsiApplicationInventory {
             try (var statement = connection.prepareStatement("SELECT t.* FROM " + table + " t WHERE " + predicate
                     + " ORDER BY " + String.join(",", declaration.keys()) + " LIMIT 2 FOR UPDATE")) {
                 statement.setQueryTimeout(10);
+                var fields = LOOKUP_FIELD.matcher(predicate);
                 for (int index = 0; index < parameters.length; index++) {
-                    var fields = java.util.regex.Pattern.compile("(\\w+)\\s*=\\s*\\?").matcher(predicate);
-                    String field = null;
-                    for (int at = 0; at <= index; at++) {
-                        requireEncoded(fields.find());
-                        field = fields.group(1);
-                    }
-                    String name = field;
+                    requireEncoded(fields.find());
+                    String name = fields.group(1);
                     var column = declaration.columns().stream().filter(value -> value.name().equals(name)).findFirst().orElseThrow();
                     historicalParameter(statement, index + 1, new Cell(column.kind(), utf8(parameters[index])));
                 }
