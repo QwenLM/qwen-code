@@ -2316,6 +2316,8 @@ describe('qwen-triage verify workflow', () => {
           }
           return ws;
         };
+        // The step summary a run wrote, beside its checkout.
+        const summaryOf = (ws) => readFileSync(`${ws}.summary`, 'utf8');
         const run = (ws, since, env = {}) => {
           const res = spawnSync(
             'bash',
@@ -2327,6 +2329,7 @@ describe('qwen-triage verify workflow', () => {
                 ...gitEnv,
                 HISTORY_SINCE: since,
                 RUNNER_TEMP: join(dir, 'tmp'),
+                GITHUB_STEP_SUMMARY: `${ws}.summary`,
                 ...env,
               },
             },
@@ -2377,16 +2380,23 @@ describe('qwen-triage verify workflow', () => {
         expect(out).toContain('4 PR commits');
         expect(out).toContain(`previous head ${pr2}`);
         expect(out).not.toContain('::warning::');
+        expect(summaryOf(deep)).toBe(
+          `history from ${day(38)}: 4 PR commits, merge base ${oldTip}, previous head ${pr2}\n`,
+        );
 
         // Dating the commits alone puts the cutoff after `main 5`, and the
         // merge whose parent that is becomes the boundary: pr 1 and pr 2
         // drop out, and the parentless merge now passes `--no-merges` as an
         // ordinary commit that adds the whole tree.
         const cut = checkout('cut');
-        // A first round: no previous report, and nothing to warn about.
+        // A first round: no previous report, so no warning about one. The
+        // cut leaves no merge base, which warns and reaches the summary.
         const cutOut = run(cut, day(30));
-        expect(cutOut).not.toContain('::warning::');
-        expect(cutOut).toContain('previous head none');
+        expect(cutOut).not.toContain('previous report');
+        expect(cutOut).toContain('::warning::No merge base is local');
+        expect(summaryOf(cut)).toContain(
+          'merge base not reachable, previous head none',
+        );
         expect(prCommits(cut)).toEqual([mergedBase, pr3].sort());
         expect(parents(cut, mergedBase)).toEqual([]);
 
@@ -2417,6 +2427,15 @@ describe('qwen-triage verify workflow', () => {
           '::warning::The previous report names no verified head',
         );
         expect(unnamedOut).toContain('previous head none');
+        // The shape real reports use (PR #13601): a bullet list in which the
+        // previous round's own head follows the verified one.
+        const bullets = checkout('bullets');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `**Verdict: \`findings\`** — see below.\n\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n- **Previous verified head (P):** \`${pr2}\`\n`,
+        );
+        expect(run(bullets, day(38))).toContain(`previous head ${gone}`);
+        expect(git(bullets, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
 
         // Older than the floor: deepened to the floor, with a warning.
         const floored = checkout('floored');
@@ -2499,7 +2518,7 @@ describe('qwen-triage verify workflow', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).not.toContain('Only these three commits exist locally');
     expect(flat).toContain(
-      "the lane deepens both sides back to the oldest date among the PR's commits and their parents, at most 90 days. When the previous report's verified head is still not local, it fetches that commit alone, without its parents, into `refs/verify/previous`.",
+      "the lane deepens both sides back to the oldest date among the PR's commits and their parents, at most 90 days. A merge base older than that stays out: a PR forked earlier keeps one only through a later merge of the base whose parents both fall within those 90 days. When the previous report's verified head is still not local, it fetches that commit alone, without its parents, into `refs/verify/previous`.",
     );
     // `git rev-parse <oid>^@` prints the argument and exits 128 for a
     // commit that is not local, so counting its lines finds a parent.
@@ -2508,7 +2527,7 @@ describe('qwen-triage verify workflow', () => {
       "`git log -1 --format=%P <oid>` for a commit's parents, which prints nothing for a commit at the shallow boundary and exits non-zero for one that is not local",
     );
     expect(flat).toContain(
-      '`git diff P H` still settles a test-only tip, but merge bases and ancestry tests do not work, and a failed `--is-ancestor` there is not evidence of a force-push. When `P` is missing, treat the round as a production change. When `git merge-tree` finds no merge base, the round is not merge only.',
+      '`git diff P H` still settles a test-only tip, but merge bases and ancestry tests do not work, and a failed `--is-ancestor` there is not evidence of a force-push. When `P` is missing, treat the round as a production change. When `git merge-tree` cannot run for want of a merge base (it exits 128 with `refusing to merge unrelated histories`), merge only is not established: say so in the report, and let `git diff P H` decide between a test-only tip and a production change.',
     );
     expect(flat).toContain(
       "Every `commits[].oid` in `$QWEN_VERIFY_CONTEXT` must be local with its parents: `git log -1 --format=%P <oid>` exits zero and prints at least one parent. In CI, `git rev-list --no-merges HEAD^2 --not HEAD^1` must also list exactly the snapshot's commits whose `%P` shows one parent, and `HEAD^1` is the `<target>` in the mutation matrix's enumeration.",

@@ -3684,7 +3684,12 @@ jobs:
             echo "::warning::The previous report names no verified head; the round cannot classify against it."
           fi
           mb="$(git merge-base "$base" "$head" 2>/dev/null)" || mb=''
-          echo "history from ${since:-nowhere}: $(git rev-list --count "$head" --not "$base") PR commits, merge base ${mb:-not reachable}, previous head ${prev:-none}"
+          [ -n "$mb" ] ||
+            echo "::warning::No merge base is local; the round cannot classify a merge or list what the base added."
+          # Also in the step summary, where a degraded round can be counted.
+          summary="history from ${since:-nowhere}: $(git rev-list --count "$head" --not "$base") PR commits, merge base ${mb:-not reachable}, previous head ${prev:-none}"
+          echo "$summary"
+          { echo "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; } 2>/dev/null || true
 
       # The flakiness gate (#9125) re-runs the PR's changed test files and
       # compares outcomes across identical rounds. The file list is recorded

@@ -50,9 +50,11 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   effective diff is `git diff HEAD^1..HEAD`; the verified head to cite is
   `git rev-parse HEAD^2`. The checkout is shallow. Before PR code runs, the
   lane deepens both sides back to the oldest date among the PR's commits
-  and their parents, at most 90 days. When the previous report's verified
-  head is still not local, it fetches that commit alone, without its
-  parents, into `refs/verify/previous`. Each fetch is best-effort, so test
+  and their parents, at most 90 days. A merge base older than that stays
+  out: a PR forked earlier keeps one only through a later merge of the
+  base whose parents both fall within those 90 days. When the previous
+  report's verified head is still not local, it fetches that commit alone,
+  without its parents, into `refs/verify/previous`. Each fetch is best-effort, so test
   for what a step needs instead of assuming it:
   `git merge-base HEAD^1 HEAD^2` for the merge base, and
   `git log -1 --format=%P <oid>` for a commit's parents, which prints
@@ -590,8 +592,11 @@ through the deepened history. Otherwise it was fetched alone as
 `refs/verify/previous`, without its parents: `git diff P H` still settles a
 test-only tip, but merge bases and ancestry tests do not work, and a failed
 `--is-ancestor` there is not evidence of a force-push. When `P` is missing,
-treat the round as a production change. When `git merge-tree` finds no
-merge base, the round is not merge only.
+treat the round as a production change. When `git merge-tree` cannot run
+for want of a merge base (it exits 128 with
+`refusing to merge unrelated histories`), merge only is not established:
+say so in the report, and let `git diff P H` decide between a test-only tip
+and a production change.
 
 - **Merge only.** `git merge-tree --write-tree P <the main tip H merged>`
   computes what a purely mechanical merge would produce. If that tree equals
