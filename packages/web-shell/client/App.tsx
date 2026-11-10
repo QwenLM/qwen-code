@@ -218,6 +218,7 @@ import {
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
+import { ComposerUsageStats } from './components/ComposerUsageStats';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import { SessionLimitBanner } from './components/SessionLimitBanner';
@@ -6770,6 +6771,18 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  // The composer reading refreshes in the background, so it reads the route
+  // directly: a failed read must not raise a notice the way the session
+  // action does.
+  const loadComposerUsageStats = useCallback(
+    (sessionId: string) => workspace.client.sessionStats(sessionId),
+    [workspace.client],
+  );
+  const openComposerUsagePanel = useCallback(() => {
+    if (connection.sessionId) {
+      openTokenUsagePanel(connection.sessionId, sessionActions);
+    }
+  }, [connection.sessionId, openTokenUsagePanel, sessionActions]);
   const openTrajectoryPanel = useCallback(
     (sourceSessionId: string) => {
       const tab: ArtifactPanelTab = {
@@ -26488,6 +26501,23 @@ export function App({
                           compact={true}
                         />
                       )}
+                      {!CustomFooter &&
+                        tokenUsageHeaderItemVisible &&
+                        !isChatEmptyState &&
+                        connection.status === 'connected' &&
+                        connection.sessionId && (
+                          <ComposerUsageStats
+                            sessionId={connection.sessionId}
+                            loadStats={loadComposerUsageStats}
+                            refreshSignal={connection.tokenCount}
+                            running={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active'
+                            }
+                            onOpen={openComposerUsagePanel}
+                          />
+                        )}
                       {isChatEmptyState && welcomeFooter && (
                         <div
                           className={[
