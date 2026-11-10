@@ -236,6 +236,19 @@ interface GithubCursor {
 }
 
 const MAX_DISPATCHED = 500;
+/**
+ * Stored replies GitHub refused are tried again while the channel runs, no
+ * sooner than this after the refusal or the last pass, so a rate limit that
+ * names no reset time is not hit on every poll.
+ */
+const PENDING_REPLY_RETRY_MIN_DELAY_MS = 5 * 60_000;
+/**
+ * Bounds how far ahead a far (or bogus) GitHub reset time schedules the
+ * next pass while the channel runs. Those passes make one attempt per reply
+ * and do not wait inside, so the schedule is their only wait; the pass at
+ * start keeps its in-call waits, and a pass still in them delays the next.
+ */
+const PENDING_REPLY_RETRY_MAX_DELAY_MS = 60 * 60_000;
 /** Bounds each list of GithubCursor.boundaryComments (one second's worth). */
 const MAX_BOUNDARY_COMMENTS = 500;
 
@@ -1390,6 +1403,23 @@ function parseRateLimitCount(value: unknown): number | undefined {
     : undefined;
 }
 
+/**
+ * How long a rate-limit answer asks to wait, as githubApi reads it: a
+ * positive `retry-after`, or a future `x-ratelimit-reset` when the budget is
+ * exhausted; undefined when it names neither.
+ */
+function rateLimitWaitHintMs(err: unknown): number | undefined {
+  const headers = (
+    err as { response?: { headers?: Record<string, string | number> } } | null
+  )?.response?.headers;
+  if (!headers) return undefined;
+  const retryAfter = Number(headers['retry-after'] ?? NaN);
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return retryAfter * 1000;
+  if (rateLimitRemaining(err) !== 0) return undefined;
+  const untilReset = Number(headers['x-ratelimit-reset']) * 1000 - Date.now();
+  return Number.isFinite(untilReset) && untilReset > 0 ? untilReset : undefined;
+}
+
 /** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
 function rateLimitRemaining(err: unknown): number | undefined {
   return parseRateLimitCount(
@@ -1552,6 +1582,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private pendingFinalDeliveryRetryAbort: AbortController | undefined;
   private pendingFinalDeliveryRequestsActive = 0;
   private pendingFinalDeliveryRetryStopRequested = false;
+  /**
+   * When the next pass over stored replies may start while the channel runs
+   * (epoch ms): the first poll from then on whose notification list succeeds
+   * starts it, unless a pass is still running. Undefined when none is
+   * scheduled. The pass at connect covers replies stored before the channel
+   * started.
+   */
+  private pendingFinalDeliveryRetryAt: number | undefined;
+  /**
+   * Stored replies this process posted, sent with an ambiguous answer, or
+   * found posted in the audit. They are never sent again by this process,
+   * even when neither the audit nor the pending file took the write; a pass
+   * that runs for other replies, or the next start, retries the removal of
+   * one still stored. Ids are kept for the life of the process: a reply with
+   * the same id is the same reply to the same message.
+   */
+  private settledPendingDeliveryIds = new Set<string>();
+  /**
+   * Passes in a row that left stored replies behind (GitHub refused them, or
+   * the pending file could not be read); lengthens the wait between them.
+   */
+  private fruitlessPendingDeliveryPasses = 0;
   private reasonFilter: Set<string> | null = null;
   private repoFilter: RepoFilter | null = null;
   private deliverToBoundSessions = false;
@@ -2081,11 +2133,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     this.pendingFinalDeliveryRetryStopRequested = false;
     this.startPollLoop();
+    // Starts before any poll reaches GitHub, so it takes over a schedule left
+    // from before a stop (see pollOnce).
+    this.startPendingFinalDeliveryRetry();
+  }
+
+  /**
+   * Runs one pass over the stored replies in the background, unless one is
+   * already running. A pass that leaves replies behind while the channel
+   * runs schedules the next one (see pollOnce). The pass at start keeps the
+   * in-call retries; later ones make a single attempt per reply.
+   */
+  private startPendingFinalDeliveryRetry(attempts = 3): void {
     if (this.pendingFinalDeliveryRetry) {
       return;
     }
+    this.pendingFinalDeliveryRetryAt = undefined;
     const retryAbort = new AbortController();
-    const retry = this.retryPendingFinalDeliveries(retryAbort.signal)
+    let refusal: unknown;
+    const retry = this.retryPendingFinalDeliveries(retryAbort.signal, attempts)
+      .then((lastRefusal) => {
+        refusal = lastRefusal;
+      })
       .catch((err) => {
         if (!retryAbort.signal.aborted) {
           process.stderr.write(
@@ -2101,9 +2170,43 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.pendingFinalDeliveryRetry = undefined;
           this.pendingFinalDeliveryRetryAbort = undefined;
         }
+        // A stopped channel retries at its next start instead.
+        if (
+          retryAbort.signal.aborted ||
+          this.pendingFinalDeliveryRetryStopRequested
+        ) {
+          return;
+        }
+        if (this.hasUnsettledPendingDeliveries()) {
+          this.fruitlessPendingDeliveryPasses += 1;
+          this.schedulePendingFinalDeliveryRetry(refusal);
+        } else {
+          this.fruitlessPendingDeliveryPasses = 0;
+        }
       });
     this.pendingFinalDeliveryRetryAbort = retryAbort;
     this.pendingFinalDeliveryRetry = retry;
+  }
+
+  /**
+   * Sets when the next pass over stored replies may start: when GitHub's
+   * `retry-after` or budget reset says the refusal ends, but no sooner than
+   * PENDING_REPLY_RETRY_MIN_DELAY_MS, doubled for each pass in a row that
+   * left replies behind, and no later than PENDING_REPLY_RETRY_MAX_DELAY_MS.
+   * An earlier schedule that is later still is kept.
+   */
+  private schedulePendingFinalDeliveryRetry(refusal?: unknown): void {
+    const floor =
+      PENDING_REPLY_RETRY_MIN_DELAY_MS *
+      2 ** Math.min(this.fruitlessPendingDeliveryPasses, 4);
+    const wait = Math.min(
+      Math.max(rateLimitWaitHintMs(refusal) ?? 0, floor),
+      PENDING_REPLY_RETRY_MAX_DELAY_MS,
+    );
+    this.pendingFinalDeliveryRetryAt = Math.max(
+      this.pendingFinalDeliveryRetryAt ?? 0,
+      Date.now() + wait,
+    );
   }
 
   /**
@@ -2277,6 +2380,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             { cause: persistError },
           );
         }
+        this.schedulePendingFinalDeliveryRetry(err);
       }
       throw new FinalPublicationError(
         err instanceof Error ? err.message : String(err),
@@ -2345,16 +2449,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.writePendingFinalDeliveries([...pending, record]);
   }
 
+  /**
+   * One pass over the stored replies. Resolves with the answer that stopped
+   * it early, if any, which may tell when to try again.
+   */
   private async retryPendingFinalDeliveries(
     signal?: AbortSignal,
-  ): Promise<void> {
+    attempts = 3,
+  ): Promise<unknown> {
     const pending = this.readPendingFinalDeliveries();
-    let rateLimited = false;
+    // Set by an answer that would turn the later replies away as well.
+    let halted = false;
+    let refusal: unknown;
     for (const record of pending) {
       // A stop defers the abort while another write is in flight; start no
       // new record meanwhile.
       if (signal?.aborted || this.pendingFinalDeliveryRetryStopRequested) {
-        return;
+        return refusal;
       }
       const auditBase = this.buildPublicationAuditBase({
         chatId: record.chatId,
@@ -2367,9 +2478,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? `Trigger: ${record.triggerKind}.`
           : undefined,
       });
-      if (this.hasPostedPublicationAudit(record.id)) {
+      if (
+        this.settledPendingDeliveryIds.has(record.id) ||
+        this.hasPostedPublicationAudit(record.id)
+      ) {
+        // Only its removal is left: never send it again, even if that
+        // removal fails and a later audit read does too.
+        this.settledPendingDeliveryIds.add(record.id);
         process.stderr.write(
-          `[Channel:${this.name}] dropping pending GitHub delivery already recorded as posted: ${sanitizeLogText(
+          `[Channel:${this.name}] dropping pending GitHub delivery already posted or attempted: ${sanitizeLogText(
             record.id,
             80,
           )}\n`,
@@ -2383,10 +2500,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         continue;
       }
-      // A rate limit answers every later record the same way: keep them for
-      // the next start instead of spending three more attempts on each. The
-      // already-posted check above needs no request, so it still runs.
-      if (rateLimited) continue;
+      // A rate limit, a refused credential or an outage answers every later
+      // record the same way: keep them for a later pass instead of spending
+      // attempts on each. The already-posted check above needs no request,
+      // so it still runs.
+      if (halted) continue;
       try {
         const comment = await this.createIssueComment(
           record.chatId,
@@ -2395,10 +2513,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             record.fullText,
             record.sourceLabel,
           ),
-          3,
+          attempts,
           isDefiniteNoWriteGithubError,
           signal,
         );
+        // Remembered before anything else can fail, so this process never
+        // posts it again even if neither the audit nor the pending file takes
+        // the write.
+        this.settledPendingDeliveryIds.add(record.id);
         // ponytail: GitHub has no createComment idempotency key without adding
         // a public marker to the verbatim final body; marker-upsert if that
         // contract changes.
@@ -2423,15 +2545,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // The abort waits for an in-flight write, so an answer that arrives
         // with the signal aborted still decides the record; only an attempt
         // that was never sent leaves it for the next start.
-        if ((err as { notSent?: boolean }).notSent) return;
-        if (isDefiniteNoWriteGithubError(err)) {
-          rateLimited = true;
+        if ((err as { notSent?: boolean }).notSent) return refusal;
+        // GitHub refused the write, for a rate limit or a credential it does
+        // not accept: keep this reply and the later ones.
+        if (
+          isDefiniteNoWriteGithubError(err) ||
+          (err as { status?: unknown }).status === 401
+        ) {
+          halted = true;
+          refusal = err;
           continue;
         }
-        // A rate limit without GitHub's header is no proof the write was
-        // refused, so this record is dropped below, but it would answer the
-        // later records the same way: keep those for the next start.
-        if (isRateLimitAnswer(err)) rateLimited = true;
+        // Another rate limit (without GitHub's budget header), or a server
+        // or network failure, is no proof the write was refused, so this
+        // record is dropped below, but it would answer the later records the
+        // same way: keep those for a later pass. Any other answer, such as a
+        // 404, a permission 403, a 422 or a local error, is taken to be about
+        // this reply alone and lets the pass go on.
+        if (classifyThreadFailure(err) !== 'permanent') {
+          halted = true;
+          refusal = err;
+        }
+        // Never sent again by this process, even if the audit or the
+        // removal below fails.
+        this.settledPendingDeliveryIds.add(record.id);
         this.recordPublicationAudit({
           ...auditBase,
           at: new Date().toISOString(),
@@ -2455,8 +2592,35 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.removeReplyPendingInboundTask(record);
       }
     }
+    if (halted) {
+      process.stderr.write(
+        `[Channel:${this.name}] pending GitHub delivery retry stopped early; any later stored replies wait for the next retry: ${sanitizeLogText(
+          refusal instanceof Error ? refusal.message : String(refusal),
+          200,
+        )}\n`,
+      );
+    }
+    return refusal;
   }
 
+  /**
+   * Whether a stored reply is left that this process has not settled. An
+   * unreadable pending file counts as one, so a later pass tries again.
+   */
+  private hasUnsettledPendingDeliveries(): boolean {
+    try {
+      return this.readPendingFinalDeliveries(true).some(
+        (record) => !this.settledPendingDeliveryIds.has(record.id),
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Whether the publication audit records the stored reply as posted. Read
+   * again for each reply, so a row another writer added meanwhile counts.
+   */
   private hasPostedPublicationAudit(pendingId: string): boolean {
     try {
       return readFileSync(this.channelFilePath('github-audit.jsonl'), 'utf-8')
@@ -2964,6 +3128,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ),
       'listNotifications',
     );
+
+    // Replies GitHub refused are tried again in the background once their
+    // wait is over, not only at the next start. Only a poll whose
+    // notification list succeeded starts the pass, so an outage that fails
+    // this list too does not spend the stored replies one ambiguous answer
+    // at a time; one that fails only comment writes still drops the reply
+    // each pass stops at. The cold binding gates above return before this
+    // list, so a channel still waiting for a binding snapshot that is
+    // complete or lists a binding (or for 30 binding scans after an empty
+    // partial one) runs no pass.
+    if (
+      this.pendingFinalDeliveryRetryAt !== undefined &&
+      Date.now() >= this.pendingFinalDeliveryRetryAt &&
+      !this.pendingFinalDeliveryRetryStopRequested
+    ) {
+      this.startPendingFinalDeliveryRetry(1);
+    }
 
     notifications.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
     this.setPollEventDetail({ notifications: notifications.length });
