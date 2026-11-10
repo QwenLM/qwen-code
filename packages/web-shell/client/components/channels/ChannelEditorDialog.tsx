@@ -1941,7 +1941,14 @@ export function ChannelEditorDialog({
                     <ChannelQrLogin
                       channelName={instance.name}
                       actions={qrLoginActions}
-                      onBound={() => void onReload()}
+                      onBound={() => {
+                        // The draft was seeded from the pre-bind instance, so
+                        // saving it would submit the old empty credentials and
+                        // clear the binding just made. Close instead of leaving
+                        // a stale draft over a changed store.
+                        void onReload();
+                        onOpenChange(false);
+                      }}
                     />
                   ) : null}
 

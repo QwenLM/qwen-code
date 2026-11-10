@@ -4553,3 +4553,72 @@ describe('Email channel editor', () => {
     expect(labels.some((t) => t.includes('Group policy'))).toBe(true);
   });
 });
+
+describe('QR bind inside the editor', () => {
+  it('closes the editor on a successful bind so the stale draft cannot unbind it', async () => {
+    // The draft is seeded from the pre-bind instance. Leaving the editor open
+    // would let the next Save submit the old empty credentials, which the
+    // upsert maps to a secret clear — silently undoing the bind.
+    const qqDescriptor: DaemonChannelTypeDescriptor = {
+      type: 'qq',
+      displayName: 'QQ',
+      manageable: true,
+      supportsQrLogin: true,
+      fields: [
+        { key: 'appID', label: 'App ID', kind: 'string' },
+        { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+      ],
+    };
+    const instance = {
+      name: 'qq-bot',
+      config: { type: 'qq' },
+      secrets: { appSecret: { present: false } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' as const },
+    };
+    const pending = {
+      loginId: 'login-1',
+      channelType: 'qq',
+      channelName: 'qq-bot',
+      status: 'pending' as const,
+      expiresAt: 9_999_999,
+      qrCodeDataUrl: 'data:image/png;base64,AAAA',
+    };
+    const onOpenChange = vi.fn();
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    const qrLoginActions = {
+      start: vi.fn().mockResolvedValue({ ...pending, attached: false }),
+      state: vi.fn().mockResolvedValue({
+        ...pending,
+        status: 'succeeded' as const,
+        qrCodeDataUrl: undefined,
+      }),
+      cancel: vi.fn(),
+    };
+    vi.useFakeTimers();
+    try {
+      await renderDialog({
+        descriptor: qqDescriptor,
+        instance: instance as never,
+        qrLoginActions,
+        onOpenChange,
+        onReload,
+      });
+      const scan = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('Scan to bind'),
+      );
+      expect(scan).toBeDefined();
+      await act(async () => {
+        scan!.click();
+      });
+      expect(onOpenChange).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+      });
+      expect(onReload).toHaveBeenCalled();
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
