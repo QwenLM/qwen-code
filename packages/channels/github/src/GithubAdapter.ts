@@ -934,10 +934,11 @@ export function validateBoundSessionConfig(
     return `prWatchBudgetReserve for channel ${channelName} requires deliverToBoundSessions: true.`;
   }
   // The descriptor now declares minimum: 0, so the editor refuses a negative
-  // before save. This check still guards the paths that never see the editor
-  // — a hand-edited settings.json or a daemon API call — because the getter
-  // would silently fall back to the default for a negative, letting a saved
-  // value mean something other than it says.
+  // the operator types. This check still guards everything else: a hand-edited
+  // settings.json or a daemon API call, and a stored negative the editor
+  // re-sends unchanged under its descriptor-level tolerance. The getter would
+  // silently fall back to the default for a negative, letting a saved value
+  // mean something other than it says.
   // Positive fractions stay legal: the getter rounds them UP, which is the
   // documented behaviour, not a silent fallback.
   if (config.prWatchBudgetReserve !== undefined) {

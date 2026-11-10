@@ -1373,10 +1373,13 @@ Numeric descriptors can use `minimum` for an inclusive lower bound,
 `exclusiveMinimum` for an open lower bound, and `maximum` for an inclusive upper
 bound. When both lower bounds are declared the stricter one applies, with the
 exclusive bound winning a tie because it also rejects equality. A stored number
-outside a newly declared bound is still accepted when the client re-sends it
-unchanged, so declaring a bound does not block unrelated edits to an existing
-channel; a value the client actually changed must satisfy the upper bound and
-whichever lower bound is in force. String
+outside a newly declared bound still passes the descriptor check when the client
+re-sends it unchanged, so declaring a bound does not by itself block unrelated
+edits to an existing channel; a value the client actually changed must satisfy
+the upper bound and whichever lower bound is in force. That tolerance is
+descriptor-level only: the channel's own configuration validation runs
+afterwards and may still refuse the write, so an unchanged value is not a
+guarantee that the save succeeds. String
 and secret descriptors can use `multiline` to ask clients for a multi-line text
 area; the descriptor types allow it only on top-level fields. Clients that do
 not render an advertised field kind must preserve its existing config value

@@ -3516,6 +3516,9 @@ describe('WorkspaceChannelSettingsStore', () => {
       // the ceiling. Without it an operator whose settings file predates the
       // floor cannot edit that channel at all — the accept-then-fail mismatch
       // this change removes, reintroduced on the daemon path.
+      // Descriptor layer only: this fixture plugin declares no validateConfig.
+      // A plugin that re-checks the field still refuses the save — see the
+      // plugin-hook case below.
       writeWorkspaceSettings(
         JSON.stringify({
           channels: {
@@ -3544,6 +3547,58 @@ describe('WorkspaceChannelSettingsStore', () => {
           secrets: {},
         }),
       ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('still refuses an unchanged below-floor value the plugin re-checks', async () => {
+      // The forgiveness above is descriptor-layer only. GitHub's validateConfig
+      // refuses a negative reserve unconditionally, so a hand-edited settings
+      // file holding one passes both forgiveness layers and fails at the hook.
+      // The plugin's own message, not the store's, is what proves the seam.
+      registerPlugin({
+        channelType: 'plugin-rechecks-floor',
+        displayName: 'Plugin rechecks floor',
+        management: {
+          fields: [
+            {
+              key: 'reserve',
+              label: 'Reserve',
+              kind: 'number',
+              minimum: 0,
+            },
+            { key: 'note', label: 'Note', kind: 'string' },
+          ],
+          validateConfig: (config: Record<string, unknown>) =>
+            typeof config['reserve'] === 'number' && config['reserve'] < 0
+              ? 'reserve must be a non-negative number.'
+              : undefined,
+        },
+        createChannel() {
+          throw new Error('not used');
+        },
+      } as unknown as ChannelPlugin);
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            rechecked: { type: 'plugin-rechecks-floor', reserve: -0.5 },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      await expect(
+        store.upsert('rechecked', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'plugin-rechecks-floor',
+            reserve: -0.5,
+            note: 'an unrelated edit',
+          } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: 'reserve must be a non-negative number.',
+      });
     });
   });
 });
