@@ -122,7 +122,7 @@ public class JdbcWorkspaceExecutionStore
     private record ResidentHeld(String sessionId, String handle, long revision, String reservationId) { }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
-    private ManagedWorkspaceRegistry externalAdmission;
+    private JdbcManagedWorkspaceRegistry externalAdmission;
 
     public void requireExternalExecution(ContextBinding binding) {
         if (isExternal(binding) && (externalAdmission == null
@@ -237,7 +237,7 @@ public class JdbcWorkspaceExecutionStore
         }
         if (authority != null) {
             try {
-                WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+                JdbcWorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
             } catch (ManagedAgentException error) {
                 throw lifecycleFailure(error);
             }

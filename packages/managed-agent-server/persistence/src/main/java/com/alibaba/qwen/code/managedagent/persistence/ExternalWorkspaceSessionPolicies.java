@@ -22,7 +22,7 @@ final class ExternalWorkspaceSessionPolicies {
      * permanent record defect, so the caller answers its own 409 instead of the
      * registry's retryable 503.
      */
-    static boolean externalFilesAllowedOrRefuse(ManagedWorkspaceRegistry workspaces, ContextBinding binding) {
+    static boolean externalFilesAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding) {
         try {
             return workspaces.externalFilesAllowed(binding);
         } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
@@ -37,7 +37,7 @@ final class ExternalWorkspaceSessionPolicies {
      * The effective pin then passes the same requested-approval selection the
      * admission path applied inline.
      */
-    static AgentSessionPolicies.AgentPin creationPin(boolean external, ManagedWorkspaceRegistry workspaces, ContextBinding binding,
+    static AgentSessionPolicies.AgentPin creationPin(boolean external, JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding,
             AgentSessionPolicies.AgentPin resolvedPin, SessionCreationCommand command) {
         AgentSessionPolicies.AgentPin effective = resolvedPin;
         if (external) {
@@ -55,7 +55,7 @@ final class ExternalWorkspaceSessionPolicies {
     }
 
     /** The legacy v1 close refusal exempts an external-files Session on its registered EXTERNAL Workspace. */
-    static boolean admitsLegacyClose(SessionRecord session, ManagedWorkspaceRegistry workspaces) {
+    static boolean admitsLegacyClose(SessionRecord session, JdbcManagedWorkspaceRegistry workspaces) {
         return WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && workspaces.isExternal(session.workspace());
     }
 }
