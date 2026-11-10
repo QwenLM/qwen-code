@@ -1718,7 +1718,6 @@
 
 .dropdownItemActive {
   color: var(--foreground);
-  background: var(--accent);
 }
 
 .dropdownItemIcon,
@@ -1828,6 +1827,7 @@
   background: var(--accent);
 }
 
+.dropdownItemActive,
 .reasoningEffortRowActive,
 .reasoningEffortRowActive:hover:not(:disabled) {
   font-weight: 500;
