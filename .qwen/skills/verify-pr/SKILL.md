@@ -1713,8 +1713,9 @@ lists what the base added, but a listed commit whose `%P` is empty is a
 shallow cut and the list stops there.) List what `main` added since the
 merge-base: validation rules on shared paths, new writers or record kinds,
 new readers of a format the PR changes, and schema changes
-(`git diff <merge-base> origin/main -- '*.sql'`). Probe each one on the PR's
-own new paths in the trial-merge tree. Measured example: `main` added
+(`git diff <merge-base> origin/main -- '*.sql'`; in CI, where no
+`origin/main` exists, `HEAD^1` takes its place). Probe each one on the
+PR's own new paths in the trial-merge tree. Measured example: `main` added
 workspace roles and dropped `can_read` / `can_create`; the PR's new SQL
 still named the old columns, so on a real stack built from the merge every
 child creation failed on `bad SQL grammar`. If the PR adds a database

@@ -3678,9 +3678,13 @@ jobs:
           if [ -n "$prev" ] && ! git cat-file -e "${prev}^{commit}" 2>/dev/null; then
             timeout -k 5 25 git fetch --no-tags --quiet --depth=1 origin "${prev}:refs/verify/previous" ||
               echo "::warning::Could not fetch the previous verified head ${prev}."
+          elif [ -z "$prev" ] && [ -s "$RUNNER_TEMP/verify-context/previous-report.md" ]; then
+            # A first round has no report; a follow-up whose report names
+            # no head re-runs everything, and should say why.
+            echo "::warning::The previous report names no verified head; the round cannot classify against it."
           fi
           mb="$(git merge-base "$base" "$head" 2>/dev/null)" || mb=''
-          echo "history from ${since:-nowhere}: $(git rev-list --count "$head" --not "$base") PR commits, merge base ${mb:-not reachable}"
+          echo "history from ${since:-nowhere}: $(git rev-list --count "$head" --not "$base") PR commits, merge base ${mb:-not reachable}, previous head ${prev:-none}"
 
       # The flakiness gate (#9125) re-runs the PR's changed test files and
       # compares outcomes across identical rounds. The file list is recorded

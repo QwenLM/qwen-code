@@ -2154,6 +2154,11 @@ describe('qwen-triage verify workflow', () => {
         // The stub serves both pages whatever it is asked; `--paginate`
         // follows only a query that selects this.
         expect(query).toContain('pageInfo { hasNextPage endCursor }');
+        // GitHub rejects a query that uses an undeclared variable, and the
+        // stub never reads the query: pin the declaration too.
+        expect(query).toContain(
+          'query($owner: String!, $name: String!, $number: Int!, $endCursor: String)',
+        );
         expect(query).toContain(
           'pullRequest(number: $number) { headRefOid commits(first: 100, after: $endCursor)',
         );
@@ -2370,6 +2375,7 @@ describe('qwen-triage verify workflow', () => {
         ).not.toBe(0);
         // Merges included: pr 1, pr 2, the merge of main, pr 3.
         expect(out).toContain('4 PR commits');
+        expect(out).toContain(`previous head ${pr2}`);
         expect(out).not.toContain('::warning::');
 
         // Dating the commits alone puts the cutoff after `main 5`, and the
@@ -2377,7 +2383,10 @@ describe('qwen-triage verify workflow', () => {
         // drop out, and the parentless merge now passes `--no-merges` as an
         // ordinary commit that adds the whole tree.
         const cut = checkout('cut');
-        run(cut, day(30));
+        // A first round: no previous report, and nothing to warn about.
+        const cutOut = run(cut, day(30));
+        expect(cutOut).not.toContain('::warning::');
+        expect(cutOut).toContain('previous head none');
         expect(prCommits(cut)).toEqual([mergedBase, pr3].sort());
         expect(parents(cut, mergedBase)).toEqual([]);
 
@@ -2395,6 +2404,19 @@ describe('qwen-triage verify workflow', () => {
         expect(prCommits(pushed)).toEqual([pr1, pr2, pr3].sort());
         expect(parents(pushed, pr1)).toEqual([fork]);
         expect(pushedOut).toContain(`4 PR commits, merge base ${oldTip}`);
+
+        // A previous report that names no verified head says so: that
+        // follow-up round re-runs everything, and the log tells why.
+        const unnamed = checkout('unnamed');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `Compared with base tip \`${fork}\`.\n`,
+        );
+        const unnamedOut = run(unnamed, day(38));
+        expect(unnamedOut).toContain(
+          '::warning::The previous report names no verified head',
+        );
+        expect(unnamedOut).toContain('previous head none');
 
         // Older than the floor: deepened to the floor, with a warning.
         const floored = checkout('floored');
@@ -2496,6 +2518,9 @@ describe('qwen-triage verify workflow', () => {
     );
     expect(flat).toContain(
       'If any commit fails either check, claim no per-commit coverage',
+    );
+    expect(flat).toContain(
+      "(`git diff <merge-base> origin/main -- '*.sql'`; in CI, where no `origin/main` exists, `HEAD^1` takes its place)",
     );
   });
 
