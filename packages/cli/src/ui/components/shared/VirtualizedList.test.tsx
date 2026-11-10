@@ -1439,4 +1439,35 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
     expect(frame).not.toMatch(/item-499/);
     expect(frame.split('\n').length).toBeLessThanOrEqual(13);
   });
+
+  // A zero from the host is a steady state while the controls region fills a
+  // short terminal, so the viewport has to come from the last height the host
+  // actually constrained to. Sizing from the component's own measurement does
+  // not work here: the root box sits under auto-height ancestors, so that
+  // measurement is the content's, and using it renders every row.
+  it('holds the last constrained viewport when the host drops to 0', () => {
+    const list = (height: number) => (
+      <Box flexDirection="column">
+        <VirtualizedList<Item>
+          data={makeItems(200)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          containerHeight={height}
+          showScrollbar={false}
+        />
+      </Box>
+    );
+
+    const { lastFrame, rerender } = render(list(10));
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(11);
+
+    rerender(list(0));
+    const frame = lastFrame() ?? '';
+    expect(frame).toMatch(/item-0/);
+    // Falling back to the measured box height would size the list to its
+    // content and mount the whole 200-row history.
+    expect(frame).not.toMatch(/item-199/);
+    expect(frame.split('\n').length).toBeLessThanOrEqual(11);
+  });
 });
