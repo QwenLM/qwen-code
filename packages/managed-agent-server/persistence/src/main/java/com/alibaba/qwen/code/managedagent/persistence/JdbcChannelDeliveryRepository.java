@@ -188,7 +188,7 @@ public final class JdbcChannelDeliveryRepository
         return ManagedSchemaKeys.key("CHANNEL", channelScope(tenantId, channelId), deliveryId);
     }
 
-    private static String receiptJson(String receipt) {
+    static String receiptJson(String receipt) {
         if (receipt == null) {
             return null;
         }
@@ -199,7 +199,7 @@ public final class JdbcChannelDeliveryRepository
         }
     }
 
-    private static String receipt(String encoded) {
+    static String receipt(String encoded) {
         if (encoded == null) {
             return null;
         }

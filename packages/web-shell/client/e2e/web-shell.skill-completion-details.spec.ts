@@ -113,7 +113,17 @@ test('wraps Skill details and separates the owning Extension', async ({
   await expect(editor).toHaveText(`/${qualifiedName} test-request`);
 
   await editor.fill('/');
-  await page.getByRole('option').filter({ hasText: standalone }).hover();
+  const standaloneOption = page
+    .getByRole('option')
+    .filter({ hasText: standalone });
+  const standaloneLabel = standaloneOption.locator(':scope > span').first();
+  await expect(standaloneLabel).toContainText(standalone);
+  const labelLayout = await standaloneLabel.evaluate((label) => ({
+    width: label.clientWidth,
+    scrollWidth: label.scrollWidth,
+  }));
+  expect(labelLayout.scrollWidth).toBeLessThanOrEqual(labelLayout.width);
+  await standaloneOption.hover();
   await expect(detail.getByText(new RegExp(`^/?${standalone}$`))).toBeVisible();
   await expect(detail).not.toContainText(extension);
 

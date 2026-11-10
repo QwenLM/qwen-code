@@ -746,6 +746,32 @@ describe('AnthropicContentGenerator', () => {
       }
     });
 
+    it('returns a block-binding rejection on a single attempt', async () => {
+      const { retryContext } = await import('../../utils/retryContext.js');
+      createImpl
+        .mockRejectedValueOnce(status400(BINDING_REJECTION))
+        .mockResolvedValue(reply('claude-opus-5-5'));
+      const generator = await newGenerator(opus55Proxy());
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () => generator.generateContent(opus55Hi())),
+      ).rejects.toThrow(BINDING_REJECTION);
+      expect(createImpl).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          thinking: expect.objectContaining({
+            block_binding: expect.anything(),
+          }),
+        }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
+    });
+
     it('does not retry an unrelated proxy 400', async () => {
       createImpl.mockRejectedValue(
         status400('Invalid signature in thinking block'),

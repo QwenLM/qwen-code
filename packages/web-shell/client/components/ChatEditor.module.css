@@ -517,7 +517,7 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 220px)
+    minmax(0, max-content)
     minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
@@ -637,7 +637,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
-  text-align: right;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
