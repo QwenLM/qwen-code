@@ -138,6 +138,14 @@ export interface PendingSliceResult {
   keptLines: number;
   /** True when some trailing source lines were dropped to fit the budget. */
   clipped: boolean;
+  /**
+   * RENDERED rows (not source lines) walked through `keptLines`. Unlike
+   * `clipped`, this is true when the result does not fit `budget`, including
+   * the case where an over-budget leading table is kept whole (the `i > 0`
+   * cut rule) and `clipped` therefore stays false. Callers using this as a
+   * height gate must read it, not `clipped`.
+   */
+  renderedRows: number;
 }
 
 /**
@@ -323,5 +331,9 @@ export function fitPendingSlice(
       i++;
     }
   }
-  return { keptLines: kept, clipped: kept < allLines.length };
+  return {
+    keptLines: kept,
+    clipped: kept < allLines.length,
+    renderedRows: rendered,
+  };
 }

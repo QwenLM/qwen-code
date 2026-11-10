@@ -114,7 +114,23 @@ describe('fitPendingSlice', () => {
     expect(fitPendingSlice(lines, 80, 10, CLAMP)).toEqual({
       keptLines: 3,
       clipped: false,
+      renderedRows: 3,
     });
+  });
+
+  it('reports renderedRows even when a kept first table overflows the budget', () => {
+    // The over-budget leading table is kept whole (the cut is gated on
+    // `i > 0`), so `clipped` is false. A height gate reading `clipped` would
+    // conclude the result fits; `renderedRows` is what says it does not.
+    const lines = [
+      '| A | B |',
+      '| - | - |',
+      ...Array.from({ length: 12 }, (_, i) => `|${i}|x|`),
+    ];
+    const result = fitPendingSlice(lines, 80, 14, CLAMP);
+    expect(result.clipped).toBe(false);
+    expect(result.keptLines).toBe(lines.length);
+    expect(result.renderedRows).toBeGreaterThan(14);
   });
 
   it('clips plain text at the budget', () => {

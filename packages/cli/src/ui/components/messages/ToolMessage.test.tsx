@@ -578,6 +578,117 @@ describe('<ToolMessage />', () => {
 
       expect(lastFrame()).not.toContain('MockMarkdown:');
     });
+
+    it('measures the object shape ask_user_question actually returns', () => {
+      // #13956's real shape: `returnDisplay` is
+      // `{ type: 'ask_user_question_answers', text, answers }`, which
+      // `useResultDisplayRenderer` maps to a string. A raw-prop `typeof ===
+      // 'string'` check never saw it, so the height gate never ran.
+      const tooTall = Array.from(
+        { length: 40 },
+        (_, i) => `**Q${i + 1}**: answer ${i + 1}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={{
+            type: 'ask_user_question_answers',
+            text: tooTall,
+            answers: [],
+          }}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('keeps a short object-shaped result as markdown', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={{
+            type: 'ask_user_question_answers',
+            text: '**Color**: Blue',
+            answers: [],
+          }}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('MockMarkdown:**Color**: Blue');
+    });
+
+    it('keeps a resumed shell result on the plain-text path with no budget', () => {
+      // Resumed sessions rebuild tool displays without `renderOutputAsMarkdown`
+      // (ToolMessage defaults it to true) and ctrl+s drops the height budget.
+      // Shell output must still stay plain text: ShellTool does not declare
+      // `isOutputMarkdown: false` — it inherits DeclarativeTool's `true` — so
+      // the `isShellTool` branch is the only thing keeping the
+      // ui.shellOutputMaxLines cap in force (#10640).
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="Shell"
+          resultDisplay={'**not markdown**'}
+          availableTerminalHeight={undefined}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('falls back for a single table taller than the budget', () => {
+      // `fitPendingSlice` keeps an over-budget LEADING table whole (the cut is
+      // gated on `i > 0`), so `clipped` stays false for a table-only result.
+      // The gate has to read the accumulated rendered rows instead.
+      const table = [
+        '| name | value |',
+        '| --- | --- |',
+        ...Array.from({ length: 12 }, (_, i) => `| row${i} | v${i} |`),
+      ].join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={table}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('falls back for wrapped bullet lines that render two rows each', () => {
+      // The estimator charges a source line one row at `contentWidth`, but
+      // MarkdownDisplay wraps list items narrower, so 14 bullets of ~78 chars
+      // render ~28 rows.
+      const bullets = Array.from(
+        { length: 14 },
+        (_, i) => `- ${`item ${i + 1} `.padEnd(78, 'x')}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={bullets}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
   });
 
   describe('fullDetail (§4.9 transcript) data-source switch', () => {
