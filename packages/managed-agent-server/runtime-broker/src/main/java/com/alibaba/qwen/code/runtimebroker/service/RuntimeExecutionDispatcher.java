@@ -263,7 +263,7 @@ final class RuntimeExecutionDispatcher {
                     return null;
                 }).thenCompose(ignored -> {
                     if (!RuntimeProviderKinds.SSH_PROCESS.equals(context.binding().getRequest().getProvisionerKind())
-                            && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())) {
+                            && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                             && !RuntimeToolMeasurements.selected(executing.getReference())) {
                         return CompletableFuture.completedFuture(null);
                     }
@@ -449,7 +449,6 @@ final class RuntimeExecutionDispatcher {
                 || !"deferred".equals(execution.getReference().get("dispatchMode")))) {
             return failed(conflict("workspace_close_identity_unverified", "External drain requires settled file Tool v2 results"));
         }
-        if ((!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) && !external)
         if ((!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
                         && !RuntimeToolMeasurements.selected(execution.getReference()) && !external)
                 || !execution.isSettled() || execution.getResult() == null
@@ -467,7 +466,6 @@ final class RuntimeExecutionDispatcher {
         if (binding.getLease() == null || session == null || !execution.belongsTo(session)
                 || !binding.getBindingId().equals(execution.getBindingId())
                 || binding.getGeneration() != execution.getRuntimeGeneration()
-                || !binding.getRequest().getScope().equals(session.getSession().getScope())
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
                 || !com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         && !execution.getHarnessSessionId().equals(binding.getRequest().getIsolationKey())) {
