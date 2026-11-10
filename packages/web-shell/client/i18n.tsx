@@ -1377,6 +1377,15 @@ const EN: Messages = {
   'askUser.submitFailed': 'Failed to submit answer',
   'askUser.submitOptionUnavailable': 'Submit option is unavailable',
   'askUser.ignore': 'Ignore',
+  'askUser.askDetails': 'Ask for details',
+  'askUser.askDetailsHint':
+    'Open a side task that explains this question before you answer',
+  'askUser.detailsPrompt': (v) =>
+    `${v?.questions ?? ''}
+
+The main session is waiting for me to answer the questions above. I want to understand the details before answering. Read the relevant code and context first. Base every claim on what you verify, and mark anything unverified.
+
+Write the explanation as a self-contained single-file HTML (inline CSS, no external resources). Language requirement: write the entire page in English — every heading, body sentence, list item, and label must be in English; do not mix in another language. Borrow the ASD-STE100 controlled-language sentence rules: one idea per sentence, active voice, short sentences (about 20 words max), one term per concept, conditions before actions, lists for three or more items, no metaphors or exclamations. Keep code, commands, paths, and config keys verbatim. Cover the background of each question, every option's meaning, differences, impact and risks, and a recommendation with reasons. Do not answer the questions for me and do not change the main session. Save the file under .qwen/tmp/ (for example .qwen/tmp/ask-details.html), then reply with its path and a one-sentence summary.`,
   'askUser.multiHint': 'multiple choice',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
@@ -1844,6 +1853,9 @@ const EN: Messages = {
     'Press / to search; Enter releases the selected live session',
   'release.releasing': 'Releasing...',
   'release.title': 'Release Session',
+  'session.limit.reached':
+    'The live-session limit has been reached. Release an idle session, or wait for active work to finish.',
+  'session.limit.release': 'Release idle sessions',
   'dialog.footer.menu': 'Esc to menu',
   'dialog.footer.mcpServers':
     '↑↓ to navigate · Enter details · r refresh · Esc close',
@@ -2113,6 +2125,41 @@ const EN: Messages = {
   'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
+  'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.off': 'Delivery off',
+  'scheduledTasks.delivery.hint':
+    'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
+  'scheduledTasks.delivery.unavailable':
+    'This daemon does not support Channel delivery changes.',
+  'scheduledTasks.delivery.discardChanges': 'Discard delivery changes',
+  'scheduledTasks.delivery.perRun':
+    'A new session every run does not support Channel delivery. Choose a persistent session or turn delivery off before saving.',
+  'scheduledTasks.delivery.required':
+    'Choose a Channel and enter a destination ID.',
+  'scheduledTasks.delivery.whitespace':
+    'This ID has leading or trailing whitespace, which will be sent as part of the destination.',
+  'scheduledTasks.delivery.trimWhitespace': 'Remove surrounding whitespace',
+  'scheduledTasks.delivery.loading': 'Loading Channels…',
+  'scheduledTasks.delivery.loadingContacts': 'Loading suggested destinations…',
+  'scheduledTasks.delivery.channelsFailed':
+    'Could not load Channels. Close and reopen the form to retry; existing delivery is preserved.',
+  'scheduledTasks.delivery.noChannels':
+    'No Channels are configured in this workspace. Configure one in Channels first.',
+  'scheduledTasks.delivery.targetUnavailable':
+    'This Channel is unavailable in this workspace. The saved destination is preserved; you can choose another Channel or turn delivery off.',
+  'scheduledTasks.delivery.notObserved':
+    'This destination is not in the recent suggestions. Its ID is preserved; contact discovery is not required for delivery.',
+  'scheduledTasks.delivery.suggestion': 'Suggested destination',
+  'scheduledTasks.delivery.manual': 'Enter a destination ID below',
+  'scheduledTasks.delivery.contactsFailed':
+    'Could not load suggestions. You can still enter a destination ID; existing delivery is preserved.',
+  'scheduledTasks.delivery.suggestionsHint':
+    'Suggestions come from recently observed contacts. You can also enter a known user or chat ID supported by the Channel.',
+  'scheduledTasks.delivery.type': 'Destination type',
+  'scheduledTasks.delivery.id': 'Destination ID',
+  'scheduledTasks.delivery.user': 'User',
+  'scheduledTasks.delivery.chat': 'Chat',
+  'scheduledTasks.delivery.cardPrefix': 'Delivery:',
   'scheduledTasks.gate': 'Gate command (optional)',
   'scheduledTasks.gatePlaceholder':
     'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
@@ -2349,6 +2396,10 @@ const EN: Messages = {
   'sidebar.sessionIdCopied': 'Session ID copied',
   'sidebar.workspaceUntrusted': 'untrusted',
   'sidebar.manageWorkspaces': 'Manage workspaces…',
+  'sidebar.collapseAllWorkspaces': 'Collapse all workspaces',
+  'sidebar.expandAllWorkspaces': 'Expand all workspaces',
+  'sidebar.workspaceOrderError':
+    'Could not load or save workspace order. Reload and try again.',
   'sidebar.workspaceReadOnly': 'read-only',
   'sidebar.workspaceTrustToOpen': 'Trust this workspace to open the session.',
   'sidebar.addWorkspace': 'Add workspace',
@@ -4018,6 +4069,37 @@ const EN: Messages = {
   'stream.cancel': 'esc to cancel',
   'stream.cancelArmed': 'Press Esc again to stop',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'waitingGame.title': 'Juust Relax',
+  'waitingGame.activityTitle': 'Q&A activity',
+  'waitingGame.usageTitle': 'Token usage',
+  'waitingGame.openActivity': 'Open task activity',
+  'waitingGame.startGame': 'Start a random game',
+  'waitingGame.backToHeatmap': 'Back to activity',
+  'waitingGame.heatmap': 'Activity',
+  'waitingGame.tokens': 'Usage',
+  'waitingGame.heatmapTooltip': (v) =>
+    `${v?.time ?? ''} · ${v?.count ?? 0} Q&A`,
+  'waitingGame.jumpToMessage': 'Click to locate',
+  'waitingGame.tokenTotal': 'Total tokens',
+  'waitingGame.tokenInput': 'Input',
+  'waitingGame.tokenOutput': 'Output',
+  'waitingGame.tokenCached': 'Cached',
+  'waitingGame.tokenContext': 'Context',
+  'waitingGame.tokenEmpty': 'No token data yet',
+  'waitingGame.snakeControls': 'Arrows / WASD turn · Space pause · Esc close',
+  'waitingGame.collapse': 'Collapse',
+  'waitingGame.region': 'Waiting minigame',
+  'waitingGame.score': (v) => `Score ${v?.score ?? 0}`,
+  'waitingGame.best': (v) => `Best ${v?.score ?? 0}`,
+  'waitingGame.controls':
+    '↑↓ move · → speed up · ← rotate · Space pause/resume · clear a column +50',
+  'waitingGame.paused': 'Paused',
+  'waitingGame.pausedHint': 'Press Space to resume',
+  'waitingGame.gameOver': 'Game over',
+  'waitingGame.restart': 'Play again',
+  'waitingGame.cleared': (v) => `Cleared ${v?.count ?? 0} · +${v?.score ?? 0}`,
+  'waitingGame.mute': 'Mute game sound',
+  'waitingGame.unmute': 'Unmute game sound',
   'theme.current': (v) => `current: ${v?.theme ?? ''}`,
   'theme.auto': 'Auto',
   'theme.dark': 'Dark',
@@ -4739,6 +4821,18 @@ const EN: Messages = {
     'member_feature_requested — organization members asked to enable a feature such as Copilot',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — the bot was credited for contributing to a security advisory',
+  'channels.editor.field.github.repoFilterMode': 'Repository Filter',
+  'channels.editor.field.github.repoFilterMode.description':
+    'Filter incoming notifications by repository. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+  'channels.editor.field.github.repoFilterMode.option.off':
+    'Off — all repositories',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    'Allowlist — only listed repositories',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    'Blocklist — all except listed repositories',
+  'channels.editor.field.github.repoFilter': 'Filtered Repositories',
+  'channels.editor.field.github.repoFilter.description':
+    'Comma-separated owner/repo names. You can paste repository or PR URLs; they are shortened to owner/repo on save.',
   'channels.editor.field.github.deliverToBoundSessions':
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
@@ -4756,6 +4850,11 @@ const EN: Messages = {
     'head_change — the PR’s head commit changes',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — the PR is merged or closed',
+  'channels.editor.field.github.prWatchLimit': 'PR Watch Limit',
+  'channels.editor.field.github.prWatchLimit.description':
+    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one API request per poll — at the 60s default, a 5000/hour token budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default (30).',
+  'channels.editor.field.github.prWatchLimit.disabledHint':
+    'Enable "Deliver To PR-Bound Sessions" above to set the watch limit.',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
   'channels.editor.field.github.boundSessionActions.description':
     'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
@@ -4966,6 +5065,8 @@ const EN: Messages = {
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.requiresBoundDelivery':
     'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+  'channels.editor.validation.repoFilterRequired':
+    'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
@@ -6314,6 +6415,14 @@ const ZH: Messages = {
   'askUser.submitFailed': '提交回答失败',
   'askUser.submitOptionUnavailable': '提交选项不可用',
   'askUser.ignore': '忽略',
+  'askUser.askDetails': '问细节',
+  'askUser.askDetailsHint': '打开侧边任务，在作答前解释这个问题',
+  'askUser.detailsPrompt': (v) =>
+    `${v?.questions ?? ''}
+
+主会话正在等我回答上面的问题。我想先了解细节，再作答。请先阅读相关代码与上下文。结论以你核实到的事实为准，未核实的内容要标注。
+
+请把解释写成自包含单文件 HTML（内联 CSS，不引用外部资源）。语言要求：整页必须用简体中文写作——每个标题、正文句子、列表项和标签都用中文，不要混用其他语言。借鉴 ASD-STE100 受控句式：一句一个意思、主动语态、每句不超过 20 字（代码与标识符按 1 词计）、同一概念只用一个词、条件写在动作之前、三项以上用列表、不用比喻和感叹号。代码、命令、路径、配置键名原样保留。内容覆盖：每个问题的背景；每个选项的含义、差异、影响与风险；给出建议并说明理由。不要替我作答，也不要改动主会话。文件保存到 .qwen/tmp/ 下（例如 .qwen/tmp/ask-details.html），完成后回复文件路径和一句话摘要。`,
   'askUser.multiHint': '可多选',
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
@@ -6754,6 +6863,9 @@ const ZH: Messages = {
   'release.pressSearch': '按 / 搜索；Enter 释放选中的 live session',
   'release.releasing': '释放中...',
   'release.title': '释放会话',
+  'session.limit.reached':
+    '活跃会话已达上限，释放一个空闲会话或等待活跃工作结束后即可继续。',
+  'session.limit.release': '释放空闲会话',
   'dialog.footer.menu': 'Esc 返回菜单',
   'dialog.footer.mcpServers': '↑↓ 导航 · Enter 查看详情 · r 刷新 · Esc 关闭',
   'dialog.footer.mcpSelect': '↑↓ 导航 · Enter 选择 · Esc 返回',
@@ -6992,6 +7104,39 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
+  'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.off': '不投递',
+  'scheduledTasks.delivery.hint':
+    '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
+  'scheduledTasks.delivery.unavailable': '此 daemon 不支持修改频道投递配置。',
+  'scheduledTasks.delivery.discardChanges': '放弃投递修改',
+  'scheduledTasks.delivery.perRun':
+    '每次新会话不支持频道投递。请在保存前选择固定会话，或关闭投递。',
+  'scheduledTasks.delivery.required': '请选择频道并输入目标 ID。',
+  'scheduledTasks.delivery.whitespace':
+    '此 ID 的首尾含有空白字符，它们会作为目标 ID 的一部分原样发送。',
+  'scheduledTasks.delivery.trimWhitespace': '去除首尾空白',
+  'scheduledTasks.delivery.loading': '正在加载频道…',
+  'scheduledTasks.delivery.loadingContacts': '正在加载目标候选…',
+  'scheduledTasks.delivery.channelsFailed':
+    '无法加载频道。请关闭并重新打开表单重试；已有投递配置会保留。',
+  'scheduledTasks.delivery.noChannels':
+    '此工作区尚未配置频道。请先在频道页面中配置。',
+  'scheduledTasks.delivery.targetUnavailable':
+    '此频道在当前工作区不可用。已保存的目标会保留；你可以选择其他频道或关闭投递。',
+  'scheduledTasks.delivery.notObserved':
+    '此目标不在最近的候选中。其 ID 会保留；联系人发现不是投递的必要条件。',
+  'scheduledTasks.delivery.suggestion': '目标候选',
+  'scheduledTasks.delivery.manual': '在下方输入目标 ID',
+  'scheduledTasks.delivery.contactsFailed':
+    '无法加载候选。你仍可输入目标 ID；已有投递配置会保留。',
+  'scheduledTasks.delivery.suggestionsHint':
+    '候选来自最近观察到的联系人。你也可以输入频道支持的已知用户或群 ID。',
+  'scheduledTasks.delivery.type': '目标类型',
+  'scheduledTasks.delivery.id': '目标 ID',
+  'scheduledTasks.delivery.user': '用户',
+  'scheduledTasks.delivery.chat': '群聊',
+  'scheduledTasks.delivery.cardPrefix': '投递：',
   'scheduledTasks.gate': '闸门命令（可选）',
   'scheduledTasks.gatePlaceholder':
     '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
@@ -7214,6 +7359,9 @@ const ZH: Messages = {
   'sidebar.sessionIdCopied': '会话 ID 已复制',
   'sidebar.workspaceUntrusted': '未信任',
   'sidebar.manageWorkspaces': '管理工作区…',
+  'sidebar.collapseAllWorkspaces': '收起所有工作区',
+  'sidebar.expandAllWorkspaces': '展开所有工作区',
+  'sidebar.workspaceOrderError': '无法加载或保存工作区顺序，请刷新后重试。',
   'sidebar.workspaceReadOnly': '只读',
   'sidebar.workspaceTrustToOpen': '信任此工作区后才能打开会话。',
   'sidebar.addWorkspace': '添加工作区',
@@ -8737,6 +8885,37 @@ const ZH: Messages = {
   'status.shortcuts': '? 查看快捷键',
   'stream.cancel': 'esc 取消',
   'stream.cancelArmed': '再按一次 Esc 停止',
+  'waitingGame.title': 'Juust Relax',
+  'waitingGame.activityTitle': '问答热度',
+  'waitingGame.usageTitle': 'Token 消耗',
+  'waitingGame.openActivity': '打开任务热度',
+  'waitingGame.startGame': '随机开始游戏',
+  'waitingGame.backToHeatmap': '返回热力图',
+  'waitingGame.heatmap': '热力图',
+  'waitingGame.tokens': '消耗',
+  'waitingGame.heatmapTooltip': (v) =>
+    `${v?.time ?? ''} · ${v?.count ?? 0} 条问答`,
+  'waitingGame.jumpToMessage': '点击定位',
+  'waitingGame.tokenTotal': '总 Token',
+  'waitingGame.tokenInput': '输入',
+  'waitingGame.tokenOutput': '输出',
+  'waitingGame.tokenCached': '缓存',
+  'waitingGame.tokenContext': '上下文',
+  'waitingGame.tokenEmpty': '暂无 Token 数据',
+  'waitingGame.snakeControls': '方向键 / WASD 转向 · 空格暂停 · Esc 收起',
+  'waitingGame.collapse': '收起',
+  'waitingGame.region': '等待小游戏',
+  'waitingGame.score': (v) => `得分 ${v?.score ?? 0}`,
+  'waitingGame.best': (v) => `最高 ${v?.score ?? 0}`,
+  'waitingGame.controls':
+    '↑↓ 移动 · → 加速 · ← 旋转 · 空格 暂停/继续 · 满列消除 +50',
+  'waitingGame.paused': '已暂停',
+  'waitingGame.pausedHint': '按空格继续',
+  'waitingGame.gameOver': '游戏结束',
+  'waitingGame.restart': '再来一局',
+  'waitingGame.cleared': (v) => `消除 ${v?.count ?? 0} 列 · +${v?.score ?? 0}`,
+  'waitingGame.mute': '关闭游戏音效',
+  'waitingGame.unmute': '开启游戏音效',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
   'theme.current': (v) => `当前：${v?.theme ?? ''}`,
   'theme.auto': '自动',
@@ -9410,6 +9589,17 @@ const ZH: Messages = {
     'member_feature_requested — 组织成员请求启用 Copilot 等功能',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — 机器人因参与安全公告而被致谢',
+  'channels.editor.field.github.repoFilterMode': '按仓库过滤',
+  'channels.editor.field.github.repoFilterMode.description':
+    '按仓库过滤入站通知。绑定到会话的 PR，其通知同样被过滤；只有它们的状态监视事件绕过此过滤器。',
+  'channels.editor.field.github.repoFilterMode.option.off': '关闭 — 所有仓库',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    '白名单 — 仅列出的仓库',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    '黑名单 — 除列出的仓库以外',
+  'channels.editor.field.github.repoFilter': '过滤的仓库',
+  'channels.editor.field.github.repoFilter.description':
+    '以逗号分隔的 owner/repo 仓库名。可以直接粘贴仓库或 PR 链接，保存时会自动缩短为 owner/repo。',
   'channels.editor.field.github.deliverToBoundSessions': '投递到 PR 绑定会话',
   'channels.editor.field.github.deliverToBoundSessions.description':
     '将已绑定到活跃会话的 PR 事件以 prompt 形式投递进该会话，而不是频道自有会话。需要 daemon 托管的频道。',
@@ -9426,6 +9616,11 @@ const ZH: Messages = {
     'head_change — PR 的 head 提交变更',
   'channels.editor.field.github.prWatchEvents.option.state_change':
     'state_change — PR 被合并或关闭',
+  'channels.editor.field.github.prWatchLimit': 'PR 监视上限',
+  'channels.editor.field.github.prWatchLimit.description':
+    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮约消耗一次 API 请求——按默认 60 秒间隔，5000 次/小时的 token 预算约容纳 80 个被监视 PR（终态积压按 1.2 倍扇出排出时约 69 个 open）；超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值（30）。',
+  'channels.editor.field.github.prWatchLimit.disabledHint':
+    '开启上方「投递到 PR 绑定会话」后即可设置监视上限。',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',
   'channels.editor.field.github.boundSessionActions.description':
     '可选。投递给 PR 绑定会话的 operator 指令模板。在下方选择事件键；加角色前缀（review:、verify:、fix:）可只定向该绑定角色。需开启"投递到 PR 绑定会话"。有匹配键的角色各自投递，没有匹配键的角色跳过该事件。变量：%repo%、%pr%、%url%、%title%、%event%、%sender%、%role%；%% 表示字面 %。留空则使用默认通用 prompt。',
@@ -9623,6 +9818,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.requiresBoundDelivery':
     '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
+  'channels.editor.validation.repoFilterRequired':
+    '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
@@ -9840,7 +10037,9 @@ export function languageLabel(language: WebShellLanguage): string {
 }
 
 export function getTranslator(language: WebShellLanguage) {
-  const messages = MESSAGES[language];
+  // The runtime value is not checked: an unshipped locale falls back to the
+  // EN table instead of crashing on the first key lookup.
+  const messages = MESSAGES[language] ?? EN;
   return (key: string, vars?: Record<string, string | number>) => {
     const message = messages[key] ?? EN[key] ?? key;
     return typeof message === 'function' ? message(vars) : message;

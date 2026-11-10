@@ -1594,6 +1594,7 @@ describe('qwen-triage verify workflow', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: commentBody,
           ISSUE_AUTHOR: author,
@@ -4127,6 +4128,7 @@ describe('qwen-triage verify hardening round 2', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: commentBody,
           ISSUE_AUTHOR: author,
@@ -4178,6 +4180,7 @@ describe('qwen-triage verify hardening round 2', () => {
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
+          RUNNER_TEMP: dir,
           EVENT_NAME: 'issue_comment',
           COMMENT_BODY: '@qwen-code /verify',
           ISSUE_AUTHOR: '',
@@ -10161,5 +10164,36 @@ describe('stage 1-pre duplicate gate', () => {
     expect(summary).toContain('fully subsumed');
     expect(summary).not.toContain('production delta');
     expect(summary).not.toContain('production diff');
+  });
+});
+
+describe('triage agent-state ownership hand-back (#16616)', () => {
+  const restoreStep = () =>
+    parse(workflow).jobs['triage'].steps.find(
+      (s) => s.name === 'Restore workspace ownership after agent',
+    );
+
+  it('stays the always() tail of the triage job', () => {
+    const steps = parse(workflow).jobs['triage'].steps;
+    expect(steps[steps.length - 1].name).toBe(
+      'Restore workspace ownership after agent',
+    );
+    expect(restoreStep().if).toBe('always()');
+  });
+
+  it('hands back every RUNNER_TEMP path the context step chowned away', () => {
+    // The context step chowns these to node (uid 1000); each one left
+    // node-owned poisons the next host-user job on the shared pool.
+    const run = restoreStep().run;
+    for (const dir of [
+      '"$QWEN_HOME"',
+      '"$RUNNER_TEMP/triage-drafts"',
+      '"$RUNNER_TEMP/triage-results"',
+      '"$RUNNER_TEMP/triage-context"',
+    ]) {
+      expect(run).toContain(dir);
+    }
+    expect(run).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
+    expect(run).toContain('chown -R "$RUNNER_UID:$RUNNER_GID" "$handback"');
   });
 });
