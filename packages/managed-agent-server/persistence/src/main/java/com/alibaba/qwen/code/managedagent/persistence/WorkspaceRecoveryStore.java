@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -551,7 +552,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')", tenant, session) == 0, "source_drift");
         check(count(jdbc, "SELECT COUNT(*) FROM ma_operation WHERE session_scope_key = ?"
                 + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL')"
-                + " AND state NOT IN ('COMPLETED', 'FAILED')", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)) == 0, "source_drift");
+                + " AND state NOT IN ('COMPLETED', 'FAILED')", ManagedSessionStore.sessionScopeKey(tenant, session)) == 0, "source_drift");
         ObjectNode source = JSON.createObjectNode().put("sessionId", session);
         ObjectNode binding = source.putObject("binding").put("tenantId", tenant);
         fields(binding, row, "workspaceId", "workspace_id", "workspaceGeneration", "workspace_generation",
@@ -579,7 +580,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                 "turnId", "turn_id", "createdAt", "gmt_create");
         if (receipt.get("result_json") != null) {
             try {
-                var skills = ManagedSessionSkills.decode((String) receipt.get("result_json"), JSON, SKILL_DIGESTS);
+                var skills = JdbcManagedSessionSkills.decode((String) receipt.get("result_json"), JSON, SKILL_DIGESTS);
                 creation.put("skillsDigest", SKILL_DIGESTS.digest(skills));
             } catch (ManagedAgentException error) {
                 var drift = failure("source_drift");
@@ -612,7 +613,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))
-                    && List.of(1, 2).contains(((Number) head.get("storage_version")).intValue())
+                    && List.of(1, 2, 3, 4, 5).contains(((Number) head.get("storage_version")).intValue())
                     && ((Number) head.get("compacted_through_revision")).longValue() >= 0
                     && ((Number) head.get("compacted_through_revision")).longValue() <= ((Number) head.get("journal_revision")).longValue()
                     && "READY".equals(head.get("recovery_status")), "source_drift");
@@ -625,7 +626,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                     "latestCheckpointResourceId", "latest_checkpoint_resource_id", "compactedThroughRevision", "compacted_through_revision",
                     "recoveryStatus", "recovery_status", "recoveryDetailCode", "recovery_detail_code");
         }
-        String privateScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String privateScope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String currentRead = lockSources ? " FOR UPDATE" : "";
         check(jdbc.queryForList("SELECT r.resource_key FROM ma_resource r JOIN ma_resource_ref f"
                 + " ON f.resource_key = r.resource_key AND f.session_scope_key = r.session_scope_key"

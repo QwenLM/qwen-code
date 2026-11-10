@@ -80,6 +80,68 @@ public final class ManagedExtensionsClient {
                 + "?packageDigest=" + segment(digest), null, null);
     }
 
+    public Map<String, Object> previewImport(String workspaceId, Path input, Map<String, Object> metadata) {
+        return importInput(workspaceId, null, input, metadata, null, true);
+    }
+
+    public Map<String, Object> importPackage(String workspaceId, String extensionId, Path input,
+            Map<String, Object> metadata, String idempotencyKey) {
+        return importInput(workspaceId, extensionId, input, metadata, header(idempotencyKey), false);
+    }
+
+    private Map<String, Object> importInput(String workspaceId, String extensionId, Path input,
+            Map<String, Object> metadata, String key, boolean preview) {
+        Path snapshot = null;
+        try {
+            snapshot = Files.createTempFile("qwen-managed-import-", ".input");
+            String digest = archiveDigest(input, snapshot);
+            Map<String, Object> bound = new java.util.LinkedHashMap<>(metadata);
+            bound.put("sourceDigest", digest);
+            String encoded = JsonSupport.encode(bound);
+            if (encoded.getBytes(StandardCharsets.UTF_8).length > 16 * 1024) {
+                throw new IllegalArgumentException("Import metadata exceeds 16 KiB");
+            }
+            String route = workspace(workspaceId) + "/imports" + (preview ? "/preview" : "")
+                    + "?metadata=" + segment(encoded) + (extensionId == null ? "" : "&extensionId=" + segment(extensionId));
+            return send("POST", route, digest, HttpRequest.BodyPublishers.ofFile(snapshot), "application/octet-stream", key, Duration.ofMinutes(10));
+        } catch (IOException error) {
+            throw new DaemonTransportException("The import input could not be read", error);
+        } finally {
+            if (snapshot != null) {
+                try {
+                    Files.deleteIfExists(snapshot);
+                } catch (IOException error) {
+                    snapshot.toFile().deleteOnExit();
+                }
+            }
+        }
+    }
+
+    public Map<String, Object> inspectPackage(String workspaceId, String extensionId, long revision, String digest) {
+        return json("GET", workspace(workspaceId) + "/" + segment(extensionId) + "/packages/" + revision
+                + "/inspection?packageDigest=" + segment(digest), null, null);
+    }
+
+    public Map<String, Object> lookupPackageOperation(String workspaceId, String kind, String key) {
+        return json("POST", workspace(workspaceId) + "/operations/lookup", Map.of("kind", kind, "idempotencyKey", header(key)), null);
+    }
+
+    public Map<String, Object> lookupConfigurationOperation(String sessionId, String key) {
+        return json("POST", session(sessionId) + "/operations/lookup", Map.of("idempotencyKey", header(key)), null);
+    }
+
+    public Map<String, Object> runtimeSkillCandidates(String sessionId) {
+        return json("GET", session(sessionId) + "/skills/candidates", null, null);
+    }
+
+    public Map<String, Object> runtimeSkillSnapshot(String sessionId, Map<String, Object> request) {
+        return json("POST", session(sessionId) + "/skills/snapshot", request, null);
+    }
+
+    public Map<String, Object> importRuntimeSkill(String sessionId, Map<String, Object> request, String key) {
+        return json("POST", session(sessionId) + "/skills/imports", request, header(key));
+    }
+
     public Map<String, Object> settings(String workspaceId, String extensionId) {
         return json("GET", workspace(workspaceId) + "/" + segment(extensionId) + "/settings", null, null);
     }
@@ -127,12 +189,17 @@ public final class ManagedExtensionsClient {
 
     private Map<String, Object> send(String method, String route, String digest, HttpRequest.BodyPublisher body,
             String contentType, String key) {
+        return send(method, route, digest, body, contentType, key, Duration.ofMinutes(5));
+    }
+
+    private Map<String, Object> send(String method, String route, String digest, HttpRequest.BodyPublisher body,
+            String contentType, String key, Duration timeout) {
         URI target = baseUri.resolve(route);
         String timestamp = Long.toString(System.currentTimeMillis() / 1000);
         String canonical = "qwen-broker-auth-v1\n" + method + "\n" + target.getRawPath() + "\n"
                 + (target.getRawQuery() == null ? "" : target.getRawQuery()) + "\n" + tenantId + "\n" + actorId
                 + "\n" + timestamp + "\n" + digest + "\n" + (key == null ? "" : key);
-        HttpRequest.Builder request = HttpRequest.newBuilder(target).timeout(Duration.ofMinutes(5))
+        HttpRequest.Builder request = HttpRequest.newBuilder(target).timeout(timeout)
                 .header("X-Qwen-Tenant-Id", tenantId).header("X-Qwen-Actor-Id", actorId)
                 .header("X-Qwen-Signature-Timestamp", timestamp).header("X-Qwen-Signature", "v1=" + signature(canonical))
                 .header("Content-Type", contentType).method(method, body);
@@ -141,7 +208,9 @@ public final class ManagedExtensionsClient {
         }
         String operation = method + " Managed extensions";
         try {
-            HttpSupport.Response response = HttpSupport.consume(http.send(request.build(), HttpSupport.bodyHandler()), operation);
+            int limit = route.contains("/imports") || route.contains("/inspection") || route.contains("/skills/")
+                    ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES;
+            HttpSupport.Response response = HttpSupport.consume(http.send(request.build(), HttpSupport.bodyHandler(limit)), operation);
             DaemonClient.requireStatus(response, 200, operation);
             return JsonSupport.parseObject(response.getBody(), operation);
         } catch (InterruptedException error) {
