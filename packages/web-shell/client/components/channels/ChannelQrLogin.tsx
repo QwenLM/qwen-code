@@ -67,6 +67,26 @@ export function ChannelQrLogin({
 
   const loginId = view?.status === 'pending' ? view.loginId : undefined;
 
+  // The daemon keeps a login alive on its own: it holds one of the workspace's
+  // four slots and polls Tencent whether or not this panel is on screen.
+  // Closing the editor must therefore drop the session explicitly, or four
+  // abandoned attempts reject every real bind until those sessions time out.
+  // Both refs keep the unmount-only cleanup off the render-time identities: an
+  // effect keyed on `actions` or `loginId` would also fire on every change and
+  // cancel a login the operator is still waiting on.
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
+  const liveLoginRef = useRef<string | undefined>(undefined);
+  liveLoginRef.current = loginId;
+  useEffect(
+    () => () => {
+      const id = liveLoginRef.current;
+      // Nobody is left to show a failure to; the session expires on its own.
+      if (id) void actionsRef.current.cancel(id).catch(() => undefined);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!loginId) return;
     let active = true;

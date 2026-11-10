@@ -29,6 +29,7 @@ const START: DaemonChannelQrLoginStartResult = { ...VIEW, attached: false };
 
 let container: HTMLDivElement;
 let root: Root;
+let unmounted: boolean;
 
 function actions(overrides?: {
   start?: () => Promise<DaemonChannelQrLoginStartResult>;
@@ -87,19 +88,29 @@ async function click(label: string) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  unmounted = false;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
 });
 
 afterEach(async () => {
-  await act(async () => {
-    root.unmount();
-  });
+  if (!unmounted) {
+    await act(async () => {
+      root.unmount();
+    });
+  }
   container.remove();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+async function unmount() {
+  unmounted = true;
+  await act(async () => {
+    root.unmount();
+  });
+}
 
 describe('ChannelQrLogin', () => {
   it('renders the image the daemon produced after starting', async () => {
@@ -250,5 +261,107 @@ describe('ChannelQrLogin', () => {
     await render({ language: 'zh-CN' });
     expect(container.textContent).toContain('扫码绑定');
     expect(container.textContent).not.toContain('Scan to bind');
+  });
+});
+
+describe('ChannelQrLogin unmount cleanup', () => {
+  it('cancels the live login when the editor closes', async () => {
+    // The daemon holds one of the workspace's four slots and keeps polling
+    // Tencent with no panel on screen, so an abandoned session must be dropped.
+    const { a } = await render();
+    await click('Scan to bind');
+    expect(a.cancel).not.toHaveBeenCalled();
+    await unmount();
+    expect(a.cancel).toHaveBeenCalledWith('login-1');
+  });
+
+  it('does not cancel while the panel stays mounted across polls', async () => {
+    const { a } = await render();
+    await click('Scan to bind');
+    await act(async () => {
+      vi.advanceTimersByTime(6_000);
+    });
+    expect(a.state.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel when the parent passes a fresh actions object', async () => {
+    // The host may rebuild the actions object on re-render. A cleanup keyed on
+    // its identity would drop a login the operator is still waiting on.
+    const first = actions();
+    await render({ actions: first });
+    await click('Scan to bind');
+    const second = actions();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelQrLogin
+            channelName="qq-bot"
+            actions={second}
+            onBound={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(first.cancel).not.toHaveBeenCalled();
+    expect(second.cancel).not.toHaveBeenCalled();
+    await unmount();
+    // The latest identity is the one that must issue the cancel.
+    expect(second.cancel).toHaveBeenCalledWith('login-1');
+    expect(first.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a login that already succeeded', async () => {
+    const a = actions({
+      state: async () => ({ ...VIEW, status: 'succeeded' as const }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel anything when no login was started', async () => {
+    const { a } = await render();
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('swallows a cancel rejection on unmount', async () => {
+    const calls: string[] = [];
+    const base = actions();
+    // A plain function, not vi.fn: the mock wrapper neutralises the returned
+    // rejection, so only a native one can witness a missing catch here.
+    const plain = {
+      start: base.start,
+      state: base.state,
+      cancel: (id: string) => {
+        calls.push(id);
+        return Promise.reject(new Error('daemon went away'));
+      },
+    };
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelQrLogin
+            channelName="qq-bot"
+            actions={plain}
+            onBound={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await click('Scan to bind');
+    await unmount();
+    expect(calls).toEqual(['login-1']);
+    // Nobody is left to show the failure to. Yield a real macrotask so the
+    // runtime's unhandled-rejection detection runs: without the cleanup's
+    // catch this rejects with no handler. CI (Linux) fails the run on that;
+    // the local macOS config ignores unhandled errors by design.
+    vi.useRealTimers();
+    await new Promise((resolve) => setTimeout(resolve, 50));
   });
 });
