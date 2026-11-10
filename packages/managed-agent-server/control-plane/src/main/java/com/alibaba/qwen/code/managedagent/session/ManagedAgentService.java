@@ -129,6 +129,20 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private Clock renameClock = Clock.systemUTC();
     private boolean externalFilesConfiguration;
 
+    private BooleanSupplier sideQueriesEnabled = () -> false;
+
+    @Autowired
+    void configureSideQueries(ManagedAgentSettings properties) {
+        sideQueriesEnabled = () -> properties.isSideQueriesEnabled() && properties.getSessionStore().isEnabled()
+                && harness.supportsSideQueries();
+    }
+
+    private boolean supportsSideQueries(SessionRecord session) {
+        return session.deletedAt() == null && "ACTIVE".equals(session.status())
+                && session.modelConfigDigest() != null
+                && sideQueriesEnabled.getAsBoolean();
+    }
+
     @Autowired
     void configureRenameDelivery(ManagedAgentSettings properties, @Qualifier("managedAgentClock") Clock clock) {
         renameLeaseDuration = properties.getDispatch()::getLeaseDuration;
@@ -1480,7 +1494,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         foregroundShell(session, worktree),
                         visible && "ACTIVE".equals(session.status()) && session.workspace() != null
                                 && ready(worktree) && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression(),
-                        childAgentsCapability(session, worktree)),
+                        childAgentsCapability(session, worktree), supportsSideQueries(session), supportsSideQueries(session)),
                 publicWorkspace(session, worktree), compression.available() ? compression.compactionRevision() : null,
                 compression.operationId(), null, null, session.memoryStoreId(), session.ownerOnly() ? true : null)
                 .withWorktree(worktree);
@@ -1644,7 +1658,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
                         visible && approvalExecutable && compressionSupported && compression.available(),
-                        childAgentsCapability(session, worktree)),
+                        childAgentsCapability(session, worktree),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

@@ -155,6 +155,9 @@ final class AgentSessionCommands {
         String turnId = AgentStoreRows.publicId("turn");
         insertTurn(tenantId, sessionId, turnId,
                 UUID.randomUUID().toString(), input, payloadDigest, now);
+        if (queuedInputs.isEmpty()) {
+            SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
+        }
         byte[] actorKey = commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
@@ -638,10 +641,10 @@ final class AgentSessionCommands {
                         + " = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
                 session.lastSequence(), ManagedReceipts.commandKey(tenantId, operation, idempotencyKey));
         // Older retired commands may have left their requested event behind.
-        String requestedSource = mutationSource(operation, idempotencyKey, "requested");
+        String requestedSource = SessionMutationEvents.mutationSource(operation, idempotencyKey, "requested");
         if (!eventJournal.hasSourceEvent(tenantId, sessionId, requestedSource)) {
             eventJournal.appendEvent(tenantId, sessionId, null,
-                    mutationEvent(kind, "requested"),
+                    SessionMutationEvents.mutationEvent(kind, "requested"),
                     Map.of("sessionId", sessionId), false,
                     requestedSource, now);
         }
@@ -720,8 +723,8 @@ final class AgentSessionCommands {
                 now,
                 ManagedReceipts.commandKey(tenantId, operation, idempotencyKey));
         eventJournal.appendEvent(tenantId, sessionId, null,
-                mutationEvent(kind, "completed"), data, false,
-                mutationSource(operation, idempotencyKey, "completed"), now);
+                SessionMutationEvents.mutationEvent(kind, "completed"), data, false,
+                SessionMutationEvents.mutationSource(operation, idempotencyKey, "completed"), now);
         return storeRows.requireSessionForUpdate(tenantId, sessionId);
     }
 
@@ -1016,16 +1019,6 @@ final class AgentSessionCommands {
                 kind == SessionMutationKind.RENAME ? "ACTIVE" : "ARCHIVED");
     }
 
-    static String mutationEvent(SessionMutationKind kind, String phase) {
-        if ("completed".equals(phase)) {
-            return kind == SessionMutationKind.RENAME ? "session.updated"
-                    : "session.unarchived";
-        }
-        return "session."
-                + (kind == SessionMutationKind.RENAME ? "update" : "unarchive")
-                + "." + phase;
-    }
-
     // The Session lock orders each new attempt against committed events.
     // Legacy receipts fall back to their original requested event; a
     // re-drive refreshes the boundary without appending another event.
@@ -1041,7 +1034,7 @@ final class AgentSessionCommands {
                             + " c.namespace = 'SESSION_COMMAND' AND c.receipt_key = ? AND"
                             + " c.session_id = ?",
                         Long.class,
-                        mutationSource(operation, idempotencyKey, "requested"),
+                        SessionMutationEvents.mutationSource(operation, idempotencyKey, "requested"),
                         ManagedReceipts.commandKey(tenantId, operation, idempotencyKey),
                         sessionId);
         if (attempts.isEmpty() || attempts.getFirst() == null) {
@@ -1055,12 +1048,8 @@ final class AgentSessionCommands {
                         Integer.class,
                         tenantId,
                         sessionId,
-                        attempts.getFirst(), mutationEvent(kind, "completed"));
+                        attempts.getFirst(), SessionMutationEvents.mutationEvent(kind, "completed"));
         return later != null && later > 0;
-    }
-
-    static String mutationSource(String operation, String idempotencyKey, String phase) {
-        return "control:" + operation + ":" + idempotencyKey + ":" + phase;
     }
 
     // Automation-verb session boot-id bind (#14548); fill only when still empty.

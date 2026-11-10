@@ -29,6 +29,7 @@ public final class ManagedSchemaContract {
                     "ma_request_receipt",
                     "ma_memory_store",
                     "ma_memory_entry",
+                    "ma_side_query",
                     "ma_operation",
                     "ma_operation_work",
                     "ma_workspace",
@@ -92,7 +93,8 @@ public final class ManagedSchemaContract {
         WORKSPACE_CREATE,
         EXTERNAL_STORAGE,
         EXTERNAL_WORKSPACE,
-        MEMORY
+        MEMORY,
+        SIDE_QUERY
     }
 
     public enum ReceiptScope {
@@ -124,7 +126,8 @@ public final class ManagedSchemaContract {
         OPERATION,
         OPERATION_WORK,
         RECOVERY,
-        HOSTED_CLEANUP
+        HOSTED_CLEANUP,
+        SIDE_QUERY
     }
 
     public enum DeliveryKind {

@@ -2340,6 +2340,10 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
+    isCommandCancellationBlocked,
+    isCommandCommitting,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -2353,7 +2357,6 @@ export const AppContainer = (props: AppContainerProps) => {
     loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
-    isProcessing,
     setIsProcessing,
     isIdleRef,
     setMemoryFileCount,
@@ -2665,6 +2668,7 @@ export const AppContainer = (props: AppContainerProps) => {
     midTurnRestoreRef,
     goalQueueRef,
     returnPrompt,
+    isCommandCancellationBlocked,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -5007,9 +5011,19 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // 4. Cancel ongoing requests
-      if (streamingState === StreamingState.Responding) {
+      if (
+        streamingState === StreamingState.Responding &&
+        !isCommandCancellationBlocked()
+      ) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
+      }
+      if (
+        streamingState === StreamingState.Idle &&
+        submissionInFlightRef.current &&
+        cancelOngoingRequest?.()
+      ) {
+        return;
       }
 
       // 5. Clear input buffer (if has content)
@@ -5032,6 +5046,7 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       streamingState,
       cancelOngoingRequest,
+      isCommandCancellationBlocked,
       buffer,
       activeWorktree,
     ],
@@ -5048,6 +5063,23 @@ export const AppContainer = (props: AppContainerProps) => {
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
+        return;
+      }
+
+      if (
+        isCommandCommitting() &&
+        (keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
+          keyMatchers[Command.ESCAPE](key))
+      ) {
+        return;
+      }
+
+      if (
+        (shellConfirmationRequest || confirmationRequest) &&
+        (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key) ||
+          keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key))
+      ) {
         return;
       }
 
@@ -5103,8 +5135,7 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Skip if shell is focused (to allow shell's own escape handling)
-        if (embeddedShellFocused) {
+        if (embeddedShellFocused || dialogsVisibleRef.current) {
           return;
         }
 
@@ -5124,28 +5155,24 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Input is empty, cancel request immediately (no double-press needed)
-        // Skip when a dialog (background tasks, etc.) is open — ESC should
-        // close the dialog, not cancel the running request.
-        if (
-          streamingState === StreamingState.Responding &&
-          !dialogsVisibleRef.current
-        ) {
+        const isResponding = streamingState === StreamingState.Responding;
+        const requestCancelled =
+          (isResponding ||
+            (streamingState === StreamingState.Idle &&
+              submissionInFlightRef.current)) &&
+          cancelOngoingRequest?.();
+        const commandCancelled = cancelSlashCommand();
+        if (isResponding || requestCancelled || commandCancelled) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
           }
-          cancelOngoingRequest?.();
           setEscapePressedOnce(false);
           return;
         }
 
         // Input is empty and idle — double-ESC opens rewind selector
-        if (
-          streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current &&
-          !config.getIdeMode()
-        ) {
+        if (streamingState === StreamingState.Idle && !config.getIdeMode()) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
@@ -5269,6 +5296,9 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       ideContextState,
       handleExit,
+      isCommandCommitting,
+      shellConfirmationRequest,
+      confirmationRequest,
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
@@ -5280,6 +5310,7 @@ export const AppContainer = (props: AppContainerProps) => {
       escapeTimerRef,
       streamingState,
       cancelOngoingRequest,
+      cancelSlashCommand,
       buffer,
       handleSlashCommand,
       activePtyId,
@@ -5419,6 +5450,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5571,6 +5603,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,

@@ -181,11 +181,11 @@ final class AgentLifecycleOperations {
                 now);
         Map<String, Object> data = Map.of("sessionId", sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null, "session.unarchive.requested", data, false,
-                AgentSessionCommands.mutationSource(namespace, scopedKey, "requested"), now);
+                SessionMutationEvents.mutationSource(namespace, scopedKey, "requested"), now);
         jdbc.update("UPDATE ma_session SET status = 'CLOSED', gmt_modified = ?, version = version + 1"
                 + " WHERE tenant_id = ? AND session_id = ?", now, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null, "session.unarchived", data, false,
-                AgentSessionCommands.mutationSource(namespace, scopedKey, "completed"), now);
+                SessionMutationEvents.mutationSource(namespace, scopedKey, "completed"), now);
         return new SessionMutation(storeRows.requireSessionForUpdate(tenantId, sessionId), false);
     }
 
@@ -367,7 +367,7 @@ final class AgentLifecycleOperations {
         var failedBefore =
                 kind != OperationKind.ACTION_RESPONSE
                         && kind != OperationKind.CWD_CHANGE
-                        && pendingStatus(kind).equals(session.status())
+                        && LifecycleOperationNames.pendingStatus(kind).equals(session.status())
                 ? latestFailedLifecycleOperation(tenantId, sessionId, kind)
                 : Optional.<FailedLifecycleOperation>empty();
         boolean resumed = failedBefore.isPresent();
@@ -540,10 +540,11 @@ final class AgentLifecycleOperations {
         jdbc.update("UPDATE ma_session SET status = ?,"
                         + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
-                archive ? "ARCHIVED" : pendingStatus(kind), now, tenantId,
+                archive ? "ARCHIVED" : LifecycleOperationNames.pendingStatus(kind), now, tenantId,
                 sessionId);
+        ManagedSideQueryStore.cancelSession(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null,
-                archive ? completedEvent(kind) : requestedEvent(kind), data,
+                archive ? LifecycleOperationNames.completedEvent(kind) : LifecycleOperationNames.requestedEvent(kind), data,
                 false, AgentEventJournal.operationSource(operationId,
                         archive ? "completed" : "requested"), now);
         return new OperationAdmission(findOperation(tenantId, sessionId,
@@ -663,7 +664,7 @@ final class AgentLifecycleOperations {
                 || operation.claimGeneration() != claimGeneration) {
             return false;
         }
-        if (!pendingStatus(operation.kind()).equals(session.status())) {
+        if (!LifecycleOperationNames.pendingStatus(operation.kind()).equals(session.status())) {
             throw new IllegalStateException("Session " + sessionId + " is "
                     + session.status() + " during its "
                     + operation.kind() + " operation");
@@ -716,7 +717,7 @@ final class AgentLifecycleOperations {
                 sessionId,
                 operationId);
         eventJournal.appendEvent(tenantId, sessionId, null,
-                completedEvent(operation.kind()),
+                LifecycleOperationNames.completedEvent(operation.kind()),
                 Map.of("sessionId", sessionId, "operationId", operationId),
                 operation.kind() == OperationKind.DELETE,
                 AgentEventJournal.operationSource(operationId, "completed"), now);
@@ -1014,37 +1015,5 @@ final class AgentLifecycleOperations {
                         + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "')",
                 Integer.class, tenantId, sessionId);
         return count != null && count > 0;
-    }
-
-    // ARCHIVING remains only for an archive admitted before V17, which closes
-    // the Harness as archive used to.
-    static String pendingStatus(OperationKind kind) {
-        return switch (kind) {
-            case CLOSE -> "CLOSING";
-            case ARCHIVE -> "ARCHIVING";
-            case DELETE -> "DELETING";
-            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
-                    throw new IllegalArgumentException("Not a lifecycle operation");
-        };
-    }
-
-    static String requestedEvent(OperationKind kind) {
-        return switch (kind) {
-            case CLOSE -> "session.close.requested";
-            case ARCHIVE -> "session.archive.requested";
-            case DELETE -> "session.delete.requested";
-            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
-                    throw new IllegalArgumentException("Not a lifecycle operation");
-        };
-    }
-
-    static String completedEvent(OperationKind kind) {
-        return switch (kind) {
-            case CLOSE -> "session.closed";
-            case ARCHIVE -> "session.archived";
-            case DELETE -> "session.deleted";
-            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
-                    throw new IllegalArgumentException("Not a lifecycle operation");
-        };
     }
 }

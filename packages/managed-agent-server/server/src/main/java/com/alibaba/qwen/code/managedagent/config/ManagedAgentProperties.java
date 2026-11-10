@@ -79,6 +79,7 @@ public class ManagedAgentProperties
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
+    private boolean sideQueriesEnabled;
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
     private List<String> definitionToolProfiles =
