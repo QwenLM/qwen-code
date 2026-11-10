@@ -1056,11 +1056,11 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'dialog': {
-                if (result.dialog === 'resume') {
-                  if (result.sessionId) {
+                if (result.dialog === 'resume' && result.sessionId) {
+                  if (fullCommandContext.beginCommit?.() !== false) {
                     await this.host.handleResume(result.sessionId);
-                    return { kind: 'handled' };
                   }
+                  return { kind: 'handled' };
                 }
                 if (result.dialog === 'branch') {
                   if (fullCommandContext.beginCommit?.() !== false) {

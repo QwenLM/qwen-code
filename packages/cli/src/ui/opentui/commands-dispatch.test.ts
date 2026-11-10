@@ -1583,7 +1583,7 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
   });
 
-  it('/resume <id> awaits handleResume', async () => {
+  it('/resume <id> stays processing after Esc until handleResume settles', async () => {
     const commands = [
       stub({
         name: 'resume',
@@ -1598,9 +1598,30 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
         }),
       }),
     ];
-    const resume = await dispatch('/resume', commands);
-    expect(resume.outcome).toEqual({ kind: 'handled' });
-    expect(resume.host.resumedSessions).toEqual(['s-9']);
+    let finishResume!: () => void;
+    const resumeGate = new Promise<void>((resolve) => {
+      finishResume = resolve;
+    });
+    const host = createFakeHost();
+    const handleResume = vi.fn(() => resumeGate);
+    host.handleResume = handleResume;
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, commands);
+
+    const resume = dispatcher.handle('/resume');
+    try {
+      await vi.waitFor(() => {
+        expect(handleResume).toHaveBeenCalledExactlyOnceWith('s-9');
+      });
+      dispatcher.cancel();
+      expect(host.processingFlags).toEqual([true]);
+      expect(dispatcher.isCommitInProgress()).toBe(true);
+    } finally {
+      finishResume();
+      await resume;
+    }
+    expect(await resume).toEqual({ kind: 'handled' });
+    expect(dispatcher.isCommitInProgress()).toBe(false);
+    expect(host.processingFlags).toEqual([true, false]);
 
     const picker = await dispatch('/resume-picker', commands);
     expect(picker.outcome).toEqual({

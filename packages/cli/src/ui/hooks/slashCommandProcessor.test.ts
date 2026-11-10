@@ -2246,8 +2246,9 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
-    it('awaits direct resume session switching before returning handled', async () => {
+    it('keeps direct resume processing until the session switch settles', async () => {
       const actions = createMockActions();
+      const processing = vi.fn();
       let resolveResume: (() => void) | undefined;
       actions.handleResume = vi.fn(
         () =>
@@ -2264,7 +2265,11 @@ describe('useSlashCommandProcessor', () => {
           sessionId: 'session-123',
         }),
       });
-      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([resumeCommand]));
+      const mcpAction = vi.fn();
+      const mcp = createTestCommand({ name: 'mcp', action: mcpAction });
+      mockBuiltinLoadCommands.mockResolvedValue(
+        Object.freeze([resumeCommand, mcp]),
+      );
 
       const { result } = renderHook(() =>
         useSlashCommandProcessor(
@@ -2276,7 +2281,7 @@ describe('useSlashCommandProcessor', () => {
           mockLoadHistory,
           vi.fn(),
           vi.fn(),
-          vi.fn(),
+          processing,
           { current: true },
           vi.fn(),
           actions,
@@ -2287,25 +2292,38 @@ describe('useSlashCommandProcessor', () => {
         ),
       );
 
-      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
-
-      let settled = false;
-      const promise = result.current
-        .handleSlashCommand('/resume-direct')
-        .then(() => {
-          settled = true;
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+      let dispatch!: ReturnType<typeof result.current.handleSlashCommand>;
+      try {
+        act(() => {
+          dispatch = result.current.handleSlashCommand('/resume-direct');
         });
-
-      await waitFor(() => {
-        expect(actions.handleResume).toHaveBeenCalledWith('session-123');
-      });
-      expect(settled).toBe(false);
-
-      resolveResume?.();
+        await waitFor(() => {
+          expect(actions.handleResume).toHaveBeenCalledExactlyOnceWith(
+            'session-123',
+          );
+        });
+        act(() => {
+          expect(result.current.cancelSlashCommand()).toBe(false);
+        });
+        expect(result.current.isCommandCommitting()).toBe(true);
+        expect(processing).toHaveBeenCalledExactlyOnceWith(true);
+        await act(async () => {
+          await result.current.handleSlashCommand('/mcp');
+        });
+        expect(mcpAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          resolveResume?.();
+          await dispatch;
+        });
+      }
+      expect(result.current.isCommandCommitting()).toBe(false);
+      expect(processing).toHaveBeenLastCalledWith(false);
       await act(async () => {
-        await promise;
+        await result.current.handleSlashCommand('/mcp');
       });
-      expect(settled).toBe(true);
+      expect(mcpAction).toHaveBeenCalledOnce();
     });
 
     it('shows info feedback for collapse-on-resume command', async () => {

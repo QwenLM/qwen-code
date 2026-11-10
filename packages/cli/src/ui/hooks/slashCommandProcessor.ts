@@ -1428,7 +1428,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
-                        await actions.handleResume(result.sessionId);
+                        if (fullCommandContext.beginCommit?.() !== false) {
+                          await actions.handleResume(result.sessionId);
+                        }
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }
