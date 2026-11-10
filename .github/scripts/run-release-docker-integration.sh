@@ -24,6 +24,10 @@ fi
 trap cleanup_release_containers EXIT
 trap 'exit 1' INT TERM
 
+# The test retry below budgets against the whole 120-minute job, so capture
+# the epoch at the start of the step rather than just before vitest.
+release_step_start_epoch="$(date +%s)"
+
 sandbox_revision="$(git rev-parse HEAD)"
 sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
 
@@ -151,7 +155,10 @@ if [ "$image_inspect_status" -ne 0 ]; then
   apply_apt_mirror
   # See e2e.yml: closing the lock descriptors in the child keeps a descendant
   # that outlives this job from holding the lock.
-  npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
+  if ! npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-; then
+    echo "::error::sandbox image build failed for ${sandbox_image}; the Docker integration tests did not run"
+    exit 1
+  fi
   if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
     flock --unlock 7
     exec 7>&-
@@ -180,5 +187,33 @@ check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}"
 
 # The package.json docker test scripts each rebuild the sandbox image. Run
 # vitest directly here so this job reuses the image built above.
-QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli 9>&-
-QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive 9>&-
+#
+# One bounded retry per suite absorbs the shared-host pressure class that
+# killed the nightly Docker lane twice in a row (#16769, #16861): the same SHA's
+# Docker E2E leg passed while this lane failed at ~39 minutes, and the
+# sandbox:none E2E leg retries the same class (#10355). The E2E Docker leg
+# cannot retry because its 60-minute job cannot fit two attempts; this job
+# has 120 minutes and leaves ~64 minutes after a 50-minute first attempt.
+# A deterministic failure fails both attempts and stays red. Remove this
+# attempt's containers first so a leaked one cannot poison the retry.
+DOCKER_TEST_RETRY_BUDGET_SECONDS=3000
+run_docker_test_suite() {
+  QWEN_SANDBOX=docker npx vitest run --root ./integration-tests "$1" 9>&-
+}
+
+for suite in cli interactive; do
+  if run_docker_test_suite "$suite"; then
+    continue
+  fi
+  elapsed=$(( $(date +%s) - release_step_start_epoch ))
+  if (( elapsed > DOCKER_TEST_RETRY_BUDGET_SECONDS )); then
+    echo "::error::Docker integration tests (${suite}) failed after ${elapsed}s of the 7200s job budget; not enough left for a retry"
+    exit 1
+  fi
+  echo "::warning::Docker integration tests (${suite}) failed after ${elapsed}s; retrying once (transient shared-host pressure class)"
+  cleanup_release_containers || echo "::warning::failed to remove release containers before retrying ${suite}"
+  if ! run_docker_test_suite "$suite"; then
+    echo "::error::Docker integration tests (${suite}) failed again after a retry"
+    exit 1
+  fi
+done

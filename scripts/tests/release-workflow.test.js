@@ -2510,9 +2510,11 @@ describe('release workflow', () => {
     );
     expect(dockerIntegrationScript).toContain('exec 7>&-');
     expect(dockerIntegrationScript).toContain('exec 8>&-');
-    expect(dockerIntegrationScript).toContain('integration-tests cli 9>&-');
     expect(dockerIntegrationScript).toContain(
-      'integration-tests interactive 9>&-',
+      'QWEN_SANDBOX=docker npx vitest run --root ./integration-tests "$1" 9>&-',
+    );
+    expect(dockerIntegrationScript).toContain(
+      'for suite in cli interactive; do',
     );
   });
 
@@ -2608,6 +2610,9 @@ describe('release workflow', () => {
     dockerPostFloorKb,
     postGateExit,
     inspectTimesOut = false,
+    buildFails = false,
+    suiteFailures = 0,
+    stepElapsedSeconds = 0,
     aptDefaultRate,
     aptAliyunRate,
     aptTunaRate,
@@ -2628,6 +2633,19 @@ describe('release workflow', () => {
       writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     stub('git', 'echo 0123456789abcdef0123456789abcdef01234567');
     stub('node', 'echo ghcr.io/qwenlm/qwen-code:0.0.0-test');
+    stub(
+      'date',
+      `count_file="$CALLS_LOG.date-count"
+count=0
+if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ "$count" -le 1 ]; then
+  echo "\${STUB_DATE_START:-1000000}"
+else
+  echo "\${STUB_DATE_NOW:-1000000}"
+fi`,
+    );
     stub('timeout', 'shift; exec "$@"');
     stub('flock', `printf 'flock %s\\n' "$*" >> "$CALLS_LOG"`);
     stub(
@@ -2669,9 +2687,27 @@ exit 0`,
     );
     stub(
       'npm',
-      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"`,
+      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"
+if [ "$BUILD_FAILS" = '1' ] && [ "$1" = 'run' ] && [ "$2" = 'build:sandbox' ]; then
+  exit 1
+fi`,
     );
-    stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
+    stub(
+      'npx',
+      `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"
+if [ "$SUITE_FAILURES" -gt 0 ]; then
+  count_file="$CALLS_LOG.npx-failures"
+  count=0
+  if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  if [ "$count" -le "$SUITE_FAILURES" ]; then
+    case "$*" in
+      *" cli") exit 1 ;;
+    esac
+  fi
+fi`,
+    );
     // Deterministic stand-in for the probe's range reads so the suite stays
     // hermetic (#16278 R1-1): answer the -w '%{http_code} %{speed_download}'
     // projection per URL, default slow + one fast mirror.
@@ -2721,6 +2757,10 @@ esac`,
         IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
         DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
         BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true',
+        BUILD_FAILS: buildFails ? '1' : '0',
+        SUITE_FAILURES: String(suiteFailures),
+        STUB_DATE_START: '1000000',
+        STUB_DATE_NOW: String(1000000 + stepElapsedSeconds),
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
         CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
         CURL_TUNA_RATE: String(aptTunaRate ?? 0),
@@ -2816,6 +2856,98 @@ esac`,
       expect(
         lines.filter((line) => line.startsWith('npx vitest')),
       ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'labels an image build failure instead of letting it read as a test failure',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        buildFails: true,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('sandbox image build failed for');
+      expect(result.stdout).toContain('-release-0123456789abcdef');
+      expect(result.stdout).toContain(
+        'the Docker integration tests did not run',
+      );
+      expect(calls).not.toContain('npx vitest');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries a failed Docker suite once within the job budget',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('retrying once');
+      const lines = calls.trim().split('\n');
+      const cliRuns = lines.filter(
+        (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+      );
+      expect(cliRuns).toHaveLength(2);
+      const firstCli = lines.indexOf(cliRuns[0]);
+      const secondCli = lines.lastIndexOf(cliRuns[1]);
+      expect(secondCli).toBeGreaterThan(firstCli);
+      // The retry removes this job's containers before the second attempt.
+      expect(
+        lines
+          .slice(firstCli, secondCli)
+          .some((line) => line.startsWith('docker ps -aq')),
+      ).toBe(true);
+      expect(
+        lines.filter(
+          (line) =>
+            line.startsWith('npx vitest') && line.endsWith(' interactive'),
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the lane red when the retried Docker suite fails again',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 2,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed again after a retry');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not retry a failed Docker suite after the retry budget is spent',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        stepElapsedSeconds: 4000,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('not enough left for a retry');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(1);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
     },
   );
 
