@@ -458,6 +458,35 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expect(amendNeedsApproval('git commit -m "note $(echo hi)"')).toBe(false);
   });
 
+  it('reads substitutions from the raw text, not from a dequoted word', () => {
+    // Quoted parens inside a substitution body must not end it early.
+    expect(
+      amendNeedsApproval('git commit -m "\$(printf \')\' ; git commit --\$x)"'),
+    ).toBe(true);
+    expect(
+      amendNeedsApproval('git commit -m "\$(printf \'(\' ; git commit --\$x)"'),
+    ).toBe(true);
+    expect(
+      amendNeedsApproval(
+        'git commit --author="\$(echo \')\' && git commit --\$x)"',
+      ),
+    ).toBe(true);
+    // A literal or escaped substitution never runs.
+    expect(amendNeedsApproval("git commit -m '\$(git commit --\$x)'")).toBe(
+      false,
+    );
+    expect(amendNeedsApproval('git commit -m "\\$(git commit --\$x)"')).toBe(
+      false,
+    );
+    expect(amendNeedsApproval('git commit -m "\\`git commit --\$x\`"')).toBe(
+      false,
+    );
+    // Nesting still reaches the inner command.
+    expect(
+      amendNeedsApproval('git commit -m "\$(echo \$(git commit --\$x))"'),
+    ).toBe(true);
+  });
+
   it('consumes the next token only when m ends a short-option cluster', () => {
     expect(amendNeedsApproval('git commit -am "$msg"')).toBe(false);
     expect(amendNeedsApproval('git commit -avm "$msg"')).toBe(false);

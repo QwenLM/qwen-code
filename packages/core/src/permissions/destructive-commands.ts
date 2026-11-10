@@ -187,7 +187,18 @@ export function amendNeedsApproval(command: string): boolean {
   return GIT_AMEND_MENTION.test(command) || mentionsGitCommitAmend(command);
 }
 
-function mentionsGitCommitAmend(command: string): boolean {
+const MAX_SUBSTITUTION_DEPTH = 8;
+
+function mentionsGitCommitAmend(command: string, depth = 0): boolean {
+  // A substitution runs before the command it sits in, wherever it appears:
+  // `-m "$(git commit --$x)"` amends even though the value is otherwise an
+  // argument. Scan the raw text with quote state so a literal
+  // `-m '$(git commit --x)'` is not mistaken for one.
+  if (depth < MAX_SUBSTITUTION_DEPTH) {
+    for (const nested of executedCommandSubstitutions(command)) {
+      if (mentionsGitCommitAmend(nested, depth + 1)) return true;
+    }
+  }
   // A `$` only speaks about the simple command it sits in: `echo $HOME;
   // git commit -m x` cannot turn the second command into an amend. Split at
   // the shell's own boundaries first, then walk each segment with fresh state
@@ -227,15 +238,6 @@ function mentionsGitCommitAmendInSegment(command: string): boolean {
     // (`-m "fix: $issue"`, `--author="$a"`).
     const valueToken =
       isGitCommitValueFlag(previousToken) || isValueFlagToken(token);
-    if (valueToken) {
-      // A flag value is exempt from the structural checks, but the shell runs
-      // a command substitution inside it first: `-m "$(git commit --$x)"` is
-      // an amend. Recurse into each substitution body instead of exempting the
-      // whole token.
-      for (const nested of commandSubstitutions(token)) {
-        if (amendNeedsApproval(nested)) return true;
-      }
-    }
     let tokenBare: string | undefined;
     // A redirect glued to a word still splits it in bash (`git>|/dev/null`),
     // so split it here too before deciding what the word is (R25-2).
@@ -314,40 +316,107 @@ function isGitCommitValueFlag(word: string | undefined): boolean {
 }
 
 /**
- * Bodies of the `$(…)` and backtick substitutions in a token, in source order.
- * Arithmetic expansions (`$((…))`) run no command and are skipped.
+ * Bodies of the `$(…)` and backtick substitutions that actually run, in source
+ * order. Scanned on the raw text with quote state: a substitution inside single
+ * quotes or escaped with a backslash is literal and is skipped, while one
+ * inside double quotes runs. Arithmetic expansions (`$((…))`) run no command
+ * and are skipped.
  */
-function commandSubstitutions(text: string): string[] {
+function executedCommandSubstitutions(text: string): string[] {
   const bodies: string[] = [];
+  let single = false;
+  let double = false;
   for (let index = 0; index < text.length; index++) {
     const char = text[index];
+    if (single) {
+      if (char === "'") single = false;
+      continue;
+    }
+    if (char === '\\') {
+      // Outside quotes any character can be escaped; inside double quotes only
+      // `$`, `` ` ``, `"` and `\` are. Skipping the escaped character keeps
+      // `\$(…)` and `` \`…\` `` out of the result.
+      if (!double || /[$`"\\]/.test(text[index + 1] ?? '')) index++;
+      continue;
+    }
+    if (double) {
+      if (char === '"') {
+        double = false;
+        continue;
+      }
+    } else if (char === "'") {
+      single = true;
+      continue;
+    } else if (char === '"') {
+      double = true;
+      continue;
+    }
     if (char === '`') {
-      const end = text.indexOf('`', index + 1);
+      const end = findBacktickEnd(text, index + 1);
       if (end === -1) break;
       bodies.push(text.slice(index + 1, end));
       index = end;
       continue;
     }
     if (char !== '$' || text[index + 1] !== '(') continue;
-    if (text[index + 2] === '(') {
-      index += 2;
-      continue;
-    }
-    let depth = 1;
-    let cursor = index + 2;
-    for (; cursor < text.length && depth > 0; cursor++) {
-      const inner = text[cursor];
-      if (inner === '\\') {
-        cursor++;
-        continue;
-      }
-      if (inner === '(') depth++;
-      else if (inner === ')') depth--;
-    }
-    if (depth === 0) bodies.push(text.slice(index + 2, cursor - 1));
-    index = cursor - 1;
+    if (text[index + 2] === '(') continue;
+    const end = findCommandSubstitutionEnd(text, index + 2);
+    if (end === -1) break;
+    bodies.push(text.slice(index + 2, end));
+    index = end;
   }
   return bodies;
+}
+
+/**
+ * Index of the `)` closing a `$(` whose body starts at `start`, honouring the
+ * quote state inside the body so a `)` in `printf ')'` does not close it.
+ */
+function findCommandSubstitutionEnd(text: string, start: number): number {
+  let depth = 1;
+  let single = false;
+  let double = false;
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+    if (single) {
+      if (char === "'") single = false;
+      continue;
+    }
+    if (char === '\\') {
+      if (!double || /[$`"\\]/.test(text[index + 1] ?? '')) index++;
+      continue;
+    }
+    if (double) {
+      if (char === '"') {
+        double = false;
+        continue;
+      }
+    } else if (char === "'") {
+      single = true;
+      continue;
+    } else if (char === '"') {
+      double = true;
+      continue;
+    }
+    if (char === '(') depth++;
+    else if (char === ')') {
+      depth--;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/** Index of the backtick closing a substitution whose body starts at `start`. */
+function findBacktickEnd(text: string, start: number): number {
+  for (let index = start; index < text.length; index++) {
+    if (text[index] === '\\') {
+      index++;
+      continue;
+    }
+    if (text[index] === '`') return index;
+  }
+  return -1;
 }
 
 /** `--author=$a` or `-m$msg`: a value flag carrying its value inline. */
