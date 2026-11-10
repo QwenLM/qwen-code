@@ -3578,6 +3578,125 @@ describe('GitHub per-repository settings', () => {
       'Enter a number greater than 0 and at most 86400000.',
     );
   });
+
+  it('words an inclusive floor as "at least", not "greater than"', async () => {
+    // Naming the exclusive bound here would tell the operator "greater than
+    // -1" — a floor the validator does not enforce, and one that reads as if
+    // -0.5 were legal.
+    const inclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          minimum: 0,
+          maximum: 5000,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: inclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '-0.5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 0 and at most 5000.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
+
+  it('names the exclusive floor on a tie, because equality is rejected', async () => {
+    // Both bounds at 5: the validator rejects 5, so "at least 5" would name a
+    // floor it does not enforce — the very defect this change removes.
+    const tie: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 5,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: tie });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '5');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the exclusive floor when it is stricter than the inclusive one', async () => {
+    // Dropping the comparison entirely would always name the inclusive bound,
+    // and here that is the weaker one: the validator rejects 5, so "at least
+    // 2" would advertise a value the save refuses.
+    const weakerInclusive: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: weakerInclusive });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '3');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 5 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('at least');
+  });
+
+  it('names the inclusive floor when it is strictly above the exclusive one', async () => {
+    const both: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'reserve',
+          label: 'Reserve',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          minimum: 2,
+          maximum: 10,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: both });
+    await act(async () => {
+      setInputValue(inputByLabel('Reserve')!, '1');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number at least 2 and at most 10.',
+    );
+    expect(document.body.textContent).not.toContain('greater than');
+  });
 });
 
 describe('Channel editor progressive disclosure', () => {
@@ -4831,5 +4950,74 @@ describe('Email channel editor', () => {
 
     const labels = labelTexts();
     expect(labels.some((t) => t.includes('Group policy'))).toBe(true);
+  });
+});
+
+describe('QR bind inside the editor', () => {
+  it('closes the editor on a successful bind so the stale draft cannot unbind it', async () => {
+    // The draft is seeded from the pre-bind instance. Leaving the editor open
+    // would let the next Save submit the old empty credentials, which the
+    // upsert maps to a secret clear — silently undoing the bind.
+    const qqDescriptor: DaemonChannelTypeDescriptor = {
+      type: 'qq',
+      displayName: 'QQ',
+      manageable: true,
+      supportsQrLogin: true,
+      fields: [
+        { key: 'appID', label: 'App ID', kind: 'string' },
+        { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+      ],
+    };
+    const instance = {
+      name: 'qq-bot',
+      config: { type: 'qq' },
+      secrets: { appSecret: { present: false } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' as const },
+    };
+    const pending = {
+      loginId: 'login-1',
+      channelType: 'qq',
+      channelName: 'qq-bot',
+      status: 'pending' as const,
+      expiresAt: 9_999_999,
+      qrCodeDataUrl: 'data:image/png;base64,AAAA',
+    };
+    const onOpenChange = vi.fn();
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    const qrLoginActions = {
+      start: vi.fn().mockResolvedValue({ ...pending, attached: false }),
+      state: vi.fn().mockResolvedValue({
+        ...pending,
+        status: 'succeeded' as const,
+        qrCodeDataUrl: undefined,
+      }),
+      cancel: vi.fn(),
+    };
+    vi.useFakeTimers();
+    try {
+      await renderDialog({
+        descriptor: qqDescriptor,
+        instance: instance as never,
+        qrLoginActions,
+        onOpenChange,
+        onReload,
+      });
+      const scan = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('Scan to bind'),
+      );
+      expect(scan).toBeDefined();
+      await act(async () => {
+        scan!.click();
+      });
+      expect(onOpenChange).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+      });
+      expect(onReload).toHaveBeenCalled();
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -8535,8 +8535,9 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // Only a delete is terminal; a close keeps the deterministic owner
-          // re-acquirable across the reload (R14-1).
+          // A Hook owner of its own is released here only on a delete; on a
+          // close Spring's drain after this phase releases it. One that shares
+          // the MCP broker is released with the MCP owner below.
           await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
           // Neither an unprovable drain nor a Session whose own settlement
@@ -8555,7 +8556,9 @@ export function registerHostedHarnessSessionRoutes(
             await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources({ terminal: kind === 'delete' });
+          // Terminal on a close as on a delete; HostedMcpSession.closeResources
+          // says why that is safe.
+          await session.mcp?.closeResources({ terminal: true });
           await session.clientFiles?.close();
           session.clientFiles = undefined;
         }

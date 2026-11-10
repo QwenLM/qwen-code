@@ -4747,6 +4747,20 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.sessionScope.option.chat_thread':
     'Per chat and thread',
   'channels.editor.field.sessionScope.option.single': 'One shared session',
+  'channels.qrLogin.title': 'Bind by QR code',
+  'channels.qrLogin.description':
+    'Scan with the QQ mobile app to bind a bot. The secret stays on this machine.',
+  'channels.qrLogin.start': 'Scan to bind',
+  'channels.qrLogin.refresh': 'New code',
+  'channels.qrLogin.waiting': 'Preparing the QR code…',
+  'channels.qrLogin.scanHint': 'Open QQ on your phone and scan this code.',
+  'channels.qrLogin.imageAlt': 'QQ bot binding QR code',
+  'channels.qrLogin.bound':
+    'Bot bound. The channel now uses the new credentials.',
+  'channels.qrLogin.failed': 'Binding failed',
+  'channels.qrLogin.expired': 'The code expired. Request a new one.',
+  'channels.qrLogin.cancelled': 'Binding cancelled.',
+  'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
@@ -5162,12 +5176,19 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.validation.repoFilterRequired':
     'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `Enter a number greater than ${v.min} and at most ${v.max}.`
-      : v?.max !== undefined
-        ? `Enter a number at most ${v.max}.`
-        : `Enter a number greater than ${v?.min ?? 0}.`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `at least ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `greater than ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `Enter a number ${lower} and at most ${v.max}.`;
+    }
+    if (v?.max !== undefined) return `Enter a number at most ${v.max}.`;
+    return `Enter a number ${lower ?? 'greater than 0'}.`;
+  },
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -9609,6 +9630,19 @@ const ZH: Messages = {
   'channels.editor.field.sessionScope.option.thread': '按话题',
   'channels.editor.field.sessionScope.option.chat_thread': '按对话和话题',
   'channels.editor.field.sessionScope.option.single': '整个频道共享',
+  'channels.qrLogin.title': '扫码绑定',
+  'channels.qrLogin.description':
+    '用手机 QQ 扫码绑定机器人。密钥只保留在本机。',
+  'channels.qrLogin.start': '扫码绑定',
+  'channels.qrLogin.refresh': '换一张码',
+  'channels.qrLogin.waiting': '正在生成二维码…',
+  'channels.qrLogin.scanHint': '在手机上打开 QQ 扫描此二维码。',
+  'channels.qrLogin.imageAlt': 'QQ 机器人绑定二维码',
+  'channels.qrLogin.bound': '已绑定机器人,渠道将使用新凭据。',
+  'channels.qrLogin.failed': '绑定失败',
+  'channels.qrLogin.expired': '二维码已过期,请重新获取。',
+  'channels.qrLogin.cancelled': '已取消绑定。',
+  'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
@@ -10002,12 +10036,19 @@ const ZH: Messages = {
   'channels.editor.validation.repoFilterRequired':
     '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
-  'channels.editor.validation.outOfRange': (v) =>
-    v?.min !== undefined && v?.max !== undefined
-      ? `请输入大于 ${v.min} 且不超过 ${v.max} 的数字。`
-      : v?.max !== undefined
-        ? `请输入不超过 ${v.max} 的数字。`
-        : `请输入大于 ${v?.min ?? 0} 的数字。`,
+  'channels.editor.validation.outOfRange': (v) => {
+    const lower =
+      v?.minInclusive !== undefined
+        ? `不小于 ${v.minInclusive}`
+        : v?.min !== undefined
+          ? `大于 ${v.min}`
+          : undefined;
+    if (lower !== undefined && v?.max !== undefined) {
+      return `请输入${lower} 且不超过 ${v.max} 的数字。`;
+    }
+    if (v?.max !== undefined) return `请输入不超过 ${v.max} 的数字。`;
+    return `请输入${lower ?? '大于 0'} 的数字。`;
+  },
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',

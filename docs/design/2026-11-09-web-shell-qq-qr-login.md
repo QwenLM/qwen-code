@@ -1,0 +1,454 @@
+# Web Shell QQ Channel Management With In-Browser QR Login
+
+[English](2026-11-09-web-shell-qq-qr-login.md) | [简体中文](2026-11-09-web-shell-qq-qr-login.zh-CN.md)
+
+## Status
+
+Layers 1-5 implemented. The `channels/base` capability contract, the QQ management
+descriptor and `qrLogin` wiring, the daemon's workspace-scoped login-session
+resource with its three routes, and the SDK types plus client methods on both
+client classes are in place. The `qrcode` dependency is added for daemon-side
+rendering.
+
+The Web Shell allowlist, the bind-by-QR panel and its English/Chinese labels are in
+place, so QQ is now configurable and bindable from the editor. The panel uses the
+shipped status union; the `scanned` state an earlier draft named is not
+representable and was dropped.
+
+**Not implemented:** the shared `requireMention` control. **Not verified:** the
+panel has not been driven in a real browser, and no human has scanned a code.
+
+Measured on the tree merged with main at `8736cfa015`: login-session lifecycle 18
+cells, QR credential persistence 8, channel management service 68, workspace
+channel routes 36, channel settings store 155, channel registry 52 plus 2 built-in
+catalog cells, SDK descriptor mirror 2, the QQ adapter package 898, the WeChat
+adapter package 111, and the Web Shell channel, workspace and i18n suites 729
+across 26 files — including 11 QR-panel cells and 144 editor cells. Typecheck is
+at zero errors for the CLI and Web Shell, and ESLint / Prettier are clean on every
+file this change touches. A real `qwen serve` daemon was driven over HTTP against
+a throwaway workspace: it reached Tencent's `create_bind_task`, the daemon-rendered
+code was decoded back to the live bind URL, and a re-bind was measured on the real
+settings store. That live pass predates the merge; everything after it is unit-
+and mutation-verified only.
+
+**Still missing:** a committed route-level test for the three QR routes, a
+completed scan-to-bind, and a browser-driven panel run. The credential write has
+been exercised at service level and on the real settings store, but never as the
+result of a real scan.
+
+The investigation findings below were read from the working tree on 2026-11-09
+and carry citations.
+
+## Problem Statement
+
+The QQ Bot adapter exists and works, but it cannot be configured from Web Shell
+at all, and its only login path draws a QR code into a terminal. A user managing
+channels from the browser therefore cannot add QQ, and cannot complete the
+scan-based binding that QQ recommends, because the daemon worker hosting the
+channel has no terminal the user can see.
+
+The goal is to let a user add a QQ channel in Web Shell and bind it by scanning a
+QR code rendered in the browser, without ever handling `appSecret` by hand.
+
+## Current State
+
+All findings below were verified by reading the cited lines.
+
+### The adapter is present but unmanageable
+
+- `packages/channels/qqbot` implements the adapter. Its `channelType` is `qq`,
+  not `qqbot` (`packages/channels/qqbot/src/index.ts:7`).
+- It is registered as a built-in (`packages/cli/src/commands/channel/channel-registry.ts:348`).
+- Its plugin declares no `management` metadata, so `supportedChannelCatalog()`
+  reports `manageable: false` and `fields: []`
+  (`packages/cli/src/commands/channel/channel-registry.ts:442`).
+- `ChannelManagementDescriptor` currently exposes only `fields` and
+  `validateConfig` (`packages/channels/base/src/types.ts:539-550`). There is no
+  extension point for an interactive login.
+
+### Web Shell gates QQ out twice
+
+- `SUPPORTED_CHANNEL_TYPES` is a hardcoded seven-entry allowlist — dingtalk, dws,
+  wecom, wecom-callback, feishu, github, gitlab
+  (`packages/web-shell/client/components/channels/channel-platform.ts:18`).
+- Availability requires both gates: `descriptor.manageable && isSupportedChannelType(descriptor.type)`
+  (`packages/web-shell/client/components/channels/channel-platform.ts:36`).
+- The instance list applies the same allowlist, so a QQ channel already present
+  in `settings.json` is hidden from the page entirely
+  (`packages/web-shell/client/components/channels/ChannelsManagerPage.tsx:265`).
+
+This is not QQ-specific treatment: `telegram` and `weixin` also lack `management`,
+and `email` declares `management` but is absent from the allowlist. Adapters are
+onboarded to the management surface one at a time; the precedent is commit
+`41f0e3ca5d0` ("add Web Shell management support for GitHub and GitLab", #8310).
+
+The counts above are the 2026-11-09 snapshot. Main has since added `email` and
+`weixin` to the allowlist, and this change adds `qq`, so it now holds ten entries
+— all ten declare `management`, which the registry suite pins. Regression scope
+is therefore written as "every other type in `SUPPORTED_CHANNEL_TYPES`" rather
+than a number that drifts with each merge.
+
+Main also shipped in-browser QR login for WeChat (#16736) while this change was
+in flight. The two share no mechanism: WeChat's credential is one process-global
+account, so its routes sit outside the workspace-scoped channel management
+surface and its panel is a separate component. QQ's credential belongs to one
+workspace's channel, so it goes through the shared `qrLogin` capability and the
+workspace-scoped session resource. The editor renders whichever panel the
+descriptor asks for — `descriptor.type === 'weixin'` for WeChat,
+`descriptor.supportsQrLogin` for QQ — and WeChat declares no `qrLogin`, so exactly
+one panel can appear.
+
+### Today's QR path is terminal-only
+
+`QQChannel.fetchToken()` resolves credentials in order: config values, then the
+persisted credentials file, then interactive QR login
+(`packages/channels/qqbot/src/QQChannel.ts:1896-1922`). The last step writes a
+prompt to `process.stderr` and awaits `qrCodeLogin()`, which delegates to
+`qrConnect()` (`packages/channels/qqbot/src/login.ts:22`). Credentials are
+persisted to `{qwenDir}/channels/{name}-credentials.json` with mode `0o600`
+(`packages/channels/qqbot/src/accounts.ts:14`, `:47-58`).
+
+`requiredConfigFields` is deliberately `[]` so that `parseChannelConfig()` does
+not reject a credential-less config before the QR path can run
+(`packages/channels/qqbot/src/index.ts:9-15`).
+
+### The connector already supports a browser-rendered QR
+
+`@tencent-connect/qqbot-connector@1.1.0` is locked with a single dependency,
+`qrcode-terminal@0.12.0` (`pnpm-lock.yaml:4758`, `:14017`). Its published
+declarations export two entry points:
+
+- `qrConnect(options)` — always prints to the console; used today.
+- `startQrConnect(callbacks, options)` — accepts
+  `displayQrCodeToConsole: false`, an `AbortSignal`, and a `source` tag; fires
+  `onQrDisplayed(url)` before polling begins, then `onSuccess(credentials)`,
+  `onQrExpired()`, or `onFailure(error)`; returns a dispose function.
+
+Both console writes sit inside `if (displayQrCodeToConsole)`, while
+`onQrDisplayed` fires unconditionally, so the callback mode produces no terminal
+output. No monkey-patching and no protocol reimplementation is required.
+
+The QR payload is
+`https://q.qq.com/qqbot/openclaw/connect.html?task_id=<id>&source=<source>&_wv=2`.
+It carries only a task id. The AES-256-GCM key generated by `createBindTask`
+stays inside the library closure and `decryptSecret` runs in the daemon, so
+`appSecret` is only ever available server-side. On expiry the library creates a
+fresh task and loops indefinitely until aborted.
+
+### Transport and contract conventions
+
+- Channel management uses plain JSON snapshots with `Cache-Control: no-store`
+  and no SSE; the UI reloads after each mutation
+  (`packages/web-shell/client/daemon/workspace/hooks/useDaemonChannels.ts:90-97`).
+- Channel routes are **not** described in
+  `docs/developers/daemon-rest-api.openapi.json` (the file contains no
+  `channels` entry). That spec and its four-way alignment test cover only the
+  guide surface. The generated-types pipeline under
+  `packages/web-shell/scripts/generate-managed-agent-api.mjs` is
+  managed-agent-specific and unrelated. Channel SDK types are hand-written
+  (`packages/sdk-typescript/src/daemon/types.ts:4811-4909`).
+- Routes register under two prefixes, `/workspace` (legacy-primary) and
+  `/workspaces/:workspace` (workspace-qualified)
+  (`packages/cli/src/serve/routes/workspace-channel-management.ts:587-588`).
+  Every request passes `resolveTarget`, which enforces
+  `requireTrustedWorkspaceRuntime` and rejects non-GET requests from a
+  `live-conversation` runtime with `live_channel_management_reserved`
+  (`packages/cli/src/serve/routes/workspace-channel-management.ts:299-307`).
+- Services are cached per runtime in a
+  `WeakMap<WorkspaceRuntime, Promise<ChannelManagementService>>`, each with its
+  own `WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd)`
+  (`packages/cli/src/serve/run-qwen-serve.ts:8227-8256`).
+
+### The closest stateful-login precedent
+
+OAuth device flow provides the entry shape to imitate: POST start returning 201
+for a fresh flow or 200 for an idempotent take-over, GET for state, DELETE for
+cancellation with an idempotent 204
+(`packages/cli/src/serve/routes/workspace-auth.ts:155`, `:223`, `:256`).
+`DeviceFlowRegistry` keeps in-memory entries with `expiresAt`
+(`packages/cli/src/serve/auth/device-flow.ts:451`), a per-entry `AbortController`
+(`:471`), a 30-second unref'd sweeper (`:61`, `:701-709`), and a concurrency cap
+that surfaces as 409 `too_many_active_flows`. State changes fan out as
+`auth_device_flow_*` workspace events
+(`packages/cli/src/serve/server/device-flow-registry.ts:56-79`), which the browser
+folds into a version counter to trigger a reload.
+
+Two properties of that precedent must not be copied blindly. First, its registry
+is deliberately **daemon-global** because OAuth credentials are process-global.
+Second, its initiator check is documented as **best-effort attribution, not
+authentication** — the bearer token is the auth boundary
+(`packages/cli/src/serve/routes/workspace-auth.ts:52-72`).
+
+## Goals
+
+- Add QQ to the Web Shell channel management surface, exposing the full
+  `QQChannelConfig` field set.
+- Let a user bind a QQ bot by scanning a QR code displayed in the browser.
+- Keep `appSecret` off the wire and out of the browser entirely.
+- Keep the QR protocol inside the QQ adapter; the daemon transports a
+  channel-agnostic capability.
+- Preserve the existing CLI terminal-scan path unchanged.
+
+## Scope Boundaries
+
+In scope: the `channels/base` contract additions, the QQ management descriptor and
+login capability, a workspace-scoped login-session resource in the daemon, SDK
+plumbing, and the Web Shell editor UI including English and Chinese copy. One
+shared surface is deliberately touched: the group section's `requireMention`
+control, which affects every adapter. The boolean-default contract change an
+earlier draft proposed was withdrawn (D6).
+
+Out of scope: QR login for any other adapter; changing the CLI scan flow;
+promoting channel routes into the OpenAPI guide surface; a dedicated SSE
+sub-resource; migrating credentials that already live in the credentials file.
+
+## Proposed Solution
+
+### Layer 1 — `packages/channels/base`
+
+Add an optional `qrLogin` capability to `ChannelManagementDescriptor`. It accepts
+a handler bundle mirroring the connector callbacks plus an `AbortSignal`, and
+returns a dispose function. The daemon never learns QQ protocol details.
+
+No change to field defaults is needed. `ChannelConfigFieldDescriptorBase.default`
+stays `string`; boolean kinds express their default as `'true'` / `'false'`, which
+the management editor already resolves (D6).
+
+### Layer 2 — `packages/channels/qqbot`
+
+Declare `management.fields` covering `QQChannelConfig`
+(`packages/channels/qqbot/src/types.ts:66-101`): `appID` and `appSecret`
+(env-resolvable, optional so the QR path can supply them), `sandbox`,
+`groupAllPolicy`, `keywordTriggers`, `allowMention`, `chatTypes`,
+`cron-msg-experimental`, `bufferFlushLength`, `maxReconnectAttempts`,
+`maxFlushRetries`, `maxGwRetries`. Shared access, session-scope, output-mode and
+instructions fields are appended automatically by
+`managementFieldsWithSharedControls()` and must not be redeclared.
+
+Wire `management.qrLogin` to `startQrConnect` with
+`displayQrCodeToConsole: false`. Add `management.validateConfig` for the
+cross-field constraints in D7.
+
+### Layer 3 — `packages/cli/src/serve`
+
+Own an ephemeral login-session registry on `ChannelManagementService`, not as a
+process-global singleton (D1). Add three routes beside the pairing routes, under
+both existing prefixes and behind the same `resolveTarget` gate: start, read
+state, cancel. Render the QR to a data URL server-side with a new `qrcode`
+dependency in `packages/cli` (D4). On success, write `appID` and `appSecret` into
+the channel config through the existing `ChannelSecretUpdate` path (D3).
+
+No new daemon capability key was added. Detection is per channel type instead:
+the catalog carries `supportsQrLogin`, so a client learns which adapters offer a
+scan without a separate global flag. An earlier draft proposed a key alongside
+`channel_management`; that was dropped as redundant.
+
+### Layer 4 — SDK
+
+Add the descriptor flag and login-session types to
+`packages/sdk-typescript/src/daemon/types.ts`, client methods to both the primary
+and workspace-scoped classes in `DaemonClient.ts`, and re-exports through
+`src/daemon/index.ts` and `src/index.ts`.
+
+### Layer 5 — Web Shell
+
+Add `qq` to the allowlist, its return-type union, and `PLATFORM_MARKS`. Extend
+`workspace/types.ts`, `workspace/actions.ts`, and `useDaemonChannels.ts`, then the
+export chain. Add a QR panel to `ChannelEditorDialog` with waiting, succeeded,
+expired, cancelled and failed states, a cancel action, and a manual-credential
+fallback.
+Add a `requireMention` control to the shared group section (D7).
+Add English and Chinese labels for every new field and state, and update the
+empty-state copy that currently enumerates five platforms
+(`packages/web-shell/client/i18n.tsx:4065`, `:8167`).
+
+## Design Decisions And Rationale
+
+**D1 — The login registry is persisted-workspace scoped, not process-global.**
+Device flow is daemon-global because OAuth credentials are process-global. A QQ
+login instead completes by writing into one workspace's channel config, and
+`ChannelManagementService` is already per-runtime with its own settings store.
+Attaching the registry there gives workspace isolation by construction, reuses
+the existing trust and live-conversation gates, and scopes session lifetime to
+the owning service instead of the process. Reclaiming that service through the
+`WeakMap` additionally requires disposing its sweeper: the scheduled interval is
+a GC root that retains the registry, so `dispose()` needs a production caller
+before the reclaim actually happens (follow-up work). Ownership class for the
+new routes: **legacy-primary + persisted-workspace**, matching their sibling
+channel routes.
+
+**D2 — Poll a JSON snapshot; do not add an SSE sub-resource.** Channel
+management already works this way. A login session is short-lived and the
+existing reload-after-mutation hook covers it. If a push signal proves necessary,
+reuse the workspace-event plus version-counter pattern rather than inventing a
+stream.
+
+**D3 — Credentials land in channel config as managed secrets.** Chosen so the
+editor can show binding state and support replacement or unbinding, consistent
+with DingTalk and Feishu. Snapshots expose only `secrets[key].present`, never
+values, so the secret does not reach the browser on read either.
+
+The storage permissions were measured rather than assumed. `saveSettings`
+reaches `writeWithBackupSync`, which preserves an existing file's mode and
+refuses to publish broader permissions, but passes `mode: undefined` when
+creating a file (`packages/cli/src/utils/write-with-backup.ts:81-105`). A probe
+driving that function directly under umask 022 produced: new file `0644`,
+existing `0600` preserved, existing `0644` preserved, staging directory `0700`
+and removed on success. The scope is `<repo>/.qwen/settings.json` when workspace
+settings are active, otherwise `~/.qwen/settings.json`
+(`packages/cli/src/serve/channel-settings-store.ts:489-491`); this repository
+ignores `.qwen/*` (`.gitignore:35`).
+
+So in the common case — a settings file already created at `0644` — the secret
+becomes readable by other local users, where the QQ credentials file is always
+`0600`. This is accepted for consistency with DingTalk and Feishu, whose secrets
+already have this property. It is a pre-existing platform-wide characteristic,
+not something QQ introduces; hardening secret-at-rest belongs in a separate
+change rather than in this feature's shared write path.
+
+**D4 — Render the QR daemon-side into a data URL.** Keeps the browser bundle free
+of a QR encoder and keeps QR generation in one place. Costs one new dependency in
+`packages/cli`.
+
+**D5 — Treat the QR URL as verification material.** Echo it only to the starting
+client, mirroring device flow. This is hardening, not a security boundary: the
+header is unauthenticated attribution and the bearer token remains the real
+boundary. The threat worth stating plainly is that whoever scans the code binds
+their own bot, so a leaked URL could point a workspace's channel at an
+attacker-controlled bot.
+
+**D6 — Boolean defaults use the existing string convention.** `allowMention` is
+read as `!== false`, so its effective default is true
+(`packages/channels/qqbot/src/QQChannel.ts:1145`). An earlier draft of this design
+proposed widening the descriptor's `default` to `string | boolean`. That was
+withdrawn: upstream already resolves a boolean default in the management editor
+via `field.default === 'true'`, and GitHub declares `prCommentWatch: 'true'` and
+`deliverToBoundSessions: 'false'` in that form. Widening the type and rejecting
+string defaults on boolean kinds stripped GitHub's and email's entire management
+surface, which was measured by A/B on the real registry. QQ therefore declares
+`default: 'true'` / `'false'` like its siblings, and no shared contract, editor, or
+SDK default type changes are needed.
+
+**D7 — Cross-field constraints become editor-visible validation.**
+`groupAllPolicy` of `keyword` or `all` needs `sessionScope: 'thread'` for
+per-group shared context, and needs at least one group with
+`requireMention: false` or `GroupGate` silently drops every non-mention message.
+The adapter only warns on stderr and no longer overrides the user's scope, so in
+a daemon worker the warning is invisible and the UI would show a configuration
+that saves cleanly and then drops traffic. `validateConfig` must reject the
+unsupported combination with an actionable message.
+
+Upstream corrected these semantics after this design was first written: the
+required scope is `thread`, not `single` (`single` merges every group and direct
+message into one context), `multiSession` pins the scope to `user` and is
+therefore mutually exclusive with these policies, and the gate accepts a
+per-group `requireMention: false` rather than only the wildcard entry. The
+implemented validation and its tests follow the current upstream behavior.
+
+`groups['*'].requireMention` also gets an editor control in the shared group
+section, so `keyword` and `all` can be configured entirely from the UI instead of
+requiring a hand edit. Because that section is shared by every adapter, the
+change needs a regression pass across every other type in `SUPPORTED_CHANNEL_TYPES`,
+and the control must leave existing group configuration untouched when unused.
+
+**D8 — The terminal fallback stays, but managed start must not reach it.** The CLI
+scan path is unchanged. A managed QQ channel with no resolvable credentials must
+fail with a clear error rather than block a worker on an invisible terminal
+prompt.
+
+**D9 — The capability is channel-agnostic; the protocol is not.** The daemon
+forwards handlers and never parses a QQ URL or task id, so a future adapter can
+reuse the transport.
+
+## Constraints
+
+- The connector refreshes expired QR codes forever. Session TTL must bound this
+  by calling dispose, or a forgotten session polls Tencent indefinitely.
+- Timers must be unref'd so login sessions never hold the process open, matching
+  the device-flow sweeper.
+- Sessions are in-memory and vanish on restart; the UI must treat a missing
+  session as expired rather than hang.
+- `appSecret` must never appear in a response body, an event payload, or a log
+  line. Route errors already pass through `redactLogCredentials` and
+  `sanitizeLogText` (`packages/cli/src/serve/routes/workspace-channel-management.ts:269`).
+
+## Risks
+
+- **Secret-at-rest change (measured and accepted).** QQ credentials currently
+  live in a `0o600` file; `settings.json` is `0644` in the common case, so the
+  secret becomes readable by other local users. D3 records the measurement and
+  the acceptance. Platform-wide secret-at-rest hardening is follow-up work, not
+  part of this change.
+- **A real scan cannot be automated.** No harness can point a phone at a screen.
+  Automated coverage must drive the connector callbacks with a fake; the actual
+  bind needs one manual pass. These are different classes of evidence and must be
+  reported separately.
+- **Shared-editor blast radius.** D7 adds a control to the shared group
+  section, which affects every channel type rather than QQ alone. D6 was
+  withdrawn, so no boolean-initialization change ships. Every other type in
+  `SUPPORTED_CHANNEL_TYPES` needs a regression pass covering boolean fields and
+  group configuration round-trips.
+- **Silent-divergence traps.** D6 and D7 are the two ways this feature could
+  appear to work while behaving incorrectly. Both need dedicated regression
+  tests, not just happy-path coverage.
+
+## Validation Plan
+
+Unit tests, collocated per project convention: QQ descriptor shape and
+`validateConfig` rejection matrix; registry validation of the new capability,
+including malformed and null `qrLogin` values; login-session lifecycle including expiry, cancel,
+concurrency cap, and take-over; route ownership and trust gating on both
+prefixes; secret never present in snapshots or event payloads; English and Chinese label rendering
+asserted per language.
+
+End-to-end: drive the real daemon with a fake connector to exercise waiting,
+expired-then-refreshed, cancelled, and failed paths, asserting that
+credentials land in the workspace's channel config and that no secret crosses the
+wire. Separately, one manual run binds a real bot by scanning the browser-rendered
+code.
+
+The two traps get explicit regressions: saving a new QQ channel must not write
+`allowMention: false`, and selecting `groupAllPolicy: keyword` without the
+required group settings must be rejected in the editor rather than saved.
+
+Because the shared group section changes, every other type in
+`SUPPORTED_CHANNEL_TYPES` gets a round-trip regression: open each in the editor,
+save without edits, and assert the resulting config is unchanged apart from
+intended normalization. This must cover boolean fields and any existing `groups`
+entries, including `requireMention` values the new control did not author.
+
+## Acceptance Criteria
+
+1. QQ appears in the Web Shell platform list, and a QQ instance already in
+   `settings.json` is listed rather than hidden.
+2. Starting a login from the editor renders a scannable QR image in the browser
+   with no terminal output from the daemon.
+3. A successful scan writes `appID` and `appSecret` into that workspace's channel
+   config, and the editor shows the bound state.
+4. No response body, workspace event, or log line contains `appSecret`.
+5. Cancelling from the editor stops upstream polling; an abandoned session
+   expires and stops polling without a client.
+6. A login started in one workspace is not readable or cancellable from another.
+7. Saving a new QQ channel leaves `allowMention` at its effective default of true.
+8. `groupAllPolicy: keyword` or `all` without the required session scope and group
+   settings is rejected with an actionable editor error.
+9. `groups['*'].requireMention` is configurable from the editor, and `keyword` or
+   `all` can be configured end to end without hand-editing `settings.json`.
+10. For every other type in `SUPPORTED_CHANNEL_TYPES`, boolean fields and group
+    configuration round-trip unchanged through the editor.
+11. The CLI terminal-scan path still works unchanged.
+12. Every new label renders in both English and Chinese.
+
+## Open Questions
+
+- Does the login session need a workspace-event push signal, or is
+  reload-on-poll sufficient in practice? Decide from the measured latency of the
+  fake-connector run rather than pre-emptively adding the fan-out.
+
+## Resolved Questions
+
+- `groups['*'].requireMention` gets an editor control in the shared group section
+  (D7), accepting the wider regression surface.
+- Credentials are written to channel config only, accepting the measured `0644`
+  exposure for consistency with other adapters (D3). The credentials file is not
+  written by the managed path.

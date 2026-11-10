@@ -633,7 +633,15 @@ export interface ChannelConfigNumberFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
   /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
    * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
   maximum?: number;
@@ -678,8 +686,40 @@ export type ChannelConfigFieldDescriptor =
   | ChannelConfigNumberFieldDescriptor
   | ChannelConfigObjectFieldDescriptor;
 
+/**
+ * Handlers an adapter drives during an interactive QR login. The daemon owns
+ * the session lifecycle and the transport; the adapter owns the protocol.
+ */
+export interface ChannelQrLoginHandlers {
+  /** A fresh QR payload URL is ready to render. Never carries a secret. */
+  onQrCode(url: string): void;
+  /** The current QR expired; a replacement is being requested. */
+  onExpired(): void;
+  /**
+   * Login succeeded. Values are keyed by management field key so the daemon can
+   * persist them through the shared config/secret path without knowing which
+   * platform produced them.
+   */
+  onSuccess(values: Readonly<Record<string, string>>): void;
+  onFailure(error: Error): void;
+}
+
+export interface ChannelQrLoginDescriptor {
+  /**
+   * Begin the login handshake. Returns a dispose function that must stop all
+   * upstream polling. Aborting `signal` has the same effect.
+   */
+  start(handlers: ChannelQrLoginHandlers, signal: AbortSignal): () => void;
+}
+
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
+
+  /**
+   * Opt in to browser-rendered QR login. Adapters without it can only be
+   * configured by supplying credentials directly.
+   */
+  qrLogin?: ChannelQrLoginDescriptor;
 
   /**
    * Cross-field validation applied to the resolved config during managed
