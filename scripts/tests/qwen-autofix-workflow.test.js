@@ -5425,6 +5425,24 @@ describe('qwen-autofix workflow', () => {
     expect(pendingLongMin).toBeTruthy();
     expect(designDoc).toContain(`${pendingLongMin}-minute long horizon`);
 
+    // The heartbeat design doc states the round length its age cap is
+    // sized against — derive it from the address step's self-hosted cap
+    // so the prose cannot drift back to the pre-split envelope. Against
+    // the old "≤130-minute agent step" text the regex does not match and
+    // this pin is red.
+    const heartbeatDoc = readFileSync(
+      'docs/design/autofix-round-heartbeat.md',
+      'utf8',
+    );
+    const heartbeatStepMin = Number(
+      heartbeatDoc.match(/(\d+)-minute self-hosted agent step/)?.[1],
+    );
+    const addressStepText =
+      workflow.match(
+        /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    expect(heartbeatStepMin).toBe(stepCapsOf(addressStepText).selfHosted);
+
     // Writer/reader identity: all three status writes and both readers bind
     // the SAME context variable — a mismatch on any site leaves the marker
     // permanently unread (the fork-bridge tests pin their cross-site signal
@@ -22716,6 +22734,16 @@ exit 1
     // The unset-variable default resolves in the run body (not in the env
     // fallback), runner-split. Replay the ACTUAL resolution block so a
     // flipped runner test or a wrong default fails here, not in production.
+    // The env line is the INPUT the default-resolution block depends on:
+    // its fallback must stay empty, or a non-empty default skips the -z
+    // branch and silently restores the old budget under the new cap (no
+    // warning, no red test). Extract the fallback and feed the replay with
+    // it, so the test stays coupled to the production line instead of
+    // injecting its own ''.
+    const envFallback = addressStep.match(
+      /QWEN_TIMEOUT_MS: "\$\{\{ vars\.QWEN_AUTOFIX_TIMEOUT_MS \|\| '([^']*)' \}\}"/,
+    )?.[1];
+    expect(envFallback, 'QWEN_TIMEOUT_MS env fallback').toBe('');
     const defaultBlock = addressStep.match(
       /if \[\[ -z "\$\{QWEN_TIMEOUT_MS\}" \]\]; then\n[\s\S]*?\n {10}fi\n/,
     )?.[0];
@@ -22727,7 +22755,7 @@ exit 1
         {
           env: {
             ...process.env,
-            QWEN_TIMEOUT_MS: '',
+            QWEN_TIMEOUT_MS: envFallback,
             RUNNER_ENVIRONMENT: runnerEnvironment,
           },
           encoding: 'utf8',

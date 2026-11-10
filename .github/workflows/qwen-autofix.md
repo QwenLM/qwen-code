@@ -1912,7 +1912,8 @@ In `review-address` · `Push and report`.
 Salvage a race-lost push instead of discarding the run. The
 per-PR head-write concurrency group serialises THIS repo's
 workflows, but it cannot stop the PR author (or anything on the
-fork side) pushing during the agent's ~120-minute window. The
+fork side) pushing during the agent's window — up to 240 minutes
+on the self-hosted pool, 120 on github-hosted (af-125). The
 stated budget widened it from ~50m, so a race-lost push is that
 much likelier and the retry loop below stays bounded at 3 merges.
 Observed twice in one day (#7983, #7985): a one-shot push died
@@ -3195,7 +3196,8 @@ In `review-address` · `Prepare branch and feedback`.
 The instant THIS round's net was measured. Stamped into the
 growth-now marker so the census filters on measurement
 time, not the marker comment's created_at — the report posts the
-marker only after the agent's ~120-minute run, so a round in
+marker only after the agent's run (up to 240 minutes self-hosted,
+120 hosted; af-125), so a round in
 flight when a concurrent base update lands would otherwise pass a
 created_at filter while carrying pre-update sums (#9114 R2-6).
 Emitted ONLY when a measurement happened: an unmeasured attempt
@@ -4027,17 +4029,22 @@ holds the bot PAT in /proc/<pid>/environ until the cap,
 and any same-UID process on that host — including another
 PR's round running its gate's host-side build/tests —
 reads it directly; the pool's ptrace scope does not gate
-this read, as witnessed above. The cap therefore sits just
-past the 330-minute job envelope — only a crash orphan
-ever reaches it, so the cap IS the bound on its token
-window. A cross-run kill keyed on a WORKDIR pid would
+this read, as witnessed above. The cap therefore sits past
+setup + the 250-minute self-hosted address step — the gate
+kills the loop, so the job envelope is not the bound — and
+only a crash orphan ever reaches it, so the cap IS the bound
+on its token window. Raising the address step cap past ~330
+minutes requires raising HB_MAX_AGE_SECONDS and widening its
+[19800, 21600] magnitude guard in the same change.
+A cross-run kill keyed on a WORKDIR pid would
 reopen the untrusted-kill-target hole, so reclamation
 stays host-local). Reading the file to self-identify is
 safe (the loop never kills anything); the
 killers never read it, which is what keeps the
 untrusted-target hole closed — no cross-run kill. The other
 bounds: a heartbeat-stop marker, or the age cap just past
-the 330-minute job envelope; each tick's gh call is
+setup + the 250-minute self-hosted address step (the gate
+kills the loop; see above); each tick's gh call is
 additionally wrapped in a 60s timeout so a black-holed
 connection cannot stall the loop past the cap. Killers that
 run in-round touch the stop marker BEFORE killing so a

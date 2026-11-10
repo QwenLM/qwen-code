@@ -3,8 +3,9 @@
 ## Problem statement
 
 A review-address round can run for a long time: the `Triage and address`
-step alone has a 130-minute timeout (120-minute agent budget), and a round
-that reaches the repair path can occupy most of the job's 330 minutes.
+step alone has a 250-minute self-hosted agent step timeout (240-minute
+budget; 130/120 on github-hosted), and a round that reaches the repair
+path can occupy most of the job's 465 self-hosted minutes (345 hosted).
 During all of that, the PR shows exactly one static signal — the
 `<!-- autofix-status -->` comment reading "🔄 AutoFix is working on this PR —
 round N/M", posted by `Post autofix status comment` and not touched again
@@ -71,8 +72,8 @@ orphan loops unacceptable):
    `Verification gate` step is the first one that runs branch code ON THE
    HOST (the agent phase sandboxes it in docker), so it kills the loop
    before launching the gate. The pulse covers the longest phase (the
-   ≤130-minute agent step); the comment holds its last tick through
-   gate/repair and finalize flips the terminal text.
+   ≤250-minute self-hosted agent step, ≤130 hosted); the comment holds
+   its last tick through gate/repair and finalize flips the terminal text.
 2. Kill targets travel through **expression context**: the launch records
    `$!` as a `heartbeat_pid` step output, and the gate / finalize /
    cleanup kill that value — routed through each killer's step-level
@@ -121,10 +122,13 @@ orphan loops unacceptable):
    `heartbeat.pid` at the same path, which an existence check would let
    the orphan pass (reading the file here is safe: the loop only
    self-identifies, it never kills anything); stop if `heartbeat-stop`
-   exists, or at a hard age cap set just past the 330-minute job
-   envelope (a live round's loop dies at the gate or finalize well inside
-   the job, so only a crash orphan ever reaches the cap — and the cap
-   bounds how long that orphan holds the PAT in `/proc/<pid>/environ`);
+   exists, or at a hard age cap set just past setup + the 250-minute
+   self-hosted address step (the gate kills the loop, so the job envelope
+   is not the bound; a live round's loop dies at the gate or finalize,
+   so only a crash orphan ever reaches the cap — and the cap bounds how
+   long that orphan holds the PAT in `/proc/<pid>/environ`; raising the
+   step cap past ~330 minutes requires raising HB_MAX_AGE_SECONDS and
+   widening its [19800, 21600] magnitude guard in the same change);
    each tick's `gh` call is wrapped in `timeout 60` so a
    black-holed connection cannot stall the loop past the cap.
 
@@ -216,9 +220,10 @@ comment is never worse than today.
    digest-verified, before the agent; the killers are inline `kill` calls
    so no PR-branch-controlled file is ever executed in a PAT-bearing or
    post-agent context.
-7. **10-minute cadence.** ≤13 PATCHes per 130-minute round, ≤20
-   concurrent legs — negligible API load. Frequent enough that a stuck
-   round shows a stale "active" timestamp within one interval.
+7. **10-minute cadence.** ≤25 PATCHes per 250-minute self-hosted round
+   (≤13 hosted), ≤20 concurrent legs — negligible API load. Frequent
+   enough that a stuck round shows a stale "active" timestamp within
+   one interval.
 
 ## Files affected
 
@@ -267,13 +272,14 @@ comment is never worse than today.
   any same-UID process on that host — including another PR's round
   running its gate's host-side build/tests — reads it directly (the
   pool's ptrace scope gates ptrace attach, not this read; witnessed on
-  the pool's host class). The cap therefore sits just past the
-  330-minute job envelope, bounding the orphan's token window to roughly
-  one job duration; the alternative — a cross-run kill keyed on a
-  WORKDIR pid — reopens the untrusted-kill-target hole.
+  the pool's host class). The cap therefore sits just past setup + the
+  250-minute self-hosted address step (the gate kills the loop, so the
+  job envelope is not the bound), bounding the orphan's token window to
+  roughly one address phase; the alternative — a cross-run kill keyed
+  on a WORKDIR pid — reopens the untrusted-kill-target hole.
 
 ## Open questions
 
-None blocking. Cadence (10 min) and the age cap (just past the
-330-minute job envelope) are repo-variable-friendly constants but ship
-as literals until a reason to configure appears.
+None blocking. Cadence (10 min) and the age cap (just past setup + the
+250-minute self-hosted address step) are repo-variable-friendly
+constants but ship as literals until a reason to configure appears.

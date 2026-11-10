@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Live-progress heartbeat for the autofix round status comment.
 #
-# A review-address round can run for hours (130-minute agent step, 330-
-# minute job) while the PR's status comment stays frozen at "working" —
-# a healthy long round and a dead one look identical on the PR page.
+# A review-address round can run for hours (250-minute self-hosted agent
+# step, 465-minute job; 130/345 on github-hosted) while the PR's status
+# comment stays frozen at "working" — a healthy long round and a dead
+# one look identical on the PR page.
 # 'Post autofix status comment' starts this script as a detached loop;
 # every interval it re-PATCHes the SAME status comment with elapsed time
 # and last agent activity, and 'Finalize autofix status comment' kills it
@@ -148,10 +149,13 @@ run_loop() {
   exec >> "${HB_WORKDIR}/heartbeat.log" 2>&1 < /dev/null
   echo "$$" > "${HB_WORKDIR}/heartbeat.pid"
   local interval="${HB_INTERVAL_SECONDS:-600}"
-  # Just past the 330-minute job envelope: a live round's loop dies at the
-  # gate or finalize well inside the job, so only a crash-leftover orphan
+  # Just past setup + the 250-minute self-hosted address step: the gate
+  # kills the loop, so the job envelope is not the bound; a live round's
+  # loop dies at the gate or finalize, so only a crash-leftover orphan
   # ever reaches the cap — and the cap bounds how long that orphan holds
-  # the PAT in /proc/<pid>/environ, so it stays tight.
+  # the PAT in /proc/<pid>/environ, so it stays tight. Raising the step
+  # cap past ~330 minutes requires raising this default and widening the
+  # [19800, 21600] magnitude guard below in the same change.
   local max_age="${HB_MAX_AGE_SECONDS:-20400}"
   # Numeric guards: a malformed or zero override must degrade to the
   # defaults, never into a sleep-less busy loop hammering the API.
@@ -162,8 +166,9 @@ run_loop() {
   # age cap that bounds an orphan's PAT window becomes unreachable),
   # while a tiny age cap silently kills the pulse after the first
   # sleep — the frozen comment this feature eliminates. Bound the
-  # magnitude too; the cap's floor is the 330-minute job envelope, so
-  # a live round's pulse always outlives the round. The digit bound
+  # magnitude too; the cap's floor is setup + the 250-minute self-hosted
+  # address step (the gate kills the loop), so a live round's pulse
+  # always outlives the round. The digit bound
   # runs FIRST: bash arithmetic wraps modulo 2^64, so a 20+-digit plant
   # would pass the comparisons on its wrapped value while the original
   # string still reaches sleep — the loop never wakes again (R16-2).
