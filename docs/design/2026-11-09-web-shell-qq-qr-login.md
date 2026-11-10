@@ -16,14 +16,22 @@ shipped status union; the `scanned` state an earlier draft named is not
 representable and was dropped.
 
 **Not implemented:** the shared `requireMention` control. **Not verified:** the
-panel has no committed test, has not been driven in a real browser, and no human
-has scanned a code.
+panel has not been driven in a real browser, and no human has scanned a code.
 
-Verification so far is unit and type level only: 13 session-lifecycle tests, the
-channel registry and QQ adapter suites, SDK typecheck at zero errors, and build /
-ESLint / Prettier clean on changed files. **No route-level test, no end-to-end run
-against a live daemon, and no manual scan has been performed.** The QR rendering
-path and the credential write have not been exercised through HTTP.
+Measured at the current head: login-session lifecycle 18 cells, channel
+management service 68, workspace channel routes 36, channel registry 52, SDK
+descriptor mirror 2, the QQ adapter package 898, and the Web Shell channel and
+workspace suites 633 — including 11 QR-panel cells and one editor bind cell.
+Typecheck is at zero errors for the QQ adapter and Web Shell, and build / ESLint /
+Prettier are clean on changed files. A real `qwen serve` daemon was driven over
+HTTP against a throwaway workspace: it reached Tencent's `create_bind_task`, the
+daemon-rendered code was decoded back to the live bind URL, and a re-bind was
+measured on the real settings store.
+
+**Still missing:** a committed route-level test for the three QR routes, a
+completed scan-to-bind, and a browser-driven panel run. The credential write has
+been exercised at service level and on the real settings store, but never as the
+result of a real scan.
 
 The investigation findings below were read from the working tree on 2026-11-09
 and carry citations.
@@ -227,8 +235,9 @@ and workspace-scoped classes in `DaemonClient.ts`, and re-exports through
 
 Add `qq` to the allowlist, its return-type union, and `PLATFORM_MARKS`. Extend
 `workspace/types.ts`, `workspace/actions.ts`, and `useDaemonChannels.ts`, then the
-export chain. Add a QR panel to `ChannelEditorDialog` with waiting, scanned,
-expired and failed states, a cancel action, and a manual-credential fallback.
+export chain. Add a QR panel to `ChannelEditorDialog` with waiting, succeeded,
+expired, cancelled and failed states, a cancel action, and a manual-credential
+fallback.
 Add a `requireMention` control to the shared group section (D7).
 Add English and Chinese labels for every new field and state, and update the
 empty-state copy that currently enumerates five platforms
@@ -353,7 +362,7 @@ reuse the transport.
   reported separately.
 - **Shared-editor blast radius.** D7 adds a control to the shared group
   section, which affects every channel type rather than QQ alone. D6 was
-  withdrawn, so no boolean-initialization change ships. The six already-manageable adapters need a regression pass
+  withdrawn, so no boolean-initialization change ships. The seven already-manageable adapters need a regression pass
   covering boolean fields and group configuration round-trips.
 - **Silent-divergence traps.** D6 and D7 are the two ways this feature could
   appear to work while behaving incorrectly. Both need dedicated regression
@@ -369,7 +378,7 @@ prefixes; secret never present in snapshots or event payloads; English and Chine
 asserted per language.
 
 End-to-end: drive the real daemon with a fake connector to exercise waiting,
-scanned, expired-then-refreshed, cancelled, and failed paths, asserting that
+expired-then-refreshed, cancelled, and failed paths, asserting that
 credentials land in the workspace's channel config and that no secret crosses the
 wire. Separately, one manual run binds a real bot by scanning the browser-rendered
 code.
@@ -378,7 +387,7 @@ The two traps get explicit regressions: saving a new QQ channel must not write
 `allowMention: false`, and selecting `groupAllPolicy: keyword` without the
 required group settings must be rejected in the editor rather than saved.
 
-Because two shared surfaces change, the seven already-manageable adapters get a
+Because the shared group section changes, the seven already-manageable adapters get a
 round-trip regression: open each in the editor, save without edits, and assert
 the resulting config is unchanged apart from intended normalization. This must
 cover boolean fields and any existing `groups` entries, including

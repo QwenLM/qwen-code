@@ -11,12 +11,18 @@ daemon 侧按 workspace 隔离的登录会话资源及其三条路由,以及 SDK
 Web Shell 白名单、扫码绑定面板及其中英文案均已就位,QQ 现在可在编辑器中配置并绑定。
 面板使用契约实际提供的状态集合;早期草稿提到的 `scanned` 状态无法表示,已删除。
 
-**尚未实现:** 共享 `requireMention` 控件。**尚未验证:** 面板无提交测试、未在真实
-浏览器中驱动过、也无人扫码。
+**尚未实现:** 共享 `requireMention` 控件。**尚未验证:** 面板未在真实浏览器中驱动过、
+也无人扫码。
 
-目前的验证仅到单元与类型层:13 条会话生命周期测试、channel registry 与 QQ 适配器套件、
-SDK 类型检查零错误,以及改动文件的构建 / ESLint / Prettier 全绿。**未做路由级测试、
-未对真实 daemon 做端到端运行、也未做人工扫码。** 二维码渲染路径与凭据写入尚未经 HTTP 实测。
+在当前 head 上实测:登录会话生命周期 18 格、渠道管理服务 68 格、workspace 渠道路由 36 格、
+channel registry 52 格、SDK 描述符镜像 2 格、QQ 适配器包 898 格、Web Shell 渠道与
+workspace 套件 633 格(其中扫码面板 11 格、编辑器绑定 1 格)。QQ 适配器与 Web Shell
+类型检查零错误,改动文件的构建 / ESLint / Prettier 全绿。另起真实 `qwen serve` daemon,
+指向一次性工作区并通过 HTTP 驱动:它真的调用了腾讯 `create_bind_task`,daemon 渲染的
+二维码被解码回真实绑定 URL,并在真实 settings store 上实测了换绑。
+
+**仍然缺失:** 三条扫码路由的提交级路由测试、一次完成的扫码绑定、以及浏览器里面板的
+实跑。凭据写入已在服务层与真实 settings store 上验证过,但从未由一次真实扫码触发。
 
 下文的调研结论于 2026-11-09 从工作树中读取得到并附带引用出处。
 
@@ -197,7 +203,7 @@ instructions 字段由 `managementFieldsWithSharedControls()` 自动追加,不�
 
 把 `qq` 加入白名单、其返回类型联合以及 `PLATFORM_MARKS`。扩展
 `workspace/types.ts`、`workspace/actions.ts` 与 `useDaemonChannels.ts`,再接上导出链。
-在 `ChannelEditorDialog` 中新增扫码面板,包含等待、已扫码、已过期与失败四种状态、
+在 `ChannelEditorDialog` 中新增扫码面板,包含等待、成功、已过期、已取消与失败五种状态、
 一个取消动作,以及手工填凭据的兜底入口。在共享群组区新增 `requireMention` 控件
 (见 D7)。为每个新字段与新状态补齐中英文文案,并更新当前枚举了五个平台的空态文案
 (`packages/web-shell/client/i18n.tsx:4065`、`:8167`)。
@@ -304,14 +310,14 @@ registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会�
 接管;两个前缀上的路由所有权与信任门禁;快照与事件载荷中绝不出现 secret;
 中英文文案按语种分别断言渲染。
 
-端到端:用 fake connector 驱动真实 daemon,覆盖等待、已扫码、过期后刷新、已取消
-与失败五条路径,断言凭据落入该 workspace 的渠道配置,且没有 secret 上 wire。
+端到端:用 fake connector 驱动真实 daemon,覆盖等待、过期后刷新、已取消
+与失败四条路径,断言凭据落入该 workspace 的渠道配置,且没有 secret 上 wire。
 另外单独进行一次人工运行,通过扫描浏览器渲染的二维码绑定真实机器人。
 
 两个陷阱各配显式回归:保存新建 QQ 渠道不得写入 `allowMention: false`;
 在缺少所需群组设置时选择 `groupAllPolicy: keyword` 必须在编辑器中被拒绝,而不是被保存。
 
-由于有两处共享面发生变化,七个已可管理的适配器各配一条往返回归:在编辑器中打开、
+由于共享群组区发生变化,七个已可管理的适配器各配一条往返回归:在编辑器中打开、
 不做任何修改直接保存,断言结果配置除预期的规范化之外保持不变。该回归必须覆盖布尔
 字段与任何既有的 `groups` 条目,包括并非由新控件写入的 `requireMention` 值。
 
