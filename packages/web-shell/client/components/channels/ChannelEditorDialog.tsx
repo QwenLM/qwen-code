@@ -572,12 +572,21 @@ export function ChannelEditorDialog({
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
       // Only name the bounds the descriptor actually declares: a field with a
-      // maximum and no exclusiveMinimum has no floor, and inventing "greater
-      // than 0" would state a constraint the validator does not enforce.
+      // maximum and no lower bound has no floor, and inventing "greater than
+      // 0" would state a constraint the validator does not enforce.
+      const exclusive = numberField?.exclusiveMinimum;
+      const inclusive = numberField?.minimum;
+      // Name whichever floor the validator actually enforces at the margin.
+      // On a tie the exclusive bound is stricter, since it also rejects equality.
+      const floorIsInclusive =
+        inclusive !== undefined &&
+        (exclusive === undefined || inclusive > exclusive);
       return t('channels.editor.validation.outOfRange', {
-        ...(numberField?.exclusiveMinimum !== undefined
-          ? { min: numberField.exclusiveMinimum }
-          : {}),
+        ...(floorIsInclusive
+          ? { minInclusive: inclusive }
+          : exclusive !== undefined
+            ? { min: exclusive }
+            : {}),
         ...(numberField?.maximum !== undefined
           ? { max: numberField.maximum }
           : {}),
