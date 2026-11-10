@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 import {
+  getPendingBackgroundApprovals,
   getPillLabel,
   hasLargeWorkflow,
   hasPendingApproval,
@@ -293,6 +294,33 @@ describe('hasPendingApproval', () => {
         dreamEntry({ dreamId: 'd-a' }),
       ]),
     ).toBe(false);
+  });
+});
+
+describe('getPendingBackgroundApprovals', () => {
+  it('lists agent and workflow approvals oldest first with stable keys', () => {
+    const late = { ...approval('c1'), at: 30 };
+    const early = { ...workflowApproval('wfap-1'), name: 'Edit', at: 10 };
+    const middle = { ...approval('c2'), name: 'Grep', at: 20 };
+    expect(
+      getPendingBackgroundApprovals([
+        agentEntry({ agentId: 'a', pendingApprovals: [late] }),
+        workflowEntry({ pendingApprovals: [early] }),
+        agentEntry({ agentId: 'b', pendingApprovals: [middle] }),
+        shellEntry({ shellId: 'bg_a' }),
+        dreamEntry({ dreamId: 'd-a' }),
+      ]),
+    ).toEqual([
+      { key: 'workflow:wfap-1', toolName: 'Edit', at: 10 },
+      { key: 'agent:b:c2', toolName: 'Grep', at: 20 },
+      { key: 'agent:a:c1', toolName: 'Shell', at: 30 },
+    ]);
+  });
+
+  it('is empty when nothing is parked', () => {
+    expect(
+      getPendingBackgroundApprovals([agentEntry(), workflowEntry()]),
+    ).toEqual([]);
   });
 });
 

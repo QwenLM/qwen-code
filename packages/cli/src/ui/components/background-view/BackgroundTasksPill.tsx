@@ -38,6 +38,46 @@ export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
   );
 }
 
+/** A tool call a background agent or workflow has parked for approval. */
+export interface PendingBackgroundApproval {
+  /** Stable across snapshots; unique among all parked approvals. */
+  key: string;
+  toolName: string;
+  /** Emission timestamp (ms). */
+  at: number;
+}
+
+/**
+ * Every approval {@link hasPendingApproval} sees, oldest first. Workflow
+ * approvals carry their own id; an agent approval is keyed by its entry and
+ * tool-call id.
+ */
+export function getPendingBackgroundApprovals(
+  entries: readonly DialogEntry[],
+): PendingBackgroundApproval[] {
+  const approvals: PendingBackgroundApproval[] = [];
+  for (const entry of entries) {
+    if (entry.kind === 'agent') {
+      for (const approval of entry.pendingApprovals ?? []) {
+        approvals.push({
+          key: `agent:${entry.agentId}:${approval.callId}`,
+          toolName: approval.name,
+          at: approval.at,
+        });
+      }
+    } else if (entry.kind === 'workflow') {
+      for (const approval of entry.pendingApprovals ?? []) {
+        approvals.push({
+          key: `workflow:${approval.approvalId}`,
+          toolName: approval.name,
+          at: approval.at,
+        });
+      }
+    }
+  }
+  return approvals.sort((a, b) => a.at - b.at);
+}
+
 /**
  * True if a workflow that is still active has been flagged as large. Settled
  * runs are left out: the marker is a nudge to stop something, and they have
