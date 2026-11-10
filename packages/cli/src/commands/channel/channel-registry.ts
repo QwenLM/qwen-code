@@ -10,6 +10,7 @@ export interface ChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
+  supportsQrLogin?: boolean;
   fields: readonly ChannelConfigFieldDescriptor[];
 }
 
@@ -330,6 +331,16 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
       'Channel management metadata must declare validateConfig as a synchronous function.',
     );
   }
+  if (
+    management.qrLogin !== undefined &&
+    (management.qrLogin === null ||
+      typeof management.qrLogin !== 'object' ||
+      typeof management.qrLogin.start !== 'function')
+  ) {
+    throw new Error(
+      'Channel management metadata must declare qrLogin.start as a function.',
+    );
+  }
   if (!Array.isArray(management.fields)) {
     throw new Error('Channel management metadata must declare a fields array.');
   }
@@ -465,6 +476,7 @@ export async function supportedChannelCatalog(): Promise<
       type: channelType,
       displayName,
       manageable: management !== undefined,
+      supportsQrLogin: management?.qrLogin !== undefined,
       fields: management
         ? managementFieldsWithSharedControls(
             management.fields,

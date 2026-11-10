@@ -131,6 +131,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
       navigationActive?: boolean;
       navigationSearch?: string;
       navigationTarget?: HTMLElement | null;
+      archivedNavigationTarget?: HTMLElement | null;
       interactive?: boolean;
       creationSkills?: { workspaceCwd: string };
       workspaceCreationOpen?: boolean;
@@ -143,6 +144,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
         <section
           data-testid="managed-conversation"
           data-session={props.sessionId ?? 'new'}
+          data-navigation-target={String(props.navigationTarget)}
           data-interactive={props.interactive}
           data-skills-workspace={props.creationSkills?.workspaceCwd}
           data-workspace={props.workspaceId}
@@ -249,6 +251,13 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
                 </button>
               </nav>,
               props.navigationTarget,
+            )}
+          {props.archivedNavigationTarget &&
+            createPortal(
+              <nav aria-label="Managed archived sessions">
+                <button>Archived managed sessions</button>
+              </nav>,
+              props.archivedNavigationTarget,
             )}
         </section>
       );
@@ -56134,6 +56143,31 @@ describe('Managed home integration', () => {
       expectSelectedTab('Extensions');
     },
   );
+
+  it('passes a null navigation target for sidebar:false hosts without flipping it to undefined', async () => {
+    // The null/undefined distinction is the documented contract: null keeps the
+    // home layout while the host owns the navigation surface; undefined would
+    // mount the page's inline navigation back inside the chat pane.
+    window.history.replaceState(null, '', '/?managed=1');
+    renderApp({
+      managedAgentProvider: managedProvider(),
+      sidebar: false,
+      language: 'en',
+    });
+    await flush();
+    const managed = document.querySelector<HTMLElement>(
+      '[data-testid="managed-conversation"]',
+    );
+    expect(managed).not.toBeNull();
+    // The page keys its home layout off `navigationTarget !== undefined`, so
+    // the fixture must observe the value itself, not only its truthiness:
+    // `undefined` would flip the page back to its inline navigation.
+    expect(managed?.dataset.navigationTarget).toBe('null');
+    // With no sidebar the page must not portal its inline navigation anywhere.
+    expect(
+      document.querySelector('nav[aria-label="Managed sessions"]'),
+    ).toBeNull();
+  });
 });
 
 describe('upstream embedded transport reproduction', () => {

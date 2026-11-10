@@ -7954,6 +7954,7 @@ describe('AppContainer State Management', () => {
         expect.arrayContaining([
           expect.objectContaining({ display: { kind: 'collapse-summary' } }),
         ]),
+        mockConfig.getSessionId(),
       );
       expect(historyManager.history.at(-1)).toMatchObject({
         type: 'info',
