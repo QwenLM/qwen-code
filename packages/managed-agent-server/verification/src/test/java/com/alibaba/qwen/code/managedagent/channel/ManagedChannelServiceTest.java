@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.RouteScope;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
@@ -20,6 +21,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
@@ -91,6 +93,7 @@ class ManagedChannelServiceTest {
     private RecordingHarness harness;
     private AtomicLong clock;
     private ManagedChannelService service;
+    private JdbcChannelSegmentRepository segmentLedger;
 
     @BeforeEach
     void setUp() {
@@ -121,9 +124,11 @@ class ManagedChannelServiceTest {
             }
         });
         clock = new AtomicLong(1_000_000L);
+        segmentLedger = new JdbcChannelSegmentRepository(jdbc);
         service = new ManagedChannelService(instances,
                 new JdbcChannelRouteRepository(jdbc),
-                new JdbcChannelDeliveryRepository(jdbc), sessions, workspaces,
+                new JdbcChannelDeliveryRepository(jdbc), segmentLedger,
+                sessions, workspaces,
                 harness, mapper, Duration.ofMinutes(10), clock::get);
         service.register(TENANT, channel, register(1));
     }
@@ -357,6 +362,108 @@ class ManagedChannelServiceTest {
                 .isInstanceOf(ManagedAgentException.class)
                 .extracting(e -> ((ManagedAgentException) e).getCode())
                 .isEqualTo("delivery_not_found");
+    }
+
+    @Test
+    void claimsAndReceiptsEverySegmentOfAMultiSegmentDelivery() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:90", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+
+        ClaimResponse claimed = service.claimDeliveries(TENANT, channel, 16);
+        assertThat(claimed.deliveries()).hasSize(1);
+        assertThat(claimed.deliveries().getFirst().segments()).hasSize(3);
+        // The claim plans every segment, not just the first unsent one.
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1",
+                        deliveryId + ":2");
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactly(0, 1, 2);
+
+        // Each receipt lands on its own segment; the line stays partial
+        // until the last segment is receipted.
+        assertThat(service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null))
+                .state()).isEqualTo("partial");
+        assertThat(service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 1, "<m1@example.com>", null))
+                .state()).isEqualTo("partial");
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>", null);
+        assertThat(service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 2, "<m2@example.com>", null))
+                .state()).isEqualTo("delivered");
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>",
+                        "<m2@example.com>");
+    }
+
+    @Test
+    void reconcileConvergesEverySegmentReceiptAfterALostAnswer() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:91", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The Harness committed every segment receipt and the delivered
+        // line, but the control plane died before mirroring them into the
+        // segment ledger.
+        mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 3);
+        jdbc.update("UPDATE ma_session_record SET delivery_state='delivered'"
+                        + " WHERE tenant_id=? AND session_id=? AND record_id=?",
+                TENANT, admitted.sessionId(), deliveryId);
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly(null, null, null);
+        clock.addAndGet(Duration.ofMinutes(11).toMillis());
+        jdbc.update("UPDATE ma_delivery SET claimed_at=?"
+                        + " WHERE tenant_id=? AND delivery_id=?",
+                clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
+                deliveryId);
+        service.reconcile();
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>",
+                        "<m2@example.com>");
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("delivered");
+    }
+
+    @Test
+    void resendPlansEveryCarriedSegmentOfAMultiSegmentDelivery() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:92", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The adapter died after sending: the lease settles the delivery
+        // unknown without a single segment receipt.
+        clock.addAndGet(Duration.ofMinutes(11).toMillis());
+        jdbc.update("UPDATE ma_delivery SET claimed_at=?"
+                        + " WHERE tenant_id=? AND delivery_id=?",
+                clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
+                deliveryId);
+        service.reconcile();
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("unknown");
+
+        ResendResponse resent = service.resend(TENANT, channel, deliveryId);
+        assertThat(resent.possibleDuplicate()).isTrue();
+        // The new chain carries every proven-unsent segment, none receipted.
+        assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactly(0, 1, 2);
+        assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly(null, null, null);
     }
 
     @Test
@@ -892,17 +999,31 @@ class ManagedChannelServiceTest {
     /** A planned channel_delivery row as the Session store projects it. */
     private void plannedDelivery(String sessionId, String deliveryId,
             String routeId, String text) {
+        plannedDelivery(sessionId, deliveryId, routeId, text, 1);
+    }
+
+    private void plannedDelivery(String sessionId, String deliveryId,
+            String routeId, String text, int segmentCount) {
         String resourceId = UUID.randomUUID().toString();
+        StringBuilder segments = new StringBuilder();
+        for (int i = 0; i < segmentCount; i++) {
+            if (i > 0) {
+                segments.append(',');
+            }
+            segments.append("""
+                    {"segmentId":"%s:%d","ordinal":%d,
+                     "contentRef":{"resourceId":"s%d","kind":"managed-channel-segment","schemaVersion":1,"byteLength":1,"digest":"%s"},
+                     "receipt":null}"""
+                    .formatted(deliveryId, i, i, i, "b".repeat(64)));
+        }
         String body = """
                 {"deliveryId":"%s","routeId":"%s","routeRevision":1,
                  "sourceTurnId":"turn","contentRef":{"resourceId":"r","kind":"managed-channel-reply","schemaVersion":1,"byteLength":1,"digest":"%s"},
-                 "segments":[{"segmentId":"%s:0","ordinal":0,
-                   "contentRef":{"resourceId":"s","kind":"managed-channel-segment","schemaVersion":1,"byteLength":1,"digest":"%s"},
-                   "receipt":null}],
+                 "segments":[%s],
                  "cancelRequested":false,
                  "run":{"state":"admitted","reason":null,"definition":null,"executionCallId":null,"effectId":"%s","dispatchId":null,"deliveryId":"%s","execution":null,"runtime":null,"delivery":{"target":"channel","state":"planned"}}}
-                """.formatted(deliveryId, routeId, "a".repeat(64), deliveryId,
-                "b".repeat(64), deliveryId, deliveryId);
+                """.formatted(deliveryId, routeId, "a".repeat(64), segments,
+                deliveryId, deliveryId);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, ?, ?, 'managed-channel_delivery', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scopeKey(sessionId), resourceId), scopeKey(sessionId), TENANT, WORKSPACE, sessionId, resourceId,
                 body.length(), "c".repeat(64),
@@ -921,6 +1042,52 @@ class ManagedChannelServiceTest {
                 TENANT, WORKSPACE, sessionId, deliveryId, "d".repeat(64),
                 resourceId, clock.get());
         harness.replies.put(deliveryId, text);
+        harness.segmentCounts.put(deliveryId, segmentCount);
+    }
+
+    /** The record body gains one committed receipt per segment, as the
+     * Session store writes them while the control plane's answers are lost. */
+    private void mirrorSegmentReceipts(String sessionId, String deliveryId,
+            int segmentCount) {
+        for (Map<String, Object> row : jdbc.query(
+                "SELECT resource_id, inline_bytes"
+                        + " FROM ma_resource"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND kind = ?"
+                        + " AND state = 'REFERENCED'",
+                (row, index) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(row), TENANT, sessionId, "managed-channel_delivery")) {
+            JsonNode tree;
+            try {
+                tree = mapper.readTree(
+                        new String((byte[]) row.get("inline_bytes"),
+                                StandardCharsets.UTF_8));
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException(error);
+            }
+            if (!deliveryId.equals(tree.path("deliveryId").asText())) {
+                continue;
+            }
+            for (JsonNode segment : tree.path("segments")) {
+                int ordinal = segment.path("ordinal").asInt();
+                if (ordinal >= segmentCount) {
+                    continue;
+                }
+                ObjectNode receipt = mapper.createObjectNode();
+                receipt.put("providerMessageId", "<m" + ordinal + "@example.com>");
+                receipt.put("acceptedAt", 1_750_000_000_000L);
+                ((ObjectNode) segment).set("receipt", receipt);
+            }
+            try {
+                jdbc.update("UPDATE ma_resource"
+                                + " SET inline_bytes = ?"
+                                + " WHERE tenant_id = ? AND resource_id = ?",
+                        mapper.writeValueAsString(tree)
+                                .getBytes(StandardCharsets.UTF_8),
+                        TENANT, row.get("resource_id"));
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException(error);
+            }
+        }
     }
 
     /** The record body gains the committed segment receipt, as the Session
@@ -994,6 +1161,9 @@ class ManagedChannelServiceTest {
                 "delivered", "unknown", "rejected", "cancelled");
         final List<Map<String, Object>> operations = new ArrayList<>();
         final Map<String, String> replies = new LinkedHashMap<>();
+        final Map<String, Integer> segmentCounts = new LinkedHashMap<>();
+        final Map<String, java.util.TreeSet<Integer>> receipted =
+                new LinkedHashMap<>();
         private final Map<String, Map<String, Object>> inputs =
                 new LinkedHashMap<>();
         private final Map<String, String> deliveryStates =
@@ -1093,22 +1263,30 @@ class ManagedChannelServiceTest {
                     reply.put("text", replies.get(deliveryId));
                     reply.put("replyContext", Map.of("parent", "<a@b>"));
                     answer.put("reply", reply);
-                    Map<String, Object> segment = new LinkedHashMap<>();
-                    segment.put("ordinal", 0);
-                    segment.put("segmentId", deliveryId + ":0");
-                    segment.put("text", replies.get(deliveryId));
-                    answer.put("segments", List.of(segment));
+                    List<Map<String, Object>> claimedSegments = new ArrayList<>();
+                    for (int i = 0; i < countOf(deliveryId); i++) {
+                        Map<String, Object> segment = new LinkedHashMap<>();
+                        segment.put("ordinal", i);
+                        segment.put("segmentId", deliveryId + ":" + i);
+                        segment.put("text", replies.get(deliveryId));
+                        claimedSegments.add(segment);
+                    }
+                    answer.put("segments", claimedSegments);
                 }
                 case "segment_receipt" -> {
-                    deliveryStates.put(deliveryId, "delivered");
-                    projection.deliveryState(sessionId, deliveryId,
-                            "delivered");
+                    int ordinal = ((Number) body.get("ordinal")).intValue();
+                    receipted.computeIfAbsent(deliveryId,
+                            key -> new java.util.TreeSet<>()).add(ordinal);
+                    String state = receipted.get(deliveryId).size()
+                            >= countOf(deliveryId) ? "delivered" : "partial";
+                    deliveryStates.put(deliveryId, state);
+                    projection.deliveryState(sessionId, deliveryId, state);
                     if (loseReceiptAnswerOnce) {
                         loseReceiptAnswerOnce = false;
                         throw new IllegalStateException(
                                 "answer lost after commit");
                     }
-                    answer.put("delivery", delivery(deliveryId, "delivered"));
+                    answer.put("delivery", delivery(deliveryId, state));
                 }
                 case "settle_delivery" -> {
                     String outcome = String.valueOf(body.get("outcome"));
@@ -1129,6 +1307,7 @@ class ManagedChannelServiceTest {
                     String resent = deliveryId + ":r1";
                     deliveryStates.put(resent, "planned");
                     replies.put(resent, replies.get(deliveryId));
+                    segmentCounts.put(resent, countOf(deliveryId));
                     answer.put("delivery", delivery(resent, "planned"));
                     answer.put("possibleDuplicate", true);
                 }
@@ -1137,8 +1316,11 @@ class ManagedChannelServiceTest {
             return answer;
         }
 
-        private static Map<String, Object> delivery(String deliveryId,
-                String state) {
+        private int countOf(String deliveryId) {
+            return segmentCounts.getOrDefault(deliveryId, 1);
+        }
+
+        private Map<String, Object> delivery(String deliveryId, String state) {
             Map<String, Object> delivery = new LinkedHashMap<>();
             delivery.put("deliveryId", deliveryId);
             delivery.put("routeId", "chrt-" + "e".repeat(64));
@@ -1146,12 +1328,18 @@ class ManagedChannelServiceTest {
             delivery.put("sourceTurnId", "turn");
             delivery.put("state", state);
             delivery.put("cancelRequested", false);
-            Map<String, Object> segment = new LinkedHashMap<>();
-            segment.put("ordinal", 0);
-            segment.put("segmentId", deliveryId + ":0");
-            segment.put("providerMessageId",
-                    "delivered".equals(state) ? "<m1@example.com>" : null);
-            delivery.put("segments", List.of(segment));
+            java.util.Set<Integer> done = receipted.getOrDefault(deliveryId,
+                    new java.util.TreeSet<>());
+            List<Map<String, Object>> segments = new ArrayList<>();
+            for (int i = 0; i < countOf(deliveryId); i++) {
+                Map<String, Object> segment = new LinkedHashMap<>();
+                segment.put("ordinal", i);
+                segment.put("segmentId", deliveryId + ":" + i);
+                segment.put("providerMessageId",
+                        done.contains(i) ? "<m" + i + "@example.com>" : null);
+                segments.add(segment);
+            }
+            delivery.put("segments", segments);
             return delivery;
         }
     }
