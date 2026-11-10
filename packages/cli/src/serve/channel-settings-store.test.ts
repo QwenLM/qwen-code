@@ -3354,6 +3354,69 @@ describe('WorkspaceChannelSettingsStore', () => {
       expect(next.channels['bounded']['retries']).toBe(4);
     });
 
+    it('tolerates re-sending a stored enum a narrowed option list excludes', async () => {
+      // A channel that narrows its own options (WeChat's group policy offers
+      // only `disabled`) must not strand an unrelated edit for an operator who
+      // configured a wider value in settings.json before the narrowing.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              mode: 'legacy',
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, mode: 'legacy', retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['mode']).toBe('legacy');
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('still rejects an enum the operator changed to an unlisted value', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, mode: 'safe' } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, mode: 'legacy' } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('still rejects a non-string enum even when it is unchanged', async () => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: { ...baseConfig, clientSecret: '$BOT_TOKEN', mode: 7 },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, mode: 7 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
     it('still rejects a number the operator changed to an invalid value', async () => {
       const store = new WorkspaceChannelSettingsStore(workspace);
       await store.upsert('bounded', {

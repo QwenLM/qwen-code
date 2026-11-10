@@ -4211,6 +4211,154 @@ describe('GitHub repository event filter', () => {
   });
 });
 
+describe('ChannelEditorDialog WeChat login', () => {
+  // Mirrors the weixin plugin's management fields plus the shared controls the
+  // registry appends. Hand-built because @qwen-code/channel-weixin is not a
+  // web-shell devDependency; channel-editor-parity.test.ts owns the drift check
+  // for the platform it can import.
+  const WEIXIN: DaemonChannelTypeDescriptor = {
+    type: 'weixin',
+    displayName: 'WeChat',
+    manageable: true,
+    fields: [
+      {
+        key: 'groupPolicy',
+        label: 'Group Policy',
+        kind: 'enum',
+        required: true,
+        default: 'disabled',
+        options: [{ value: 'disabled', label: 'Disabled' }],
+      },
+      {
+        key: 'privatePolicy',
+        label: 'Private Policy',
+        kind: 'enum',
+        required: true,
+        default: 'pairing',
+        options: [
+          { value: 'disabled', label: 'Disabled' },
+          { value: 'pairing', label: 'Pairing' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'open', label: 'Open' },
+        ],
+      },
+      { key: 'allowedUsers', label: 'Allowed Users', kind: 'string-list' },
+    ],
+  };
+
+  function loginApi() {
+    return {
+      status: vi.fn().mockResolvedValue({ enabled: true, configured: false }),
+      start: vi.fn(),
+      poll: vi.fn(),
+      cancel: vi.fn(),
+      revoke: vi.fn(),
+    };
+  }
+
+  async function saveDialog() {
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+  }
+
+  it('renders the login panel for a WeChat channel', async () => {
+    const api = loginApi();
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: api });
+
+    expect(api.status).toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain('Not logged in');
+  });
+
+  it('does not render the panel for other platforms', async () => {
+    const api = loginApi();
+    await renderDialog({ descriptor: DINGTALK, weixinLogin: api });
+
+    expect(api.status).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).toBeNull();
+  });
+
+  it('renders exactly one credentials heading for WeChat', async () => {
+    // The panel brings its own "Credentials" section. The field loop must not
+    // add a second one: groupPolicy/privatePolicy/allowedUsers are shared
+    // access fields and baseUrl is a connection field, so the loop's
+    // credentials section has no fields and does not render.
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: loginApi() });
+
+    const headings = Array.from(document.querySelectorAll('h3')).filter(
+      (heading) => heading.textContent?.trim() === 'Credentials',
+    );
+    expect(headings).toHaveLength(1);
+  });
+
+  it('omits the panel when the host supplies no login API', async () => {
+    await renderDialog({ descriptor: WEIXIN });
+
+    expect(
+      document.querySelector('[data-testid="weixin-login-panel"]'),
+    ).toBeNull();
+  });
+
+  it('renders no credential input, because the token comes from QR login', async () => {
+    await renderDialog({ descriptor: WEIXIN, weixinLogin: loginApi() });
+
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+    expect(labels.some((text) => /token|secret/i.test(text))).toBe(false);
+  });
+
+  it('saves a WeChat channel while logged out', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: WEIXIN,
+      weixinLogin: loginApi(),
+      onSave,
+    });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'my-weixin');
+    });
+    await saveDialog();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const [name, request] = onSave.mock.calls[0] as [
+      string,
+      { config: Record<string, unknown> },
+    ];
+    expect(name).toBe('my-weixin');
+    expect(request.config['type']).toBe('weixin');
+    // Login state must not gate configuration: the credential is independent.
+    expect(request.config['groupPolicy']).toBe('disabled');
+  });
+
+  it('localizes the WeChat field labels in zh-CN', async () => {
+    await renderDialog({
+      descriptor: WEIXIN,
+      weixinLogin: loginApi(),
+      language: 'zh-CN',
+    });
+
+    expect(document.body.textContent).toContain('未登录');
+    expect(document.body.textContent).toContain('扫码登录');
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    );
+    expect(labels.some((text) => text.includes('群聊策略'))).toBe(true);
+    // Descriptor labels are English, so a missing i18n key would surface them.
+    expect(labels.some((text) => text.includes('Group Policy'))).toBe(false);
+  });
+});
+
 /**
  * Email's access shape as the daemon ships it: the plugin declares
  * `privatePolicy` without `pairing`, and the registry injects `groupPolicy`
