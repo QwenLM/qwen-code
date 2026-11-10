@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
+import { act } from 'react';
 import { Composer } from './Composer.js';
 import { InputPrompt } from './InputPrompt.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -317,7 +318,11 @@ describe('Composer', () => {
       const firstProps = inputPrompt.mock.calls.at(-1)?.[0] as {
         onToggleShortcuts?: () => void;
       };
-      firstProps?.onToggleShortcuts?.();
+      // The premise is asserted: a later refactor that stops passing the prop
+      // would otherwise make the case green without opening the panel at all.
+      expect(firstProps.onToggleShortcuts).toBeDefined();
+      act(() => firstProps.onToggleShortcuts!());
+      expect(lastFrame()).toContain('KeyboardShortcuts');
 
       rerender(
         composerElement(
@@ -331,6 +336,28 @@ describe('Composer', () => {
 
       expect(lastFrame()).toContain('Footer');
       expect(lastFrame()).not.toContain('KeyboardShortcuts');
+    });
+
+    it('keeps the shortcuts panel reachable while the input is active', () => {
+      // The mirror of the suppression case: an inverted or collapsed ternary
+      // would make the panel unreachable in every state and leave the rest of
+      // the suite green.
+      const uiState = createMockUIState({
+        isInputActive: true,
+        isConfigInitialized: true,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const inputPrompt = vi.mocked(InputPrompt);
+      const props = inputPrompt.mock.calls.at(-1)?.[0] as {
+        onToggleShortcuts?: () => void;
+      };
+      expect(props.onToggleShortcuts).toBeDefined();
+      act(() => props.onToggleShortcuts!());
+
+      expect(lastFrame()).toContain('KeyboardShortcuts');
+      expect(lastFrame()).not.toContain('Footer');
     });
   });
 
