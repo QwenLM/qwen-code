@@ -61,6 +61,7 @@ describe('built-in channel registry', () => {
       type: 'dingtalk',
       displayName: 'DingTalk',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
     expect(catalog.map((entry) => entry.type)).toContain('gitlab');
@@ -72,6 +73,7 @@ describe('built-in channel registry', () => {
       'wecom',
       'wecom-callback',
       'feishu',
+      'qq',
       'github',
       'gitlab',
     ]);

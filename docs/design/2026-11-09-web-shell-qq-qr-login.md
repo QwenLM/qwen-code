@@ -52,8 +52,8 @@ All findings below were verified by reading the cited lines.
 
 ### Web Shell gates QQ out twice
 
-- `SUPPORTED_CHANNEL_TYPES` is a hardcoded six-entry allowlist — dingtalk, dws,
-  wecom, feishu, github, gitlab
+- `SUPPORTED_CHANNEL_TYPES` is a hardcoded seven-entry allowlist — dingtalk, dws,
+  wecom, wecom-callback, feishu, github, gitlab
   (`packages/web-shell/client/components/channels/channel-platform.ts:18`).
 - Availability requires both gates: `descriptor.manageable && isSupportedChannelType(descriptor.type)`
   (`packages/web-shell/client/components/channels/channel-platform.ts:36`).
@@ -260,7 +260,7 @@ existing `0600` preserved, existing `0644` preserved, staging directory `0700`
 and removed on success. The scope is `<repo>/.qwen/settings.json` when workspace
 settings are active, otherwise `~/.qwen/settings.json`
 (`packages/cli/src/serve/channel-settings-store.ts:489-491`); this repository
-ignores `.qwen/*` (`.gitignore:32`).
+ignores `.qwen/*` (`.gitignore:35`).
 
 So in the common case — a settings file already created at `0644` — the secret
 becomes readable by other local users, where the QQ credentials file is always
@@ -311,7 +311,7 @@ implemented validation and its tests follow the current upstream behavior.
 `groups['*'].requireMention` also gets an editor control in the shared group
 section, so `keyword` and `all` can be configured entirely from the UI instead of
 requiring a hand edit. Because that section is shared by every adapter, the
-change needs a regression pass across the six already-manageable channel types,
+change needs a regression pass across the seven already-manageable channel types,
 and the control must leave existing group configuration untouched when unused.
 
 **D8 — The terminal fallback stays, but managed start must not reach it.** The CLI
@@ -346,9 +346,9 @@ reuse the transport.
   Automated coverage must drive the connector callbacks with a fake; the actual
   bind needs one manual pass. These are different classes of evidence and must be
   reported separately.
-- **Shared-editor blast radius.** D6 changes boolean initialization and D7 adds a
-  control to the shared group section, so both affect every channel type rather
-  than QQ alone. The six already-manageable adapters need a regression pass
+- **Shared-editor blast radius.** D7 adds a control to the shared group
+  section, which affects every channel type rather than QQ alone. D6 was
+  withdrawn, so no boolean-initialization change ships. The six already-manageable adapters need a regression pass
   covering boolean fields and group configuration round-trips.
 - **Silent-divergence traps.** D6 and D7 are the two ways this feature could
   appear to work while behaving incorrectly. Both need dedicated regression
@@ -360,8 +360,7 @@ Unit tests, collocated per project convention: QQ descriptor shape and
 `validateConfig` rejection matrix; registry validation of the new capability,
 including malformed and null `qrLogin` values; login-session lifecycle including expiry, cancel,
 concurrency cap, and take-over; route ownership and trust gating on both
-prefixes; secret never present in snapshots or event payloads; editor boolean
-initialization for a true-default field; English and Chinese label rendering
+prefixes; secret never present in snapshots or event payloads; English and Chinese label rendering
 asserted per language.
 
 End-to-end: drive the real daemon with a fake connector to exercise waiting,
@@ -374,7 +373,7 @@ The two traps get explicit regressions: saving a new QQ channel must not write
 `allowMention: false`, and selecting `groupAllPolicy: keyword` without the
 required group settings must be rejected in the editor rather than saved.
 
-Because two shared surfaces change, the six already-manageable adapters get a
+Because two shared surfaces change, the seven already-manageable adapters get a
 round-trip regression: open each in the editor, save without edits, and assert
 the resulting config is unchanged apart from intended normalization. This must
 cover boolean fields and any existing `groups` entries, including
@@ -397,7 +396,7 @@ cover boolean fields and any existing `groups` entries, including
    settings is rejected with an actionable editor error.
 9. `groups['*'].requireMention` is configurable from the editor, and `keyword` or
    `all` can be configured end to end without hand-editing `settings.json`.
-10. For the six already-manageable adapters, boolean fields and group
+10. For the seven already-manageable adapters, boolean fields and group
     configuration round-trip unchanged through the editor.
 11. The CLI terminal-scan path still works unchanged.
 12. Every new label renders in both English and Chinese.

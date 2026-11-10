@@ -44,8 +44,8 @@ QQ Bot 适配器已经存在且可用,但完全无法从 Web Shell 配置,而它
 
 ### Web Shell 有两道门禁把 QQ 挡在外面
 
-- `SUPPORTED_CHANNEL_TYPES` 是硬编码的六项白名单 —— dingtalk、dws、
-  wecom、feishu、github、gitlab
+- `SUPPORTED_CHANNEL_TYPES` 是硬编码的七项白名单 —— dingtalk、dws、
+  wecom、wecom-callback、feishu、github、gitlab
   (`packages/web-shell/client/components/channels/channel-platform.ts:18`)。
 - 可用性要求两道门禁同时通过:`descriptor.manageable && isSupportedChannelType(descriptor.type)`
   (`packages/web-shell/client/components/channels/channel-platform.ts:36`)。
@@ -224,7 +224,7 @@ Device flow 是 daemon 全局的,因为 OAuth 凭据是进程级的。而 QQ 登
 暂存目录 `0700` 且成功后清理。落点是 workspace settings 激活时的
 `<repo>/.qwen/settings.json`,否则为 `~/.qwen/settings.json`
 (`packages/cli/src/serve/channel-settings-store.ts:489-491`);本仓库忽略 `.qwen/*`
-(`.gitignore:32`)。
+(`.gitignore:35`)。
 
 因此在常见情况下 —— settings 文件早已以 `0644` 建好 —— secret 会变成本机其他用户
 可读,而 QQ 凭据文件恒为 `0600`。为了与钉钉、飞书一致而接受这一点,它们的 secret
@@ -263,7 +263,7 @@ registry 上做过 A/B 实测。因此 QQ 与兄弟适配器一样声明 `defaul
 
 `groups['*'].requireMention` 同时在共享群组区获得一个编辑器控件,使 `keyword` 与
 `all` 可以完全从 UI 配置,而不需要手工编辑。由于该区被所有适配器共用,此改动需要
-对六个已可管理的渠道类型做一轮回归,且该控件在未被使用时必须原样保留既有群组配置。
+对七个已可管理的渠道类型做一轮回归,且该控件在未被使用时必须原样保留既有群组配置。
 
 **D8 —— 保留终端兜底,但受管启动不得走到它。** CLI 扫码路径不变。
 一个没有可解析凭据的受管 QQ 渠道必须以清晰报错失败,而不是让 worker 阻塞在
@@ -290,9 +290,8 @@ URL 或 task id,因此未来的适配器可以复用该传输层。
   改动内。
 - **真实扫码无法自动化。** 没有 harness 能把手机对准屏幕。自动化覆盖必须用
   fake 驱动连接器回调;真实绑定需要一次人工验证。这是两类不同的证据,必须分开报告。
-- **共享编辑器的影响面。** D6 改动布尔初始化,D7 在共享群组区新增控件,两者都影响
-  所有渠道类型而不只是 QQ。六个已可管理的适配器需要一轮回归,覆盖布尔字段与群组
-  配置的往返保真。
+- **共享编辑器的影响面。** D7 在共享群组区新增控件,影响所有渠道类型而不只是 QQ。
+  D6 已撤回,本次不改布尔初始化。七个已可管理的适配器需要一轮群组配置往返回归。
 - **静默分叉陷阱。** D6 与 D7 是本功能可能「看起来能用、实际行为错误」的两条路径。
   两者都需要专门的回归测试,而不只是 happy path 覆盖。
 
@@ -301,7 +300,7 @@ URL 或 task id,因此未来的适配器可以复用该传输层。
 单元测试,按项目约定与源码同目录放置:QQ 描述符形状与 `validateConfig` 拒绝矩阵;
 registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会话生命周期,含过期、取消、并发上限与
 接管;两个前缀上的路由所有权与信任门禁;快照与事件载荷中绝不出现 secret;
-真默认值字段的编辑器布尔初始化;中英文文案按语种分别断言渲染。
+中英文文案按语种分别断言渲染。
 
 端到端:用 fake connector 驱动真实 daemon,覆盖等待、已扫码、过期后刷新、已取消
 与失败五条路径,断言凭据落入该 workspace 的渠道配置,且没有 secret 上 wire。
@@ -310,7 +309,7 @@ registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会�
 两个陷阱各配显式回归:保存新建 QQ 渠道不得写入 `allowMention: false`;
 在缺少所需群组设置时选择 `groupAllPolicy: keyword` 必须在编辑器中被拒绝,而不是被保存。
 
-由于有两处共享面发生变化,六个已可管理的适配器各配一条往返回归:在编辑器中打开、
+由于有两处共享面发生变化,七个已可管理的适配器各配一条往返回归:在编辑器中打开、
 不做任何修改直接保存,断言结果配置除预期的规范化之外保持不变。该回归必须覆盖布尔
 字段与任何既有的 `groups` 条目,包括并非由新控件写入的 `requireMention` 值。
 
@@ -329,7 +328,7 @@ registry 对新能力的校验,含畸形与 null 的 `qrLogin` 取值;登录会�
    会被拒绝,并给出可操作的编辑器报错。
 9. `groups['*'].requireMention` 可从编辑器配置,且 `keyword` 或 `all` 能够端到端
    配齐,无需手工编辑 `settings.json`。
-10. 对六个已可管理的适配器,布尔字段与群组配置经编辑器往返后保持不变。
+10. 对七个已可管理的适配器,布尔字段与群组配置经编辑器往返后保持不变。
 11. CLI 终端扫码路径仍然照常工作。
 12. 每个新文案在中英文下都能渲染。
 

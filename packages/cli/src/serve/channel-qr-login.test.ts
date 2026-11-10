@@ -238,15 +238,20 @@ describe('ChannelQrLoginRegistry', () => {
 
   it('does not grow without bound across start/cancel cycles', () => {
     const h = harness();
+    const ids: string[] = [];
     for (let i = 0; i < CHANNEL_QR_LOGIN_MAX_ACTIVE * 3; i++) {
       const { view } = h.start(`cycle-${i}`);
+      ids.push(view.loginId);
       h.registry.cancel(view.loginId);
       h.advance(CHANNEL_QR_LOGIN_RETENTION_MS + 1);
       h.runSweep();
     }
-    // Every entry has been reclaimed, so a fresh login still fits the cap.
+    // The cap only counts pending logins, so a fresh start succeeding proves
+    // nothing about reclamation. Assert each terminal entry is actually gone.
+    for (let i = 0; i < CHANNEL_QR_LOGIN_MAX_ACTIVE * 3; i++) {
+      expect(h.registry.get(ids[i]!)).toBeUndefined();
+    }
     expect(() => h.start('after-cycles')).not.toThrow();
-    expect(h.registry.get('missing')).toBeUndefined();
   });
 
   it('stays cancelled when cancel lands during an in-flight persist', async () => {

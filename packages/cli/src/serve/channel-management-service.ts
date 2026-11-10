@@ -752,50 +752,75 @@ export function createChannelManagementService(
       return QRCode.toDataURL(url, { margin: 1, width: 320 });
     },
     persist: async (channelName, values) => {
-      const current = opts.store.snapshot();
-      const existing = current.channels[channelName];
-      if (!existing) {
-        throw Object.assign(
+      const missing = () =>
+        Object.assign(
           new Error(
             `Channel ${JSON.stringify(channelName)} must be saved before it can be bound.`,
           ),
           { code: 'channel_qr_login_channel_missing' },
         );
-      }
-      const type = String(existing['type']);
-      const plugin = await getPlugin(type);
-      const fields = plugin?.management?.fields ?? [];
+      // Resolve the descriptor outside the lane: it is an async import and
+      // reads no workspace state. Ownership is asserted here and again inside.
+      const probe = opts.store.snapshot().channels[channelName];
+      if (!probe) throw missing();
+      assertWorkspaceConfig(probe);
+      const type = String(probe['type']);
+      const fields = (await getPlugin(type))?.management?.fields ?? [];
       const secretKeys = new Set(
         fields
           .filter((field) => field.kind === 'secret')
           .map((field) => field.key),
       );
-      const config: Record<string, unknown> & { type: string } = {
-        ...existing,
-        type,
-      };
-      // The stored snapshot resolves secret references to literals. Leaving
-      // them in config would submit the same secret twice and the store
-      // rejects any secret-kind config key, so a channel that already holds a
-      // credential could never be re-bound.
-      for (const key of secretKeys) delete config[key];
-      const secrets: Record<string, ChannelSecretUpdate> = {};
-      for (const [key, value] of Object.entries(values)) {
-        // Secret-kind values go through the managed secret path so they are
-        // stored and redacted exactly like a hand-entered credential.
-        if (secretKeys.has(key)) {
-          secrets[key] = { operation: 'replace', value };
-        } else {
-          config[key] = value;
+
+      await inMutationLane(async () => {
+        // Re-read inside the lane so a concurrent save cannot slip between
+        // reading the revision and writing against it.
+        const current = opts.store.snapshot();
+        const existing = current.channels[channelName];
+        if (!existing) throw missing();
+        assertWorkspaceConfig(existing);
+        const active = workspaceCommittedNames().includes(channelName);
+        if (active) assertOwnedRuntime(channelName);
+
+        const config: Record<string, unknown> & { type: string } = {
+          ...existing,
+          type,
+        };
+        // The stored snapshot resolves secret references to literals. Leaving
+        // them in config would submit the same secret twice and the store
+        // rejects any secret-kind config key, so a channel that already holds a
+        // credential could never be re-bound.
+        for (const key of secretKeys) delete config[key];
+        const secrets: Record<string, ChannelSecretUpdate> = {};
+        for (const [key, value] of Object.entries(values)) {
+          if (secretKeys.has(key)) {
+            secrets[key] = { operation: 'replace', value };
+          } else {
+            config[key] = value;
+          }
         }
-      }
-      await inMutationLane(() =>
-        opts.store.upsert(channelName, {
+        await opts.store.upsert(channelName, {
           expectedRevision: current.revision,
           config,
           secrets,
-        }),
-      );
+        });
+        // Mirror the sibling upsert tail: a worker loads its config at fork
+        // time, so without this a bind reports success while the running
+        // channel keeps the old credential.
+        forgetDiagnostics(channelName);
+        if (active) {
+          try {
+            await opts.manager.reloadWorkspace(opts.workspaceCwd, channelName);
+          } catch (error) {
+            diagnostics.set(channelName, diagnostic(error));
+            try {
+              await stopChannel(channelName);
+            } catch {
+              // Keep the reload diagnostic when best-effort cleanup also fails.
+            }
+          }
+        }
+      });
     },
   });
 
@@ -819,6 +844,7 @@ export function createChannelManagementService(
     startQrLogin: async (name, initiatorClientId) => {
       assertManageableInstanceName(name);
       const existing = opts.store.snapshot().channels[name];
+      if (existing) assertWorkspaceConfig(existing);
       if (!existing) {
         throw Object.assign(
           new Error(
