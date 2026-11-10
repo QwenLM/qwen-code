@@ -149,8 +149,8 @@ public class O4OssGate extends O4MySqlGate {
         try (var objects = new OssFixture(client())) {
             String prefix = ownedPrefix();
             collectCapacity(objects, bytes, prefix);
-            List<String> keys = jdbc.queryForList("SELECT object_key FROM qwen_tool_publication_object"
-                    + " WHERE scope_key = ? AND object_key IS NOT NULL", String.class, scope);
+            List<String> keys = jdbc.queryForList("SELECT object_key FROM ma_resource"
+                    + " WHERE session_scope_key = ? AND object_key IS NOT NULL", String.class, scope);
             for (String objectKey : keys) {
                 assertThat(objects.client.doesObjectExist(bucket(), objectKey)).isFalse();
             }
