@@ -19,6 +19,8 @@ import {
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import { runHostedCsiTextTurn } from './hosted-csi-text-turn.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
+import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 
 vi.mock('./hosted-harness-model.js', () => ({
   runHostedHarnessTextTurn: vi.fn(),
@@ -175,6 +177,95 @@ describe('private CSI native text turn', () => {
     expect(second.systemPayload).toMatchObject({ state: 'completed' });
     expect(managed.authority.currentActivation?.epoch).toBe(1);
   });
+
+  it.each([
+    ['cancelled', 'harness_interruption', ['user', 'assistant', 'tool_result']],
+    ['cancelled', 'cancelled', []],
+    ['error', 'error', []],
+    ['completed', 'end_turn', ['user', 'assistant', 'tool_result']],
+  ] as const)(
+    'keeps CSI settled groups whole after %s/%s (PR #15959)',
+    async (outcome, stopReason, expectedTypes) => {
+      await submit(managed, PROMPT_A, 'review then fix');
+      await createManagedHarnessHandle(managed).ensureRunnable();
+      const messages: Array<Pick<ChatRecord, 'type' | 'message'>> = [
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'review then fix' }] },
+        },
+        {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'review-call', name: 'agent', args: {} } },
+            ],
+          },
+        },
+        {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'review-call',
+                  name: 'agent',
+                  response: { output: 'started' },
+                },
+              },
+            ],
+          },
+        },
+      ];
+      for (const [index, message] of messages.entries())
+        await managed.sink.write({
+          uuid: `${PROMPT_A}:${index}`,
+          parentUuid: null,
+          sessionId: SESSION_ID,
+          timestamp: new Date().toISOString(),
+          cwd: root,
+          version: 'hosted-harness/1',
+          daemonPromptId: PROMPT_A,
+          ...message,
+        } as ChatRecord);
+      await managed.sink.write({
+        uuid: `${PROMPT_A}:terminal`,
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        cwd: root,
+        version: 'hosted-harness/1',
+        daemonPromptId: PROMPT_A,
+        type: 'system',
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: PROMPT_A,
+          state: outcome,
+          stopReason,
+          endedAt: Date.now(),
+        },
+      });
+      vi.mocked(runHostedHarnessTextTurn).mockResolvedValue({
+        text: 'next answer',
+        model: 'owned-model',
+      });
+      await submit(managed, PROMPT_B, 'new question');
+      const result = await runHostedCsiTextTurn(
+        { managed, cwd: root },
+        PROMPT_B,
+        'new question',
+        new AbortController(),
+      );
+      expect(result.systemPayload).toMatchObject({ state: 'completed' });
+      const input = vi.mocked(runHostedHarnessTextTurn).mock.calls[0]![0];
+      expect(
+        input.history
+          .filter((entry) => entry.daemonPromptId === PROMPT_A && entry.message)
+          .map((entry) => entry.type),
+      ).toEqual(expectedTypes);
+    },
+  );
 
   it('keeps one final assistant with its attempt receipt and streamed identity for file turns', async () => {
     const parts = [

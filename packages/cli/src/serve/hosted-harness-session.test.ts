@@ -5,6 +5,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   mkdir,
   mkdtemp,
@@ -4814,6 +4816,31 @@ describe('Hosted Harness no-tool session', () => {
         'end_turn',
       );
       await writeSettledToolHistory(managed, PROMPT_ID, outcome, stopReason);
+      const projected = await managed.sink.projectModelHistory();
+      const savedIds = projected.apiHistory.map(
+        (entry) => getApiHistoryPromptId(entry) ?? null,
+      );
+      const snapshotId = randomUUID();
+      await managed.sink.write({
+        uuid: snapshotId,
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            compressionStatus: CompressionStatus.COMPRESSED,
+            originalTokenCount: 100,
+            newTokenCount: 50,
+          },
+          compressedHistory: projected.apiHistory,
+          promptIds: savedIds,
+          summaryPrefixLength: 0,
+        },
+      });
       const prompt = [{ type: 'text', text: 'please continue' }];
       const nextPromptId = randomUUID();
       await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
@@ -4851,6 +4878,18 @@ describe('Hosted Harness no-tool session', () => {
           )
           .map((entry) => entry.type),
       ).toEqual(['user', 'assistant', 'tool_result']);
+      expect(
+        input.history.find((entry) => entry.uuid === snapshotId)?.systemPayload,
+      ).toMatchObject({
+        promptIds: expect.arrayContaining([PROMPT_ID, completedId]),
+      });
+      expect(
+        (await managed.sink.projectModelRecords()).find(
+          (entry) => entry.uuid === snapshotId,
+        )?.systemPayload,
+      ).toMatchObject({
+        promptIds: savedIds,
+      });
       expect(
         (await managed.sink.project())
           .filter((entry) => entry.daemonPromptId === PROMPT_ID)

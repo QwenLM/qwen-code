@@ -24,6 +24,10 @@ import {
   type HostedCsiTurnCommit,
 } from './hosted-csi-tool-turn.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
+import {
+  excludedHostedPrompts,
+  isExcludedHostedRecord,
+} from './hosted-turn-history.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 
 export interface HostedCsiTextSession {
@@ -67,24 +71,23 @@ export async function runHostedCsiTextTurn(
     async (modelScope) =>
       harness.run(async () => {
         const projected = await managed.sink.project();
-        const settled = new Map(
+        const settled = new Set(
           authority
             .eventsInSequenceRange(1, authority.committedSequence)
             .filter((event) => event.kind === 'turn.settled')
-            .map((event) => [
-              event.payload['turnId'],
-              event.payload['outcome'],
-            ]),
+            .map((event) => event.payload['turnId']),
         );
+        const excluded = excludedHostedPrompts(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+          projected,
+        );
+        if (resumeFromToolResults !== undefined) excluded.delete(promptId);
         const history = projected.filter(
           (entry) =>
             (resumeFromToolResults !== undefined &&
               entry.daemonPromptId === promptId) ||
             (settled.has(entry.daemonPromptId) &&
-              !(
-                entry.type === 'user' &&
-                settled.get(entry.daemonPromptId) !== 'completed'
-              )),
+              !isExcludedHostedRecord(entry, excluded)),
         );
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (resumeFromToolResults === undefined) {
@@ -164,6 +167,7 @@ export async function runHostedCsiTextTurn(
               sessionId,
               cwd,
               history,
+              excludedPromptIds: excluded,
               prompt: text,
               promptId,
               signal: abort.signal,

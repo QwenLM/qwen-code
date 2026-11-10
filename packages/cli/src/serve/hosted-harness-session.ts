@@ -190,7 +190,11 @@ import {
   HostedRestoreKeptBytes,
   readerWithVerified,
 } from './hosted-restore-kept-bytes.js';
-import { excludedHostedPrompts } from './hosted-turn-history.js';
+import {
+  excludedHostedPrompts,
+  isExcludedHostedRecord,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
 import {
   isChildSessionRun,
   parseChildRun,
@@ -3920,7 +3924,10 @@ async function executeHostedTurn(
     async (modelScope) =>
       harness.run(async () => {
         const projected = await session.managed.sink.project();
-        const modelRecords = await session.managed.sink.projectModelRecords();
+        const modelRecords = normalizeHostedTurnRecords(
+          await session.managed.sink.projectModelRecords(),
+          unansweredPrompts(session, projected),
+        );
         const settledPrompts = new Set(
           authority
             .eventsInSequenceRange(1, authority.committedSequence)
@@ -3938,13 +3945,7 @@ async function executeHostedTurn(
                     entry.daemonPromptId === promptId),
               )
             : modelRecords
-        ).filter(
-          (entry) =>
-            !(
-              entry.daemonPromptId !== undefined &&
-              unanswered.has(entry.daemonPromptId)
-            ),
-        );
+        ).filter((entry) => !isExcludedHostedRecord(entry, unanswered));
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
           const continuation = isHostedWakeContinuationId(promptId);
@@ -11478,7 +11479,10 @@ export function registerHostedHarnessSessionRoutes(
       try {
         const harness = createManagedHarnessHandle(session.managed);
         let projected = await session.managed.sink.project();
-        let modelRecords = await session.managed.sink.projectModelRecords();
+        let modelRecords = normalizeHostedTurnRecords(
+          await session.managed.sink.projectModelRecords(),
+          unansweredPrompts(session, projected),
+        );
         const settledPrompts = new Set(
           session.managed.authority
             .eventsInSequenceRange(
@@ -11520,10 +11524,7 @@ export function registerHostedHarnessSessionRoutes(
                 settledPrompts.has(entry.daemonPromptId) ||
                 (entry.daemonPromptId === promptId &&
                   !parkedRound.has(entry.uuid))) &&
-              !(
-                entry.daemonPromptId !== undefined &&
-                unanswered.has(entry.daemonPromptId)
-              ),
+              !isExcludedHostedRecord(entry, unanswered),
           );
           const resumeParts = turnRecords
             .slice(lastCallIndex + 1)
@@ -11692,7 +11693,10 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = await session.managed.sink.projectModelRecords();
+              modelRecords = normalizeHostedTurnRecords(
+                await session.managed.sink.projectModelRecords(),
+                unansweredPrompts(session, projected),
+              );
               ({ history, resumeParts } = deriveRound());
             }
           }
@@ -11747,7 +11751,10 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = await session.managed.sink.projectModelRecords();
+              modelRecords = normalizeHostedTurnRecords(
+                await session.managed.sink.projectModelRecords(),
+                unansweredPrompts(session, projected),
+              );
               ({ history, resumeParts } = deriveRound());
             }
           }
@@ -11771,7 +11778,10 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
-            modelRecords = await session.managed.sink.projectModelRecords();
+            modelRecords = normalizeHostedTurnRecords(
+              await session.managed.sink.projectModelRecords(),
+              unansweredPrompts(session, projected),
+            );
             ({ history, resumeParts } = deriveRound());
           }
           if (resumeParts.length === 0) {

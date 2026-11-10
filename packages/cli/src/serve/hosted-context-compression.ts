@@ -49,7 +49,10 @@ import type { HostedAgentDefinition } from './hosted-agent-definition.js';
 import {
   excludedHostedPrompts,
   filterHostedTurnHistory,
+  isExcludedHostedRecord,
+  normalizeHostedTurnRecords,
 } from './hosted-turn-history.js';
+import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 
 const debugLogger = createDebugLogger('HOSTED_CONTEXT_COMPRESSION');
@@ -213,18 +216,20 @@ export class HostedContextCompression {
           .filter((event) => event.kind === 'turn.settled')
           .map((event) => event.payload['turnId']),
       );
+      const projected =
+        await session.sink.projectModelRecords(historyCutSequence);
       const unanswered = excludedHostedPrompts(
         session.authority.eventsInSequenceRange(1, historyCutSequence),
-        await session.sink.project(historyCutSequence),
+        projected,
       );
-      const history = await session.sink.projectModelHistory({
-        throughSequence: historyCutSequence,
-        includeRecord: (entry) =>
-          (entry.type === 'system' || settled.has(entry.daemonPromptId)) &&
-          !(
-            entry.daemonPromptId !== undefined &&
-            unanswered.has(entry.daemonPromptId)
-          ),
+      const records = normalizeHostedTurnRecords(projected, unanswered);
+      const history = buildSessionHistoryFromConversation({
+        messages: records.filter(
+          (entry) =>
+            entry.subtype === 'chat_compression' ||
+            ((entry.type === 'system' || settled.has(entry.daemonPromptId)) &&
+              !isExcludedHostedRecord(entry, unanswered)),
+        ),
       });
       history.apiHistory = filterHostedTurnHistory(
         history.apiHistory,

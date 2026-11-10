@@ -1459,6 +1459,17 @@ describe('Hosted Harness model boundary', () => {
     const model = config([{ type: LlmEventType.Finished }]);
     const history: ChatRecord[] = [
       {
+        uuid: 'cancelled-source',
+        parentUuid: null,
+        sessionId: input.sessionId,
+        timestamp: '2026-10-22T00:00:00.000Z',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        type: 'user',
+        daemonPromptId: 'cancelled-prompt',
+        message: { role: 'user', parts: [{ text: 'cancelled secret' }] },
+      },
+      {
         uuid: 'compaction',
         parentUuid: null,
         sessionId: input.sessionId,
@@ -1479,7 +1490,7 @@ describe('Hosted Harness model boundary', () => {
             { role: 'user', parts: [{ text: 'cancelled secret' }] },
             { role: 'model', parts: [{ text: 'partial answer' }] },
           ],
-          promptIds: [null, null, 'cancelled-prompt', null],
+          promptIds: [null, null, 'legacy-record:cancelled-source', null],
           summaryPrefixLength: 2,
         },
       },
@@ -1508,6 +1519,21 @@ describe('Hosted Harness model boundary', () => {
         { role: 'model', parts: [{ text: 'next answer' }] },
       ];
       const history: ChatRecord[] = [
+        ...[
+          ['cancelled-source', 'cancelled-prompt', 'cancelled instruction'],
+          ['guidance-source', 'cancelled-prompt', 'cancelled queued guidance'],
+          ['next-source', 'next-prompt', 'next request'],
+        ].map(([uuid, daemonPromptId, text]) => ({
+          uuid: uuid!,
+          parentUuid: null,
+          sessionId: input.sessionId,
+          timestamp: '2026-10-30T00:00:00.000Z',
+          cwd: input.cwd,
+          version: 'hosted-harness/1',
+          type: 'user' as const,
+          daemonPromptId,
+          message: { role: 'user', parts: [{ text }] },
+        })),
         {
           uuid: 'compression-with-cancelled-tools',
           parentUuid: null,
@@ -1555,12 +1581,12 @@ describe('Hosted Harness model boundary', () => {
             promptIds: [
               null,
               null,
-              'cancelled-prompt',
+              'legacy-record:cancelled-source',
               null,
               null,
-              marked ? 'cancelled-prompt' : null,
+              marked ? 'legacy-record:guidance-source' : null,
               null,
-              'next-prompt',
+              'legacy-record:next-source',
               null,
             ],
             summaryPrefixLength: prefix.length,

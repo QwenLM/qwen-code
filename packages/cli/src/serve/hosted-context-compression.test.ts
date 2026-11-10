@@ -9,6 +9,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Content } from '@google/genai';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -369,7 +370,16 @@ describe('Hosted context compression', () => {
           endedAt: Date.now(),
         },
       });
-      if (snapshot)
+      if (snapshot) {
+        const projected = await session.sink.projectModelHistory();
+        const group = projected.apiHistory.filter((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.text === instruction ||
+              part.functionCall?.id === callId ||
+              part.functionResponse?.id === callId,
+          ),
+        );
         await session.sink.write({
           uuid: randomUUID(),
           parentUuid: null,
@@ -381,22 +391,27 @@ describe('Hosted context compression', () => {
           subtype: 'chat_compression',
           systemPayload: {
             info: candidate.info,
-            compressedHistory: [...candidate.newHistory, ...messages],
+            compressedHistory: [...candidate.newHistory, ...group],
             summaryPrefixLength: 2,
             promptIds: [
               null,
               null,
-              promptId,
-              ...messages.slice(1).map(() => null),
+              ...group.map((entry) => getApiHistoryPromptId(entry) ?? null),
             ],
           },
         });
+      }
       engine();
+      const project = vi.spyOn(session.sink, 'project');
+      const projectModel = vi.spyOn(session.sink, 'projectModelRecords');
+      const cut = session.authority.committedSequence;
       const request = {
         ...intent(),
         expectedCompactionRevision: compression.revision,
       };
       await compression.admit(request);
+      expect(project).not.toHaveBeenCalled();
+      expect(projectModel).toHaveBeenCalledExactlyOnceWith(cut);
       await compression.wait();
       expect(compression.status(request.operationId)?.status).toBe('completed');
       const history = chat.setHistory.mock.calls[0]![0];
