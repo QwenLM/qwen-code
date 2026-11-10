@@ -1735,6 +1735,43 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('emits the detach reason when a detached session closes unheld', async () => {
+      // The automatic paths pass no `closeOpts`, so
+      // `reason: opts.closeReason` inside `closeIfChildUnheld` is the only
+      // source of the emitted reason there. Observe it through the lifecycle
+      // hook: subscribing to the session would pin it as a watched Session and
+      // skip the close-on-last-detach path entirely.
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const removed: Array<{ sessionId: string; reason: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+        sessionLifecycle: (event) => {
+          if (event.type === 'removed')
+            removed.push({ sessionId: event.sessionId, reason: event.reason });
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await vi.waitFor(() =>
+        expect(
+          removed.find((entry) => entry.sessionId === session.sessionId),
+        ).toBeDefined(),
+      );
+      expect(
+        removed.find((entry) => entry.sessionId === session.sessionId)?.reason,
+      ).toBe('last_client_detached');
+
+      await bridge.shutdown();
+    });
+
     it('keeps a detached session until the child reports it unheld', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
@@ -33613,9 +33650,11 @@ describe('createAcpSessionBridge', () => {
             call.params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
         ),
       ).toHaveLength(1);
-      // Pinned as a literal rather than read back from the caller's options:
-      // the nested close re-emits `closeOpts.reason ?? 'client_close'`, so a
-      // read-back would let a lost hand-off pass unnoticed.
+      // Pins the wire-level reason on the explicit path. This case cannot
+      // witness the `reason: opts.closeReason` hand-off in
+      // `closeIfChildUnheld`: the spread of `closeOpts` already carries the
+      // same literal, so dropping the hand-off leaves this green. The
+      // automatic paths (no `closeOpts`) are where it is the only source.
       const closedEvent = events.find((e) => e.type === 'session_closed');
       expect(closedEvent).toBeDefined();
       expect((closedEvent?.data as { reason: string }).reason).toBe(
