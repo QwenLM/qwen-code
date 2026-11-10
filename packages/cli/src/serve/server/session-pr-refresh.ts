@@ -179,19 +179,6 @@ export interface SessionPrRefreshResult {
 }
 
 /**
- * Refreshes the persisted `state` snapshot of one workspace's PR bindings,
- * and on GitHub the `issues` snapshot (the closing references) too. Only
- * merged is terminal (closed PRs can reopen), so workspaces whose bindings
- * are all merged — with an issue snapshot in place — cost no platform call
- * at all. GitHub workspaces pay one slim `gh pr list --state all` per sweep
- * for states plus one by-number GraphQL lookup for the closing issues
- * (which can change while the PR is open, and which legacy bindings lack);
- * Aone workspaces pay one `a1 repo mr view` per unique pending number (list
- * output carries no state+URL pair, and closed MRs are not listable — a
- * reopen reappears as opened and self-heals). Rewritten in place (order and
- * createdAt preserved).
- */
-/**
  * Records what the slim listing already observed, and returns the keys it
  * covered. The listing is an observation of every PR it returns, so its state
  * is recorded without spending a `gh pr view`; the returned keys are what lets
@@ -264,6 +251,19 @@ async function recordListedPrStates(
   return keys;
 }
 
+/**
+ * Refreshes the persisted `state` snapshot of one workspace's PR bindings,
+ * and on GitHub the `issues` snapshot (the closing references) too. Only
+ * merged is terminal (closed PRs can reopen), so workspaces whose bindings
+ * are all merged — with an issue snapshot in place — cost no platform call
+ * at all. GitHub workspaces pay one slim `gh pr list --state all` per sweep
+ * for states plus one by-number GraphQL lookup for the closing issues
+ * (which can change while the PR is open, and which legacy bindings lack);
+ * Aone workspaces pay one `a1 repo mr view` per unique pending number (list
+ * output carries no state+URL pair, and closed MRs are not listable — a
+ * reopen reappears as opened and self-heals). Rewritten in place (order and
+ * createdAt preserved).
+ */
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
@@ -677,6 +677,9 @@ export function startSessionPrRefreshTimer(deps: {
     try {
       // Anchor the watch deadline at the tick start (master §1).
       const tickStart = (deps.now ?? Date.now)();
+      // Resolved per tick, not carried: a tick whose watch deps have gone away
+      // must not keep writing watch files through the previous tick's seam.
+      watchSeam = undefined;
       const archiveCoordinator = deps.getArchiveCoordinator?.();
       const live = deps.workspaceRegistry.listAll();
       const liveCwds = new Set(live.map((r) => r.workspaceCwd));

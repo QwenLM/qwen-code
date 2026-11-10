@@ -1964,7 +1964,10 @@ describe('refreshWorkspaceSessionPrStates', () => {
         const result = await refreshWorkspaceSessionPrStates(
           runtime,
           undefined,
-          { prWatch: { watchDir, locks: new PathMutexRegistry() } },
+          {
+            prWatch: { watchDir, locks: new PathMutexRegistry() },
+            now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+          },
         );
 
         expect(result.listedKeys).toEqual(
@@ -1978,7 +1981,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
         expect(closed.kind).toBe('state');
         if (closed.kind !== 'state') throw new Error('unreachable');
         expect(closed.state.state).toBe('closed');
-        expect(closed.state.observedAt).toBeDefined();
+        expect(closed.state.observedAt).toBe('2026-11-10T00:00:00.000Z');
         // A draft is still open in the watch snapshot.
         const draft = readPrWatchStateSync(watchDir, {
           ...identity42,
