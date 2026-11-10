@@ -618,6 +618,34 @@ class ManagedChannelServiceTest {
         assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
                 .extracting(SegmentLedger::providerReceipt)
                 .containsExactly(null, null, null);
+        // A replayed resend under the same id matches the stored row and
+        // converges rather than conflicting or appending.
+        ResendResponse replayed = service.resend(TENANT, channel, deliveryId);
+        assertThat(replayed.deliveryId()).isEqualTo(resent.deliveryId());
+        assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactly(0, 1, 2);
+    }
+
+    @Test
+    void aResendAgainstAMatchingIdButDifferentOrdinalIsRejected() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:100", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The stored row keeps the first segment's id but a different ordinal:
+        // the ordinal clause of the identity guard must reject it.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, resentId + ":0", 5, "planned", null, 0, 0));
+        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                .isInstanceOf(IllegalStateException.class);
+        // The guard must reject on the ordinal before planning: findOrCreate
+        // would also reject, but only after orphan segment rows were written.
+        assertThat(segmentLedger.list(TENANT, channel, resentId)).isEmpty();
     }
 
     @Test
