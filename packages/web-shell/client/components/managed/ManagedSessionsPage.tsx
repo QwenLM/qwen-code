@@ -2000,16 +2000,6 @@ function ManagedSessionsContent({
 
           {recovery.value && (
             <ManagedRecoveryPanel
-              // A terminal Session still needs the panel for diagnostics and
-              // any handoff action. Only the terminal "not active" verdict is
-              // expected state, so it should not be framed as operator work.
-              attention={
-                !(
-                  (summary?.lifecycleStatus === 'closed' ||
-                    summary?.lifecycleStatus === 'archived') &&
-                  recovery.value.reasonCode === 'session_not_active'
-                )
-              }
               recovery={recovery.value}
               busy={!interactive || recovery.busy || turnCancel.busy}
               error={recovery.error}
