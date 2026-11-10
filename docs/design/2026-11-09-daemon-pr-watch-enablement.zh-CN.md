@@ -95,11 +95,13 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - **自推账本**：从候选者的 clone（bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`）跑 `cloneWorktreesOf`，然后 `vouchedScanRoots`、`autofixPrPaths`、`readState`，仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 仅用坐标——其检出里不跑 git。任何拒绝意味着无账本、转换照常投递。
 - **actions**：不填充。`sessionPrWatch.actions` 属 PR B；drain 的空 map 归一化已把缺失的 map 当作通用 prompt。
 
-### 5. listing 写入、listedKeys 与 partial（尚未落地）
+### 5. listing 写入与 listedKeys（尚未落地）
 
 refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下、且仅当 daemon 持有 owner 记录时，在该 PR 的 per-PR 锁内把 `state` 与 `observedAt` 写进其 watch 文件——与观测相同的原子写，无文件时静默初始化。把被列出的键收集为 `listedKeys` 传给观测，使 listing 已返回的 closed PR 离开 view 轮转（主 §1）。
 
-把绑定扫描的 `partial` 标志透传进观测选项。观测今天不做负面决策，但 drain 已经做，且该标志必须来自同一次扫描而不是重新计算。drain 调用方的 `coveragePartial`（#16656 新增）保留：它覆盖 `listAll()` 略过的 registry 条目，那是扫描自身标志看不到的。
+**`partial` 那一项已经满足，不需要写代码。** 本节早先的稿子要求把绑定扫描的 `partial` 透传进观测选项。读代码可知：drain 已经把每个 workspace 扫描自身的 `partial` OR 进它以调用方 `coveragePartial` 起头的那个标志，并已在两处负面决策上消费它——watch 文件删除守卫与 pending 丢弃守卫。而观测根本不做任何负面决策，因此在那里新增 `partial` 选项不会有任何读取方：那是死开关。所以观测 tick 里丢弃该标志是正确的现状，其注释应改为「要求已满足」而非「尚待完成」。调用方的 `coveragePartial`（#16656 新增）仍覆盖单个 workspace 扫描看不到的东西——`listAll()` 略过的 registry 条目。
+
+**tick 次序决定了键从哪来。** timer 先跑观测再跑 refresh，所以产出 `listedKeys` 的 listing 在消费它的观测**之后**运行。因此 refresh 返回它列出的键，timer 按 workspace 把它们带进下一个 tick 的观测。state 写入是即时的；只有「退出 view 轮转」滞后一个 tick，而这本就是轮转的工作间隔。两个机制互补而非冗余：存下的 `state` 让 `effectiveState` 无需花一次 view 就变成 closed 或 merged，而 `listedKeys` 区分「listing 覆盖到的 closed PR」与「没覆盖到的」——后者留在轮转里以捕捉 reopen。
 
 ## 涉及文件
 
