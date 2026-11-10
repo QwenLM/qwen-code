@@ -5398,10 +5398,12 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
       );
-      // The connector draws the QR with console.log, so stdout is the stream
-      // that must be visible. Keying on stderr would both refuse a working
-      // `2>err.log` terminal and admit a `| tee` pipe whose code nobody sees.
-      if (!process.stdout.isTTY) {
+      // Only a daemon worker has no operator watching. A stream cannot tell
+      // "piped to a human-visible tee" from "piped to a worker" — both are
+      // pipes — so key on the explicit context the supervisor stamps on every
+      // child it spawns (QWEN_CODE_SERVE=1, set in
+      // cli/src/serve/channel-worker-supervisor.ts and not scrubbed).
+      if (process.env['QWEN_CODE_SERVE'] === '1') {
         throw new Error(
           `QQ channel "${this.name}" has no appID/appSecret. Bind it by QR from the channel management UI, or set appID and appSecret in the channel config.`,
         );

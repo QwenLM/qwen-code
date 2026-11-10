@@ -678,27 +678,23 @@ describe('channel-base test double', () => {
 });
 
 describe('credential-less QR fallback visibility guard', () => {
-  // The connector draws the QR with console.log, so stdout is the stream that
-  // must be a terminal. These four cells pin that choice: keying on stderr
-  // instead fails A (refuses a usable `2>err.log` terminal) and B (admits a
-  // `| tee` pipe whose code nobody can see).
-  const cells: Array<[string, boolean, boolean, boolean]> = [
-    ['A stdout tty, stderr redirected', true, false, false],
-    ['B stdout piped, stderr tty', false, true, true],
-    ['C both tty (interactive CLI)', true, true, false],
-    ['D both piped (daemon worker)', false, false, true],
+  // A stream cannot distinguish a pipe to a human-visible `tee` from a pipe to
+  // a daemon worker, so the guard keys on the supervisor's explicit context.
+  // Every terminal shape must keep working, including the piped ones.
+  const cells: Array<[string, boolean, boolean, boolean, boolean]> = [
+    ['daemon worker, stdout tty', true, true, true, true],
+    ['daemon worker, stdout piped', true, false, false, true],
+    ['terminal, both tty', false, true, true, false],
+    ['terminal, stdout piped through tee', false, false, true, false],
+    ['terminal, stderr redirected', false, true, false, false],
   ];
 
   const original = {
     out: Object.getOwnPropertyDescriptor(process.stdout, 'isTTY'),
     err: Object.getOwnPropertyDescriptor(process.stderr, 'isTTY'),
+    serve: process.env['QWEN_CODE_SERVE'],
   };
-  const setTTY = (
-    stream: NodeJS.WriteStream,
-    value: boolean,
-    restore?: PropertyDescriptor,
-  ) => {
-    void restore;
+  const setTTY = (stream: NodeJS.WriteStream, value: boolean) => {
     Object.defineProperty(stream, 'isTTY', {
       value,
       configurable: true,
@@ -714,12 +710,16 @@ describe('credential-less QR fallback visibility guard', () => {
       if (desc) Object.defineProperty(stream, 'isTTY', desc);
       else delete (stream as unknown as Record<string, unknown>)['isTTY'];
     }
+    if (original.serve === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = original.serve;
     vi.restoreAllMocks();
   });
 
   it.each(cells)(
     '%s -> throws=%s',
-    async (_label, stdoutTTY, stderrTTY, shouldThrow) => {
+    async (_label, daemon, stdoutTTY, stderrTTY, shouldThrow) => {
+      if (daemon) process.env['QWEN_CODE_SERVE'] = '1';
+      else delete process.env['QWEN_CODE_SERVE'];
       setTTY(process.stdout, stdoutTTY);
       setTTY(process.stderr, stderrTTY);
       vi.spyOn(process.stderr, 'write').mockReturnValue(true);

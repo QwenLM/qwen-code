@@ -784,18 +784,30 @@ export function createChannelManagementService(
         if (!Object.hasOwn(latest.channels, channelName)) throw missing();
         const target = latest.channels[channelName]!;
         assertWorkspaceConfig(target);
+        const targetType = String(target['type']);
+        // A save during the import may also have changed the type. Re-derive
+        // the secret keys from the type actually being written, or a secret
+        // would be persisted as a plain config value under the new descriptor.
+        const writeKeys =
+          targetType === type
+            ? secretKeys
+            : new Set(
+                ((await getPlugin(targetType))?.management?.fields ?? [])
+                  .filter((field) => field.kind === 'secret')
+                  .map((field) => field.key),
+              );
         const config: Record<string, unknown> & { type: string } = {
           ...target,
-          type: String(target['type']),
+          type: targetType,
         };
         // The stored snapshot resolves secret references to literals. Leaving
         // them in config would submit the same secret twice and the store
         // rejects any secret-kind config key, so a channel that already holds a
         // credential could never be re-bound.
-        for (const key of secretKeys) delete config[key];
+        for (const key of writeKeys) delete config[key];
         const secrets: Record<string, ChannelSecretUpdate> = {};
         for (const [key, value] of Object.entries(values)) {
-          if (secretKeys.has(key)) {
+          if (writeKeys.has(key)) {
             secrets[key] = { operation: 'replace', value };
           } else {
             config[key] = value;
