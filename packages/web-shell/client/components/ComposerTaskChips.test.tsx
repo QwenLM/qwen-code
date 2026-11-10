@@ -182,6 +182,35 @@ describe('ComposerTaskChips', () => {
     ).toBeNull();
   });
 
+  it('focuses the first choice on opening without stealing focus on refresh', () => {
+    render([workflow('wf-1'), workflow('wf-2')]);
+    act(() => chips()[0].click());
+
+    const rows = container.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="composer-task-list"] button',
+    );
+    expect(document.activeElement).toBe(rows[0]);
+
+    rows[1].focus();
+    render([workflow('wf-1'), workflow('wf-2')]);
+    expect(document.activeElement).toBe(rows[1]);
+
+    act(() => {
+      rows[1].dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(chips()[0]);
+
+    act(() => chips()[0].click());
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="composer-task-list"] button'),
+    );
+  });
+
   it('drops a chip once its task finishes', () => {
     render([workflow('wf-1'), shell('shell-1')]);
     expect(chips()).toHaveLength(2);

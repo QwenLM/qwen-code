@@ -115,6 +115,7 @@ export const ComposerTaskChips = forwardRef<
     (group) => group.kind === openKind && group.tasks.length > 1,
   );
   const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const chipRefs = useRef(new Map<ComposerTaskChipKind, HTMLButtonElement>());
   const now = useSharedNow(Boolean(openGroup));
 
@@ -137,6 +138,12 @@ export const ComposerTaskChips = forwardRef<
   useEffect(() => {
     if (openKind && !openGroup) setOpenKind(null);
   }, [openGroup, openKind]);
+
+  useEffect(() => {
+    if (openKind) {
+      listRef.current?.querySelector('button')?.focus({ preventScroll: true });
+    }
+  }, [openKind]);
 
   // The list closes on a click anywhere outside the chip row.
   useEffect(() => {
@@ -228,6 +235,7 @@ export const ComposerTaskChips = forwardRef<
     >
       {openGroup && (
         <div
+          ref={listRef}
           className={styles.list}
           role="group"
           aria-label={groupLabel(openGroup)}

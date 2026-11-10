@@ -205,6 +205,42 @@ test('a chip for several runs lists them to pick from', async ({
   ).toBeVisible();
 });
 
+test('a multi-task chip opens keyboard choices and returns focus on Escape @smoke', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+  const first = list.getByRole('button', { name: /Review and fix/ });
+  const second = list.getByRole('button', { name: /Update the docs/ });
+  await chip.focus();
+  await page.keyboard.press('Enter');
+  await expect(first).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await expect(chip).toBeFocused();
+
+  await page.keyboard.press('Space');
+  await expect(first).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(second).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(
+    page.getByRole('dialog', { name: 'Background tasks' }),
+  ).toBeVisible();
+});
+
 test('a finished workflow leaves no chip behind', async ({
   page,
 }, testInfo) => {
