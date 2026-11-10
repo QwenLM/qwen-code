@@ -18031,7 +18031,8 @@
           },
           "servers": {
             "type": "array",
-            "description": "The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server selection capacity.",
+            "description": "The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 224 total entries.",
+            "maxItems": 224,
             "contains": {
               "type": "object",
               "required": ["state"],

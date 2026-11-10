@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
@@ -130,6 +131,7 @@ public class ManagedMcpManagementService {
         if (!body.isObject() || body.size() != (body.has("operation") ? 6 : 5)
                 || !body.path("sessionId").isTextual() || !body.path("supported").isBoolean()
                 || !counter(body.path("revision"), 0) || !body.path("servers").isArray()
+                || body.path("servers").size() > ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES
                 || !body.path("availableServers").isArray()) {
             throw new HarnessFailure("Invalid MCP management snapshot");
         }

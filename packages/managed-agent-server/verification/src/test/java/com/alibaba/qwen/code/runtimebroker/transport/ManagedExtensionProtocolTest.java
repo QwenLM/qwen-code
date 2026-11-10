@@ -66,6 +66,21 @@ class ManagedExtensionProtocolTest {
                 () -> ManagedExtensionProtocol.validateOperation(prepare)).getStatusCode());
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void boundsRetainedTombstonesInTheMcpChangeSnapshot() {
+        var prepare = prepare();
+        var command = new LinkedHashMap<>((Map<String, Object>) prepare.get("command"));
+        command.put("mcpChange", Map.of("action", "disable", "serverId", "server-0", "expectedRevision", 0,
+                "servers", selections(32, 192)));
+        prepare.put("command", command);
+        ManagedExtensionProtocol.validateOperation(prepare);
+        command.put("mcpChange", Map.of("action", "disable", "serverId", "server-0", "expectedRevision", 0,
+                "servers", selections(32, 193)));
+        assertEquals(400, assertThrows(RuntimeBrokerException.class,
+                () -> ManagedExtensionProtocol.validateOperation(prepare)).getStatusCode());
+    }
+
     private static List<Map<String, Object>> selections(int live, int removed) {
         var servers = new ArrayList<Map<String, Object>>();
         for (int index = 0; index < live + removed; index++) {

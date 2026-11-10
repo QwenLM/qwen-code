@@ -57,7 +57,8 @@ public final class ManagedMcpSettings {
             check(command.get("serverId").equals(command.path("server").get("serverId")), "MCP server identity conflicts");
         }
         JsonNode servers = body.get("servers");
-        check(servers.isArray(), "Invalid MCP settings servers");
+        check(servers.isArray() && servers.size() <= ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES,
+                "Invalid MCP settings servers");
         Set<String> ids = new HashSet<>();
         int enabled = 0;
         int selected = 0;

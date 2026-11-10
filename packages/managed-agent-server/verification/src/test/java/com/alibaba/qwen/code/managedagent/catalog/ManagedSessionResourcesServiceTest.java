@@ -112,6 +112,23 @@ class ManagedSessionResourcesServiceTest {
     }
 
     @Test
+    void boundsRetainedTombstonesInIndependentSelections() throws Exception {
+        ObjectNode active = bundle(1);
+        addSelections(active, 32, 192);
+        ObjectNode activeRef = resource("managed-extension-config-bundle", active);
+        latest(config(1, 1, "active", null, activeRef, null));
+        assertThat(get().path("configCoverage").asText()).isEqualTo("complete");
+
+        ObjectNode overfilled = bundle(1);
+        addSelections(overfilled, 32, 193);
+        ObjectNode overfilledRef = resource("managed-extension-config-bundle", overfilled);
+        latest(config(1, 1, "active", null, overfilledRef, null));
+        JsonNode rejected = get();
+        assertThat(rejected.path("configCoverage").asText()).isEqualTo("partial");
+        assertThat(rejected.path("coverageReasons").toString()).contains("invalid_resource");
+    }
+
+    @Test
     void boundsTheConfigurationChainAndDoesNotInventAnActiveBundle() throws Exception {
         ObjectNode activeRef = resource("managed-extension-config-bundle", bundle(0));
         ObjectNode previous = null;
@@ -310,6 +327,13 @@ class ManagedSessionResourcesServiceTest {
         bundle.putArray("mcpServers");
         bundle.putArray("independentMcpSelections");
         return bundle;
+    }
+
+    private static void addSelections(ObjectNode bundle, int live, int removed) {
+        for (int index = 0; index < live + removed; index++) {
+            bundle.withArray("independentMcpSelections").add(pin((index < live ? "live-" : "removed-") + index)
+                    .put("state", index == 0 ? "enabled" : index < live ? "disabled" : "removed"));
+        }
     }
 
     private ObjectNode config(int recordRevision, int configRevision, String phase, JsonNode previous, JsonNode bundle, JsonNode baseline) throws Exception {

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.transport;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -273,6 +274,9 @@ public final class ManagedExtensionProtocol {
     }
 
     private static void mcpPins(List<?> servers, boolean selection) {
+        if (selection && servers.size() > ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES) {
+            throw invalid();
+        }
         Set<String> ids = new HashSet<>();
         int enabled = 0;
         int selected = 0;

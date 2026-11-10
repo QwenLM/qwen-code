@@ -103,4 +103,43 @@ describe('Managed extension apply commands', () => {
       ),
     ).toThrow(/MCP selection/);
   });
+
+  it('bounds the retained MCP snapshot including tombstones', () => {
+    const server = (index: number, state: string) => ({
+      serverId: `server-${index}`,
+      serverRevision: 1,
+      definitionDigest: 'c'.repeat(64),
+      state,
+    });
+    const mcpChangeFor = (servers: unknown[]) => ({
+      ...command,
+      mcpChange: {
+        action: 'add',
+        serverId: 'server-0',
+        expectedRevision: 0,
+        servers,
+      },
+    });
+    const atTotal = parseManagedExtensionApplyCommand(
+      mcpChangeFor([
+        ...Array.from({ length: 32 }, (_, index) => server(index, 'disabled')),
+        ...Array.from({ length: 192 }, (_, index) =>
+          server(32 + index, 'removed'),
+        ),
+      ]),
+    );
+    expect(atTotal.mcpChange?.servers).toHaveLength(224);
+    expect(() =>
+      parseManagedExtensionApplyCommand(
+        mcpChangeFor([
+          ...Array.from({ length: 32 }, (_, index) =>
+            server(index, 'disabled'),
+          ),
+          ...Array.from({ length: 193 }, (_, index) =>
+            server(32 + index, 'removed'),
+          ),
+        ]),
+      ),
+    ).toThrow(/MCP selection/);
+  });
 });

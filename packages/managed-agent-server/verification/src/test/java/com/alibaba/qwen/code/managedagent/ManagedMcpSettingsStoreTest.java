@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -115,6 +116,28 @@ class ManagedMcpSettingsStoreTest {
     }
 
     @Test
+    void boundsRetainedTombstonesAtThePersistenceBoundary() throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        ObjectNode settings = settingsWithServers(32, 192);
+        assertThat(json.writeValueAsBytes(settings).length).isLessThan(64 * 1024);
+        var request = journal.requestOrdinary(settings.path("operationId").asText(), "config_install", settings,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isEqualTo(json.readTree(settings.toString()));
+
+        ObjectNode overfilled = settings.deepCopy();
+        overfilled.withArray("servers").addObject()
+                .put("serverId", "x".repeat(128))
+                .put("serverRevision", 9_007_199_254_740_991L)
+                .put("definitionDigest", "a".repeat(64))
+                .put("state", "removed");
+        assertThatThrownBy(() -> ManagedMcpSettings.require(overfilled))
+                .isInstanceOf(ManagedExtensionRecords.InvalidRecordException.class);
+    }
+
+    @Test
     void recipesAndBrokenPredecessorsCannotCommitAnOverride() throws Exception {
         String id = UUID.randomUUID().toString();
         var journal = publicJournal(id);
@@ -225,5 +248,30 @@ class ManagedMcpSettingsStoreTest {
                     .put("digest", DigestUtils.sha256Hex(bytes));
         }
         return result;
+    }
+
+    private ObjectNode settingsWithServers(int live, int removed) {
+        String operation = UUID.randomUUID().toString();
+        ObjectNode result = json.createObjectNode().put("kind", "hosted-mcp-settings").put("schemaVersion", 1)
+                .put("operationId", operation).put("revision", 1);
+        var servers = result.putArray("servers");
+        for (int index = 0; index < live + removed; index++) {
+            servers.addObject()
+                    .put("serverId", serverId(index < live ? "live-" : "removed-", index))
+                    .put("serverRevision", 9_007_199_254_740_991L)
+                    .put("definitionDigest", "a".repeat(64))
+                    .put("state", index == 0 ? "enabled" : index < live ? "disabled" : "removed");
+        }
+        var command = result.putObject("command").put("operationId", operation).put("actorKey", "b".repeat(64))
+                .put("action", "add").put("serverId", serverId("live-", 0)).put("expectedRevision", 0);
+        command.putObject("server").put("serverId", serverId("live-", 0))
+                .put("serverRevision", 9_007_199_254_740_991L).put("definitionDigest", "a".repeat(64));
+        result.putNull("previousRecordRef");
+        return result;
+    }
+
+    private static String serverId(String prefix, int index) {
+        String id = prefix + index;
+        return id + "x".repeat(128 - id.length());
     }
 }

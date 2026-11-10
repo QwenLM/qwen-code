@@ -492,6 +492,13 @@ class ManagedAgentApiContractTest {
         assertThat(CONTRACT.validate(
                 "/components/schemas/ManagedMcpManagementSnapshot",
                 tooManyLive)).isNotEmpty();
+
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 192))).isEmpty();
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 193))).isNotEmpty();
     }
 
     @Test

@@ -41,6 +41,7 @@ import {
   readHostedMcpSettings,
   selectedMcpServers,
   type HostedMcpCommand,
+  type HostedMcpSelection,
 } from './hosted-mcp-settings.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -2188,6 +2189,66 @@ it('refuses a durable record whose live selections exceed the reader capacity', 
   ];
   expect(overfilled.filter((entry) => entry.state !== 'removed')).toHaveLength(
     33,
+  );
+  await commitHostedMcpSettings(session, command, overfilled);
+  await expect(readHostedMcpSettings(session)).rejects.toThrow(
+    'Invalid MCP settings.',
+  );
+});
+
+it('commits a tombstone-heavy snapshot under the total capacity and reads it back', async () => {
+  const previous = Array.from({ length: 224 }, (_, index) => ({
+    ...pin,
+    serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
+    serverRevision: Number.MAX_SAFE_INTEGER,
+    state: (index === 0
+      ? 'enabled'
+      : index < 32
+        ? 'disabled'
+        : 'removed') as HostedMcpSelection['state'],
+  }));
+  const command = managementCommand('edit', previous[0].serverId, 0, {
+    serverId: previous[0].serverId,
+    serverRevision: previous[0].serverRevision,
+    definitionDigest: previous[0].definitionDigest,
+  });
+  const servers = selectedMcpServers(previous, command);
+  expect(servers).toHaveLength(224);
+  expect(servers.filter((entry) => entry.state === 'removed')).toHaveLength(
+    192,
+  );
+  const body = JSON.stringify({
+    kind: 'hosted-mcp-settings',
+    schemaVersion: 1,
+    servers,
+    command,
+    operationId: command.operationId,
+    revision: 1,
+    previousRecordRef: null,
+  });
+  expect(Buffer.byteLength(body)).toBeLessThan(64 * 1024);
+  await commitHostedMcpSettings(session, command, servers);
+  const history = await readHostedMcpSettings(session);
+  expect(history.at(-1)?.servers).toHaveLength(224);
+  expect(
+    history.at(-1)?.servers.filter((entry) => entry.state === 'removed'),
+  ).toHaveLength(192);
+});
+
+it('refuses a durable record whose retained snapshot exceeds the total capacity', async () => {
+  const overfilled = Array.from({ length: 225 }, (_, index) => ({
+    ...pin,
+    serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
+    serverRevision: Number.MAX_SAFE_INTEGER,
+    state: (index === 0
+      ? 'enabled'
+      : index < 32
+        ? 'disabled'
+        : 'removed') as HostedMcpSelection['state'],
+  }));
+  const command = managementCommand('disable', overfilled[0].serverId, 0);
+  expect(() => selectedMcpServers(overfilled, command)).toThrow(
+    'MCP selection exceeds its capacity.',
   );
   await commitHostedMcpSettings(session, command, overfilled);
   await expect(readHostedMcpSettings(session)).rejects.toThrow(

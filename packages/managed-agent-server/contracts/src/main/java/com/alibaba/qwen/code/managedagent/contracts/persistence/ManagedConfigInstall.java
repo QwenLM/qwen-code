@@ -98,7 +98,8 @@ public final class ManagedConfigInstall {
                 && change.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}"), "Invalid independent MCP command");
         count(change.get("expectedRevision"), 0);
         JsonNode servers = change.get("servers");
-        check(servers.isArray(), "Invalid independent MCP selection");
+        check(servers.isArray() && servers.size() <= ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES,
+                "Invalid independent MCP selection");
         Set<String> ids = new HashSet<>();
         int enabled = 0;
         int selected = 0;

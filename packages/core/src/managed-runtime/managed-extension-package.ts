@@ -14,6 +14,11 @@ import type { ManagedHookCatalogPin } from './managed-hook-protocol.js';
 import type { ManagedPackageContributions } from '../extension/managed-package.js';
 import type { OperationGrant } from './managed-extension-record.js';
 
+// Large enough to retain a long-lived Session's tombstones, small enough that a
+// worst-case record (128-char ids, 16-digit revisions, add/edit's duplicate
+// pin) stays below the 64 KiB inline resource bound.
+export const MAX_MCP_SELECTION_ENTRIES = 224;
+
 export interface ManagedExtensionCommandControl {
   readonly kind: 'extension-command';
   readonly operationId: string;
@@ -341,7 +346,8 @@ export function parseManagedExtensionApplyCommand(
 function mcpSelections(
   value: unknown,
 ): readonly ManagedExtensionMcpSelection[] {
-  if (!Array.isArray(value)) invalid('MCP selection');
+  if (!Array.isArray(value) || value.length > MAX_MCP_SELECTION_ENTRIES)
+    invalid('MCP selection');
   const selected = value.map((value): ManagedExtensionMcpSelection => {
     const candidate = object(value, 'MCP selection');
     const { state, ...pin } = candidate;

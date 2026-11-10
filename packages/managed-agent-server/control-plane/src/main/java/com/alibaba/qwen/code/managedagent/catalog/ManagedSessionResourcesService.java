@@ -267,7 +267,8 @@ public class ManagedSessionResourcesService {
         }
 
         private void select(JsonNode pins) {
-            require(pins.isArray(), "Invalid MCP selections");
+            require(pins.isArray() && pins.size() <= ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES,
+                    "Invalid MCP selections");
             int live = 0;
             for (JsonNode pin : pins) {
                 pin(pin);
