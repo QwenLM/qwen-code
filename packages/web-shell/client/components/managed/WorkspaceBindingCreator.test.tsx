@@ -2026,8 +2026,34 @@ describe('WorkspaceBindingCreator', () => {
       document.querySelector('[data-testid="footer-running"]')?.textContent,
     ).toBe('true');
 
+    // The read-back after the create response is part of the same request:
+    // the latch must stay set while getSession resolves.
+    let releaseRead!: (value: {
+      sessionId: string;
+      agentId: string;
+      workspace: { workspaceId: string; cwdRelative: string };
+    }) => void;
+    getSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = resolve;
+        }),
+    );
     await act(async () => {
       release({ sessionId: 'session-a' });
+      await flush();
+    });
+    expect(editorMocks.props!.placeholderText).toBe('Processing hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('true');
+
+    await act(async () => {
+      releaseRead({
+        sessionId: 'session-a',
+        agentId: 'agent-a',
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
       await flush();
     });
   });
