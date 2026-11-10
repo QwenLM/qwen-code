@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_066_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_130_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -93,7 +93,12 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_066_000;
 // the merged tree measures 2,065,087, 11,621 above the head figure. The
 // warning sits 913 above the merged measurement and the ceiling 4,913 above
 // it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_070_000;
+//
+// The patched Zod 4 upgrade (#16434) adds 43,494 bytes when rebuilt against
+// the same candidate with Zod 3. Merged main 754792b8d1 measures 2,129,325
+// bytes and the forbidden-input guard still passes, leaving 2,675 bytes below
+// this ceiling.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_132_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -137,7 +142,8 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'echarts/zrender rule.',
   },
   {
-    pattern: /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\//,
+    pattern:
+      /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\/|web-shell[\\/]dist[\\/]mermaid\.core-[\w-]+\.js$/,
     why:
       'Exported transcripts render a ```mermaid fence as a plain <pre>, the ' +
       'same degradation CodeBlock already applies to syntax highlighting in ' +
@@ -180,6 +186,11 @@ const stripDocumentDeadModules = {
     build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
       path: documentMermaidStub,
     }));
+    build.onResolve({ filter: /^\.\/mermaid\.core-[\w-]+\.js$/ }, (args) =>
+      /web-shell[\\/]dist[\\/]/.test(args.importer)
+        ? { path: documentMermaidStub }
+        : undefined,
+    );
     build.onResolve(
       { filter: /^@datafe-open\/markdown-chart-table(\/|$)/ },
       () => ({ path: documentMarkdownChartTableStub }),

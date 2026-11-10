@@ -14,6 +14,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
   feishu: 'F',
   github: 'GH',
   gitlab: 'GL',
+  email: 'E',
   qq: 'QQ',
 };
 
@@ -25,6 +26,7 @@ const SUPPORTED_CHANNEL_TYPES = new Set([
   'feishu',
   'github',
   'gitlab',
+  'email',
   'qq',
 ]);
 
@@ -38,6 +40,7 @@ export function isSupportedChannelType(
   | 'feishu'
   | 'github'
   | 'gitlab'
+  | 'email'
   | 'qq' {
   return typeof type === 'string' && SUPPORTED_CHANNEL_TYPES.has(type);
 }
@@ -57,6 +60,17 @@ const REPOSITORY_ONLY_CHANNEL_TYPES = new Set(['github']);
 
 export function isRepositoryOnlyChannelType(type: unknown): boolean {
   return typeof type === 'string' && REPOSITORY_ONLY_CHANNEL_TYPES.has(type);
+}
+
+/**
+ * The mirror of repository-only: channels whose traffic is always a direct
+ * conversation. Email builds every envelope with `isGroup: false`, so no group
+ * gate is ever consulted and the injected group controls cannot do anything.
+ */
+const PRIVATE_ONLY_CHANNEL_TYPES = new Set(['email']);
+
+export function isPrivateOnlyChannelType(type: unknown): boolean {
+  return typeof type === 'string' && PRIVATE_ONLY_CHANNEL_TYPES.has(type);
 }
 
 const GITHUB_REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;

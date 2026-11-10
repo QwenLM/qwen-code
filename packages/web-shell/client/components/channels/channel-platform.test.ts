@@ -10,6 +10,7 @@ import {
   githubEventNumber,
   githubEventWebUrl,
   isChannelPlatformAvailable,
+  isPrivateOnlyChannelType,
   isSupportedChannelType,
 } from './channel-platform';
 
@@ -31,11 +32,14 @@ describe('Channel platform availability', () => {
         descriptor('feishu'),
         descriptor('github'),
         descriptor('gitlab'),
+        descriptor('email'),
         descriptor('telegram'),
         descriptor('weixin'),
+        descriptor('qq'),
         descriptor('dingtalk', false),
         descriptor('github', false),
         descriptor('gitlab', false),
+        descriptor('email', false),
       ]
         .filter(isChannelPlatformAvailable)
         .map((item) => item.type),
@@ -47,6 +51,8 @@ describe('Channel platform availability', () => {
       'feishu',
       'github',
       'gitlab',
+      'email',
+      'qq',
     ]);
   });
 
@@ -58,8 +64,41 @@ describe('Channel platform availability', () => {
     expect(isSupportedChannelType('feishu')).toBe(true);
     expect(isSupportedChannelType('github')).toBe(true);
     expect(isSupportedChannelType('gitlab')).toBe(true);
+    expect(isSupportedChannelType('email')).toBe(true);
     expect(isSupportedChannelType('telegram')).toBe(false);
+    expect(isSupportedChannelType('weixin')).toBe(false);
+    // The QQ plugin's channelType is 'qq'; 'qqbot' is only the loader name, so
+    // asserting that spelling would guard a string no descriptor can carry.
+    expect(isSupportedChannelType('qq')).toBe(true);
+    expect(isSupportedChannelType('qqbot')).toBe(false);
     expect(isSupportedChannelType(undefined)).toBe(false);
+  });
+});
+
+describe('Private-only channel types', () => {
+  it('classifies Email as private-only', () => {
+    expect(isPrivateOnlyChannelType('email')).toBe(true);
+  });
+
+  it('leaves every group-capable platform outside the set', () => {
+    // A leak here would hide the group controls on a platform that needs them,
+    // which is the same defect in the opposite direction.
+    for (const type of [
+      'dingtalk',
+      'dws',
+      'wecom',
+      'wecom-callback',
+      'feishu',
+      'github',
+      'gitlab',
+      'telegram',
+      'weixin',
+      'qq',
+    ]) {
+      expect(isPrivateOnlyChannelType(type)).toBe(false);
+    }
+    expect(isPrivateOnlyChannelType(undefined)).toBe(false);
+    expect(isPrivateOnlyChannelType(42)).toBe(false);
   });
 });
 

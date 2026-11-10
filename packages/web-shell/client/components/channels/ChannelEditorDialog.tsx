@@ -76,6 +76,7 @@ import {
   hasDescriptorGroupPolicy,
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
+  GROUP_ONLY_FIELD_KEYS,
   PRIVATE_ONLY_FIELD_KEYS,
   invalidRepositoryGroupEntries,
   isRepoFilterActive,
@@ -92,6 +93,7 @@ import {
   type ChannelGroupSenders,
 } from './channel-editor-state';
 import {
+  isPrivateOnlyChannelType,
   isRepositoryOnlyChannelType,
   PLATFORM_MARKS,
 } from './channel-platform';
@@ -137,6 +139,29 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     action_prompt_template:
       'channels.editor.field.gitlab.action_prompt_template',
   },
+  email: {
+    address: 'channels.editor.field.email.address',
+    imapHost: 'channels.editor.field.email.imapHost',
+    imapUser: 'channels.editor.field.email.imapUser',
+    imapPassword: 'channels.editor.field.email.imapPassword',
+    smtpHost: 'channels.editor.field.email.smtpHost',
+    smtpUser: 'channels.editor.field.email.smtpUser',
+    smtpPassword: 'channels.editor.field.email.smtpPassword',
+    folder: 'channels.editor.field.email.folder',
+    imapPort: 'channels.editor.field.email.imapPort',
+    smtpPort: 'channels.editor.field.email.smtpPort',
+    imapSecure: 'channels.editor.field.email.imapSecure',
+    smtpSecure: 'channels.editor.field.email.smtpSecure',
+    proactiveRecipients: 'channels.editor.field.email.proactiveRecipients',
+    pollInterval: 'channels.editor.field.email.pollInterval',
+    maxMessageBytes: 'channels.editor.field.email.maxMessageBytes',
+    maxAttachmentBytes: 'channels.editor.field.email.maxAttachmentBytes',
+    maxTextLength: 'channels.editor.field.email.maxTextLength',
+    // The shared hints say "stable user IDs ... without pairing", but the
+    // Email adapter only accepts bare mailbox addresses and rejects pairing.
+    allowedUsers: 'channels.editor.field.email.allowedUsers',
+    operators: 'channels.editor.field.email.operators',
+  },
 };
 
 const SHARED_ACCESS_FIELD_KEYS = new Set([
@@ -178,9 +203,24 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
 const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.baseUrl': 'https://ghe.example.com/api/v3',
   'github.repoFilter': 'owner/repo, owner/repo',
+  'email.allowedUsers': 'you@example.com, colleague@example.com',
+  'email.operators': 'you@example.com',
 };
 
-const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl', 'pollInterval']);
+// Email's endpoint and TLS keys are declared by no other channel, so listing
+// them here moves only Email's fields: they decide where the mailbox
+// credentials are sent, which is Connection rather than Credentials.
+const CONNECTION_FIELD_KEYS = new Set([
+  'baseUrl',
+  'wsUrl',
+  'pollInterval',
+  'imapHost',
+  'imapPort',
+  'imapSecure',
+  'smtpHost',
+  'smtpPort',
+  'smtpSecure',
+]);
 /**
  * Rarely changed tuning, collapsed into one disclosure panel. Primary
  * endpoints stay out: `wsUrl` (WeCom) and `baseUrl` (GitHub Enterprise /
@@ -198,6 +238,14 @@ const ADVANCED_FIELD_KEYS = new Set([
   'defaultMessageRoute',
   'multiSession',
   'instructions',
+  // Email tuning: the polled mailbox folder (defaults to INBOX) and the size
+  // caps are rarely changed, not credentials. `folder` is a plain string, so
+  // unlike an enum it is not pre-filled on a fresh draft and does not auto-open
+  // this panel.
+  'folder',
+  'maxMessageBytes',
+  'maxAttachmentBytes',
+  'maxTextLength',
 ]);
 
 /** Every repository starts fully inheriting; nothing is materialized. */
@@ -1679,6 +1727,7 @@ export function ChannelEditorDialog({
               const repositoryOnly = isRepositoryOnlyChannelType(
                 descriptor.type,
               );
+              const privateOnly = isPrivateOnlyChannelType(descriptor.type);
               const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = repositoryOnly
                 ? ''
@@ -1688,9 +1737,17 @@ export function ChannelEditorDialog({
               const showRadioGroup = !descriptorPolicy && !repositoryOnly;
               const descriptorGroupPolicy =
                 hasDescriptorGroupPolicy(descriptor);
-              const effectiveGroupPolicy = descriptorGroupPolicy
-                ? String(draft.values['groupPolicy'] ?? '')
-                : String(instance?.config.groupPolicy ?? '');
+              // Mirror of the repository-only branch above. The draft skip is
+              // what normally keeps this empty: it omits groupPolicy from
+              // draft.values, so the descriptor arm below reads ''. This
+              // ternary is the guard for the other arm — if the descriptor ever
+              // lacked the injected field, the fallback would read the STORED
+              // config, and a stored 'pairing' must not resurrect the panel.
+              const effectiveGroupPolicy = privateOnly
+                ? ''
+                : descriptorGroupPolicy
+                  ? String(draft.values['groupPolicy'] ?? '')
+                  : String(instance?.config.groupPolicy ?? '');
               const showPairing =
                 effectivePolicy === 'pairing' ||
                 effectiveGroupPolicy === 'pairing';
@@ -1698,6 +1755,7 @@ export function ChannelEditorDialog({
                 (field) =>
                   field.key !== 'operators' &&
                   !(repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) &&
+                  !(privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) &&
                   (field.key !== 'allowedUsers' ||
                     effectivePolicy === 'allowlist' ||
                     effectivePolicy === 'pairing'),
