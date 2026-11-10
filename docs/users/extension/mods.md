@@ -610,8 +610,9 @@ store in place.
   named pipes, and invalid store data and leave the entry in place.
 - A paused process still holds its write lock. Acquiring the lock across
   processes times out after eight seconds. A later writer can recover a lock
-  from a verified dead process. On Linux, locks from an earlier boot can
-  also be recovered when the recorded machine identity matches.
+  from a verified dead process. On Linux, recovery across boots requires
+  matching machine, hostname, and PID namespace identities and boot IDs
+  verified through procfs. Older locks support recovery within the same boot.
 - Ending a dispatch cancels `set` and `delete` calls that are waiting for a
   lock. An update already started under the lock may still land, and the
   session waits for it before closing. A process exit during the update

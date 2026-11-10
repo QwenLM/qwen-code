@@ -5,7 +5,13 @@
  */
 
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  openSync,
+  readFileSync,
+  statfsSync,
+} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { hostname } from 'node:os';
 import * as path from 'node:path';
@@ -27,17 +33,46 @@ export const MOD_STORE_MAX_BYTES = 4 * 1024 * 1024;
 // Leave room for the worker reply and the nested next(e) result envelope.
 const MAX_KEY_LIST_BYTES = MOD_MAX_BYTES - 64;
 const LOCK_WAIT_MS = 8_000;
+const PROC_SUPER_MAGIC = 0x9fa0;
+const BOOT_ID_PATH = '/proc/sys/kernel/random/boot_id';
+const lockHost = hostname();
 const pidNamespace = readPidNamespaceId();
 const bootId = process.platform === 'linux' ? readLocalBootId() : null;
-const lockScope = createHash('sha256')
-  .update(JSON.stringify([hostname(), pidNamespace, bootId]))
-  .digest('hex')
-  .slice(0, 16);
-const machineScope = readMachineScope();
+const lockScope = scopeForBoot(bootId);
+const machineScope =
+  bootId !== null && pidNamespace !== null && hasKernelBootId(bootId)
+    ? readMachineScope()
+    : null;
 const fileLocks = new Map<string, Mutex>();
 
+function scopeForBoot(id: string | null): string {
+  return createHash('sha256')
+    .update(JSON.stringify([lockHost, pidNamespace, id]))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function hasKernelBootId(expected: string): boolean {
+  try {
+    const fd = openSync(
+      BOOT_ID_PATH,
+      constants.O_RDONLY | constants.O_NONBLOCK,
+    );
+    try {
+      // Containers can bind-mount a per-container boot ID over this file.
+      return (
+        statfsSync(`/proc/self/fd/${fd}`).type === PROC_SUPER_MAGIC &&
+        readFileSync(fd, 'utf8').trim() === expected
+      );
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
 function readMachineScope(): string | null {
-  if (process.platform !== 'linux') return null;
   try {
     const id = readFileSync('/etc/machine-id', 'utf8').trim();
     if (!/^[a-f0-9]{32}$/i.test(id) || /^0+$/.test(id)) return null;
@@ -56,19 +91,27 @@ function processStart(pid: number): string {
 }
 
 function deadOwner(owner: string): boolean {
-  const match =
-    /^([a-f0-9]{16})\.([1-9]\d{0,9})\.([\w-]+)\.[a-f0-9-]{36}(?:\.([a-f0-9]{32})\.([a-f0-9-]+))?$/.exec(
+  const identity =
+    /^(?<scope>[a-f0-9]{16})\.(?<pid>[1-9]\d{0,9})\.(?<start>[\w-]+)\.[a-f0-9-]{36}(?:(?<kernel>\.k)?\.(?<machine>[a-f0-9]{32})\.(?<boot>[a-f0-9-]+))?$/.exec(
       owner,
-    );
-  if (!match) return false;
-  if (match[1] !== lockScope) {
-    // A PID is meaningful only within its boot and namespace. A verified
-    // earlier boot of this machine is already gone, regardless of its PID.
+    )?.groups;
+  if (!identity) return false;
+  const {
+    scope,
+    pid: rawPid,
+    start: recordedStart,
+    kernel,
+    machine,
+    boot,
+  } = identity;
+  if (scope !== lockScope) {
     return (
+      kernel !== undefined &&
       machineScope !== null &&
-      bootId !== null &&
-      match[4] === machineScope &&
-      match[5] !== bootId
+      machine === machineScope &&
+      boot !== undefined &&
+      boot !== bootId &&
+      scope === scopeForBoot(boot)
     );
   }
   if (
@@ -76,7 +119,7 @@ function deadOwner(owner: string): boolean {
     (pidNamespace === null || bootId === null)
   )
     return false;
-  const pid = Number(match[2]);
+  const pid = Number(rawPid);
   if (pid > 2_147_483_647) return false;
   try {
     process.kill(pid, 0);
@@ -84,7 +127,7 @@ function deadOwner(owner: string): boolean {
     return isNodeError(error) && error.code === 'ESRCH';
   }
   const start = processStart(pid);
-  return match[3] !== '-' && start !== '-' && match[3] !== start;
+  return recordedStart !== '-' && start !== '-' && recordedStart !== start;
 }
 
 async function removeLock(lock: string, owner?: string): Promise<void> {
@@ -109,7 +152,7 @@ async function acquireLock(
   signal?.throwIfAborted();
   const nonce = randomUUID();
   const staging = `${lock}.${nonce}`;
-  const recovery = machineScope && bootId ? `.${machineScope}.${bootId}` : '';
+  const recovery = machineScope && bootId ? `.k.${machineScope}.${bootId}` : '';
   const owner = `${lockScope}.${process.pid}.${processStart(process.pid)}.${nonce}${recovery}`;
   await fs.mkdir(staging, { mode: 0o700 });
   let acquired = false;

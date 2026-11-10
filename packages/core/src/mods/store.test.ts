@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  statfsSync,
   statSync,
   symlinkSync,
   utimesSync,
@@ -41,9 +42,12 @@ describe('ModStore', () => {
   };
 
   const bootId = process.platform === 'linux' ? readLocalBootId() : null;
+  const pidNamespace = readPidNamespaceId();
   const machineScope = (() => {
-    if (bootId === null) return null;
+    if (bootId === null || pidNamespace === null) return null;
     try {
+      if (statfsSync('/proc/sys/kernel/random/boot_id').type !== 0x9fa0)
+        return null;
       const id = readFileSync('/etc/machine-id', 'utf8').trim();
       if (!/^[a-f0-9]{32}$/i.test(id) || /^0+$/.test(id)) return null;
       return createHmac('sha256', 'Qwen-Code/ModStore/lock-host')
@@ -57,20 +61,27 @@ describe('ModStore', () => {
   const heldLock = (
     dir: string,
     pid: number,
-    recovery?: { boot: string; machine: string },
+    recovery?: {
+      boot: string;
+      machine: string;
+      namespace?: number;
+      legacy?: boolean;
+    },
   ) => {
     const scope = createHash('sha256')
       .update(
         JSON.stringify([
           hostname(),
-          readPidNamespaceId(),
+          recovery?.namespace ?? pidNamespace,
           recovery?.boot ?? bootId,
         ]),
       )
       .digest('hex')
       .slice(0, 16);
     const lock = join(dir, 'mod.json.lock');
-    const suffix = recovery ? `.${recovery.machine}.${recovery.boot}` : '';
+    const suffix = recovery
+      ? `${recovery.legacy ? '' : '.k'}.${recovery.machine}.${recovery.boot}`
+      : '';
     const owner = join(lock, `${scope}.${pid}.-.${randomUUID()}${suffix}`);
     mkdirSync(owner, { recursive: true });
     return { lock, owner };
@@ -110,7 +121,7 @@ describe('ModStore', () => {
   });
 
   it.runIf(machineScope !== null)(
-    'recovers an earlier boot of this machine even if its PID is in use',
+    'recovers a verified earlier boot in this PID namespace even if its PID is in use',
     async () => {
       const dir = storeDir();
       const { lock, owner } = heldLock(dir, process.pid, {
@@ -122,6 +133,72 @@ describe('ModStore', () => {
       await store.set('mod', 'kept', 1);
       expect(await store.get('mod', 'kept')).toBe(1);
       expect(() => statSync(lock)).toThrow();
+    },
+  );
+
+  const expectLockRetained = async (
+    store: ModStore,
+    { lock, owner }: ReturnType<typeof heldLock>,
+  ) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 300);
+    try {
+      await expect(
+        store.set('mod', 'kept', 1, controller.signal),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(await readdir(lock)).toEqual([basename(owner)]);
+      expect(await store.keys('mod')).toEqual([]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  it.runIf(machineScope !== null).each([
+    ['an older marker', { legacy: true }],
+    ['another PID namespace', { namespace: (pidNamespace ?? 0) + 1 }],
+  ] as const)(
+    'preserves an earlier boot lock with %s',
+    async (_case, identity) => {
+      const dir = storeDir();
+      const lock = heldLock(dir, process.pid, {
+        boot: randomUUID(),
+        machine: machineScope!,
+        ...identity,
+      });
+      await expectLockRetained(new ModStore(dir), lock);
+    },
+  );
+
+  it.runIf(machineScope !== null)(
+    'preserves an earlier boot lock when the reaper reads a virtual boot ID',
+    async () => {
+      const dir = storeDir();
+      const lock = heldLock(dir, process.pid, {
+        boot: randomUUID(),
+        machine: machineScope!,
+      });
+      const checkedBootFile = vi.fn();
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        return {
+          ...actual,
+          statfsSync(file: string) {
+            const stat = actual.statfsSync(file);
+            if (!file.startsWith('/proc/self/fd/')) return stat;
+            checkedBootFile(file);
+            return { ...stat, type: 0x01021994 };
+          },
+        };
+      });
+      try {
+        const { ModStore: VirtualBootStore } = await import('./store.js');
+        expect(checkedBootFile).toHaveBeenCalled();
+        await expectLockRetained(new VirtualBootStore(dir), lock);
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+      }
     },
   );
 
