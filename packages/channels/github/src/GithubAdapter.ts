@@ -1310,6 +1310,8 @@ const BOUND_DELIVERY_COPY: Readonly<
       newCommentsHeader: string;
       omittedNotice(count: number): string;
       commentTruncated(count: number): string;
+      reviewRequestedInstruction: string;
+      assignInstruction: string;
       headChange(fromSha: string, toSha: string): string;
       ciFailure(headSha: string): string;
       failedChecks(names: string, namesIncomplete: boolean): string;
@@ -1327,6 +1329,9 @@ const BOUND_DELIVERY_COPY: Readonly<
     omittedNotice: (count) =>
       `${count} earlier comment(s) omitted from this batch; list the PR comments to see them`,
     commentTruncated: (count) => `comment truncated: ${count} more characters`,
+    reviewRequestedInstruction:
+      'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+    assignInstruction: 'Triage this issue and respond with the next action.',
     headChange: (fromSha, toSha) =>
       `New commits pushed: head moved from ${fromSha} to ${toSha}.`,
     ciFailure: (headSha) => `CI failed on head ${headSha}.`,
@@ -1348,6 +1353,9 @@ const BOUND_DELIVERY_COPY: Readonly<
     omittedNotice: (count) =>
       `本批次省略了 ${count} 条较早的评论；请列出 PR 评论查看`,
     commentTruncated: (count) => `评论已截断：省略了 ${count} 个字符`,
+    reviewRequestedInstruction:
+      '请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。',
+    assignInstruction: '请分诊该 issue 并给出下一步行动。',
     headChange: (fromSha, toSha) =>
       `有新提交推送：head 从 ${fromSha} 变为 ${toSha}。`,
     ciFailure: (headSha) => `head ${headSha} 的 CI 失败。`,
@@ -6692,21 +6700,36 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // <no-reply/>") contradicts in-session delivery; keep only the comments.
     let text = envelope.text;
     if (text.startsWith(AGGREGATE_COMMENTS_PROMPT_PREFIX)) {
-      text = `${copy.newCommentsHeader}\n${text.slice(AGGREGATE_COMMENTS_PROMPT_PREFIX.length)}`;
+      let summary = text.slice(AGGREGATE_COMMENTS_PROMPT_PREFIX.length);
+      let header = copy.newCommentsHeader;
       if (this.locale !== 'en') {
-        // Only the bound path localizes: the shared summary is also consumed
-        // by the public channel lane, which the design pins unchanged, so the
-        // batch-omission and per-comment truncation markers are rewritten
-        // HERE, not where the body is composed.
-        text = text.replace(
-          /\[(\d+) earlier comment\(s\) omitted from this batch; list the PR comments to see them\]/,
-          (_match, count: string) => `[${copy.omittedNotice(Number(count))}]`,
+        // Only the bound path localizes: the shared summary also feeds the
+        // public lane. The omission notice is lifted ONTO the header line
+        // (a line-start bracketed copy would be peeled by the sanitizer),
+        // and the per-comment truncation marker is rewritten only at line
+        // end — quoted marker text inside a comment body stays verbatim.
+        summary = summary.replace(
+          /^\[(\d+) earlier comment\(s\) omitted from this batch; list the PR comments to see them\]\n?/,
+          (_match, count: string) => {
+            header = `${header}[${copy.omittedNotice(Number(count))}]`;
+            return '';
+          },
         );
-        text = text.replaceAll(
-          /… \[comment truncated: (\d+) more characters\]/g,
+        summary = summary.replaceAll(
+          /… \[comment truncated: (\d+) more characters\]$/gm,
           (_match, count: string) =>
             `… [${copy.commentTruncated(Number(count))}]`,
         );
+      }
+      text = `${header}\n${summary}`;
+    }
+    // The direct lanes' task instructions are product prose as well: exact
+    // match against the English literal, never a pattern over comment text.
+    if (this.locale !== 'en') {
+      if (text === BOUND_DELIVERY_COPY.en.reviewRequestedInstruction) {
+        text = copy.reviewRequestedInstruction;
+      } else if (text === BOUND_DELIVERY_COPY.en.assignInstruction) {
+        text = copy.assignInstruction;
       }
     }
     // The shared envelope caps the body VISIBLY: the aggregate lane can

@@ -77,6 +77,9 @@ live producer of bound event prompts today.
 - **Operator templates are unchanged**: `boundSessionActions` /
   `sessionPrWatch.actions` values render verbatim in whatever language the
   operator wrote them.
+- **`auto` means English**: localization is opt-in. `general.language: auto`
+  (the default) resolves to English through `resolveChannelLocale`, matching
+  every other consumer of that locale — it does not follow the OS locale.
 - **The public channel lane is unchanged**: publication instructions, trigger
   guidance, and channel-owned session prompts keep their current text.
 - **The daemon drain producer stays English**: it is inert pre-enablement;
@@ -118,6 +121,13 @@ live producer of bound event prompts today.
   failed-checks suffix and the incomplete-list note.
 - `buildBoundSessionPrompt` passes `language: this.locale` and picks
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`.
+- The aggregate lane's batch-omission notice is lifted ONTO the header line
+  (a line-start bracketed copy would be peeled by the sanitizer), and the
+  per-comment truncation marker is rewritten only at line end, so quoted
+  marker text inside a comment body stays verbatim. The direct-lane task
+  instructions (`review_requested` / `assign`) are rewritten on exact literal
+  match. All of these rewrites happen on the bound path only; the shared
+  aggregate summary the public lane publishes is never touched.
 - `watchOnePr` renders summaries in `this.locale` at detection time. The
   English renderings stay byte-identical.
 
@@ -150,18 +160,20 @@ Role guidance (shared table):
 
 Channel-authored strings:
 
-| Key                    | en (unchanged)                                                                                                              | zh                                                                                                  |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| provenance             | `Delivered by the "<name>" GitHub channel because this session is bound to the PR below.`                                   | `由 "<name>" GitHub channel 投递，因为本会话绑定了下面的 PR。`                                      |
-| instruction source     | `this channel's configuration`                                                                                              | `本 channel 的配置`                                                                                 |
-| aggregate header       | `New comments on the PR:`                                                                                                   | `PR 的新评论：`                                                                                     |
-| batch omission notice  | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
-| per-comment truncation | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
-| head_change            | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
-| ci_failure             | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |
-| merge_conflict         | `Merge conflicts detected (mergeable_state: dirty).`                                                                        | `检测到合并冲突（mergeable_state: dirty）。`                                                        |
-| state_change (merged)  | `The PR was merged.`                                                                                                        | `PR 已合并。`                                                                                       |
-| state_change (closed)  | `The PR was closed without merging.`                                                                                        | `PR 已关闭，未合并。`                                                                               |
+| Key                            | en (unchanged)                                                                                                              | zh                                                                                                  |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| provenance                     | `Delivered by the "<name>" GitHub channel because this session is bound to the PR below.`                                   | `由 "<name>" GitHub channel 投递，因为本会话绑定了下面的 PR。`                                      |
+| instruction source             | `this channel's configuration`                                                                                              | `本 channel 的配置`                                                                                 |
+| aggregate header               | `New comments on the PR:`                                                                                                   | `PR 的新评论：`                                                                                     |
+| batch omission notice          | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
+| direct lane (review_requested) | `Return a formal review summary with verified actionable findings, or a concise no-blocker result.`                         | `请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。`              |
+| direct lane (assign)           | `Triage this issue and respond with the next action.`                                                                       | `请分诊该 issue 并给出下一步行动。`                                                                 |
+| per-comment truncation         | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
+| head_change                    | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
+| ci_failure                     | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |
+| merge_conflict                 | `Merge conflicts detected (mergeable_state: dirty).`                                                                        | `检测到合并冲突（mergeable_state: dirty）。`                                                        |
+| state_change (merged)          | `The PR was merged.`                                                                                                        | `PR 已合并。`                                                                                       |
+| state_change (closed)          | `The PR was closed without merging.`                                                                                        | `PR 已关闭，未合并。`                                                                               |
 
 Check names keep their `, ` join in both languages; they are platform data.
 

@@ -11996,13 +11996,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
       const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
       expect(prompt).toContain('PR 的新评论：');
-      // The zh omission notice is under the sanitizer's 64-code-point tag
-      // window, so a line-start bracketed copy is peeled — unlike the longer
-      // English original, which keeps its brackets.
+      // The omission notice rides ONTO the header line, so no start-of-line
+      // peel applies and its brackets survive — unlike a line-start copy.
       expect(prompt).toContain(
-        '本批次省略了 5 条较早的评论；请列出 PR 评论查看',
+        'PR 的新评论：[本批次省略了 5 条较早的评论；请列出 PR 评论查看]',
       );
-      expect(prompt).not.toContain('[本批次省略了');
+      expect(prompt).not.toContain('\n本批次省略了');
       expect(prompt).toContain('… [评论已截断：省略了 112 个字符]');
       expect(prompt).toMatch(/\[提示词已截断：省略了 \d+ 个字符\]/);
       expect(prompt).not.toContain('earlier comment(s) omitted');
@@ -12011,6 +12010,107 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(prompt).not.toContain('TAIL-INSTRUCTION');
       expect(prompt).toContain('REQ6 ');
       expect(prompt).not.toContain('REQ0 ');
+    });
+
+    it('leaves quoted English marker text in comment bodies verbatim', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      // Two comments, so there is NO genuine batch omission: quoted text
+      // must never be rewritten into a real omission/truncation notice.
+      const comments = [
+        makeComment({
+          id: 1,
+          body: 'quoted [7 earlier comment(s) omitted from this batch; list the PR comments to see them] inside',
+        }),
+        makeComment({
+          id: 2,
+          body: 'quote … [comment truncated: 5 more characters] inside',
+        }),
+      ];
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce(comments);
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain(
+        '[7 earlier comment(s) omitted from this batch; list the PR comments to see them]',
+      );
+      expect(prompt).toContain('… [comment truncated: 5 more characters]');
+      expect(prompt).not.toContain('本批次省略了');
+      expect(prompt).not.toContain('评论已截断：省略了 5 个字符');
+    });
+
+    it('keeps the public aggregate lane English under a Chinese locale', async () => {
+      await initChannel(
+        { deliverToBoundSessions: false },
+        { boundSessions, locale: 'zh' },
+      );
+      const comments = Array.from({ length: 25 }, (_, i) =>
+        makeComment({
+          id: 2000 + i,
+          body:
+            i === 5
+              ? `HEAD ${'b'.repeat(490)} TAIL-INSTRUCTION`
+              : `REQ${i} ${'x'.repeat(390)}`,
+          created_at: `2026-07-02T09:${String(i).padStart(2, '0')}:00.000Z`,
+          updated_at: `2026-07-02T09:${String(i).padStart(2, '0')}:00.000Z`,
+        }),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce(comments);
+      await pollOnce();
+
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain(
+        '[5 earlier comment(s) omitted from this batch; list the PR comments to see them]',
+      );
+      expect(text).toContain('… [comment truncated: 112 more characters]');
+      expect(text).not.toContain('本批次省略了');
+      expect(text).not.toContain('评论已截断');
+    });
+
+    it('localizes the direct-lane task instructions on the bound path', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true },
+        { boundSessions, locale: 'zh' },
+      );
+      const build = (
+        channel as unknown as {
+          buildBoundSessionPrompt: (envelope: Envelope) => string;
+        }
+      ).buildBoundSessionPrompt.bind(channel);
+      const makeEnvelope = (text: string): Envelope => ({
+        channelName: 'test-github',
+        senderId: 'alice',
+        senderName: 'alice',
+        chatId: 'owner/repo',
+        threadId: 'pr:42',
+        messageId: 'event-1',
+        text,
+        isGroup: true,
+        isMentioned: true,
+        isReplyToBot: false,
+        metadata:
+          'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: review_requested.',
+      });
+      const review = build(
+        makeEnvelope(
+          'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+        ),
+      );
+      expect(review).toContain(
+        '请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。',
+      );
+      expect(review).not.toContain('Return a formal review summary');
+      const assign = build(
+        makeEnvelope('Triage this issue and respond with the next action.'),
+      );
+      expect(assign).toContain('请分诊该 issue 并给出下一步行动。');
+      expect(assign).not.toContain('Triage this issue');
     });
 
     it('re-injects with the SAME idempotency key after a failed acceptance mark (W4)', async () => {

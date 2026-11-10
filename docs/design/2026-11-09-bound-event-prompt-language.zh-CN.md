@@ -67,6 +67,9 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
   `mergeable_state` 值、通知 reason。
 - **运维模板不变**：`boundSessionActions` / `sessionPrWatch.actions` 的值
   按运维书写的语言原样渲染。
+- **`auto` 即英文**：本地化是显式选择。`general.language: auto`（缺省）经
+  `resolveChannelLocale` 解析为英文，与该 locale 的其他消费者一致——不跟随
+  操作系统 locale。
 - **公开 channel 通道不变**：发布指令、trigger 指引、channel 自有会话的
   提示词保持现有文本。
 - **daemon drain 生产方保持英文**：它在启用前是惰性的；把语言穿过它的
@@ -101,6 +104,11 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
   （含失败检查后缀与列表不完整注记）。
 - `buildBoundSessionPrompt` 传 `language: this.locale` 并选取
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`。
+- 聚合通道的批次省略提示被移到头部行（行首的方括号副本会被 sanitizer
+  剥掉），单条评论截断标记只在行尾重写，因此评论正文里引用形态的标记
+  文本保持原样。direct lane 的任务指令（`review_requested` / `assign`）
+  按英文字面量精确匹配重写。以上重写全部只发生在绑定投递路径；公共通道
+  发布的共享聚合 summary 不受影响。
 - `watchOnePr` 在检测时按 `this.locale` 渲染摘要。英文渲染逐字节不变。
 
 ### daemon drain 生产方
