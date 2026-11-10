@@ -105,10 +105,11 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
 - `buildBoundSessionPrompt` 传 `language: this.locale` 并选取
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`。
 - 聚合通道的批次省略提示被移到头部行（行首的方括号副本会被 sanitizer
-  剥掉），单条评论截断标记只在行尾重写，因此评论正文里引用形态的标记
-  文本保持原样。direct lane 的任务指令（`review_requested` / `assign`）
-  按英文字面量精确匹配重写。以上重写全部只发生在绑定投递路径；公共通道
-  发布的共享聚合 summary 不受影响。
+  剥掉），单条评论截断标记只在 composer 真正按 400 码点截断评论时重写
+  （该 bullet 的渲染内容恰好为 `MAX_AGGREGATE_COMMENT_CHARS` 码点），因此
+  评论正文里引用形态的标记文本保持原样。direct lane 的指令由 `Trigger:`
+  元数据行决定，不依据正文文本。以上重写全部只发生在绑定投递路径；公共
+  通道发布的共享聚合 summary 不受影响。
 - `watchOnePr` 在检测时按 `this.locale` 渲染摘要。英文渲染逐字节不变。
 
 ### daemon drain 生产方
@@ -140,18 +141,20 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
 
 channel 撰写的字符串：
 
-| 键                     | en（不变）                                                                                                                  | zh                                                                                                  |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| 来源说明               | `Delivered by the "<name>" GitHub channel because this session is bound to the PR below.`                                   | `由 "<name>" GitHub channel 投递，因为本会话绑定了下面的 PR。`                                      |
-| 指令来源               | `this channel's configuration`                                                                                              | `本 channel 的配置`                                                                                 |
-| 聚合头部               | `New comments on the PR:`                                                                                                   | `PR 的新评论：`                                                                                     |
-| 批次省略提示           | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
-| 单条评论截断           | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
-| head_change            | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
-| ci_failure             | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |
-| merge_conflict         | `Merge conflicts detected (mergeable_state: dirty).`                                                                        | `检测到合并冲突（mergeable_state: dirty）。`                                                        |
-| state_change（已合并） | `The PR was merged.`                                                                                                        | `PR 已合并。`                                                                                       |
-| state_change（已关闭） | `The PR was closed without merging.`                                                                                        | `PR 已关闭，未合并。`                                                                               |
+| 键                              | en（不变）                                                                                                                  | zh                                                                                                  |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| 来源说明                        | `Delivered by the "<name>" GitHub channel because this session is bound to the PR below.`                                   | `由 "<name>" GitHub channel 投递，因为本会话绑定了下面的 PR。`                                      |
+| 指令来源                        | `this channel's configuration`                                                                                              | `本 channel 的配置`                                                                                 |
+| 聚合头部                        | `New comments on the PR:`                                                                                                   | `PR 的新评论：`                                                                                     |
+| 批次省略提示                    | `[<n> earlier comment(s) omitted from this batch; list the PR comments to see them]`                                        | `[本批次省略了 <n> 条较早的评论；请列出 PR 评论查看]`                                               |
+| direct lane（review_requested） | `Return a formal review summary with verified actionable findings, or a concise no-blocker result.`                         | `请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。`              |
+| direct lane（assign）           | `Triage this issue and respond with the next action.`                                                                       | `请分诊该 issue 并给出下一步行动。`                                                                 |
+| 单条评论截断                    | `… [comment truncated: <n> more characters]`                                                                                | `… [评论已截断：省略了 <n> 个字符]`                                                                 |
+| head_change                     | `New commits pushed: head moved from <a> to <b>.`                                                                           | `有新提交推送：head 从 <a> 变为 <b>。`                                                              |
+| ci_failure                      | `CI failed on head <sha>.` + ` Failed checks: <names>` + ` (list may be incomplete: later check pages were not read)` + `.` | `head <sha> 的 CI 失败。` + `失败的检查：<names>` + `（列表可能不完整：未读取后续检查分页）` + `。` |
+| merge_conflict                  | `Merge conflicts detected (mergeable_state: dirty).`                                                                        | `检测到合并冲突（mergeable_state: dirty）。`                                                        |
+| state_change（已合并）          | `The PR was merged.`                                                                                                        | `PR 已合并。`                                                                                       |
+| state_change（已关闭）          | `The PR was closed without merging.`                                                                                        | `PR 已关闭，未合并。`                                                                               |
 
 检查名在两种语言下都保持 `, ` 连接；它们是平台数据。
 

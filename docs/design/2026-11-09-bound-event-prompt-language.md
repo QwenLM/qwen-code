@@ -123,11 +123,13 @@ live producer of bound event prompts today.
   `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[this.locale][role]`.
 - The aggregate lane's batch-omission notice is lifted ONTO the header line
   (a line-start bracketed copy would be peeled by the sanitizer), and the
-  per-comment truncation marker is rewritten only at line end, so quoted
-  marker text inside a comment body stays verbatim. The direct-lane task
-  instructions (`review_requested` / `assign`) are rewritten on exact literal
-  match. All of these rewrites happen on the bound path only; the shared
-  aggregate summary the public lane publishes is never touched.
+  per-comment truncation marker is rewritten only where the composer actually
+  cut a comment at the 400-code-point cap (the bullet's rendered content is
+  exactly `MAX_AGGREGATE_COMMENT_CHARS` code points long), so quoted marker
+  text inside a comment body stays verbatim. The direct-lane instructions are
+  keyed by the `Trigger:` metadata line, never by body text. All of these
+  rewrites happen on the bound path only; the shared aggregate summary the
+  public lane publishes is never touched.
 - `watchOnePr` renders summaries in `this.locale` at detection time. The
   English renderings stay byte-identical.
 

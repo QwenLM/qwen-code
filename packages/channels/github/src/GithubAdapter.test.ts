@@ -12019,6 +12019,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
       // Two comments, so there is NO genuine batch omission: quoted text
       // must never be rewritten into a real omission/truncation notice.
+      // The truncation quote sits at END of the bullet, the position the
+      // composer itself uses — only the 400-code-point boundary tells the
+      // composer's own cut from the quote.
       const comments = [
         makeComment({
           id: 1,
@@ -12026,7 +12029,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         }),
         makeComment({
           id: 2,
-          body: 'quote … [comment truncated: 5 more characters] inside',
+          body: 'quote … [comment truncated: 5 more characters]',
         }),
       ];
       mockOctokit.paginate
@@ -12083,7 +12086,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           buildBoundSessionPrompt: (envelope: Envelope) => string;
         }
       ).buildBoundSessionPrompt.bind(channel);
-      const makeEnvelope = (text: string): Envelope => ({
+      const makeEnvelope = (text: string, trigger: string): Envelope => ({
         channelName: 'test-github',
         senderId: 'alice',
         senderName: 'alice',
@@ -12094,12 +12097,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         isGroup: true,
         isMentioned: true,
         isReplyToBot: false,
-        metadata:
-          'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: review_requested.',
+        metadata: `Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: ${trigger}.`,
       });
       const review = build(
         makeEnvelope(
           'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
+          'review_requested',
         ),
       );
       expect(review).toContain(
@@ -12107,10 +12110,25 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
       expect(review).not.toContain('Return a formal review summary');
       const assign = build(
-        makeEnvelope('Triage this issue and respond with the next action.'),
+        makeEnvelope(
+          'Triage this issue and respond with the next action.',
+          'assign',
+        ),
       );
       expect(assign).toContain('请分诊该 issue 并给出下一步行动。');
       expect(assign).not.toContain('Triage this issue');
+      // A body that happens to equal the instruction literal is NOT a direct
+      // lane: the Trigger line decides, so quoted text is left verbatim.
+      const quoted = build(
+        makeEnvelope(
+          'Triage this issue and respond with the next action.',
+          'comment',
+        ),
+      );
+      expect(quoted).toContain(
+        'Triage this issue and respond with the next action.',
+      );
+      expect(quoted).not.toContain('请分诊该 issue');
     });
 
     it('re-injects with the SAME idempotency key after a failed acceptance mark (W4)', async () => {
