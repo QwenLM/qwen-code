@@ -759,32 +759,34 @@ export function createChannelManagementService(
           ),
           { code: 'channel_qr_login_channel_missing' },
         );
-      // Resolve the descriptor outside the lane: it is an async import and
-      // reads no workspace state. Ownership is asserted here and again inside.
-      const probe = opts.store.snapshot().channels[channelName];
-      if (!probe) throw missing();
-      assertWorkspaceConfig(probe);
-      const type = String(probe['type']);
-      const fields = (await getPlugin(type))?.management?.fields ?? [];
-      const secretKeys = new Set(
-        fields
-          .filter((field) => field.kind === 'secret')
-          .map((field) => field.key),
-      );
-
       await inMutationLane(async () => {
-        // Re-read inside the lane so a concurrent save cannot slip between
-        // reading the revision and writing against it.
+        // Read, resolve and write in one lane turn: a concurrent save must not
+        // be able to change the entry's type or ownership between the read that
+        // picks the secret keys and the write that uses them.
         const current = opts.store.snapshot();
-        const existing = current.channels[channelName];
-        if (!existing) throw missing();
+        if (!Object.hasOwn(current.channels, channelName)) throw missing();
+        const existing = current.channels[channelName]!;
         assertWorkspaceConfig(existing);
         const active = workspaceCommittedNames().includes(channelName);
         if (active) assertOwnedRuntime(channelName);
 
+        const type = String(existing['type']);
+        const fields = (await getPlugin(type))?.management?.fields ?? [];
+        const secretKeys = new Set(
+          fields
+            .filter((field) => field.kind === 'secret')
+            .map((field) => field.key),
+        );
+        // The descriptor import above is an await point. Re-read and re-assert
+        // immediately before writing so a save that repointed the entry during
+        // that import cannot slip the write into another workspace.
+        const latest = opts.store.snapshot();
+        if (!Object.hasOwn(latest.channels, channelName)) throw missing();
+        const target = latest.channels[channelName]!;
+        assertWorkspaceConfig(target);
         const config: Record<string, unknown> & { type: string } = {
-          ...existing,
-          type,
+          ...target,
+          type: String(target['type']),
         };
         // The stored snapshot resolves secret references to literals. Leaving
         // them in config would submit the same secret twice and the store
@@ -800,7 +802,7 @@ export function createChannelManagementService(
           }
         }
         await opts.store.upsert(channelName, {
-          expectedRevision: current.revision,
+          expectedRevision: latest.revision,
           config,
           secrets,
         });
@@ -843,9 +845,10 @@ export function createChannelManagementService(
       inMutationLane(() => service.revokePairingApproval(name, subject)),
     startQrLogin: async (name, initiatorClientId) => {
       assertManageableInstanceName(name);
-      const existing = opts.store.snapshot().channels[name];
-      if (existing) assertWorkspaceConfig(existing);
-      if (!existing) {
+      const channels = opts.store.snapshot().channels;
+      // Own-property, not truthiness: 'constructor' and 'toString' resolve to
+      // prototype members and would otherwise reach the capability check.
+      if (!Object.hasOwn(channels, name)) {
         throw Object.assign(
           new Error(
             `Channel ${JSON.stringify(name)} must be saved before it can be bound.`,
@@ -853,6 +856,8 @@ export function createChannelManagementService(
           { code: 'channel_qr_login_channel_missing' },
         );
       }
+      const existing = channels[name]!;
+      assertWorkspaceConfig(existing);
       const channelType = String(existing['type']);
       const qrLogin = (await getPlugin(channelType))?.management?.qrLogin;
       if (!qrLogin) {

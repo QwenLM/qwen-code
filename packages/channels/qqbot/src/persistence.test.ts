@@ -40,8 +40,16 @@ vi.mock('./accounts.js', () => ({
   saveCredentials: vi.fn(),
 }));
 
+const { mockQrCodeLogin } = vi.hoisted(() => ({
+  mockQrCodeLogin: vi.fn(async () => ({
+    appId: 'qr-app',
+    appSecret: 'qr-secret',
+  })),
+}));
+
 vi.mock('./login.js', () => ({
-  qrCodeLogin: vi.fn(),
+  qrCodeLogin: mockQrCodeLogin,
+  startQrLogin: vi.fn(),
 }));
 
 // The pure channel-base helpers stay the shipped implementations rather than
@@ -667,4 +675,80 @@ describe('channel-base test double', () => {
     expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
     expect(mocked.unwrapMessageRoutingKey).toBe(actual.unwrapMessageRoutingKey);
   });
+});
+
+describe('credential-less QR fallback visibility guard', () => {
+  // The connector draws the QR with console.log, so stdout is the stream that
+  // must be a terminal. These four cells pin that choice: keying on stderr
+  // instead fails A (refuses a usable `2>err.log` terminal) and B (admits a
+  // `| tee` pipe whose code nobody can see).
+  const cells: Array<[string, boolean, boolean, boolean]> = [
+    ['A stdout tty, stderr redirected', true, false, false],
+    ['B stdout piped, stderr tty', false, true, true],
+    ['C both tty (interactive CLI)', true, true, false],
+    ['D both piped (daemon worker)', false, false, true],
+  ];
+
+  const original = {
+    out: Object.getOwnPropertyDescriptor(process.stdout, 'isTTY'),
+    err: Object.getOwnPropertyDescriptor(process.stderr, 'isTTY'),
+  };
+  const setTTY = (
+    stream: NodeJS.WriteStream,
+    value: boolean,
+    restore?: PropertyDescriptor,
+  ) => {
+    void restore;
+    Object.defineProperty(stream, 'isTTY', {
+      value,
+      configurable: true,
+      writable: true,
+    });
+  };
+
+  afterEach(() => {
+    for (const [stream, desc] of [
+      [process.stdout, original.out],
+      [process.stderr, original.err],
+    ] as const) {
+      if (desc) Object.defineProperty(stream, 'isTTY', desc);
+      else delete (stream as unknown as Record<string, unknown>)['isTTY'];
+    }
+    vi.restoreAllMocks();
+  });
+
+  it.each(cells)(
+    '%s -> throws=%s',
+    async (_label, stdoutTTY, stderrTTY, shouldThrow) => {
+      setTTY(process.stdout, stdoutTTY);
+      setTTY(process.stderr, stderrTTY);
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      mockFetchAccessToken.mockResolvedValue({
+        accessToken: 'tok',
+        expiresIn: 7200,
+      });
+      const ch = new QQChannel(
+        'guard-bot',
+        {
+          type: 'qq',
+          token: '',
+          senderPolicy: 'open' as const,
+          allowedUsers: [],
+          sessionScope: 'user' as const,
+          cwd: '/tmp',
+          groupPolicy: 'disabled' as const,
+          groups: {},
+        },
+        {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+      );
+      const fetchToken = (
+        ch as unknown as { fetchToken: () => Promise<void> }
+      ).fetchToken.bind(ch);
+      if (shouldThrow) {
+        await expect(fetchToken()).rejects.toThrow(/has no appID\/appSecret/);
+      } else {
+        await expect(fetchToken()).resolves.toBeUndefined();
+      }
+    },
+  );
 });

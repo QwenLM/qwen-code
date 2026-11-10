@@ -5398,10 +5398,10 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
       );
-      // The terminal QR loop is only usable where an operator can see the
-      // console. A daemon worker pipes stderr, so waiting here would hang the
-      // channel silently instead of reporting a configuration error.
-      if (!process.stderr.isTTY) {
+      // The connector draws the QR with console.log, so stdout is the stream
+      // that must be visible. Keying on stderr would both refuse a working
+      // `2>err.log` terminal and admit a `| tee` pipe whose code nobody sees.
+      if (!process.stdout.isTTY) {
         throw new Error(
           `QQ channel "${this.name}" has no appID/appSecret. Bind it by QR from the channel management UI, or set appID and appSecret in the channel config.`,
         );
