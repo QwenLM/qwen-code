@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @EnableConfigurationProperties(ManagedAgentProperties.class)
 @EnableScheduling
 @EnableTransactionManagement(proxyTargetClass = true)
+@org.springframework.boot.autoconfigure.ImportAutoConfiguration(ExtensionArchiveStorageAutoConfiguration.class)
 @Import({
     ManagedAgentConfiguration.PersistenceImport.class,
     ExecutionConfiguration.class,

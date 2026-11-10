@@ -3479,6 +3479,13 @@ class ManagedAgentApiContractTest {
                 + "\"name\":\"fixture\",\"version\":\"1\",\"target\":{\"platform\":\"linux\",\"arch\":\"x64\"},\"components\":[\"skills\"]}")
                 .getBytes(StandardCharsets.UTF_8));
         exchange(drift, "listWorkspaceExtensionPackages", 200, get(base).header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "importWorkspaceExtensionSource", 401, post(base + "/source-imports").header(TENANT, tenant)
+                .header(IDEMPOTENCY_KEY, "source-import"),
+                "{\"reference\":{\"providerId\":\"dataworks\",\"kind\":\"skill\",\"resourceId\":\"skill_1\",\"revision\":\"1\"},\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}");
+        exchange(drift, "getWorkspaceExtensionSourceImport", 404,
+                get(base + "/source-imports/missing").header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "lookupWorkspaceExtensionSourceImport", 404,
+                get(base + "/source-imports").header(TENANT, tenant).principal(actor).header(IDEMPOTENCY_KEY, "missing"), null);
         exchange(drift, "createWorkspaceExtensionPackage", 401, post(base).header(TENANT, tenant)
                 .header(IDEMPOTENCY_KEY, "extension-publish").param("manifest", encodedManifest).param("packageDigest", digest)
                 .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
