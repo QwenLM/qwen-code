@@ -1745,7 +1745,7 @@ export interface WebShellProps {
   /**
    * Let the host render managed artifact previews instead of the built-in
    * panel. Set this only when the host also claims artifact open requests via
-   * onRightPanelOpen/onOpenRequest; this flag only controls the card label.
+   * onRightPanelOpen; this flag only controls the card label.
    */
   hostOwnsArtifactPreview?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */

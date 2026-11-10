@@ -41,9 +41,16 @@ describe('TurnOutputs helpers', () => {
       id: 'published-document',
       metadata: { artifactType: 'document' },
     } as DaemonSessionArtifact;
+    const externalUrlSnapshot = {
+      ...published,
+      id: 'external-url-snapshot',
+      storage: 'external_url',
+      url: 'https://example.com/report.html',
+    } as DaemonSessionArtifact;
 
     expect(isArtifactPreviewable(published)).toBe(true);
     expect(isArtifactPreviewable(publishedDocument)).toBe(false);
+    expect(isArtifactPreviewable(externalUrlSnapshot, true)).toBe(false);
   });
 
   it('recognizes live published artifact pages without over-promising links', () => {

@@ -689,7 +689,8 @@ export function isArtifactPreviewable(
   return (
     isRenderedArtifact(artifact) &&
     (artifact.storage === 'workspace' ||
-      artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+      (artifact.storage === 'published' &&
+        artifact.metadata?.['artifactType'] === 'web_preview_snapshot') ||
       (artifact.storage === 'published' &&
         artifact.source === 'tool' &&
         artifact.toolName?.toLowerCase() === 'artifact' &&
