@@ -24,9 +24,11 @@ const unsubscribed = () => {};
  */
 export function useModRow<T extends ModRenderInput>(
   config: Config | undefined,
+  sessionId: string | undefined,
   input: T | undefined,
 ): T['props'] | undefined {
-  const session = config ? getInteractiveModSession(config) : undefined;
+  const session =
+    config && input ? getInteractiveModSession(config) : undefined;
   // A row shown before the Mods have loaded is offered to them once they do.
   const [ready, setReady] = useState(() =>
     Boolean(session && !session.starting),
@@ -51,17 +53,21 @@ export function useModRow<T extends ModRenderInput>(
   const stable = useMemo(() => input, [key]);
   const subscribe = useCallback(
     (listener: () => void) =>
-      (ready && stable && session?.watchRow(stable, listener)) || unsubscribed,
-    [session, ready, stable],
+      (ready &&
+        stable &&
+        sessionId !== undefined &&
+        session?.watchRow(sessionId, stable, listener)) ||
+      unsubscribed,
+    [session, sessionId, ready, stable],
   );
   const snapshot = useCallback(
     () =>
-      stable
-        ? (session?.rowProps(stable.component, stable.requestId) as
+      stable && sessionId !== undefined
+        ? (session?.rowProps(sessionId, stable.component, stable.requestId) as
             | T['props']
             | undefined)
         : undefined,
-    [session, stable],
+    [session, sessionId, stable],
   );
   return useSyncExternalStore(subscribe, snapshot);
 }

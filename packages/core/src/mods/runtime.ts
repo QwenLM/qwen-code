@@ -387,7 +387,9 @@ export class ModRuntime {
     props?: ModRenderInput['props'];
   }> {
     const answer = await this.request({ type: 'render', input }, signal);
-    const settled = record(answer) ? answer['tree'] : undefined;
+    let settled = answer;
+    if (input.component === 'AssistantMessage')
+      settled = record(answer) ? answer['tree'] : undefined;
     const hooks = this.renderHooksFor(input.component);
     const owner = hooks.length === 1 ? hooks[0] : 'hooks';
     const notes: string[] = [];

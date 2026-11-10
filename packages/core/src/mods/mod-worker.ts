@@ -1333,7 +1333,8 @@ port.on('message', async (request: ModWorkerRequest) => {
           return ENGINE_NODE;
         },
       );
-      result = { tree, props };
+      result =
+        request.input.component === 'AssistantMessage' ? { tree, props } : tree;
     } else if (request.type === 'turn-complete') {
       result = await dispatch(
         'turn.complete',

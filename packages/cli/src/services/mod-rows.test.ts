@@ -90,6 +90,22 @@ describe('ModRows', () => {
     expect(render).toHaveBeenCalledTimes(2);
   });
 
+  it('skips a row hidden while waiting behind another dispatch', async () => {
+    const dispatches = queue();
+    const render = vi.fn(async () => undefined);
+    const rows = new ModRows(dispatches.schedule, render);
+    dispatches.other('tool.call');
+    const release = rows.watch(row('1'), () => {});
+    release();
+    await dispatches.settled();
+    expect(dispatches.ran).toEqual(['tool.call']);
+    expect(render).not.toHaveBeenCalled();
+
+    rows.watch(row('1'), () => {});
+    await dispatches.settled();
+    expect(render).toHaveBeenCalledOnce();
+  });
+
   it('renders shown rows again on invalidate, drawing the old answer meanwhile', async () => {
     const dispatches = queue();
     let round = 0;
@@ -117,7 +133,7 @@ describe('ModRows', () => {
     expect(heard).toHaveBeenCalledTimes(3);
   });
 
-  it('on clear forgets every answer and renders the rows still shown again', async () => {
+  it('on clear drops old rows and waits for new subscriptions', async () => {
     const dispatches = queue();
     let session = 'old';
     const render = vi.fn(async (input: ModAssistantMessageInput) => ({
@@ -128,14 +144,18 @@ describe('ModRows', () => {
       render(input as ModAssistantMessageInput),
     );
     const heard = vi.fn();
-    rows.watch(row('1'), heard);
+    const releaseOld = rows.watch(row('1'), heard);
     rows.watch(row('2'), () => {})();
     await dispatches.settled();
     expect(render).toHaveBeenCalledTimes(1);
     session = 'new';
     rows.clear();
-    // The shown row draws its own text until the new session answers.
     expect(rows.get('AssistantMessage', '1')).toBeUndefined();
+    await dispatches.settled();
+    expect(render).toHaveBeenCalledTimes(1);
+
+    rows.watch(row('1'), heard);
+    releaseOld();
     await dispatches.settled();
     expect(
       (rows.get('AssistantMessage', '1') as { text: string } | undefined)?.text,

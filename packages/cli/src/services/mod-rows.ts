@@ -93,27 +93,13 @@ export class ModRows {
     }
   }
 
-  /**
-   * Forgets every answer: they belonged to a session that ended. A row still
-   * shown, as after a branch, renders again for the session that follows.
-   */
+  /** Drops the previous session's rows and their queued renders. */
   clear(): void {
-    const rows = [...this.rows];
+    const rows = [...this.rows.values()];
     this.rows.clear();
     this.queue.length = 0;
-    for (const [id, old] of rows) {
-      if (!old.listeners.size) continue;
-      // A fresh row, so a render of the old session in flight keeps no answer.
-      const row: Row = {
-        input: old.input,
-        key: old.key,
-        queued: false,
-        listeners: old.listeners,
-      };
-      this.rows.set(id, row);
-      this.enqueue(id, row);
-      if (old.answer) for (const listener of row.listeners) listener();
-    }
+    for (const row of rows)
+      if (row.answer) for (const listener of row.listeners) listener();
   }
 
   private enqueue(id: string, row: Row): void {
@@ -141,10 +127,12 @@ export class ModRows {
     const readyId = id;
     this.running = true;
     this.schedule(async () => {
-      const { input, key } = ready;
-      // An invalidate while it renders asks for this row once more.
-      ready.stale = false;
       try {
+        // The session queue may have waited while the row was hidden or cleared.
+        if (this.rows.get(readyId) !== ready || !ready.listeners.size) return;
+        const { input, key } = ready;
+        // An invalidate while it renders asks for this row once more.
+        ready.stale = false;
         let answer: ModRenderInput['props'] | undefined;
         try {
           answer = await this.render(input);

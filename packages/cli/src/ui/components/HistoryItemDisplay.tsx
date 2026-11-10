@@ -115,10 +115,10 @@ interface HistoryItemDisplayProps {
    */
   thoughtHeadId?: number;
   /**
-   * Whether this item is a row of the main transcript the Mods may draw.
-   * Set where a committed item can be drawn again, never for <Static>.
+   * The session owning the committed main transcript this row comes from.
+   * Set only where a committed item can be drawn again.
    */
-  modRows?: boolean;
+  modSessionId?: string;
 }
 
 /**
@@ -389,7 +389,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   thoughtExpanded,
   fullDetail = false,
   thoughtHeadId,
-  modRows = false,
+  modSessionId,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
   // A committed reply block is offered to the Mods, which may rewrite the
@@ -397,7 +397,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const config = useContext(ConfigContext);
   const modInput = useMemo<ModAssistantMessageInput | undefined>(
     () =>
-      modRows &&
+      modSessionId !== undefined &&
       !isPending &&
       (item.type === 'gemini' || item.type === 'gemini_content')
         ? {
@@ -407,9 +407,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             props: { text: item.text, isFirstOfReply: item.type === 'gemini' },
           }
         : undefined,
-    [modRows, isPending, item],
+    [modSessionId, isPending, item],
   );
-  const modProps = useModRow(config, modInput);
+  const modProps = useModRow(config, modSessionId, modInput);
 
   const {
     allExpanded,
@@ -434,6 +434,10 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
+  const sourceCopyText =
+    modProps && (item.type === 'gemini' || item.type === 'gemini_content')
+      ? item.text
+      : undefined;
   const itemForDisplay = useMemo(
     () =>
       escapeAnsiCtrlCodes(
@@ -488,6 +492,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             }
             contentWidth={contentWidth}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+            sourceCopyText={sourceCopyText}
           />
         </>
       )}
@@ -502,6 +507,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           }
           contentWidth={contentWidth}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          sourceCopyText={sourceCopyText}
         />
       )}
       {itemForDisplay.type === 'gemini_thought' && (

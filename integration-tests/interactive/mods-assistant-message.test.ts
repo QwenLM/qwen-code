@@ -194,13 +194,24 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
           text: e.prompt.toUpperCase(), usage: { input_tokens: 0, output_tokens: 0,
           cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }));`,
       'shout-rows': `
+        const sessionsByText = new Map();
+        let firstSession;
+        let sawOldRowInNewSession = false;
         on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+          const session = await $.session.id();
+          firstSession ??= session;
+          const previous = sessionsByText.get(e.props.text);
+          if (previous && previous !== session) sawOldRowInNewSession = true;
+          sessionsByText.set(e.props.text, session);
           const r = await $.model.complete({ model: 'haiku', prompt: e.props.text });
           if (!r.isAnswered) return next(e);
           const text = r.text.includes('ANSWER 1')
             ? r.text + '\\n\\nExtra line A.\\n\\nExtra line B.'
             : r.text.split('\\n\\n')[0];
-          return next({ ...e, props: { ...e.props, text: 'Shouted ${nonce}: ' + text } });
+          const afterClear = r.text.includes('ANSWER 3')
+            ? (session !== firstSession && !sawOldRowInNewSession ? ' Clean switch.' : ' Stale switch.')
+            : '';
+          return next({ ...e, props: { ...e.props, text: 'Shouted ${nonce}: ' + text + afterClear } });
         });`,
     });
 
@@ -216,6 +227,7 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     expect(first).not.toContain('Answer 1 reads plainly.');
 
     // The stored reply and what the model reads next keep the original.
+    await terminal.idle(300, 20_000);
     await terminal.send(`Again ${nonce}`);
     await terminal.waitForScreen(
       (screen) =>
@@ -247,5 +259,23 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     expect(lastRequest().join('\n')).not.toContain('Shouted');
     expect(storedReplies().join('\n')).toContain('Answer 1 reads plainly.');
     expect(storedReplies().join('\n')).not.toContain('Shouted');
+
+    await terminal.idle(300, 20_000);
+    await terminal.send('/clear');
+    await terminal.waitForScreen(
+      (screen) =>
+        !screen.includes(`Again ${nonce}`) &&
+        screen.includes('Type your message'),
+      'the cleared transcript',
+      60_000,
+    );
+    await terminal.idle(300, 20_000);
+    await terminal.send(`After clear ${nonce}`);
+    const afterClear = await terminal.waitForScreen(
+      (screen) => screen.includes(`Shouted ${nonce}: ANSWER 3 READS PLAINLY.`),
+      'the new session reply',
+      60_000,
+    );
+    expect(afterClear).toContain('Clean switch.');
   });
 });

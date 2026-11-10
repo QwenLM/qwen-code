@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ModRuntime, type ModRenderHost } from './runtime.js';
 import type { ModAssistantMessageInput, ModBandInput } from './render-tree.js';
-import type { ModLog } from './types.js';
+import { MOD_MAX_BYTES, type ModLog } from './types.js';
 
 const signal = () => new AbortController().signal;
 const band = (props: Partial<ModBandInput['props']> = {}): ModBandInput => ({
@@ -93,6 +93,23 @@ describe('ui.render through the real QuickJS worker', () => {
           { type: 'Text', props: { dimColor: true }, children: ['  done'] },
         ],
       },
+      notes: [],
+    });
+  });
+
+  it('keeps the whole reply budget available to an AbovePrompt tree', async () => {
+    const overhead = Buffer.byteLength(
+      JSON.stringify({ type: 'Text', children: [''] }),
+    );
+    const length = Math.floor(
+      (MOD_MAX_BYTES - overhead) / Buffer.byteLength('字'),
+    );
+    const runtime = await create([
+      mod(`on('ui.render', { component: 'AbovePrompt' }, ($, e) =>
+        $.ui.resolve(e).Text({ children: '字'.repeat(${length}) }));`),
+    ]);
+    await expect(runtime.render(band(), signal())).resolves.toEqual({
+      tree: { type: 'Text', children: ['字'.repeat(length)] },
       notes: [],
     });
   });

@@ -90,6 +90,7 @@ const RENDER_SETTLE_MS = 150;
 const RENDER_LIVE_MS = 34;
 const RENDER_STEADY_MS = 100;
 const RENDER_SLOW_MS = 1_000;
+const ROW_RENDER_TIMEOUT_MS = 30_000;
 
 export interface ModTerminalHost {
   surface: 'terminal';
@@ -709,11 +710,13 @@ export class ModSession implements ICommandLoader {
    * row's site or the row is too large to hand to the Mods.
    */
   watchRow(
+    sessionId: string,
     input: ModRenderInput,
     listener: () => void,
   ): (() => void) | undefined {
     if (
       this.closing ||
+      sessionId !== this.sessionId ||
       !this.sites.includes(input.component) ||
       !this.runtime?.renderHooksFor(input.component).length ||
       Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2
@@ -724,10 +727,13 @@ export class ModSession implements ICommandLoader {
 
   /** The props a row draws with once its hooks answered, if they rewrote it. */
   rowProps(
+    sessionId: string,
     component: ModRenderSite,
     requestId: string,
   ): ModRenderInput['props'] | undefined {
-    return this.rows.get(component, requestId);
+    return sessionId === this.sessionId
+      ? this.rows.get(component, requestId)
+      : undefined;
   }
 
   // Rows answered while dispatches were cancelled render again.
@@ -751,21 +757,25 @@ export class ModSession implements ICommandLoader {
     input: ModRenderInput,
   ): Promise<ModRenderInput['props'] | undefined> {
     const runtime = this.runtime;
-    const signal = AbortSignal.any([
-      this.lifetime.signal,
-      this.toolGeneration.signal,
-    ]);
+    const generation = this.toolGeneration.signal;
     if (
       !runtime ||
       this.closing ||
-      signal.aborted ||
+      generation.aborted ||
       this.sessionId !== this.config.getSessionId() ||
       !this.allowed() ||
       !this.active()
     )
       return undefined;
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      generation,
+      // Provider I/O pauses the runtime's dispatch clock.
+      AbortSignal.timeout(ROW_RENDER_TIMEOUT_MS),
+    ]);
     try {
       const { props, notes } = await runtime.render(input, signal);
+      signal.throwIfAborted();
       for (const note of notes) logger.debug(note);
       return !props || stableJson(props) === stableJson(input.props)
         ? undefined

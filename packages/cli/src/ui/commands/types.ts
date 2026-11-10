@@ -82,7 +82,7 @@ export interface CommandContext {
     /** Adds a new item to the history display. */
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
-    clear: () => void;
+    clear: (sessionId?: string) => void;
     /** Clears transient assistant output before replacing conversation history. */
     clearPendingState?: () => void;
     /**

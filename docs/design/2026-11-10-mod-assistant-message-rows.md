@@ -55,17 +55,17 @@ The chain's answer must be the engine node `next` resolved to. The row then draw
 
 ### One row at a time
 
-A session runs one Mod dispatch at a time. A row render that awaits a model call holds the queue for seconds, so rows render one by one: the next row is queued only when the previous one settles, and a `tool.call` or `turn.start` arriving meanwhile waits behind at most one row. A row that scrolls away before its turn leaves the queue. Answers are kept per row and input, so a row that scrolls back into view draws its answer without a new dispatch; up to 1,000 rows no longer shown are kept. A failed render keeps the row as it is. A row asked again, by `$.ui.invalidate('ui.render')` or after an abandoned switch, draws its previous answer until the new one arrives, so it does not flash its original text.
+A session runs one Mod dispatch at a time. The next row is queued after the previous one settles, so a `tool.call` or `turn.start` waits behind at most one row. The host cancels each row render after 30 seconds, including time spent waiting on a model. A row that scrolls away before its dispatch starts is skipped. Answers are kept per row and input, so a row that scrolls back into view draws its answer without a new dispatch. Up to 1,000 rows no longer shown are kept. A failed render falls back to the original text. While a row waits for a new answer after `$.ui.invalidate('ui.render')` or an abandoned switch, it draws its previous answer.
 
 A row whose input is larger than half a Mod payload is not raised, rather than handing the hooks a cut text.
 
 ### Session changes
 
-Rows belong to a session. `/clear`, `/resume` and `/branch` forget every row's answer; a row still shown after the switch, as after `/branch`, renders again for the session that follows. If a switch is abandoned, rows answered while dispatches were cancelled render again.
+Rows belong to the session of the displayed transcript. When `/clear`, `/resume` or `/branch` adopts another session, the host discards the old row cache and accepts rows from the new transcript once it is committed. The branch can render replies inherited from the parent once they are part of the branch transcript. If a switch is abandoned, visible rows in the original session can render again.
 
 ### Copy hints
 
-The `/copy mermaid N` and `/copy latex N` hints under a block are numbered from the stored text, and `/copy` copies the stored text: it reads the conversation history, which a row's rewrite never reaches. A rewrite that keeps code blocks, as a translation does, keeps the numbers right.
+`/copy` reads the stored conversation history. In a rewritten row, a Mermaid or LaTeX block with one exact source match in the original row shows the original block's `/copy mermaid N` or `/copy latex N` hint. New, modified or ambiguous blocks omit the hint.
 
 ## Validation and acceptance
 
@@ -76,12 +76,12 @@ Core runtime tests with the real QuickJS worker:
 - A hook that awaits `$.model.complete`, answered by another Mod, rewrites the row.
 - A dispatch abandoned while its hook awaits a model call settles, cancels the host call, and the next dispatch runs.
 
-CLI tests for the row scheduler: one row at a time with another dispatch waiting behind one row, hidden rows skipped, answers kept for a remount, invalidate and clear.
+CLI tests cover serialization, skipping a row hidden while it waits, remounts, invalidation, the render deadline, session ownership and source-copy hints. The Ink PTY test exercises `/clear` and checks which session receives each row.
 
 Acceptance: in the Ink terminal with the virtualized viewport, a Mod that rewrites each reply block shows the rewritten text once the block is complete, and the original before; `/copy` still copies the original.
 
 ## Risks and open questions
 
-- While a row's hook waits on a model, other Mod hooks wait for that row. Concurrent dispatches are a separate stage.
+- A row's hook can delay other Mod hooks until it settles or hits the 30-second deadline. Concurrent dispatches are a separate stage.
 - A row's height changes when its text is rewritten above the bottom of the viewport; the list re-measures it.
 - Whether hooks should later draw trees in rows, and how a tree would hold the engine's own row.

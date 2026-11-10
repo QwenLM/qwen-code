@@ -6,11 +6,16 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ModRenderHost } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import type {
+  ModRenderHost,
+  ModRuntime,
+} from '@qwen-code/qwen-code-core/mods/runtime.js';
 import {
   ENGINE_NODE,
-  type ModRenderElement,
+  type ModAssistantMessageInput,
   type ModBandInput,
+  type ModRenderElement,
+  type ModRenderSite,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { ModSession, type ModTerminalHost } from './mod-session.js';
@@ -58,6 +63,13 @@ const line = (text: string): ModRenderElement => ({
   children: [{ type: 'Text', children: [text] }],
 });
 
+const replyRow: ModAssistantMessageInput = {
+  surface: 'terminal',
+  component: 'AssistantMessage',
+  requestId: '1',
+  props: { text: 'Original', isFirstOfReply: true },
+};
+
 function deferred() {
   let resolve: () => void = () => {};
   const promise = new Promise<void>((done) => {
@@ -66,7 +78,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-describe('Mod session band renders', () => {
+describe('Mod session renders', () => {
   const sessions: ModSession[] = [];
 
   beforeEach(() => {
@@ -79,7 +91,9 @@ describe('Mod session band renders', () => {
     vi.resetAllMocks();
   });
 
-  function setup({ sites = ['AbovePrompt' as const] } = {}) {
+  function setup({
+    sites = ['AbovePrompt'],
+  }: { sites?: readonly ModRenderSite[] } = {}) {
     const sessionId = vi.fn(() => 'session-1');
     const extension = {
       id: 'id',
@@ -114,15 +128,15 @@ describe('Mod session band renders', () => {
     const runtime = {
       hasToolHooks: false,
       renderHooks: ['token-weather'],
-      renderHooksFor(site: string): readonly string[] {
-        return site === 'AbovePrompt' ? this.renderHooks : [];
+      renderHooksFor(site: ModRenderSite): readonly string[] {
+        return sites.includes(site) ? this.renderHooks : [];
       },
       turnHooks: { start: false, complete: [] as string[] },
       getCommands: () => [],
       runTool: vi.fn<ModToolCall>(async (call, next, signal) =>
         next(call, signal, async (_input, verdict) => verdict),
       ),
-      render: vi.fn(async (request: ModBandInput, _signal: AbortSignal) => {
+      render: vi.fn<ModRuntime['render']>(async (request) => {
         order.push(`render ${request.viewport?.columns}`);
         return { tree: line(`${request.viewport?.columns}`), notes: [] };
       }),
@@ -244,7 +258,9 @@ describe('Mod session band renders', () => {
     expect(order).toEqual(['render 80', 'render 80', 'render 110']);
     await vi.advanceTimersByTimeAsync(1);
     expect(runtime.render).toHaveBeenCalledTimes(4);
-    expect(runtime.render.mock.calls[3][0].props.maxRows).toBe(10);
+    expect(runtime.render.mock.calls[3][0]).toMatchObject({
+      props: { maxRows: 10 },
+    });
   });
 
   it('folds requests into one waiting render and never cancels a running one', async () => {
@@ -266,7 +282,9 @@ describe('Mod session band renders', () => {
     release.resolve();
     await vi.advanceTimersByTimeAsync(500);
     expect(runtime.render).toHaveBeenCalledTimes(2);
-    expect(runtime.render.mock.calls[1][0].props.isWorking).toBe(true);
+    expect(runtime.render.mock.calls[1][0]).toMatchObject({
+      props: { isWorking: true },
+    });
   });
 
   it('waits behind a tool call and reads the latest input when it runs', async () => {
@@ -295,7 +313,9 @@ describe('Mod session band renders', () => {
     await call;
     await vi.advanceTimersByTimeAsync(0);
     expect(order).toEqual(['render 80', 'tool', 'render 80']);
-    expect(runtime.render.mock.calls[1][0].props.isWorking).toBe(true);
+    expect(runtime.render.mock.calls[1][0]).toMatchObject({
+      props: { isWorking: true },
+    });
   });
 
   it('keeps to the live rate, and to the steady rate after a slow render', async () => {
@@ -393,5 +413,83 @@ describe('Mod session band renders', () => {
     session.setRenderInput(input());
     await vi.advanceTimersByTimeAsync(0);
     expect(host.draw).toHaveBeenCalledWith(line('80'), 'hooks');
+  });
+
+  it.each(['clear', 'resume'] as const)(
+    'only renders rows from the adopted transcript after %s',
+    async (reason) => {
+      const { config, runtime, session } = setup({
+        sites: ['AssistantMessage'],
+      });
+      await session.initialize(new AbortController().signal);
+      runtime.render.mockResolvedValue({
+        tree: ENGINE_NODE,
+        notes: [],
+        props: { ...replyRow.props, text: 'Rewritten' },
+      });
+      const release = session.watchRow('session-1', replyRow, () => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledOnce();
+
+      config.getSessionId.mockReturnValue('session-2');
+      await session.syncSession(reason);
+      expect(session.watchRow('session-1', replyRow, () => {})).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledOnce();
+
+      const adoptedRow = {
+        ...replyRow,
+        props: { ...replyRow.props, text: 'Adopted' },
+      };
+      session.watchRow('session-2', adoptedRow, () => {});
+      release?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.render).toHaveBeenCalledTimes(2);
+      expect(runtime.render.mock.lastCall?.[0]).toEqual(adoptedRow);
+      expect(
+        session.rowProps('session-1', 'AssistantMessage', '1'),
+      ).toBeUndefined();
+      expect(session.rowProps('session-2', 'AssistantMessage', '1')).toEqual({
+        ...replyRow.props,
+        text: 'Rewritten',
+      });
+    },
+  );
+
+  it('aborts a stalled row on its wall-clock deadline and releases the next tool', async () => {
+    const { runtime, session } = setup({ sites: ['AssistantMessage'] });
+    runtime.hasToolHooks = true;
+    await session.initialize(new AbortController().signal);
+    const deadline = new AbortController();
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValueOnce(deadline.signal);
+    runtime.render.mockImplementationOnce(async (_request, signal) => {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      signal.throwIfAborted();
+      return { tree: ENGINE_NODE, notes: [] };
+    });
+    try {
+      session.watchRow('session-1', replyRow, () => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(timeout).toHaveBeenCalledWith(30_000);
+      const tool = session.toolCall(() => {})!(
+        { tool: 'write_file' },
+        async () => ({ result: {} }),
+        new AbortController().signal,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.runTool).not.toHaveBeenCalled();
+      deadline.abort();
+      await tool;
+      expect(runtime.runTool).toHaveBeenCalledOnce();
+      expect(
+        session.rowProps('session-1', 'AssistantMessage', '1'),
+      ).toBeUndefined();
+    } finally {
+      timeout.mockRestore();
+    }
   });
 });

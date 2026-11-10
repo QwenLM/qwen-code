@@ -1057,10 +1057,16 @@ its own text until its hooks answer, so a hook may await `$.model.complete`;
 answers are kept, and a row that scrolls back into view does not ask again. A
 row asked again with `$.ui.invalidate('ui.render')` shows its previous answer
 until the new one arrives; `/clear`, `/resume` and `/branch` forget every
-answer.
+answer when switching sessions. The Mod sees rows from the new transcript once
+it is committed.
 Rows render one at a time, so while a row's hook waits, other Mod hooks wait for
-that row only. A long reply is split into several blocks while it streams, and
-each block is its own row.
+that row only. A render that takes more than 30 seconds is cancelled, including
+time spent waiting for a model call. A long reply is split into several blocks
+while it streams, and each block is its own row.
+
+In a rewritten row, a Mermaid or LaTeX block with one exact source match in the
+original row shows the original block's `/copy mermaid N` or `/copy latex N`
+hint. New, changed, or ambiguous blocks omit the hint.
 
 Reply rows are drawn only with the virtualized history (`ui.useTerminalBuffer`,
 on by default in interactive terminals). With history in the terminal
