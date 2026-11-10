@@ -446,6 +446,43 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it.each([
+    { terminal: true, withProvider: true, shown: true },
+    { terminal: false, withProvider: true, shown: false },
+    { terminal: null, withProvider: true, shown: false },
+    { terminal: undefined, withProvider: true, shown: false },
+    { terminal: true, withProvider: false, shown: false },
+  ])(
+    'gates the terminal entry on capabilities.terminal ($terminal, provider: $withProvider)',
+    async ({ terminal, withProvider, shown }) => {
+      provider = {
+        ...provider,
+        ...(withProvider
+          ? {
+              terminal: {
+                ticket: vi.fn(),
+                webSocketUrl: () => 'ws://managed-test/terminal',
+              },
+            }
+          : {}),
+      };
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: {
+            canSend: false,
+            canCancel: false,
+            ...(terminal === undefined ? {} : { terminal }),
+          },
+        }),
+      );
+      await render('s1');
+      const button = [...container.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Terminal',
+      );
+      expect(button !== undefined).toBe(shown);
+    },
+  );
+
   it('clears diagnostic content when the Session read loses permission', async () => {
     vi.useFakeTimers();
     const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
