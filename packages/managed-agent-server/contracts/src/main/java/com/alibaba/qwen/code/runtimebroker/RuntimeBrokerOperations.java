@@ -61,6 +61,9 @@ public interface RuntimeBrokerOperations {
             String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference);
 
+    public CompletionStage<ToolExecutionRecord> admitTerminalHold(
+            String harnessSessionId, String runtimeSessionId, String terminalId);
+
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes);
 

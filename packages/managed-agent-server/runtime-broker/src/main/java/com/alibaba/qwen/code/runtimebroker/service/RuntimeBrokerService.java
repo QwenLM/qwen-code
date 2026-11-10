@@ -1431,6 +1431,80 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 idempotencyKey, reference, null);
     }
 
+    /**
+     * Admits the durable hold for one user terminal. A terminal is not a model
+     * tool call, so its attach invocation is admitted and settled through the
+     * never-dispatched evidence path ({@code settlePrepared}) rather than a
+     * dispatch claim; the TERMINAL process row admitted beside it holds the
+     * Runtime Session until the worker proves the terminal ended, exactly the
+     * background Shell/Monitor hold semantics. Re-admitting the same terminal
+     * (a reconnect) returns the existing hold.
+     */
+    public CompletionStage<ToolExecutionRecord> admitTerminalHold(
+            String harnessSessionId, String runtimeSessionId, String terminalId) {
+        requireOpen(closed);
+        String harness = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String runtime = BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        String terminal = BrokerValues.requireId(terminalId, "terminalId");
+        String invocationId = "terminal-attach:" + terminal;
+        String processId = invocationId + ":process";
+        return mapStoreFailure(safeStage(() -> {
+            ToolExecutionRecord existing = executionRepository.findByExecutionCallId(processId);
+            if (existing != null) {
+                requireTerminalHoldOwner(existing, harness, runtime);
+                return CompletableFuture.completedFuture(existing);
+            }
+            return bindingRegistry.requireReadySession(harness, runtime)
+                    .thenApply(context -> {
+                        context.lock();
+                        try {
+                            bindingRegistry.requireReadySessionRecord(context);
+                            ToolExecutionRecord again = executionRepository
+                                    .findByExecutionCallId(processId);
+                            if (again != null) {
+                                requireTerminalHoldOwner(again, harness, runtime);
+                                return again;
+                            }
+                            String digest = "sha256:" + DigestUtils.sha256Hex(terminal);
+                            Map<String, Object> reference = Map.of(
+                                    "sessionId", runtime,
+                                    "promptId", harness,
+                                    "callId", terminal,
+                                    "argsDigest", digest);
+                            ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
+                                    invocationId, invocationId,
+                                    context.binding().getBindingId(),
+                                    context.binding().getGeneration(),
+                                    harness, runtime, harness, terminal, digest, reference);
+                            ToolExecutionRecord admitted = bindingRepository.admitExecution(
+                                    sessionRepository, executionRepository, candidate);
+                            Map<String, Object> result = new LinkedHashMap<>();
+                            result.put("executionStatus", "success");
+                            result.put("responseParts", List.of());
+                            result.put("capture", null);
+                            executionRepository.settlePrepared(admitted, result, clock.instant());
+                            admitBackgroundProcess(context, admitted, ManagedHoldFamily.TERMINAL);
+                            ToolExecutionRecord process = executionRepository
+                                    .findByExecutionCallId(processId);
+                            return process == null ? admitted : process;
+                        } finally {
+                            context.unlock();
+                        }
+                    });
+        }));
+    }
+
+    /** A terminal id is only unique within its Session; never hand one
+     * Session another's hold on a reconnect. */
+    private static void requireTerminalHoldOwner(ToolExecutionRecord hold,
+            String harnessSessionId, String runtimeSessionId) {
+        if (!hold.getHarnessSessionId().equals(harnessSessionId)
+                || !hold.getRuntimeSessionId().equals(runtimeSessionId)) {
+            throw conflict("runtime_terminal_hold_conflict",
+                    "Terminal hold belongs to another Session");
+        }
+    }
+
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes) {
         requireOpen(closed);
