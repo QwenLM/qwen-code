@@ -1136,9 +1136,11 @@ export class HostedMcpSession {
   }
 
   async closeResources(opts: { terminal?: boolean } = {}): Promise<void> {
-    // The rule lives on the owner, not the call site (R14-1): every non-delete
-    // close defaults to non-terminal, and only DELETE opts into the terminal
-    // release that persists a RELEASED tombstone.
+    // The default is non-terminal (R14-1): a v1 detach or an extension discard
+    // may be followed by a reload that acquires this owner again, so it hands
+    // the mount back and leaves the rows drained. A delete and a lifecycle
+    // close pass terminal and persist the RELEASED tombstone, since nothing
+    // acquires the owner after either.
     const terminal = opts.terminal ?? false;
     if (
       this.hasPendingOperations() ||

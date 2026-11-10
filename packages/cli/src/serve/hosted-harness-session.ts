@@ -8532,8 +8532,9 @@ export function registerHostedHarnessSessionRoutes(
                 throw cause;
               }
             }
-          // Only a delete is terminal; a close keeps the deterministic owner
-          // re-acquirable across the reload (R14-1).
+          // The Hook owner is released here only on a delete; a close hands
+          // its mount back, and Spring's drain after this phase releases its
+          // Runtime Session. The MCP owner below is released here on both.
           await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
           // Neither an unprovable drain nor a Session whose own settlement
