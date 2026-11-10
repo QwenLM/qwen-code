@@ -201,6 +201,8 @@ describe('no-AK integration CI wiring', () => {
     );
     const expectedFiles = [
       './fake-openai-server.test.ts',
+      './generated-ui-acceptance/fixtures.test.ts',
+      './generated-ui-acceptance/harness.test.ts',
       './test-helper.test.ts',
       './chat-transcript-contract.test.ts',
       './skill-hooks-invocation-parity.test.ts',
@@ -362,6 +364,12 @@ describe('no-AK integration CI wiring', () => {
       'cli/utf-bom-encoding.test.ts': 'Runtime budget',
       'cli/write_file.test.ts': 'Real model required',
       'export-artifact-contract.test.ts': 'Runtime budget',
+      'generated-ui-acceptance/cases.test.ts':
+        'Opt-in Chromium evaluator tests',
+      'generated-ui-acceptance/live.test.ts':
+        'Real model and Chromium required',
+      'generated-ui-acceptance/replay.test.ts':
+        'Opt-in Chromium replay; runtime budget',
       'globalSetup.test.ts': 'Runtime budget',
       'helpers/hosted-relay-headers.test.ts': 'Runtime budget',
       'helpers/wire-rows.test.ts': 'Runtime budget',

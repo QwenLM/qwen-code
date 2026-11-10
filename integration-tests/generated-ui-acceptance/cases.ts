@@ -32,6 +32,7 @@ import {
   setValue,
   settle,
   text,
+  userTurns,
   waitForCardOn,
   type AcceptanceEnv,
   type Card,
@@ -527,7 +528,9 @@ export async function runActivityForm(
   const card = await env.waitForCard(0);
   await env.waitForIdle();
   const { view, app } = card;
-  const before = env.mainRequests().length;
+  const initialRequests = env.mainRequests();
+  const before = initialRequests.length;
+  const turnsBefore = Math.max(0, ...initialRequests.map(userTurns));
 
   await checks.guard('edits-start-no-turn', 'case 3 / R3', async () => {
     for (const [id, value] of Object.entries(FORM_VALUES)) {
@@ -596,13 +599,14 @@ export async function runActivityForm(
     );
     await env.waitForIdle();
     const submitted = submittedTurns(env, before);
-    const distinctTurns = new Set(submitted.map((r) => r.lastUserText)).size;
+    const newTurns =
+      Math.max(turnsBefore, ...submitted.map(userTurns)) - turnsBefore;
     const log = await continuationLog(app);
     checks.expect(
       'one-submission',
       'case 3 / R3',
-      distinctTurns === 1,
-      `${distinctTurns} distinct submitted turn(s); status: ${describeLog(log)}`,
+      newTurns === 1,
+      `${newTurns} submitted user turn(s); status: ${describeLog(log)}`,
     );
     const inputs = parseSubmittedInputs(submitted[0]?.lastUserText ?? '');
     const missing = Object.entries(FORM_VALUES).filter(
@@ -731,8 +735,8 @@ export async function runComparator(
   const views = () => env.page.frames().filter((f) => f.name() === 'view');
   let second: Card | undefined;
   await checks.guard('extends-after-follow-up', 'case 4 / R5', async () => {
-    second = await env.waitForCard(1);
     await env.waitForIdle();
+    second = await env.waitForCard(Math.max(0, views().length - 1));
     const observed = await settle(
       () => readComparator(second!.view),
       (value) => comparatorMatches(value, COMPARATOR_SCENARIO),
@@ -754,11 +758,15 @@ export async function runComparator(
       seats === String(COMPARATOR_SCENARIO.seats) && annual && team,
       `seats=${seats} annual=${annual} team=${team}`,
     );
+    const support = await second.view
+      .locator('#support')
+      .isChecked()
+      .catch(() => false);
     return checks.expect(
       'extends-existing-card',
       'R5',
-      views().length === 1,
-      `the follow-up produced ${views().length} independent cards; the earlier card was not extended`,
+      views().length === 1 && support,
+      `after the follow-up: ${views().length} independent cards, support=${support}`,
     );
   });
 
@@ -789,10 +797,9 @@ export async function runComparator(
   });
 
   await checks.guard('reset-via-follow-up', 'case 4', async () => {
-    const count = views().length;
     await env.send(prompts.reset);
-    const reset = await env.waitForCard(count);
     await env.waitForIdle();
+    const reset = await env.waitForCard(Math.max(0, views().length - 1));
     const seats = await reset.view.locator('#seats').inputValue();
     const support = await reset.view
       .locator('#support')

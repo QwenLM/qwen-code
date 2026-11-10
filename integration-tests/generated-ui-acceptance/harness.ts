@@ -316,50 +316,64 @@ export async function startAcceptanceEnv(options: {
       ? await startReplay(options.mode.script)
       : await startRecordingProxy(options.mode.model);
 
-  const daemon = await spawnDaemon({
-    cliBin: process.env['TEST_CLI_PATH'] ?? DEFAULT_CLI_BIN,
-    workspaceCwd: workspaces[0],
-    extraArgs: workspaces.slice(1).flatMap((ws) => ['--workspace', ws]),
-    bootTimeoutMs: 60_000,
-    env: {
-      HOME: home,
-      USERPROFILE: home,
-      QWEN_HOME: home,
-      QWEN_RUNTIME_DIR: path.join(root, 'runtime'),
-      QWEN_CLI_ENTRY: process.env['TEST_CLI_PATH'] ?? DEFAULT_CLI_BIN,
-      QWEN_SANDBOX: 'false',
-      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'system.json'),
-      QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(home, 'trustedFolders.json'),
-      QWEN_CODE_DISABLE_CRON: '1',
-      OPENAI_API_KEY: backend.apiKey,
-      OPENAI_BASE_URL: backend.baseUrl,
-      OPENAI_MODEL: backend.model,
-      QWEN_MODEL: backend.model,
-      NO_PROXY: '127.0.0.1,localhost',
-      no_proxy: '127.0.0.1,localhost',
-      HTTP_PROXY: '',
-      HTTPS_PROXY: '',
-      http_proxy: '',
-      https_proxy: '',
-    },
-  });
-
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 900 },
-    acceptDownloads: true,
-  });
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
-    origin: daemon.base,
-  });
-  const page = await context.newPage();
+  let daemon: SpawnedDaemon;
+  let browser: Browser;
+  let context: BrowserContext;
+  let page: Page;
   const logs: string[] = [];
-  page.on('console', (message) =>
-    logs.push(`${message.type()}: ${message.text().slice(0, 300)}`),
-  );
-  page.on('pageerror', (error) => logs.push(`pageerror: ${error.message}`));
-  await page.goto(`${daemon.base}/?language=en#token=${daemon.token}`);
+  const close = async () => {
+    await browser?.close().catch(() => {});
+    await daemon?.dispose().catch(() => {});
+    await backend.close().catch(() => {});
+  };
+  try {
+    daemon = await spawnDaemon({
+      cliBin: process.env['TEST_CLI_PATH'] ?? DEFAULT_CLI_BIN,
+      workspaceCwd: workspaces[0],
+      extraArgs: workspaces.slice(1).flatMap((ws) => ['--workspace', ws]),
+      bootTimeoutMs: 60_000,
+      env: {
+        HOME: home,
+        USERPROFILE: home,
+        QWEN_HOME: home,
+        QWEN_RUNTIME_DIR: path.join(root, 'runtime'),
+        QWEN_CLI_ENTRY: process.env['TEST_CLI_PATH'] ?? DEFAULT_CLI_BIN,
+        QWEN_SANDBOX: 'false',
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'system.json'),
+        QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(home, 'trustedFolders.json'),
+        QWEN_CODE_DISABLE_CRON: '1',
+        OPENAI_API_KEY: backend.apiKey,
+        OPENAI_BASE_URL: backend.baseUrl,
+        OPENAI_MODEL: backend.model,
+        QWEN_MODEL: backend.model,
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+        HTTP_PROXY: '',
+        HTTPS_PROXY: '',
+        http_proxy: '',
+        https_proxy: '',
+      },
+    });
+
+    browser = await chromium.launch({ headless: true });
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      acceptDownloads: true,
+    });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+      origin: daemon.base,
+    });
+    page = await context.newPage();
+    page.on('console', (message) =>
+      logs.push(`${message.type()}: ${message.text().slice(0, 300)}`),
+    );
+    page.on('pageerror', (error) => logs.push(`pageerror: ${error.message}`));
+    await page.goto(`${daemon.base}/?language=en#token=${daemon.token}`);
+  } catch (error) {
+    await close();
+    throw error;
+  }
 
   const composer = () =>
     page.locator('[data-web-shell-composer-editor] .cm-content');
@@ -476,11 +490,7 @@ export async function startAcceptanceEnv(options: {
       await page.screenshot({ path: file, fullPage: true }).catch(() => {});
       return file;
     },
-    async close() {
-      await browser.close().catch(() => {});
-      await daemon.dispose().catch(() => {});
-      await backend.close().catch(() => {});
-    },
+    close,
   };
   return env;
 }
