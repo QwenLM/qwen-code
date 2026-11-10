@@ -342,6 +342,23 @@ public class ManagedSessionStoreController {
         return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId));
     }
 
+    @PostMapping(value = "/resources/{resourceId}:upload",
+            consumes = MediaType.APPLICATION_JSON_VALUE)
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> uploadResourceJson(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration,
+            @RequestBody java.util.Map<String, String> body) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId,
+                java.util.Base64.getDecoder().decode(body.get("bytesBase64")));
+        return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId));
+    }
+
     @PostMapping("/resources/{resourceId}:finalize")
     @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<Object> finalizeResource(TenantContext tenant,

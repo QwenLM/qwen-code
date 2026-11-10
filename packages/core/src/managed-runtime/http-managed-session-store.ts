@@ -701,7 +701,7 @@ const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
-    { ref: ManagedSessionDurableRef; bytes: Buffer }
+    { ref: ManagedSessionDurableRef; bytes: Buffer; external?: boolean }
   >();
   private client: ManagedSessionStoreHttpClient | undefined;
 
@@ -715,11 +715,6 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
-    if (source.byteLength > maxBytes) {
-      throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
-      );
-    }
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
       resourceId: randomUUID(),
@@ -728,6 +723,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       byteLength: bytes.byteLength,
       digest: sha256(bytes),
     };
+    if (source.byteLength > maxBytes) {
+      if (this.client === undefined) {
+        throw new ManagedSessionRecordError(
+          `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
+        );
+      }
+      await this.client.externalizeResource(ref, bytes);
+      this.staged.set(ref.resourceId, { ref, bytes, external: true });
+      return ref;
+    }
     this.staged.set(ref.resourceId, { ref, bytes });
     return ref;
   }
@@ -834,7 +839,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         schemaVersion: ref.schemaVersion,
         byteLength: ref.byteLength,
         digest: ref.digest,
-        ...(staged === undefined
+        ...(staged === undefined || staged.external
           ? {}
           : { bytesBase64: staged.bytes.toString('base64') }),
       };
@@ -2460,6 +2465,49 @@ class ManagedSessionStoreHttpClient {
       },
       contentionDeadline,
     );
+  }
+
+  async externalizeResource(
+    ref: ManagedSessionDurableRef,
+    bytes: Buffer,
+  ): Promise<void> {
+    await this.ensureWriter();
+    const grant = this.requireGrant();
+    const query =
+      `workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}` +
+      `&writerId=${encodeURIComponent(this.writerId)}` +
+      `&writerGeneration=${grant.writerGeneration}`;
+    const allocatePath = '/resources:allocate';
+    await this.withRetry(false, 'POST', allocatePath, async (timeoutMs) => {
+      await this.request(
+        allocatePath,
+        'POST',
+        {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          resourceId: ref.resourceId,
+          kind: ref.kind,
+          schemaVersion: ref.schemaVersion,
+          byteLength: ref.byteLength,
+          digest: ref.digest,
+        },
+        timeoutMs,
+      );
+    });
+    const uploadPath = `/resources/${encodeURIComponent(ref.resourceId)}:upload?${query}`;
+    await this.withRetry(false, 'POST', uploadPath, async (timeoutMs) => {
+      await this.request(
+        uploadPath,
+        'POST',
+        { bytesBase64: bytes.toString('base64') },
+        timeoutMs,
+      );
+    });
+    const finalizePath = `/resources/${encodeURIComponent(ref.resourceId)}:finalize?${query}`;
+    await this.withRetry(false, 'POST', finalizePath, async (timeoutMs) => {
+      await this.request(finalizePath, 'POST', undefined, timeoutMs);
+    });
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
