@@ -4519,24 +4519,111 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
   });
 
-  it('ends the turn with the answers in history when every call is a replay', async () => {
-    const send = batchStream([
-      { callId: 'r1', providerCallId: 'p-old', name: 'test_tool', args: {} },
-    ]);
+  /** The calls made to the fake sidecar, by method. */
+  const calls: Record<string, ReturnType<typeof vi.fn>> = {};
+  /** A sidecar that records each call made to it. */
+  const fakeDualOutput = () =>
+    new Proxy(
+      {},
+      {
+        get: (_target, key: string) => {
+          if (key === 'isConnected') return true;
+          calls[key] ??= vi.fn();
+          return calls[key];
+        },
+      },
+    ) as Record<string, ReturnType<typeof vi.fn>>;
+
+  it('sends the answers as the next round when every call is a replay', async () => {
+    for (const key of Object.keys(calls)) delete calls[key];
+    const replay = {
+      callId: 'r1',
+      providerCallId: 'p-old',
+      name: 'test_tool',
+      args: {},
+    };
+    const send = batchStream([replay]);
     const config = shared(
       createFakeConfig(send),
       new Map([['p-old', getToolCallFingerprint('test_tool', {})]]),
     );
-    const events = await drain(livePromptEvents(config, 'start'));
-    expect(send).toHaveBeenCalledOnce();
-    expect(config.getGeminiClient().addHistory).toHaveBeenCalledOnce();
-    const [history] = vi.mocked(config.getGeminiClient().addHistory).mock
-      .calls[0];
-    expect(
-      (history.parts as Part[]).map((part) => part.functionResponse?.id),
-    ).toEqual(['r1']);
+    const dualOutput = fakeDualOutput();
+    const events = await drain(
+      livePromptEvents(config, 'start', undefined, {
+        dualOutput: dualOutput as unknown as DualOutputBridge,
+      }),
+    );
+    expect(sentResponses(send)).toEqual([['r1']]);
+    expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
     expect(toolEnds(events)).toEqual(['r1:error']);
+    // The answered call's sidecar result goes out too.
+    expect(
+      dualOutput['emitToolResult'].mock.calls.map(
+        ([request]) => request.callId,
+      ),
+    ).toEqual(['r1']);
   });
+
+  it('stops the turn as a loop when the model replays an answered call again', async () => {
+    for (const key of Object.keys(calls)) delete calls[key];
+    const replay = {
+      callId: 'r1',
+      providerCallId: 'p-old',
+      name: 'test_tool',
+      args: {},
+    };
+    let sends = 0;
+    const send = vi.fn(function* () {
+      sends++;
+      if (sends > 2) return;
+      yield { type: 'tool_call_request', value: { ...replay } };
+    });
+    const config = shared(
+      createFakeConfig(send),
+      new Map([['p-old', getToolCallFingerprint('test_tool', {})]]),
+    );
+    const dualOutput = fakeDualOutput();
+    const events = await drain(
+      livePromptEvents(config, 'start', undefined, {
+        dualOutput: dualOutput as unknown as DualOutputBridge,
+      }),
+    );
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(events.at(-1)).toMatchObject({ type: 'info' });
+    expect(toolEnds(events)).toEqual(['r1:error', 'r1:cancelled']);
+    // Both rounds' replays close their sidecar tool uses.
+    expect(dualOutput['emitToolResult']).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['cancelled', 'error'])(
+    'closes the cards and rethrows a %s schedule failure',
+    async (summary) => {
+      const send = batchStream([
+        {
+          callId: 'revoked',
+          name: 'test_tool',
+          args: { __scheduleFailure: summary },
+        },
+      ]);
+      const config = shared(createFakeConfig(send));
+      const events: OpenTuiStreamEvent[] = [];
+      await expect(
+        (async () => {
+          for await (const event of livePromptEvents(config, 'run'))
+            events.push(event);
+        })(),
+      ).rejects.toThrow(
+        summary === 'cancelled' ? 'Mod generation revoked' : 'Scheduler failed',
+      );
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: 'revoked',
+        success: false,
+        summary,
+      });
+      expect(send).toHaveBeenCalledOnce();
+    },
+  );
 
   it('counts each completed call toward the session, not a cancelled one', async () => {
     const send = batchStream([

@@ -33,6 +33,11 @@ import {
   type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
 import { createNotStartedToolErrorResponse } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  LoopReason,
+  LoopType,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
+import { formatInteractiveLoopDetectedMessage } from '../../utils/loop-detected-message.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
@@ -1504,15 +1509,28 @@ export async function* livePromptEvents(
     const shared = batch ? await batch : undefined;
     if (shared?.stop === 'duplicate_provider_call') {
       // The batch ran nothing: the model repeated a call id it was already
-      // answered for, which stops the turn as Ink does.
-      for (const { callId } of pending) {
+      // answered for, which stops the turn as a loop, as Ink does.
+      const message = 'Tool skipped because the model repeated a tool-call id.';
+      for (const call of pending) {
+        if (current())
+          dualOutput?.emitToolResult(
+            call,
+            createNotStartedToolErrorResponse(call, message),
+          );
         yield {
           type: 'tool-end',
-          id: callId,
+          id: call.callId,
           success: false,
           summary: 'cancelled',
         };
       }
+      yield {
+        type: 'info',
+        text: formatInteractiveLoopDetectedMessage({
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+        }),
+      };
       return;
     }
     const sharedParts = new Map(
@@ -1660,16 +1678,13 @@ export async function* livePromptEvents(
     // model request. Checked before the steering drain so surviving steered
     // texts stay parked for the post-turn queue drain instead of riding a
     // request that will never be sent.
-    // The batch ran no call, e.g. every call was a replay: the answers pair
-    // the calls in history and the turn ends.
-    if (shared && completed.length === 0) {
-      emitAnswered();
-      if (responseParts.length > 0) {
-        await client.addHistory({ role: 'user', parts: responseParts });
-      }
-      return;
-    }
-    if (completed.every((call) => call.status === 'cancelled')) {
+    // A batch that ran no call, e.g. one of replays alone, sends its answers
+    // as the next round, as Ink does; the batch stops a model that keeps
+    // replaying.
+    if (
+      (!shared || completed.length > 0) &&
+      completed.every((call) => call.status === 'cancelled')
+    ) {
       emitAnswered();
       if (responseParts.length > 0) {
         await client.addHistory({ role: 'user', parts: responseParts });

@@ -455,13 +455,13 @@ The parity suite runs on the renderer that `QWEN_E2E_RENDERER` selects. On OpenT
 
 PR 4b runs a shared round's calls as one batch of the shared loop, `runToolBatch`, on an executor over the turn's `InteractiveModToolScheduler`. The scheduler takes the batch as before, so the tool cards, approvals, checkpoints and the Mod tool middleware do not change. The batch then finishes the step, as it does on Ink:
 
-| OpenTUI today                                             | With the setting on                                                                                                   |
-| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| a call the model replays from history runs again          | the batch answers it in place; when every call of a response is a replay, the answers go to history and the turn ends |
-| only a batch the Mod tool middleware touched is finalized | every batch is finalized, so results that together exceed the tool output budget are trimmed to it                    |
-| the turn records each result while it is current          | the batch's recording, under the same check                                                                           |
-| no call counts toward the session's completed tool calls  | each completed call counts, except a cancelled one and those the Mod tool middleware counted                          |
-| a tool that ends the turn does not end it                 | it ends the turn, with the results in history                                                                         |
+| OpenTUI today                                             | With the setting on                                                                                                                         |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| a call the model replays from history runs again          | the batch answers it in place, and answers alone go out as the next round; a model that replays an answered call again is stopped as a loop |
+| only a batch the Mod tool middleware touched is finalized | every batch is finalized, so results that together exceed the tool output budget are trimmed to it                                          |
+| the turn records each result while it is current          | the batch's recording, under the same check                                                                                                 |
+| no call counts toward the session's completed tool calls  | each completed call counts, except a cancelled one and those the Mod tool middleware counted                                                |
+| a tool that ends the turn does not end it                 | it ends the turn, with the results in history                                                                                               |
 
 A tool a slash command runs keeps the current path, as on Ink.
 
