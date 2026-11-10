@@ -60,6 +60,36 @@ class ClientFilesRelayStoreTest {
     }
 
     @Test
+    void concurrentRegistrationsAdvanceGenerationsWithoutLostUpdates() throws Exception {
+        int threads = 8;
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var done = new java.util.concurrent.CountDownLatch(threads);
+        var generations = java.util.Collections.synchronizedList(new java.util.ArrayList<Long>());
+        var errors = java.util.Collections.synchronizedList(new java.util.ArrayList<Throwable>());
+        for (int i = 0; i < threads; i++) {
+            String tokenHash = Integer.toHexString(i + 1).repeat(64).substring(0, 64);
+            Thread.startVirtualThread(() -> {
+                try {
+                    start.await();
+                    Binding binding = tx(() -> store.register(tenant, session, actor, "local-files",
+                            tokenHash, 9_000L, 1_000L));
+                    generations.add(binding.generation());
+                } catch (Throwable error) {
+                    errors.add(error);
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        start.countDown();
+        assertThat(done.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        assertThat(errors).isEmpty();
+        assertThat(generations).hasSize(threads);
+        assertThat(new java.util.HashSet<>(generations)).hasSize(threads);
+        assertThat(tx(() -> store.find(tenant, session)).generation()).isEqualTo(threads);
+    }
+
+    @Test
     void reRegisterAdvancesTheGenerationAndKeepsCreationTime() {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L));
         Binding second = tx(() -> store.register(tenant, session, "actor-2", "local-files", "b".repeat(64), 19_000L, 2_000L));

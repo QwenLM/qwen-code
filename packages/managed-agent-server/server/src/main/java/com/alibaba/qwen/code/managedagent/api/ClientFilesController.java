@@ -77,12 +77,17 @@ public class ClientFilesController {
             try {
                 while (open.get()) {
                     List<QueuedRequest> rows = service.requests(tenant.tenantId(), actor, session, generation);
+                    Set<String> live = new HashSet<>();
                     for (QueuedRequest row : rows) {
+                        live.add(row.requestId());
                         if (sent.add(row.requestId())) {
                             emitter.send(SseEmitter.event().name("request").id(row.requestId())
                                     .data(Map.of("requestId", row.requestId(), "payloadJson", row.payloadJson())));
                         }
                     }
+                    // Settled ids never reappear in the queue; keep the dedup
+                    // set bounded by the live queue instead of the session.
+                    sent.retainAll(live);
                     Thread.sleep(500);
                 }
             } catch (InterruptedException interrupted) {

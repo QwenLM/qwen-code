@@ -46,15 +46,22 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     public Binding register(String tenantId, String sessionId, String actorId, String serverId,
             String tokenHash, long expiresAt, long now) {
         String scope = ManagedSchemaKeys.key(tenantId, sessionId);
-        Binding previous = findByScope(scope);
+        // The read is locked so concurrent registrations serialize their
+        // generation increments instead of losing an update.
+        Binding previous = findByScopeForUpdate(scope);
         if (previous == null) {
-            jdbc.update("INSERT INTO ma_client_files_binding (session_scope_key,"
-                            + BINDING_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    scope, ManagedSchemaKeys.identity(tenantId),
-                    ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(actorId),
-                    1L, ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, now, now);
-            return new Binding(tenantId, sessionId, actorId, 1L, ClientFilesModels.STATE_ACTIVE,
-                    serverId, tokenHash, expiresAt, now, now);
+            try {
+                jdbc.update("INSERT INTO ma_client_files_binding (session_scope_key,"
+                                + BINDING_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        scope, ManagedSchemaKeys.identity(tenantId),
+                        ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(actorId),
+                        1L, ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, now, now);
+                return new Binding(tenantId, sessionId, actorId, 1L, ClientFilesModels.STATE_ACTIVE,
+                        serverId, tokenHash, expiresAt, now, now);
+            } catch (org.springframework.dao.DuplicateKeyException raced) {
+                // A concurrent first registration won the insert; advance it.
+                previous = findByScopeForUpdate(scope);
+            }
         }
         long generation = previous.generation() + 1;
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
@@ -175,6 +182,13 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
     private Binding findByScope(String scope) {
         List<Binding> rows = jdbc.query("SELECT " + BINDING_COLUMNS
                 + " FROM ma_client_files_binding WHERE session_scope_key=?", BINDING_MAPPER, scope);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private Binding findByScopeForUpdate(String scope) {
+        List<Binding> rows = jdbc.query("SELECT " + BINDING_COLUMNS
+                + " FROM ma_client_files_binding WHERE session_scope_key=? FOR UPDATE",
+                BINDING_MAPPER, scope);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
