@@ -1032,6 +1032,53 @@ public final class HostedHarnessClient implements AutoCloseable {
         return result;
     }
 
+    public Map<String, Object> runtimeSkillCandidates(HarnessSessionRef session) {
+        return runtimeSkillRead(session, "/extensions/skills/candidates");
+    }
+
+    public Map<String, Object> runtimeSkillSnapshot(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/extensions/skills/snapshot";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/extensions/skills/snapshot",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation, Duration.ofMinutes(10));
+        DaemonClient.requireStatus(response, 200, operation);
+        return runtimeSkillResponse(response, ref, operation);
+    }
+
+    public Map<String, Object> runtimeSkillArchive(HarnessSessionRef session, String operationId, String preparationId,
+            String bindingId, String generation, long offset) {
+        String id = requireUuid(preparationId, "preparationId");
+        String op = requireUuid(operationId, "operationId");
+        if (bindingId == null || !CLIENT_ID_PATTERN.matcher(bindingId).matches() || generation == null
+                || !generation.matches("[1-9][0-9]{0,15}") || offset < 0 || offset > 100L * 1024 * 1024) {
+            throw new IllegalArgumentException("Invalid Runtime Skill archive request");
+        }
+        return runtimeSkillRead(session, "/extensions/skills/archives/" + id + "?operationId=" + op
+                + "&bindingId=" + encodeQuery(bindingId) + "&generation=" + generation + "&offset=" + offset);
+    }
+
+    private Map<String, Object> runtimeSkillRead(HarnessSessionRef session, String suffix) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "GET /session/:id/extensions/skills";
+        HttpSupport.Response response = sendRead(sessionPath(ref.getHarnessSessionId()) + suffix, ref, operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return runtimeSkillResponse(response, ref, operation);
+    }
+
+    private Map<String, Object> runtimeSkillResponse(HttpSupport.Response response, HarnessSessionRef session, String operation) {
+        Map<String, Object> result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!session.getHarnessSessionId().equals(result.get("sessionId"))) {
+            throw new DaemonProtocolException("Runtime Skill response names another Session");
+        }
+        Map<String, Object> owner = JsonSupport.requiredObject(result, "owner", operation);
+        String binding = JsonSupport.requiredString(owner, "bindingId", operation);
+        String generation = JsonSupport.requiredString(owner, "generation", operation);
+        if (!CLIENT_ID_PATTERN.matcher(binding).matches() || !generation.matches("[1-9][0-9]{0,15}")) {
+            throw new DaemonProtocolException("Invalid Runtime Skill owner");
+        }
+        return result;
+    }
+
     private Map<String, Object> extensionMutation(HarnessSessionRef session, String suffix, Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
         String id = requireUuid(JsonSupport.requiredString(body, "operationId", "Extension apply"), "operationId");
@@ -2527,7 +2574,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpRequest request = builder.build();
         CompletableFuture<HttpResponse<HttpSupport.Body>> pending;
         try {
-            pending = httpClient.sendAsync(request, HttpSupport.bodyHandler());
+            pending = httpClient.sendAsync(request, HttpSupport.bodyHandler(path.contains("/extensions/skills/")
+                    ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES));
         } catch (RejectedExecutionException e) {
             // sendAsync surfaces a submit-time rejection synchronously —
             // for a saturated-but-running pool and a terminated one alike —

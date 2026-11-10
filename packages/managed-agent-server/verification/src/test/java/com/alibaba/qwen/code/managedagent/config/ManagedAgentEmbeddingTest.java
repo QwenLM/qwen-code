@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.druid.pool.DruidDataSource;
-import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcHostedCleanupDebtStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -97,7 +97,7 @@ class ManagedAgentEmbeddingTest {
     void cleanupDebtStoreQueriesTheDedicatedDatabaseNotTheHostOne() {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();
-            var store = context.getBean(HostedCleanupDebtStore.class);
+            var store = context.getBean(JdbcHostedCleanupDebtStore.class);
             // The host business database has no ma_resource_ref. An unqualified
             // JdbcTemplate would bind it and throw "Table not found" here; the
             // dedicated database carries the schema, so the scan returns an
@@ -139,7 +139,7 @@ class ManagedAgentEmbeddingTest {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();
             var managed = context.getBean("managedJdbcTemplate", JdbcTemplate.class);
-            var repository = context.getBean(ManagedAgentDefinitionStore.class);
+            var repository = context.getBean(JdbcManagedAgentDefinitionStore.class);
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> repository.create(
                     "tenant", "key", "x".repeat(1000), "agent", "digest", "{}", 1))
                     .isInstanceOf(org.springframework.dao.DataAccessException.class);

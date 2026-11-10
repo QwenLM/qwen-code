@@ -7,7 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolic
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationCollector;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -45,7 +45,7 @@ class ToolPublicationStorageConfigurationTest {
             .withUserConfiguration(PropertiesConfiguration.class, ToolPublicationConfiguration.class)
             .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> mock(JdbcTemplate.class))
             .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> mock(PlatformTransactionManager.class))
-            .withBean(ManagedSessionStore.class, () -> mock(ManagedSessionStore.class))
+            .withBean(JdbcManagedSessionStore.class, () -> mock(JdbcManagedSessionStore.class))
             .withBean(HarnessRules.class, SdkHarnessRules::new)
             .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
             .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)

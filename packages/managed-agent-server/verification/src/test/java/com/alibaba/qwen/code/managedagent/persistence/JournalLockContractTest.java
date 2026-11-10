@@ -29,8 +29,8 @@ class JournalLockContractTest {
     private static final String SESSION = "journal-session";
     private static final String TOKEN = "a".repeat(32);
     protected StoreLockTrace trace;
-    private ManagedSessionStore raw;
-    private ManagedSessionStore proxy;
+    private JdbcManagedSessionStore raw;
+    private JdbcManagedSessionStore proxy;
     private TransactionTemplate transactions;
     private int notifications;
 
@@ -44,7 +44,7 @@ class JournalLockContractTest {
         trace = new StoreLockTrace(dataSource());
         ManagedSchema.initialize(trace);
         var jdbc = new ManagedSchemaJdbcTemplate(trace);
-        raw = VerificationFixtures.managedSessionStore(jdbc, new ManagedExtensionRecordStore(jdbc),
+        raw = VerificationFixtures.managedSessionStore(jdbc, new JdbcManagedExtensionRecordStore(jdbc),
                 null, null, null, null, null, bytes -> {
                     assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.COMMIT);
                     notifications++;

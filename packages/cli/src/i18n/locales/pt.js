@@ -2033,6 +2033,8 @@ export default {
   'Advisor review failed: {{error}}': 'Falha na revisão do assessor: {{error}}',
   'No conversation context available for /advisor':
     'Nenhum contexto de conversa disponível para /advisor',
+  'No conversation context available for /btw':
+    'Nenhum contexto de conversa disponível para /btw',
   'Focus too long (max {{max}} chars)':
     'Foco muito longo (máx. {{max}} caracteres)',
   'Another operation is in progress, wait for it to complete before running /advisor':
