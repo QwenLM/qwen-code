@@ -24,7 +24,10 @@ import {
   waitForHostedQuestion,
 } from './hosted-question-wait.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
-import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 import {
   MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
   MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
@@ -129,6 +132,7 @@ import {
   type ManagedSessionDomain,
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { recordManagedToolMeasurements } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import {
   harnessCommandLocked,
@@ -6251,6 +6255,10 @@ export class HostedWorkspaceToolTurn {
           ? await this.publisher!.receipt(executionCallId, shellResult)
           : undefined;
         if (receipt?.deliveryStatus === 'blocked') {
+          await this.recordToolMeasurements(
+            executionCallId,
+            receipt.outcomeRef,
+          );
           await this.broker.acknowledge(executionCallId, receipt);
           throw new Error('Complete Shell output was not admitted.');
         }
@@ -6358,6 +6366,7 @@ export class HostedWorkspaceToolTurn {
             'managed-tool-outcome',
             outcome,
           ));
+        await this.recordToolMeasurements(executionCallId, outcomeRef);
         await this.commit('tool_result', converted, model);
         await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);
         if (receipt) await this.broker.acknowledge(executionCallId, receipt);
@@ -6682,6 +6691,7 @@ export class HostedWorkspaceToolTurn {
           'managed-tool-outcome',
           Buffer.from(JSON.stringify({ executionCallId, ...parts[0] })),
         );
+        await this.recordToolMeasurements(executionCallId, outcomeRef);
         await this.commit('tool_result', parts, model);
         await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);
       }
@@ -6958,6 +6968,7 @@ export class HostedWorkspaceToolTurn {
     }
     if (!receipt)
       throw new Error('Original Monitor watch receipt disappeared.');
+    await this.recordToolMeasurements(executionCallId, ref);
     await this.commit('tool_result', converted, model, {
       uuid: messageId,
       timestamp,
@@ -8679,6 +8690,7 @@ export class HostedWorkspaceToolTurn {
     }
     if (!receipt)
       throw new Error('Original background Shell receipt disappeared.');
+    await this.recordToolMeasurements(executionCallId, ref);
     await this.commit('tool_result', converted, model, {
       uuid: messageId,
       timestamp,
@@ -8698,6 +8710,21 @@ export class HostedWorkspaceToolTurn {
       );
     }
     return converted;
+  }
+
+  private async recordToolMeasurements(
+    executionCallId: string,
+    outcomeRef: ManagedSessionDurableRef,
+  ): Promise<void> {
+    if (this.broker.capabilityDigest !== MEASURED_WORKSPACE_CAPABILITY_DIGEST)
+      return;
+    await recordManagedToolMeasurements(
+      this.session,
+      executionCallId,
+      outcomeRef,
+      this.broker.toolMeasurements(executionCallId),
+    );
+    this.broker.releaseToolMeasurements(executionCallId);
   }
 
   private async acceptShell(
@@ -8848,6 +8875,7 @@ export class HostedWorkspaceToolTurn {
       }
       if (!receipt)
         throw new Error('Original unstarted Shell receipt disappeared.');
+      await this.recordToolMeasurements(executionCallId, ref);
       await this.commit('tool_result', converted, model, {
         uuid: messageId,
         timestamp,
@@ -9024,6 +9052,7 @@ export class HostedWorkspaceToolTurn {
         );
     }
     if (!receipt) throw new Error('Original Shell receipt disappeared.');
+    await this.recordToolMeasurements(executionCallId, ref);
     await this.commit('tool_result', converted, model, {
       uuid: messageId,
       timestamp,
