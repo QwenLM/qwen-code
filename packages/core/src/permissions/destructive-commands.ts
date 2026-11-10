@@ -189,12 +189,13 @@ export function amendNeedsApproval(command: string): boolean {
 function mentionsGitCommitAmend(command: string): boolean {
   let seenGit = false;
   let inCommit = false;
+  let previousWord: string | undefined;
   // Rule 3 (R25-2): a `$` that can change the command's *structure* keeps the
-  // mention unprovable. Only two positions qualify: before the first `commit`
-  // word (program/subcommand/flag assembly), and a flag built from an
-  // expansion (handled by `isUnprovableFlag`). A `$` in an ordinary argument
-  // value — `-m "$msg"`, `-m "$(cat msg)"` — does not change what the guard
-  // reads and must not ask.
+  // mention unprovable. Three positions qualify: before the first `commit`
+  // word (program/subcommand/flag assembly), a flag built from an expansion,
+  // and a bare post-commit argument expansion that is not consumed as a known
+  // flag value. A `$` in an ordinary argument value — `-m "$msg"`,
+  // `-m "$(cat msg)"` — does not change what the guard reads and must not ask.
   let dollarBeforeCommit = false;
   // `${IFS}`/`$IFS` expand to whitespace at run time, so a command that
   // assembles `git`, `commit` and `--amend` this way cannot be read from the
@@ -212,11 +213,18 @@ function mentionsGitCommitAmend(command: string): boolean {
           // A flag assembled by an expansion cannot be proven inert; ask.
           // The escalation stays gated on a seen `git` + `commit` prefix.
           if (isUnprovableFlag(bare)) return true;
+          // A bare expansion can become `--amend` at run time. It is only
+          // provably an argument value when it immediately follows a flag
+          // whose next word is consumed as that flag's value.
+          if (isLeadingExpansion(word) && !isGitCommitValueFlag(previousWord)) {
+            return true;
+          }
         } else if (bare.includes('$')) {
           dollarBeforeCommit = true;
         }
         if (isGitWord(bare)) seenGit = true;
         else if (seenGit && bare === 'commit') inCommit = true;
+        previousWord = bare;
       }
     }
   }
@@ -226,6 +234,31 @@ function mentionsGitCommitAmend(command: string): boolean {
 /** A word that expands at run time and starts like a flag (R25-2). */
 function isUnprovableFlag(word: string): boolean {
   return /^-{1,2}/.test(word) && /[$`{]/.test(word);
+}
+
+const GIT_COMMIT_VALUE_FLAGS = new Set([
+  '-m',
+  '--message',
+  '-F',
+  '--file',
+  '-C',
+  '-c',
+  '--reuse-message',
+  '--reedit-message',
+  '-t',
+  '--template',
+  '-S',
+  '--gpg-sign',
+  '--author',
+  '--date',
+]);
+
+function isLeadingExpansion(word: string): boolean {
+  return word.startsWith('$') || word.startsWith('`');
+}
+
+function isGitCommitValueFlag(word: string | undefined): boolean {
+  return word !== undefined && GIT_COMMIT_VALUE_FLAGS.has(word);
 }
 
 function bareShellWord(word: string): string {

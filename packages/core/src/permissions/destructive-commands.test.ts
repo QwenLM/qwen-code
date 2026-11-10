@@ -350,6 +350,12 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git>|/dev/null commit --amend --no-edit --allow-empty',
     'git${IFS}commit${IFS}--amend --no-edit',
     'x=amend; git commit --$x',
+    // A bare expansion after `commit` may itself produce `--amend`; only a
+    // known value-taking flag may consume such an expansion as its argument.
+    'git commit $FLAG',
+    'git commit "${FLAG}"',
+    'git commit -m msg $FLAG',
+    'git commit `printf "$FLAG"`',
     // Rule 3: an indirect word plus IFS assembly still carries a `$`, so the
     // text is unprovable and must ask rather than fall through to L5.3.
     `w='git commit --am'; IFS=' '; $w"end"`,
@@ -374,6 +380,24 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // legitimate case.
     expect(amendNeedsApproval('git commit -m "$msg"')).toBe(false);
     expect(amendNeedsApproval('git commit -m "$(cat msg)"')).toBe(false);
+    for (const flag of [
+      '-m',
+      '--message',
+      '-F',
+      '--file',
+      '-C',
+      '-c',
+      '--reuse-message',
+      '--reedit-message',
+      '-t',
+      '--template',
+      '-S',
+      '--gpg-sign',
+      '--author',
+      '--date',
+    ]) {
+      expect(amendNeedsApproval(`git commit ${flag} "$value"`)).toBe(false);
+    }
   });
 
   it.each([
