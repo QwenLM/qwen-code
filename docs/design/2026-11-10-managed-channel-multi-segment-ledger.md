@@ -122,7 +122,9 @@ and delivery identity.
 
 - `claimOne` plans **all** of the record's segments (with their current
   receipts), not just the first unsent one. The delivery-level
-  `findOrCreate` is unchanged.
+  `findOrCreate` is keyed on the record's **first** segment, stable across a
+  resumed partial: naming the first unsent segment would make it reject the
+  row the first claim wrote once a segment is receipted.
 - `receipt` records the per-ordinal receipt into the segment ledger after the
   Harness commits and **before** `stepLedger` can move the delivery to a
   terminal state. The reconciler skips terminal deliveries, so the receipt
