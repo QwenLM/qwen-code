@@ -741,6 +741,10 @@
       "zh": "Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。",
       "type": "duration"
     },
+    "qwen.managed-agent.side-queries-enabled": {
+      "en": "Enables new actor-private BTW and recap generation for ACTIVE Sessions with explicit model_config, execution authority, the Session Store and a Harness advertising side-query/1. Defaults off. Disabling admission preserves authorized result reads and accepted work. Catalog/default-model Sessions are unsupported in this version.",
+      "zh": "为具备显式 model_config、执行权限、Session Store 以及声明 side-query/1 的 Harness 的 ACTIVE Session 开启新的 actor 私有 BTW 与 recap 生成。默认关闭。关闭新请求受理后仍保留已授权结果读取和已受理任务。此版本不支持模型目录或默认模型 Session。"
+    },
     "qwen.managed-agent.tool-publication.active-captures": {
       "en": "How many tool output captures one tenant may have open at the same time; a further reservation is refused until one finishes. Required when `qwen.managed-agent.tool-publication.enabled` is true; must be at least 1 (startup refusal).",
       "zh": "单个租户可同时处于打开状态的工具输出捕获数量；达到上限后新的预留会被拒绝，直到有捕获结束。`qwen.managed-agent.tool-publication.enabled` 为 true 时必填，且至少为 `1`（否则启动时拒绝）。"
