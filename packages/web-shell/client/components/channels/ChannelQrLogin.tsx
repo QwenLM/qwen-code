@@ -29,6 +29,14 @@ export interface ChannelQrLoginProps {
   onBound: () => void;
 }
 
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const body = (error as { body?: unknown }).body;
+  if (!body || typeof body !== 'object') return undefined;
+  const code = (body as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
 export function ChannelQrLogin({
   channelName,
   actions,
@@ -67,14 +75,18 @@ export function ChannelQrLogin({
         (next) => {
           if (active && mounted.current) setView(next);
         },
-        () => {
-          // A missing session means it expired or the daemon restarted; stop
-          // polling rather than spinning on a 404.
-          if (active && mounted.current) {
+        (pollError: unknown) => {
+          if (!active || !mounted.current) return;
+          // Only a genuinely missing session is terminal. A transient failure
+          // must not report 'expired' for a login the daemon still holds, or
+          // one network blip would kill a live binding.
+          if (errorCode(pollError) === 'channel_qr_login_not_found') {
             setView((current) =>
               current ? { ...current, status: 'expired' } : current,
             );
+            return;
           }
+          setError(t('channels.qrLogin.error'));
         },
       );
     }, POLL_INTERVAL_MS);
@@ -82,7 +94,7 @@ export function ChannelQrLogin({
       active = false;
       clearInterval(timer);
     };
-  }, [actions, loginId]);
+  }, [actions, loginId, t]);
 
   useEffect(() => {
     if (view?.status !== 'succeeded') return;
@@ -181,7 +193,7 @@ export function ChannelQrLogin({
             disabled={busy}
             onClick={() => void cancel()}
           >
-            {t('channels.cancel')}
+            {t('channels.editor.cancel')}
           </Button>
         </div>
       ) : null}
