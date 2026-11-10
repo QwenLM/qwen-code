@@ -425,6 +425,10 @@ export function WorkspaceBindingCreator({
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(true);
+  // True only while a creation request is in flight. Neither `busy` (also set
+  // by the pending-restore window) nor `workspaceCreating` (the add-workspace
+  // flow) describes this, and the screen has no queue to report through.
+  const [creatingSession, setCreatingSession] = useState(false);
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState<string>();
@@ -928,8 +932,11 @@ export function WorkspaceBindingCreator({
     setBusy(true);
     setError(undefined);
     setPathError(undefined);
+    let creating = false;
     try {
       if (!attempt.sessionId) {
+        creating = true;
+        setCreatingSession(true);
         const request = {
           agentId: attempt.agentId,
           ...(attempt.modelId === undefined
@@ -1042,6 +1049,7 @@ export function WorkspaceBindingCreator({
         setError(message(failure));
       }
     } finally {
+      if (creating) setCreatingSession(false);
       if (!abort.signal.aborted) setBusy(false);
     }
   }
@@ -2046,13 +2054,13 @@ export function WorkspaceBindingCreator({
                     // read the same classifier App applies.
                     composerPlaceholders?.[
                       getComposerPlaceholderState({
-                        isPreparingPrompt: workspaceCreating,
+                        isPreparingPrompt: creatingSession,
                         isStreaming: false,
                       })
                     ]?.trim() ||
                     t(
                       getComposerPlaceholderKey({
-                        isPreparingPrompt: workspaceCreating,
+                        isPreparingPrompt: creatingSession,
                         isStreaming: false,
                       }),
                     )
@@ -2069,8 +2077,9 @@ export function WorkspaceBindingCreator({
                 <Footer
                   disabled={composerBlocked}
                   // The creation screen never runs a turn: only the creation
-                  // request itself is running work, not the restore window.
-                  isRunning={workspaceCreating}
+                  // request itself is running work, not the restore window
+                  // (`busy`) and not the add-workspace flow.
+                  isRunning={creatingSession}
                   currentMode={displayedApprovalMode ?? ''}
                   currentModel={composerFooterModel}
                 />

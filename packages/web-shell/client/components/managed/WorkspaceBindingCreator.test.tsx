@@ -1988,6 +1988,84 @@ describe('WorkspaceBindingCreator', () => {
     expect(createSession).toHaveBeenCalledOnce();
   });
 
+  it('reports the creation request as processing and running', async () => {
+    // R9-1: the processing signal is the creation request itself, not
+    // `workspaceCreating` (which only the add-workspace flow sets).
+    const createSession = directCreation();
+    let release!: (value: { sessionId: string }) => void;
+    createSession.mockImplementation(
+      () =>
+        new Promise<{ sessionId: string }>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await render(
+      true,
+      false,
+      undefined,
+      {
+        alignManagedChatWithHost: true,
+        renderComposerFooter: (props) => (
+          <span data-testid="footer-running">{String(props.isRunning)}</span>
+        ),
+      },
+      {
+        composerPlaceholders: {
+          idle: 'Idle hint',
+          processing: 'Processing hint',
+        },
+      },
+    );
+
+    await act(async () => {
+      editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(editorMocks.props!.placeholderText).toBe('Processing hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('true');
+
+    await act(async () => {
+      release({ sessionId: 'session-a' });
+      await flush();
+    });
+  });
+
+  it('does not report workspace creation as a running prompt', async () => {
+    // R9-1 the other direction: adding a workspace is not a creation request,
+    // and this screen has no queue, so it must not draw the processing state.
+    const createWorkspace = workspaceCreation();
+    createWorkspace.mockImplementation(() => new Promise(() => {}));
+    await render(
+      true,
+      false,
+      undefined,
+      {
+        alignManagedChatWithHost: true,
+        onOpenLocalWorkspace: vi.fn(),
+        renderComposerFooter: (props) => (
+          <span data-testid="footer-running">{String(props.isRunning)}</span>
+        ),
+      },
+      {
+        composerPlaceholders: {
+          idle: 'Idle hint',
+          processing: 'Processing hint',
+        },
+      },
+    );
+
+    await openWorkspaceCreation();
+    await nameWorkspace('Created');
+    await click('Create workspace');
+
+    expect(editorMocks.props!.placeholderText).toBe('Idle hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('false');
+  });
+
   it('freezes selected policy on lost response and restores the exact mode after refresh', async () => {
     const { createSession } = approvalSelection();
     createSession.mockRejectedValueOnce(new Error('lost response'));
