@@ -4970,6 +4970,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               { nestedSource: true },
             )
           : undefined;
+      // Without such an ancestor the prompt is answered inline in the parent
+      // session. Record it on this entry too, so the live panel says the
+      // agent is waiting for approval instead of showing its last activity.
+      const cleanupInlineApprovalTracking = approvalAncestorId
+        ? undefined
+        : registry.trackInlineApprovals(hookOpts.agentId, runtimeEventEmitter);
 
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
@@ -5202,6 +5208,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           onFgUsageMetadata,
         );
         cleanupNestedApprovalBridge?.();
+        cleanupInlineApprovalTracking?.();
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
         // Release the JSONL writer's listeners and close the fd before

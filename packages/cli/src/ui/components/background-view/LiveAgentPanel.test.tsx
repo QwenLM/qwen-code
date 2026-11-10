@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { BackgroundApproval, Config } from '@qwen-code/qwen-code-core';
 import { LiveAgentPanel } from './LiveAgentPanel.js';
 import {
   BackgroundTaskViewActionsContext,
@@ -179,6 +179,64 @@ describe('<LiveAgentPanel />', () => {
     // Latest activity is rendered next to the row, with elapsed time.
     expect(frame).toContain('Glob');
     expect(frame).toContain('5s');
+  });
+
+  it('shows the call awaiting approval instead of the latest activity', () => {
+    // A parallel batch keeps starting calls after the one that asked, so
+    // the latest activity is not the call the agent is waiting on.
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'a-wait',
+          description: 'modec probe',
+          isBackgrounded: false,
+          recentActivities: [
+            {
+              name: 'grep_search',
+              description: "'general' in settings",
+              at: 1,
+            },
+            { name: 'grep_search', description: "'world' in plain.txt", at: 2 },
+          ],
+          inlineApprovals: [
+            {
+              callId: 'c1',
+              name: 'grep_search',
+              description: "'general' in settings",
+              at: 1,
+            },
+          ],
+        }),
+      ],
+      width: 160,
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain("needs approval: Grep 'general' in settings");
+    expect(frame).not.toContain('plain.txt');
+  });
+
+  it('shows a parked background approval the same way', () => {
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'a-parked',
+          description: 'bg probe',
+          recentActivities: [{ name: 'Glob', description: '**/*.ts', at: 2 }],
+          pendingApprovals: [
+            {
+              callId: 'c1',
+              name: 'run_shell_command',
+              description: 'rm -rf tmp',
+              at: 1,
+            } as unknown as BackgroundApproval,
+          ],
+        }),
+      ],
+      width: 160,
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('needs approval: Shell rm -rf tmp');
+    expect(frame).not.toContain('**/*.ts');
   });
 
   it('elides the default `general-purpose` subagent type from the row', () => {

@@ -272,6 +272,23 @@ export interface BackgroundActivity {
 }
 
 /**
+ * A tool call a foreground agent is waiting on through the parent session's
+ * inline confirmation prompt. Display-only: unlike {@link BackgroundApproval}
+ * it carries no `respond`, because the prompt is answered inline, not from
+ * the Background tasks dialog.
+ */
+export interface InlineApprovalNotice {
+  /** Tool-call id the prompt belongs to. */
+  callId: string;
+  /** Tool name (e.g. `grep_search`). */
+  name: string;
+  /** Render-friendly one-line description of the call. */
+  description: string;
+  /** Emission timestamp (ms). */
+  at: number;
+}
+
+/**
  * Agent kind of `TaskState`. Tracks one running subagent — either a
  * synchronous foreground run (`isBackgrounded: false`, awaited by the
  * parent's tool-call) or an async background run (`isBackgrounded: true`,
@@ -373,6 +390,14 @@ export interface AgentTask extends TaskBase {
    * Newest last, mirroring `recentActivities`.
    */
   pendingApprovals?: readonly BackgroundApproval[];
+  /**
+   * Tool calls this FOREGROUND agent is waiting on through the parent
+   * session's inline confirmation prompt, newest last. Display-only, so
+   * the live panel can say the agent is waiting for approval instead of
+   * showing its last activity as if it were still running. Set by
+   * {@link BackgroundTaskRegistry.trackInlineApprovals}.
+   */
+  inlineApprovals?: readonly InlineApprovalNotice[];
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
   /**
@@ -1427,6 +1452,53 @@ export class BackgroundTaskRegistry {
     };
   }
 
+  /**
+   * Record a FOREGROUND agent's inline approval prompts on its entry.
+   * The prompt itself stays inline in the parent session; this only keeps
+   * `inlineApprovals` in step with it: a `TOOL_WAITING_APPROVAL` adds the
+   * call (re-emissions for a call already listed are ignored), and its
+   * `TOOL_RESULT` removes it. Terminal transitions clear the list too.
+   * Returns an unsubscribe function the caller MUST invoke when the agent
+   * terminates.
+   */
+  trackInlineApprovals(
+    agentId: string,
+    emitter: AgentEventEmitter,
+  ): () => void {
+    const onWaiting = (event: AgentApprovalRequestEvent) => {
+      const entry = this.agents.get(agentId);
+      if (!entry || entry.isBackgrounded || entry.status !== 'running') return;
+      const prior = entry.inlineApprovals ?? [];
+      if (prior.some((notice) => notice.callId === event.callId)) return;
+      entry.inlineApprovals = [
+        ...prior,
+        {
+          callId: event.callId,
+          name: event.name,
+          description: event.description,
+          at: event.timestamp,
+        },
+      ];
+      this.emitApprovalChange(entry);
+    };
+    const onResult = (event: AgentToolResultEvent) => {
+      const entry = this.agents.get(agentId);
+      if (!entry?.inlineApprovals?.length) return;
+      const next = entry.inlineApprovals.filter(
+        (notice) => notice.callId !== event.callId,
+      );
+      if (next.length === entry.inlineApprovals.length) return;
+      entry.inlineApprovals = next;
+      this.emitApprovalChange(entry);
+    };
+    emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+    emitter.on(AgentEventType.TOOL_RESULT, onResult);
+    return () => {
+      emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+      emitter.off(AgentEventType.TOOL_RESULT, onResult);
+    };
+  }
+
   get(agentId: string): AgentTask | undefined {
     return this.agents.get(agentId);
   }
@@ -2161,8 +2233,15 @@ export class BackgroundTaskRegistry {
    * with no parked approvals.
    */
   private rejectPendingApprovals(entry: AgentTask): void {
+    // A foreground agent's inline prompts are answered (or torn down) by
+    // the parent session; only the display record needs clearing here.
+    const hadInline = (entry.inlineApprovals?.length ?? 0) > 0;
+    if (hadInline) entry.inlineApprovals = [];
     const parked = entry.pendingApprovals;
-    if (!parked?.length) return;
+    if (!parked?.length) {
+      if (hadInline) this.emitApprovalChange(entry);
+      return;
+    }
     entry.pendingApprovals = [];
     for (const approval of parked) {
       // `respond` is async — a `.catch()` on the promise is the only thing
