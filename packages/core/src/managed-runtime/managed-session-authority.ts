@@ -353,6 +353,13 @@ export interface ManagedSessionInputRequest {
   readonly deadline: number | null;
   readonly admissionRef: ManagedSessionDurableRef;
   readonly wakeReason: string;
+  /**
+   * The earliest instant this input may start a turn (epoch ms), or null for
+   * immediate delivery. The self-paced loop wakeup is the first producer; the
+   * wake pump defers a not-yet-due input rather than polling. Distinct from
+   * `deadline`, which is the absolute turn completion deadline.
+   */
+  readonly notBefore?: number | null;
 }
 
 export class ManagedSessionConflictError extends ManagedSessionRecordError {
@@ -4480,6 +4487,7 @@ function inputEvents(
         contentRef: input.contentRef,
         deadline: input.deadline,
         admissionRef: input.admissionRef,
+        notBefore: input.notBefore ?? null,
       },
     },
     {
