@@ -142,10 +142,10 @@ function channel(
   };
 }
 
-async function renderPage() {
+async function renderPage(language: 'en' | 'zh-CN' = 'en') {
   await act(async () => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ChannelsManagerPage onClose={vi.fn()} />
       </I18nProvider>,
     );
@@ -274,6 +274,24 @@ describe('ChannelsManagerPage', () => {
     expect(container.textContent).toContain('Feishu');
     expect(container.textContent).not.toContain('Telegram');
   });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'names WeChat in the empty state in %s',
+    async (language) => {
+      // The platform tiles are filtered by capability, but this sentence is a
+      // fixed list: it named every supported platform except WeChat.
+      channelState.current.channels = {};
+      channelState.current.snapshot = { revision: '1', instances: {} };
+
+      await renderPage(language);
+
+      expect(container.textContent).toContain(
+        language === 'zh-CN'
+          ? '配置微信、钉钉、企业微信、飞书、GitHub 或 GitLab'
+          : 'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, or GitLab',
+      );
+    },
+  );
 
   it('starts a stopped Channel from its card', async () => {
     await renderPage();

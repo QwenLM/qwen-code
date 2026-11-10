@@ -167,7 +167,16 @@ export async function waitForLogin(params: {
           break;
       }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
+      // Two names for the same outcome. The poll's bound is a plain
+      // AbortController, so it rejects with AbortError; the mint's bound is
+      // `AbortSignal.timeout`, which rejects with TimeoutError. Retrying only
+      // the first turned one stalled refresh into a failed login with most of
+      // the budget unspent. The retry budget still bounds this: the next poll
+      // reports `expired` again and spends another retry.
+      if (
+        err instanceof Error &&
+        (err.name === 'AbortError' || err.name === 'TimeoutError')
+      ) {
         continue;
       }
       throw err;

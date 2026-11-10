@@ -265,6 +265,39 @@ describe('weixin login progress events', () => {
     );
     expect(qrCalls).toHaveLength(2);
   });
+
+  it('retries a refresh mint that outlives its bound', async () => {
+    // `AbortSignal.timeout` rejects with TimeoutError, not AbortError. A catch
+    // that retries only AbortError turns one stalled refresh into a failed
+    // login with most of the 480 s budget unspent.
+    vi.useFakeTimers();
+    let mintCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('get_bot_qrcode')) {
+        mintCalls += 1;
+        return Promise.reject(
+          Object.assign(new Error('The operation was aborted due to timeout'), {
+            name: 'TimeoutError',
+          }),
+        );
+      }
+      return Promise.resolve(response({ status: 'expired' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+    });
+    await vi.advanceTimersByTimeAsync(3100);
+
+    // The retry budget, not the first timeout, decides when this ends.
+    await expect(pending).resolves.toMatchObject({
+      connected: false,
+      reason: 'expired',
+    });
+    expect(mintCalls).toBe(2);
+  });
 });
 
 describe('weixin login cancellation', () => {

@@ -22,6 +22,12 @@ import type {
 const MAX_FLOWS = 4;
 /** How long a terminal view stays readable so a polling client can observe it. */
 const TERMINAL_RETENTION_MS = 60_000;
+/**
+ * How long a live flow may go unpolled before it is treated as abandoned. The
+ * browser polls every 1.5 s, so this is ten missed polls — far above any jitter
+ * and far below the 480 s deadline an orphan would otherwise poll upstream for.
+ */
+const UNWATCHED_FLOW_MS = 15_000;
 
 const TERMINAL_STATUSES = new Set<DaemonWeixinLoginFlow['status']>([
   'ready',
@@ -35,12 +41,15 @@ export interface RegisterWeixinAuthRoutesOptions {
    * override it: a caller-supplied upstream URL would turn login into SSRF.
    */
   apiBaseUrl?: string;
+  /** Test seam only, for the same reason: it shortens the abandonment bound. */
+  unwatchedFlowMs?: number;
 }
 
 interface WeixinFlow {
   view: DaemonWeixinLoginFlow;
   controller: AbortController;
   timer: NodeJS.Timeout | undefined;
+  watchdog: NodeJS.Timeout | undefined;
 }
 
 function noStore(res: Response): void {
@@ -79,6 +88,7 @@ export function registerWeixinAuthRoutes(
   options: RegisterWeixinAuthRoutesOptions = {},
 ): () => void {
   const apiBaseUrl = options.apiBaseUrl ?? DEFAULT_BASE_URL;
+  const unwatchedFlowMs = options.unwatchedFlowMs ?? UNWATCHED_FLOW_MS;
   const flows = new Map<string, WeixinFlow>();
   let disposed = false;
 
@@ -95,7 +105,19 @@ export function registerWeixinAuthRoutes(
     if (!flow) return;
     flow.controller.abort();
     clearTimeout(flow.timer);
+    clearTimeout(flow.watchdog);
     flows.delete(id);
+  };
+
+  // A client that vanishes after the 201 — a page reload, not a closing dialog
+  // — never sends DELETE and `res.on('close')` cannot fire once the response is
+  // out. Its id is lost, so nothing else can reach the flow: it would hold a
+  // live slot and poll the upstream for its whole deadline. Every poll re-arms
+  // this, so only a flow nobody watches is reaped.
+  const armWatchdog = (id: string, flow: WeixinFlow) => {
+    clearTimeout(flow.watchdog);
+    flow.watchdog = setTimeout(() => cancel(id), unwatchedFlowMs);
+    flow.watchdog.unref();
   };
 
   app.get('/auth/weixin', (_req, res) => {
@@ -142,6 +164,7 @@ export function registerWeixinAuthRoutes(
         view: { id, status: 'waiting' },
         controller,
         timer: undefined,
+        watchdog: undefined,
       };
 
       // Reserve the slot before awaiting the upstream mint. Checking the cap
@@ -182,9 +205,13 @@ export function registerWeixinAuthRoutes(
       }
       noStore(res);
       res.status(201).json(flow.view);
+      armWatchdog(id, flow);
 
       const finish = (view: DaemonWeixinLoginFlow) => {
         clearTimeout(flow.timer);
+        // Terminal views are governed by the retention timer, not by whether
+        // anyone is still reading them.
+        clearTimeout(flow.watchdog);
         flow.view = view;
         flow.timer = setTimeout(() => cancel(id), TERMINAL_RETENTION_MS);
         flow.timer.unref();
@@ -256,11 +283,13 @@ export function registerWeixinAuthRoutes(
   );
 
   app.get('/auth/weixin/flows/:id', allowed, (req, res) => {
-    const flow = flows.get(req.params['id'] ?? '');
+    const id = req.params['id'] ?? '';
+    const flow = flows.get(id);
     if (!flow) {
       res.status(404).json({ code: 'flow_not_found' });
       return;
     }
+    if (!TERMINAL_STATUSES.has(flow.view.status)) armWatchdog(id, flow);
     noStore(res);
     res.status(200).json(flow.view);
   });

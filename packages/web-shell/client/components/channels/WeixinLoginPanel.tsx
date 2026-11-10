@@ -158,6 +158,9 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
   }, [flowId, reloadAccount]);
 
   const startLogin = useCallback(async () => {
+    // Retrying from the re-mint window replaces a flow that is still live. The
+    // daemon keeps polling the one it replaces, so drop it explicitly.
+    const previous = liveFlowRef.current;
     setBusy(true);
     setError(undefined);
     try {
@@ -177,6 +180,9 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
         return;
       }
       setFlow(next);
+      if (previous && previous !== next.id) {
+        void apiRef.current.cancel(previous).catch(() => undefined);
+      }
     } catch (failure) {
       if (mountedRef.current) setError(extractErrorDetail(failure));
     } finally {
@@ -219,17 +225,23 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
     );
   }
 
-  const showQr = flow !== undefined && !isTerminal(flow.status);
-  // A credential the daemon could not write is a permanent local fault, not a
-  // transient one: retrying it only burns flow slots. Keep it distinct from
-  // the upstream failures the generic retry copy is written for.
+  const safeQrUrl =
+    flow?.qrcodeUrl && isSafeHref(flow.qrcodeUrl) ? flow.qrcodeUrl : undefined;
+  const live = flow !== undefined && !isTerminal(flow.status);
+  // "Non-terminal" is not "scannable": after an expiry the daemon publishes a
+  // QR-less view while it mints the replacement. Showing the scan prompt there
+  // would ask the operator to scan nothing, with no control to act on.
+  const showQr = live && Boolean(flow?.qrText || safeQrUrl);
+  const preparing = live && !showQr;
+  // A credential the daemon could not write is a local fault, so it gets its
+  // own copy rather than the generic upstream-failure wording. It still offers
+  // the primary action: the flow is terminal and occupies no slot, so a retry
+  // after the operator fixes the directory costs nothing.
   const credentialsFailure = flow?.errorCode === 'credentials_error';
   const needsRetry =
     flow !== undefined &&
     !credentialsFailure &&
     (flow.status === 'expired' || flow.status === 'error');
-  const safeQrUrl =
-    flow?.qrcodeUrl && isSafeHref(flow.qrcodeUrl) ? flow.qrcodeUrl : undefined;
 
   return (
     <div className={styles.weixinPanel} data-testid="weixin-login-panel">
@@ -268,7 +280,9 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
           {t(
             credentialsFailure
               ? 'channels.weixin.credentialsError'
-              : STATUS_KEYS[flow.status],
+              : preparing
+                ? 'channels.weixin.preparing'
+                : STATUS_KEYS[flow.status],
           )}
         </p>
       ) : null}
@@ -309,7 +323,7 @@ export function WeixinLoginPanel({ api }: { api: WeixinLoginApi }) {
       ) : null}
 
       <div className={styles.weixinActions}>
-        {showQr || credentialsFailure ? null : needsRetry ? (
+        {showQr ? null : needsRetry || preparing ? (
           <Button
             type="button"
             size="sm"

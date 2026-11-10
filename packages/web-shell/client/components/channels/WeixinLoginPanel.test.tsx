@@ -378,8 +378,11 @@ describe('WeixinLoginPanel', () => {
     expect(container.textContent).toContain('status unavailable');
   });
 
-  it('presents a credential write failure as permanent, not retryable', async () => {
-    await renderPanel({
+  it('names a credential write failure and still offers a way to try again', async () => {
+    // The copy tells the operator to fix the directory and retry, so the
+    // action has to exist. The flow is terminal and occupies no slot, so a
+    // retry cannot displace anything.
+    const { start } = await renderPanel({
       poll: vi.fn().mockResolvedValue({
         id: 'flow-1',
         status: 'error',
@@ -396,6 +399,74 @@ describe('WeixinLoginPanel', () => {
 
     expect(container.textContent).toContain('could not save the credential');
     expect(buttonByText('Refresh QR code')).toBeUndefined();
+    const retry = buttonByText('Log in with QR code');
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry?.click();
+    });
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not ask the operator to scan while a replacement QR is minted', async () => {
+    // After an expiry the daemon publishes a live view with neither QR field.
+    // A scan prompt there names something that is not on screen, and the
+    // action row must not be empty while it is up.
+    await renderPanel({
+      poll: vi.fn().mockResolvedValue({ id: 'flow-1', status: 'waiting' }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(container.textContent).toContain('Preparing a new QR code');
+    expect(container.textContent).not.toContain('Scan the QR code with WeChat');
+    expect(container.querySelector('pre')).toBeNull();
+    expect(container.querySelector('a')).toBeNull();
+    expect(buttonByText('Refresh QR code')).toBeDefined();
+  });
+
+  it('drops the flow it replaces when retrying from the re-mint window', async () => {
+    const { cancel } = await renderPanel({
+      start: vi
+        .fn()
+        .mockResolvedValueOnce({ id: 'flow-1', status: 'waiting' })
+        .mockResolvedValueOnce({ ...WAITING, id: 'flow-2' }),
+      poll: vi.fn().mockResolvedValue({ id: 'flow-1', status: 'waiting' }),
+    });
+
+    await act(async () => {
+      buttonByText('Log in with QR code')?.click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    await act(async () => {
+      buttonByText('Refresh QR code')?.click();
+    });
+
+    expect(cancel).toHaveBeenCalledWith('flow-1');
+  });
+
+  it('keeps the account visible when the revoke itself fails', async () => {
+    // The credential is still installed server-side, so the optimistic
+    // logged-out paint must stay after the await, not move above it.
+    await renderPanel({
+      status: vi.fn().mockResolvedValue(LOGGED_IN),
+      revoke: vi.fn().mockRejectedValue(new Error('revoke unavailable')),
+    });
+
+    await act(async () => {
+      buttonByText('Log out')?.click();
+    });
+
+    expect(container.textContent).toContain('Logged in');
+    expect(container.textContent).toContain('wx-user-1');
+    expect(container.textContent).toContain('revoke unavailable');
+    expect(buttonByText('Log out')).toBeDefined();
     expect(buttonByText('Log in with QR code')).toBeUndefined();
   });
 
@@ -407,9 +478,10 @@ describe('WeixinLoginPanel', () => {
 
     const pre = container.querySelector('pre');
     expect(pre?.getAttribute('role')).toBe('img');
-    expect(pre?.getAttribute('aria-label')).toBe(
-      getTranslator('en')('channels.weixin.qrAlt'),
-    );
+    // The literal, not the same translator lookup the component performs:
+    // `getTranslator` falls back to the key itself, so a missing catalog entry
+    // would make both sides `channels.weixin.qrAlt` and pass.
+    expect(pre?.getAttribute('aria-label')).toBe('WeChat login QR code');
   });
 
   it('refuses to link an unsafe QR URL', async () => {
@@ -707,6 +779,58 @@ describe('WeixinLoginPanel localization', () => {
         expect(t('channels.weixin.loggedIn')).toBe('已登录');
         expect(t('channels.weixin.logout')).toBe('退出登录');
       }
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'renders the scannable QR state in %s',
+    async (language) => {
+      await renderPanel({ language });
+      const t = getTranslator(language);
+
+      await act(async () => {
+        buttonByText(t('channels.weixin.login'))?.click();
+      });
+
+      const pre = container.querySelector('pre');
+      expect(pre?.getAttribute('role')).toBe('img');
+      // Literals: a translator lookup on both sides would pass on a missing
+      // key, which is exactly the regression this pins.
+      expect(pre?.getAttribute('aria-label')).toBe(
+        language === 'zh-CN' ? '微信登录二维码' : 'WeChat login QR code',
+      );
+      expect(container.textContent).toContain(
+        language === 'zh-CN'
+          ? '请用微信扫描二维码。'
+          : 'Scan the QR code with WeChat.',
+      );
+      expect(container.textContent).not.toContain('channels.weixin.');
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'renders the re-mint window in %s',
+    async (language) => {
+      await renderPanel({
+        language,
+        poll: vi.fn().mockResolvedValue({ id: 'flow-1', status: 'waiting' }),
+      });
+      const t = getTranslator(language);
+
+      await act(async () => {
+        buttonByText(t('channels.weixin.login'))?.click();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+
+      expect(container.textContent).toContain(
+        language === 'zh-CN'
+          ? '正在生成新的二维码…'
+          : 'Preparing a new QR code…',
+      );
+      expect(container.textContent).not.toContain('channels.weixin.');
+      expect(buttonByText(t('channels.weixin.refresh'))).toBeDefined();
     },
   );
 

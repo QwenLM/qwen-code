@@ -158,12 +158,20 @@ primitive.
 
 Flow lifecycle:
 
-- At most 4 concurrent flows; the fifth request gets `429` with
+- At most 4 concurrent _live_ flows; the fifth request gets `429` with
   `code: 'too_many_flows'`, matching the subscription route's cap pattern.
+  Terminal views are retained for 60 s so a polling client can read the outcome,
+  and they do not count against the cap — four finished logins must not refuse a
+  fifth start with nothing running.
   A client that disconnects before the mint answers cannot cancel what it never
   learned the id of, so the route drops that flow itself (`res` closed before
   the response finished) — otherwise a page refresh mid-login would hold a slot
   for the flow's whole deadline.
+- A client that vanishes _after_ the `201` is covered by a per-flow watchdog:
+  every poll re-arms a 15 s bound, and a live flow nobody polls is cancelled.
+  The bound is ten times the panel's 1.5 s interval, so jitter cannot cancel a
+  login mid-scan, and an orphan no longer polls upstream for its whole 480 s
+  deadline. Terminal views are governed by the retention timer instead.
 - Starting a flow calls `startLogin`, renders `qrcodeUrl` to `qrText`, and stores
   the view. A response that carries a QR id but no scannable URL is treated as a
   failed mint (`502 qr_unavailable`, slot released) rather than a live flow: with
@@ -221,7 +229,15 @@ subscription auth routes and calls the dispose function on shutdown.
   until four abandoned attempts made every real login answer `429`. The window
   where the start request is still in flight is covered too: the unmount
   cleanup has no id yet, so the resolved response cancels the flow it created
-  instead of silently dropping it.
+  instead of silently dropping it. Retrying from the re-mint window cancels the
+  live flow it replaces for the same reason.
+- What the panel shows is derived from what is scannable, not from the status.
+  A live view with neither `qrText` nor a safe `qrcodeUrl` is the daemon's
+  re-mint window: it renders a "preparing a new QR code" line and a refresh
+  action, never a scan prompt with nothing to scan and no control. A credential
+  the daemon could not write (`errorCode: credentials_error`) gets its own copy
+  naming the local fault, and keeps the primary action — the flow is terminal
+  and holds no slot, so retrying after the directory is fixed costs nothing.
 - `ChannelEditorDialog.tsx` — render the panel at the top of the credentials
   section when `descriptor.type === 'weixin'`. The login API arrives as an
   optional prop, matching how every other daemon call in this dialog is injected
@@ -372,8 +388,9 @@ directories.
   exposed. Supporting it means fixing the adapter's precedence and giving the
   global login route a root to mint against — worth revisiting if such a
   deployment ever needs the browser path.
-- A flow whose client vanishes _after_ the `201` — a page reload, rather than a
-  closing dialog — is still not reaped: the id is lost, so no `DELETE` can reach
-  it, and it polls upstream until its deadline. The cap now counts only live
-  flows, and both the unmount and the pre-response disconnect are covered, but a
-  liveness sweep keyed on the last poll would close the remaining window.
+- Retained terminal views are no longer bounded by the flow cap: each finished
+  login keeps a small view and a timer for 60 s, so the map's size is bounded by
+  the retention window times the creation rate rather than by 4. Every route is
+  behind the strict mutation gate and a real confirm needs a human scan, so this
+  is not a practical exhaustion path; a second, larger ceiling on terminal
+  entries is the shape to use if it ever needs tightening.

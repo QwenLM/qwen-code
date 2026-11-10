@@ -38,10 +38,12 @@ class FakeIlink {
   statusHttpCode = 200;
   /** Holds the mint open, so a client can vanish while it is in flight. */
   mintDelayMs = 0;
+  /** Mint requests whose caller went away before the response was written. */
+  mintAborts = 0;
   /** Every gate option the route asked for, in registration order. */
   mutateCalls: Array<{ strict?: boolean } | undefined> = [];
   private server: Server | undefined;
-  private dispose: (() => void) | undefined;
+  private disposes: Array<() => void> = [];
   baseUrl = '';
 
   async start(): Promise<void> {
@@ -53,7 +55,16 @@ class FakeIlink {
           this.qrResponses[Math.min(this.qrCalls, this.qrResponses.length - 1)];
         this.qrCalls += 1;
         if (this.mintDelayMs > 0) {
-          setTimeout(() => res.end(JSON.stringify(body)), this.mintDelayMs);
+          const timer = setTimeout(
+            () => res.end(JSON.stringify(body)),
+            this.mintDelayMs,
+          );
+          // An aborted fetch closes the socket before anything is written.
+          req.on('close', () => {
+            if (res.writableEnded) return;
+            this.mintAborts += 1;
+            clearTimeout(timer);
+          });
           return;
         }
         res.end(JSON.stringify(body));
@@ -90,15 +101,16 @@ class FakeIlink {
   }
 
   setDispose(dispose: () => void): void {
-    this.dispose = dispose;
+    this.disposes.push(dispose);
   }
 
   runDispose(): void {
-    this.dispose?.();
+    for (const dispose of this.disposes) dispose();
+    this.disposes = [];
   }
 }
 
-function mount(fake: FakeIlink) {
+function mount(fake: FakeIlink, options: { unwatchedFlowMs?: number } = {}) {
   // The options are recorded, not ignored: `strict` is the only thing keeping
   // these routes closed on a daemon without a bearer token, and the real gate
   // returns one shared passthrough once a token is configured, so the option
@@ -117,6 +129,7 @@ function mount(fake: FakeIlink) {
   app.use(express.json());
   const dispose = registerWeixinAuthRoutes(app, mutate, {
     apiBaseUrl: fake.baseUrl,
+    ...options,
   });
   fake.setDispose(dispose);
   return app;
@@ -368,6 +381,19 @@ describe('weixin auth routes', () => {
     expect(response.body).toEqual({ code: 'credentials_error' });
   });
 
+  it('reads a corrupt credential file as not configured', async () => {
+    // `loadAccount` swallows read and parse errors and returns null, so the 502
+    // above covers only a state directory that cannot be created. Pinned so the
+    // protocol doc's narrower claim stays true: re-login is the recovery for a
+    // credential the daemon cannot parse.
+    writeFileSync(join(stateDir, 'account.json'), 'not json');
+
+    const response = await auth(request(app).get('/auth/weixin'));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ configured: false });
+  });
+
   it('cancels every flow even when the credential cannot be removed', async () => {
     const started = await auth(request(app).post('/auth/weixin/flows')).send(
       {},
@@ -407,16 +433,22 @@ describe('weixin auth routes', () => {
     const id = started.body['id'] as string;
     expect(started.body['qrcodeUrl']).toBe('https://scan.example/qr-1');
 
-    // Wait for the expiry to be observed upstream, then read the live view.
+    // The terminal `expired` view is URL-less too, so breaking on "no URL"
+    // alone would also accept a route that never clears the dead QR and simply
+    // runs the retry budget out. Only a *live* QR-less view is the state under
+    // test, and a terminal status ends the wait as a failure rather than a
+    // timeout.
     const deadline = Date.now() + 8000;
     let view: Record<string, unknown> = {};
     while (Date.now() < deadline) {
       const response = await auth(request(app).get(`/auth/weixin/flows/${id}`));
       view = response.body as Record<string, unknown>;
+      if (view['status'] !== 'waiting') break;
       if (fake.statusCalls > 0 && view['qrcodeUrl'] === undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     expect(fake.statusCalls).toBeGreaterThan(0);
+    expect(view['status']).toBe('waiting');
     expect(view['qrcodeUrl']).toBeUndefined();
     expect(view['qrText']).toBeUndefined();
   });
@@ -517,6 +549,73 @@ describe('weixin auth routes', () => {
     const fifth = await auth(request(app).post('/auth/weixin/flows')).send({});
 
     expect(fifth.status).toBe(201);
+  });
+
+  it('reaps a live flow whose client stopped polling', async () => {
+    // A page reload after the 201 loses the id: no DELETE can reach the flow
+    // and `res.on('close')` cannot fire once the response is out. Without a
+    // watchdog it holds a live slot and polls upstream for its whole deadline.
+    const watched = mount(fake, { unwatchedFlowMs: 300 });
+    const started = await auth(
+      request(watched).post('/auth/weixin/flows'),
+    ).send({});
+    const id = started.body['id'] as string;
+    await waitForUpstreamPoll(fake);
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    const gone = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
+    expect(gone.status).toBe(404);
+    await expectPollingStopped(fake);
+    // The slot is free again, which is the operator-visible half.
+    const next = await auth(request(watched).post('/auth/weixin/flows')).send(
+      {},
+    );
+    expect(next.status).toBe(201);
+  });
+
+  it('does not reap a flow a client is still polling', async () => {
+    // The bound must sit far above the browser's 1.5 s interval, or the sweep
+    // would cancel a live login mid-scan. Poll faster than the bound here and
+    // the flow must survive several of its windows.
+    const watched = mount(fake, { unwatchedFlowMs: 300 });
+    const started = await auth(
+      request(watched).post('/auth/weixin/flows'),
+    ).send({});
+    const id = started.body['id'] as string;
+
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const view = await auth(request(watched).get(`/auth/weixin/flows/${id}`));
+      expect(view.status).toBe(200);
+    }
+  });
+
+  it('aborts the upstream mint when the daemon shuts down mid-mint', async () => {
+    // The route must hand its controller signal to `startLogin`. Without it,
+    // shutdown returns while the mint request stays open for its whole bound.
+    fake.mintDelayMs = 600;
+    // supertest is lazy: the request only leaves when something subscribes.
+    const pending = auth(request(app).post('/auth/weixin/flows'))
+      .send({})
+      .then((response) => response);
+    const deadline = Date.now() + 8000;
+    while (fake.qrCalls === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(fake.qrCalls).toBeGreaterThan(0);
+
+    fake.runDispose();
+    const started = await pending;
+    expect(started.status).toBe(502);
+
+    // The route answers as soon as the fetch rejects; the peer observes the
+    // closed socket a tick later.
+    const abortDeadline = Date.now() + 2000;
+    while (fake.mintAborts === 0 && Date.now() < abortDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(fake.mintAborts).toBe(1);
   });
 
   it('holds the cap under concurrent starts', async () => {
