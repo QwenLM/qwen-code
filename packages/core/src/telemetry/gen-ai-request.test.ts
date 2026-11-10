@@ -376,7 +376,7 @@ describe('GenAI response attributes', () => {
       'openrouter.provider',
       undefined,
     );
-    expect(attributes).toEqual({});
+    expect(attributes).toStrictEqual({});
   });
 
   it('ignores a missing handle', () => {
