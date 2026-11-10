@@ -747,6 +747,23 @@ export function decodeAnsiCBytes(bytes: number[]): string {
   return text;
 }
 
+/** True when a string cannot round-trip through Node's UTF-8 path encoding. */
+export function hasUnpairedSurrogate(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index++;
+        continue;
+      }
+      return true;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) return true;
+  }
+  return false;
+}
+
 /**
  * Decode a whole ANSI-C word body. A NUL ends the word bash builds:
  * `$'--\0x'` is the word `--`; the rest of the segment is dropped.
@@ -772,7 +789,9 @@ function decodeAnsiCWord(body: string): string {
  * The word a token denotes once the shell removes its quoting, so `'--'`,
  * `"--"`, `\--`, `$'--'`, `$'\x2d\x2d'` and `-'-'` all read as `--`.
  * Expansion syntax stays literal text and sets `hasExpansion`; such a word
- * is not a resolved terminator. Returns null on an unterminated quote.
+ * is not a resolved terminator. An undecodable byte sequence sets the same
+ * signal because the string/path API cannot represent it losslessly.
+ * Returns null on an unterminated quote.
  * Locale quoting `$"…"` does NOT decode ANSI-C escapes (bash runs a program
  * literally named `x2dx2d` for `$"\x2d\x2d"`), so it reads like a
  * double-quoted word.
@@ -875,7 +894,7 @@ function shellWordQuoteRemoval(
     out += ch;
     i++;
   }
-  return { text: out, hasExpansion };
+  return { text: out, hasExpansion: hasExpansion || hasUnpairedSurrogate(out) };
 }
 
 /**

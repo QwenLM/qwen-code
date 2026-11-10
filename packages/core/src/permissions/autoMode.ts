@@ -333,7 +333,7 @@ export function shouldForceAutoModeReviewForAllow(
     ) {
       return false;
     }
-    if (op.cwdUnknown && op.pathMayDependOnCwd) {
+    if (op.pathUnknown || (op.cwdUnknown && op.pathMayDependOnCwd)) {
       return true;
     }
     return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));

@@ -36,6 +36,7 @@ import os from 'node:os';
 import {
   decodeAnsiCBytes,
   decodeAnsiCEscape,
+  hasUnpairedSurrogate,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -79,6 +80,8 @@ export interface ShellOperation {
    * do not depend on cwd; relative redirect/path arguments do.
    */
   pathMayDependOnCwd?: boolean;
+  /** True when the path contains bytes the JS path API cannot represent losslessly. */
+  pathUnknown?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2275,10 +2278,12 @@ export function extractShellOperations(
   const cmdName = tokens[0];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
-    return toRedirectOperations({
-      readFiles: redirectReads,
-      writeFiles: redirectWrites,
-    });
+    return markUndecodablePathOps(
+      toRedirectOperations({
+        readFiles: redirectReads,
+        writeFiles: redirectWrites,
+      }),
+    );
   }
 
   const ops: ShellOperation[] = [];
@@ -2342,7 +2347,7 @@ export function extractShellOperations(
     }),
   );
 
-  return ops;
+  return markUndecodablePathOps(ops);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2463,6 +2468,14 @@ function toRedirectOperations({
   ];
 }
 
+function markUndecodablePathOps(ops: ShellOperation[]): ShellOperation[] {
+  return ops.map((op) =>
+    op.filePath && hasUnpairedSurrogate(op.filePath)
+      ? { ...op, pathUnknown: true }
+      : op,
+  );
+}
+
 /**
  * Compound-aware shell-operation extractor.
  *
@@ -2502,7 +2515,7 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return markUndecodablePathOps(walkCompoundCommand(command, cwd, 0, false));
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {

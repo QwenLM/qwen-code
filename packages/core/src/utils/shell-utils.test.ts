@@ -769,11 +769,14 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('sh -c --')).toEqual('--');
   });
 
-  // Invalid UTF-8 keeps one character per byte instead of U+FFFD.
-  it('keeps undecodable ANSI-C bytes distinct', () => {
-    expect(stripShellWrapper(String.raw`sh -c $'\xff'`)).toEqual('\udcff');
+  // Invalid UTF-8 stays unresolved instead of becoming a path the rule API
+  // cannot represent losslessly.
+  it('leaves undecodable ANSI-C words unresolved', () => {
+    expect(stripShellWrapper(String.raw`sh -c $'\xff'`)).toEqual(
+      String.raw`$'\xff'`,
+    );
     expect(stripShellWrapper(String.raw`sh -c $'\uD800'`)).toEqual(
-      '\udced\udca0\udc80',
+      String.raw`$'\uD800'`,
     );
   });
 

@@ -910,11 +910,14 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
     [String.raw`cat $'\xc3'`, '/repo/\udcc3'],
     [String.raw`cat $'\uD800'`, '/repo/\udced\udca0\udc80'],
     [String.raw`cat $'\U00110000'`, '/repo/\udcf4\udc90\udc80\udc80'],
-  ])('keeps one character per byte: %s', (command, path) => {
-    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
-      read(path),
-    ]);
-  });
+  ])(
+    'keeps one character per byte but marks the path unresolved: %s',
+    (command, path) => {
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        { ...read(path), pathUnknown: true },
+      ]);
+    },
+  );
 });
 
 describe('ANSI-C wrapper payloads', () => {

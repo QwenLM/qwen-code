@@ -601,6 +601,16 @@ export class PermissionManager {
       });
 
       if (
+        op.pathUnknown &&
+        DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask
+      ) {
+        debugLogger.info(
+          `PermissionManager: undecodable path escalation to 'ask' for virtualTool=${op.virtualTool}`,
+        );
+        opDecision = 'ask';
+      }
+
+      if (
         op.cwdUnknown &&
         op.pathMayDependOnCwd &&
         DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask &&
@@ -1230,6 +1240,7 @@ export class PermissionManager {
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
         ops.some((op) => {
+          if (op.pathUnknown) return true;
           if (
             op.cwdUnknown &&
             op.pathMayDependOnCwd &&
