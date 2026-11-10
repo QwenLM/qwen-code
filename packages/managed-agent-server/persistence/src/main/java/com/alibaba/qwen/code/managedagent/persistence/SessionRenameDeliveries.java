@@ -57,11 +57,15 @@ final class SessionRenameDeliveries {
             CommandRecord previous, String actorId,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            if (principal == null && actorId != null) {
-                principal = SessionPrincipal.ofUser(session.tenantId(), actorId);
+            // The raw twin defers principal construction to the row match,
+            // so a filter-admitted byte-long actor keeps replaying (R11-3).
+            if (principal != null) {
+                ManagedSessionPrincipal.requireAuthority(jdbc, session.tenantId(),
+                        session.sessionId(), principal);
+            } else {
+                ManagedSessionPrincipal.requireAuthority(jdbc, session.tenantId(),
+                        session.sessionId(), actorId);
             }
-            ManagedSessionPrincipal.requireAuthority(jdbc, session.tenantId(),
-                    session.sessionId(), principal);
             return;
         }
         if (!previous.admitsReplayBy(actorId)

@@ -143,4 +143,40 @@ class ManagedTaskActorBoundaryTest {
         verify(sessions).requireTaskCanceller(bound, longActor);
         verifyNoInteractions(operations, coordinator);
     }
+
+    @Test
+    void unboundTaskCancelAdmitsAnActorThePrincipalByteBoundWouldReject() {
+        // R11-1: the unbound raw cancel arm keeps the raw actor digest; a
+        // filter-admitted 1536-byte actor reaches the TASK_CANCEL write
+        // instead of 400 invalid_actor mid-flight.
+        String longActor = "界".repeat(512);
+        ManagedAgentService sessions = mock(ManagedAgentService.class);
+        ManagedExtensionRecordStore records = mock(ManagedExtensionRecordStore.class);
+        SessionRecord unbound = new SessionRecord("tenant", "session",
+                "qwen-code", "1", "title", "ACTIVE", null, null, 0, 0, 0,
+                1, 1, null, 1, null, "default", "qwen-code/1", null, 0);
+        when(sessions.requireReadableSession("tenant", longActor, "session"))
+                .thenReturn(unbound);
+        when(records.findTask("tenant", "session", "task"))
+                .thenReturn(java.util.Optional.of(
+                        new ManagedExtensionRecordStore.TaskRow("task",
+                                "child_agent", null, null)));
+        SessionLifecycleStore store = mock(SessionLifecycleStore.class);
+        SessionLifecycleService operations = mock(SessionLifecycleService.class);
+        TaskCancelCoordinator coordinator = mock(TaskCancelCoordinator.class);
+        ManagedAgentException sentinel = new ManagedAgentException(409,
+                "probe_reached_write", "reached the operation write");
+        when(store.beginTaskCancelOperation(org.mockito.ArgumentMatchers.eq("tenant"),
+                org.mockito.ArgumentMatchers.eq("session"),
+                org.mockito.ArgumentMatchers.eq("task"),
+                org.mockito.ArgumentMatchers.eq(new RequestDigests()
+                        .digest(java.util.Map.of("actorId", longActor))),
+                org.mockito.ArgumentMatchers.eq("key"),
+                org.mockito.ArgumentMatchers.any())).thenThrow(sentinel);
+        ManagedTaskCancelService cancels = new ManagedTaskCancelService(store,
+                sessions, records, new RequestDigests(), operations, coordinator);
+        assertThatThrownBy(() -> cancels.cancelPublic("tenant", longActor,
+                "key", "session", "task")).isSameAs(sentinel);
+        verify(sessions).requireTaskCanceller(unbound, longActor);
+    }
 }

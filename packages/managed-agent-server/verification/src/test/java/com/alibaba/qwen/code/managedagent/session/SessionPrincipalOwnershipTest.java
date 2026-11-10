@@ -509,6 +509,36 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void rawLifecycleAndRenameServeAnActorThePrincipalByteBoundWouldReject() {
+        // R11-2/R11-3: a filter-admitted 1536-byte actor keeps closing and
+        // renaming a genuine legacy row-less Session; the raw arms never
+        // construct a byte-bounded principal, and the stored operation
+        // digest stays the pre-ownership {actorId} shape.
+        String longActor = "界".repeat(512);
+        var f = new Fixture();
+        var digests = new RequestDigests();
+        var lifecycle = new SessionLifecycleService(f.store, f.service, digests,
+                mock(SessionLifecycleCoordinator.class));
+        f.tx.executeWithoutResult(status -> {
+            String id = f.store.insertSessionCommand("tenant", (String) null,
+                    "CREATE_SESSION", "long-create", "digest", "qwen-code",
+                    null, "legacy", List.of(), "payload").sessionId();
+            when(f.harness.supportsFencedTitles()).thenReturn(true);
+            when(f.harness.createOrLoad("tenant", id, false, true))
+                    .thenReturn(new HarnessConnector.Attachment("boot", null, 0L, "epoch"));
+            assertThat(f.service.renameSession("tenant", longActor,
+                    "long-rename", id, "renamed").replayed()).isFalse();
+            var operation = lifecycle.admitPublic("tenant", longActor,
+                    "long-delete", id,
+                    com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind.DELETE);
+            assertThat(f.jdbc.queryForObject(
+                    "SELECT actor_digest FROM ma_operation WHERE operation_id = ?",
+                    String.class, operation.id()))
+                    .isEqualTo(digests.digest(Map.of("actorId", longActor)));
+        });
+    }
+
+    @Test
     void actorStreamDeliversStoredEventsAndRechecksTheSamePrincipal() throws Exception {
         var f = new Fixture();
         String id = f.tx.execute(status -> f.create(OWNER, "create"));

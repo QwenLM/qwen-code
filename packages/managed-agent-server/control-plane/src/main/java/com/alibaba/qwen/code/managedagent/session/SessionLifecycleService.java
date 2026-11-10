@@ -224,14 +224,18 @@ public class SessionLifecycleService {
                             : kind == OperationKind.CLOSE && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace()),
                     activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0);
         } else {
-            // Only the unbound ownership arm needs a byte-bounded
-            // principal; the bound arm above kept the raw actor (R7-1).
-            SessionPrincipal owner = principal != null ? principal
-                    : rawActorId == null ? null
-                            : SessionPrincipal.ofUser(tenantId, rawActorId);
-            sessions.requireLegacyWorkspace(tenantId, owner, sessionId);
+            // The raw route keeps the raw actor end to end: the authority
+            // check and the pre-ownership digest never construct a
+            // byte-bounded principal from a filter-admitted actor (R11-2).
+            if (principal == null) {
+                sessions.requireLegacyWorkspace(tenantId, rawActorId, sessionId);
+            } else {
+                sessions.requireLegacyWorkspace(tenantId, principal, sessionId);
+            }
             admission = store.beginOperation(tenantId, sessionId, kind,
-                    principalDigest(owner), idempotencyKey, digest);
+                    principal == null ? actorDigest(rawActorId)
+                            : principalDigest(principal),
+                    idempotencyKey, digest);
         }
         OperationRecord operation = admission.operation();
         if (!"COMPLETED".equals(operation.state())) {

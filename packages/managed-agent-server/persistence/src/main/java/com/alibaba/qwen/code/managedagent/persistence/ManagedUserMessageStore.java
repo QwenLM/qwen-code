@@ -339,11 +339,12 @@ public class ManagedUserMessageStore
             // behalf of the actor recorded on the queued message under the
             // unified authority, so a principal-created Session whose row
             // was deleted still refuses while genuine legacy queues run.
-            SessionPrincipal queued = SessionPrincipal.ofUser(tenant,
-                    owner.actorId());
+            // The raw twin never constructs a byte-bounded principal from
+            // the stored actor, so a filter-admitted long actor's queue
+            // keeps draining instead of wedging the tick (R11-4).
             ManagedSessionPrincipal.requireAuthority(jdbc, tenant, session,
-                    queued);
-            return new QueuedIdentity(owner.actorId(), queued);
+                    owner.actorId());
+            return new QueuedIdentity(owner.actorId(), null);
         }
         if (!owner.actorId().equals(row.userId())) {
             throw new ManagedAgentException(404, "session_not_found",

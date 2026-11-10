@@ -103,13 +103,10 @@ public class ManagedTaskCancelService {
                     "The task was not found.");
         }
         sessions.requireTaskCanceller(session, actorId);
-        // The bound arm's digest keys on the raw actor id only, so a
-        // byte-long non-ASCII actor never needs a principal here; the
-        // unbound ownership digest still does.
-        SessionPrincipal principal = session.workspace() != null ? null
-                : principalOf(tenantId, actorId);
-        String rawActor = session.workspace() != null ? actorId : null;
-        return record(tenantId, session, principal, rawActor,
+        // The raw route never synthesises a principal: the unbound digest
+        // keys on the raw actor id (the pre-ownership shape), so a
+        // filter-admitted byte-long non-ASCII actor keeps cancelling (R11-1).
+        return record(tenantId, session, null, actorId,
                 idempotencyKey, sessionId, taskId);
     }
 
@@ -141,15 +138,12 @@ public class ManagedTaskCancelService {
         String requestDigest = digests.digest(Map.of("sessionId", sessionId,
                 "operation", "TASK_CANCEL", "taskId", taskId));
         String actorDigest;
-        if (session.workspace() != null) {
-            actorDigest = digests.digest(Map.of("actorId", rawActorId));
-        } else if (principal == null) {
-            // An anonymous caller admitted to a legacy no-row Session has no
-            // principal identity; the cancel is scoped to the tenant-wide
-            // anonymous actor — the SAME empty digest the pre-ownership code
-            // stored, so rows recorded before a rolling deploy still replay
-            // (R7-4). A bound Session never reaches here anonymously.
-            actorDigest = "";
+        if (session.workspace() != null || principal == null) {
+            // Bound arm and raw unbound arm both key on the raw actor id —
+            // the pre-ownership shape ("" for the anonymous caller), so
+            // rows recorded before a rolling deploy still replay (R7-4).
+            actorDigest = rawActorId == null ? ""
+                    : digests.digest(Map.of("actorId", rawActorId));
         } else if (!principal.actorPresent()) {
             // No business actor: keep the pre-ownership {actorId} digest so
             // idempotency rows written before this deploy still replay. The
@@ -168,12 +162,5 @@ public class ManagedTaskCancelService {
                     admission.operation().operationId());
         }
         return admission;
-    }
-
-    // An anonymous caller keeps its tenant: visibility runs before the actor
-    // guard, so a foreign Session is 404 rather than actor_required.
-    private static SessionPrincipal principalOf(String tenantId, String actorId) {
-        return actorId == null || actorId.isBlank() ? null
-                : SessionPrincipal.ofUser(tenantId, actorId);
     }
 }

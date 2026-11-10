@@ -137,6 +137,12 @@ public final class ManagedSessionPrincipal {
         requireReadAuthority(jdbc, tenantId, sessionId, principal);
     }
 
+    /** The raw-actor twin of {@link #requireAuthority} (R11-3/R11-4). */
+    public static void requireAuthority(JdbcTemplate jdbc, String tenantId,
+            String sessionId, String actorId) {
+        requireReadAuthority(jdbc, tenantId, sessionId, actorId);
+    }
+
     /**
      * The unified authority over an unbound Session. A present ownership row
      * is the sole authority: deleting it revokes access even for the creator,
