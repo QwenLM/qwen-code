@@ -37,6 +37,7 @@ import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
   SESSION_LIST_PAGE_SIZE,
+  SIDEBAR_SESSION_EXPAND_STEP,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import {
@@ -347,7 +348,9 @@ export function WorkspaceSection({
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [showAllSessions, setShowAllSessions] = useState(false);
+  const [visibleSessionCount, setVisibleSessionCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const fulfilledPendingSessions = useRef(new Set<string>());
   const channelCatalogLoadRequestId = useRef(0);
@@ -370,14 +373,14 @@ export function WorkspaceSection({
   useEffect(() => {
     if (!expansionRequest || controlledExpanded !== undefined) return;
     setInternalExpanded(expansionRequest.expanded);
-    setShowAllSessions(false);
+    setVisibleSessionCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
     writeWorkspaceExpanded(storageId, expansionRequest.expanded);
   }, [expansionRequest, controlledExpanded, storageId]);
 
   useEffect(() => {
-    // The five-row preview is scoped per source; reset the one-shot
-    // show-all when the section collapses or the source changes.
-    setShowAllSessions(false);
+    // The five-row preview is scoped per source; reset the expanded count
+    // when the section collapses or the source changes.
+    setVisibleSessionCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded, sourceType]);
 
   // The render site keys this component by workspace id, so an id change
@@ -930,11 +933,11 @@ export function WorkspaceSection({
     : sessionTree.buildRows(visibleSessions);
   const directSessions =
     searchActive ||
-    showAllSessions ||
     !limitSessions ||
-    revealsEditingSession(visibleSessions)
+    revealsEditingSession(visibleSessions) ||
+    directTreeRows.length <= visibleSessionCount
       ? directTreeRows
-      : directTreeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      : directTreeRows.slice(0, visibleSessionCount);
 
   const groupedSessions = useMemo(() => {
     // The grouped branch has no trust gate of its own; untrusted secondary
@@ -1309,15 +1312,23 @@ export function WorkspaceSection({
                 })}
                 {limitSessions &&
                   !searchActive &&
-                  !showAllSessions &&
                   !revealsEditingSession(visibleSessions) &&
-                  directTreeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+                  directTreeRows.length > visibleSessionCount && (
                     <button
                       type="button"
                       className={sidebarStyles.showAllSessions}
-                      onClick={() => setShowAllSessions(true)}
+                      onClick={() =>
+                        setVisibleSessionCount(
+                          (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                        )
+                      }
                     >
-                      {t('sidebar.showAllSessions')}
+                      {t('sidebar.showMoreSessions', {
+                        count: Math.min(
+                          SIDEBAR_SESSION_EXPAND_STEP,
+                          directTreeRows.length - visibleSessionCount,
+                        ),
+                      })}
                     </button>
                   )}
               </>

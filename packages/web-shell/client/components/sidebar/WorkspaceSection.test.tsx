@@ -1078,7 +1078,7 @@ describe('WorkspaceSection session loading', () => {
     expect(note?.getAttribute('aria-label')).toContain('Trust to open');
   });
 
-  it('shows five sessions and resets Show all after the workspace closes', async () => {
+  it('shows five sessions and resets the expansion after the workspace closes', async () => {
     const sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,
       displayName: `Session ${index + 1}`,
@@ -1098,10 +1098,10 @@ describe('WorkspaceSection session loading', () => {
     expect(container.textContent).toContain('Session 5');
     expect(container.textContent).not.toContain('Session 6');
 
-    const showAll = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Show all',
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Show 1 more',
     );
-    act(() => showAll?.click());
+    act(() => showMore?.click());
     expect(container.textContent).toContain('Session 6');
 
     renderSection({ client, expanded: true, temporarilyCollapsed: true });
@@ -1129,6 +1129,38 @@ describe('WorkspaceSection session loading', () => {
     renderSection({ client, expanded: true });
     await flush();
     expect(container.textContent).not.toContain('Session 6');
+  });
+
+  it('expands the flat preview ten sessions at a time', async () => {
+    const sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    }));
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const expandButton = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    expect(container.textContent).not.toContain('Session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 15');
+    expect(container.textContent).not.toContain('Session 16');
+    expect(expandButton()?.textContent).toBe('Show 1 more');
+    act(() => expandButton()?.click());
+    expect(container.textContent).toContain('Session 16');
+    expect(expandButton()).toBeUndefined();
   });
 
   it('keeps the edited row mounted when a refresh reorders it past the preview', async () => {
@@ -2857,6 +2889,6 @@ describe('WorkspaceSection session tree', () => {
     await flush();
 
     expect(container.textContent).not.toContain('Derived session');
-    expect(container.textContent).not.toContain('Show all');
+    expect(container.textContent).not.toMatch(/Show \d+ more/);
   });
 });

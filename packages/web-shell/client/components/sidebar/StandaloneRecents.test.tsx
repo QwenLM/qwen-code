@@ -539,14 +539,39 @@ describe('StandaloneRecents', () => {
 
     expect(container.textContent).toContain('Chat 5');
     expect(container.textContent).not.toContain('Chat 6');
-    const showAll = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'sidebar.showAllSessions',
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showMoreSessions',
     );
+    expect(t).toHaveBeenCalledWith('sidebar.showMoreSessions', { count: 1 });
 
-    await act(async () => showAll?.click());
+    await act(async () => showMore?.click());
 
     expect(container.textContent).toContain('Chat 6');
-    expect(showAll?.isConnected).toBe(false);
+    expect(showMore?.isConnected).toBe(false);
+  });
+
+  it('expands the preview ten sessions at a time', async () => {
+    list.mockResolvedValue({
+      sessions: Array.from({ length: 16 }, (_, index) =>
+        summary(`session-${index + 1}`, `Chat ${index + 1}`),
+      ),
+    });
+    await render();
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+
+    expect(container.textContent).toContain('Chat 5');
+    expect(container.textContent).not.toContain('Chat 6');
+    expect(t).toHaveBeenCalledWith('sidebar.showMoreSessions', { count: 10 });
+    await act(async () => showMore()?.click());
+    expect(container.textContent).toContain('Chat 15');
+    expect(container.textContent).not.toContain('Chat 16');
+    expect(t).toHaveBeenCalledWith('sidebar.showMoreSessions', { count: 1 });
+    await act(async () => showMore()?.click());
+    expect(container.textContent).toContain('Chat 16');
+    expect(showMore()).toBeUndefined();
   });
 
   it('unlocks pagination when a refresh replaces an in-flight page', async () => {

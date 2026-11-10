@@ -2979,8 +2979,8 @@ describe('WebShellSidebar workspace removal', () => {
     // must not pull the other two sessions into the DOM.
     expect(sessionRows()).toHaveLength(5);
     expect(
-      Array.from(container.querySelectorAll('button')).some(
-        (button) => button.textContent === 'Show all',
+      Array.from(container.querySelectorAll('button')).some((button) =>
+        /^Show \d+ more$/.test(button.textContent ?? ''),
       ),
     ).toBe(true);
     expect(container.textContent).not.toContain('Preview session 6');
@@ -6365,7 +6365,7 @@ describe('WebShellSidebar session source switch', () => {
 });
 
 describe('WebShellSidebar session list notices', () => {
-  it('limits the flat session preview to five until Show all is selected', async () => {
+  it('limits the flat session preview to five until it is expanded', async () => {
     active.sessions = Array.from({ length: 6 }, (_, index) => ({
       sessionId: `session-${index + 1}`,
       displayName: `Preview session ${index + 1}`,
@@ -6377,12 +6377,37 @@ describe('WebShellSidebar session list notices', () => {
     expect(container.textContent).toContain('Preview session 5');
     expect(container.textContent).not.toContain('Preview session 6');
 
-    const showAll = Array.from(
+    const showMore = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),
-    ).find((button) => button.textContent === 'Show all');
-    expect(showAll).toBeDefined();
-    act(() => click(showAll!));
+    ).find((button) => button.textContent === 'Show 1 more');
+    expect(showMore).toBeDefined();
+    act(() => click(showMore!));
     expect(container.textContent).toContain('Preview session 6');
+  });
+
+  it('expands the flat session preview ten sessions at a time', async () => {
+    active.sessions = Array.from({ length: 16 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Preview session ${index + 1}`,
+      workspaceCwd: '/tmp/project',
+    }));
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const expandButton = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => /^Show \d+ more$/.test(button.textContent ?? ''),
+      );
+    expect(container.textContent).toContain('Preview session 5');
+    expect(container.textContent).not.toContain('Preview session 6');
+    expect(expandButton()?.textContent).toBe('Show 10 more');
+    act(() => click(expandButton()!));
+    expect(container.textContent).toContain('Preview session 15');
+    expect(container.textContent).not.toContain('Preview session 16');
+    expect(expandButton()?.textContent).toBe('Show 1 more');
+    act(() => click(expandButton()!));
+    expect(container.textContent).toContain('Preview session 16');
+    expect(expandButton()).toBeUndefined();
   });
 
   it('keeps an edited session visible when the preview order changes', async () => {

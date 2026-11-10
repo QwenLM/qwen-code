@@ -282,7 +282,7 @@ describe('recent sessions', () => {
     expect(container.textContent).not.toContain('sidebar.loadFailed');
   });
 
-  it('shows five previews, expands to twenty, and refreshes activity order', async () => {
+  it('shows five previews, expands in steps to twenty, and refreshes activity order', async () => {
     vi.useFakeTimers();
     listStandaloneSessionsPage.mockResolvedValue({
       sessions: Array.from({ length: 25 }, (_, i) =>
@@ -293,12 +293,15 @@ describe('recent sessions', () => {
     });
     await render();
     expect(buttons()).toHaveLength(5);
-    await click(
+    const expand = () =>
       [...container.querySelectorAll<HTMLButtonElement>('button')].find(
-        (button) => button.textContent === 'sidebar.showAllSessions',
-      )!,
-    );
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      )!;
+    await click(expand());
+    expect(buttons()).toHaveLength(15);
+    await click(expand());
     expect(buttons()).toHaveLength(20);
+    expect(expand()).toBeUndefined();
     listStandaloneSessionsPage.mockResolvedValue({
       sessions: [session('newest', '2026-10-26', { sourceType: 'standalone' })],
     });

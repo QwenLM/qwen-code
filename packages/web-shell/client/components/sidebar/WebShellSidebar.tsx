@@ -179,6 +179,7 @@ import {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  SIDEBAR_SESSION_EXPAND_STEP,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
   WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
@@ -1950,7 +1951,9 @@ export function WebShellSidebar({
   const [projectExpanded, setProjectExpanded] = useState(() =>
     readPrimaryExpanded(),
   );
-  const [showAllProjectSessions, setShowAllProjectSessions] = useState(false);
+  const [projectSessionVisibleCount, setProjectSessionVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [workspaceExpansionRequest, setWorkspaceExpansionRequest] = useState<{
     scope: string;
     expanded: boolean;
@@ -2016,8 +2019,8 @@ export function WebShellSidebar({
 
   useEffect(() => {
     // The five-row preview is scoped per source and per primary workspace;
-    // reset the one-shot show-all when either changes, not only on collapse.
-    setShowAllProjectSessions(false);
+    // reset the expanded count when either changes, not only on collapse.
+    setProjectSessionVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [projectExpanded, primaryWorkspaceExpansionId, selectedSessionSource]);
 
   const previousPrimaryExpansionRef = useRef({
@@ -2534,7 +2537,7 @@ export function WebShellSidebar({
       ),
     );
     setProjectExpanded(expanded);
-    setShowAllProjectSessions(false);
+    setProjectSessionVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
     writeWorkspaceExpanded(primaryWorkspaceExpansionId, expanded);
     if (registeredPrimaryWorkspace) {
       writeWorkspaceExpanded(registeredPrimaryWorkspace.id, expanded);
@@ -6307,14 +6310,15 @@ export function WebShellSidebar({
         (session) => getIdentityForSession(session) === editingSessionIdentity,
       ) >= SIDEBAR_SESSION_PREVIEW_LIMIT;
     const renderFlatSessions = () => {
-      const showAll =
-        showAllProjectSessions ||
+      const unlimited =
         Boolean(searchQuery.trim()) ||
         editingSessionBeyondPreview(filteredSessions);
       const treeRows = sessionTree.buildRows(filteredSessions);
-      const displayedRows = showAll
-        ? treeRows
-        : treeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      const previewLimited =
+        !unlimited && treeRows.length > projectSessionVisibleCount;
+      const displayedRows = previewLimited
+        ? treeRows.slice(0, projectSessionVisibleCount)
+        : treeRows;
       return (
         <>
           {displayedRows.map((row) => (
@@ -6324,13 +6328,22 @@ export function WebShellSidebar({
               })}
             </Fragment>
           ))}
-          {!showAll && treeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+          {previewLimited && (
             <button
               type="button"
               className={styles.showAllSessions}
-              onClick={() => setShowAllProjectSessions(true)}
+              onClick={() =>
+                setProjectSessionVisibleCount(
+                  (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                )
+              }
             >
-              {t('sidebar.showAllSessions')}
+              {t('sidebar.showMoreSessions', {
+                count: Math.min(
+                  SIDEBAR_SESSION_EXPAND_STEP,
+                  treeRows.length - projectSessionVisibleCount,
+                ),
+              })}
             </button>
           )}
         </>
@@ -6475,7 +6488,7 @@ export function WebShellSidebar({
     selectedSessionSource,
     sessionSections,
     sessionsPage,
-    showAllProjectSessions,
+    projectSessionVisibleCount,
     t,
     toggleSessionSection,
   ]);
