@@ -5,12 +5,14 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { createServer, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as path from 'node:path';
 import type { Browser, BrowserContext, BrowserType, Page } from 'playwright';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { startFakeOpenAIServer } from '../fake-openai-server.js';
 import type { spawnDaemon, SpawnedDaemon } from '../cli/_daemon-harness.js';
-import { startAcceptanceEnv } from './harness.js';
+import { startAcceptanceEnv, type AcceptanceEnv } from './harness.js';
 
 const mocks = vi.hoisted(() => ({
   startFakeOpenAIServer: vi.fn<typeof startFakeOpenAIServer>(),
@@ -106,4 +108,74 @@ describe('acceptance environment setup cleanup', () => {
     expect(mocks.daemonDispose).toHaveBeenCalledTimes(1);
     expect(mocks.backendClose).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('live recording proxy', () => {
+  it.each([false, true])(
+    'handles an upstream reset with headersSent=%s',
+    async (afterHeaders) => {
+      let failedResponse: ServerResponse | undefined;
+      let requests = 0;
+      const upstream = createServer((_request, response) => {
+        if (requests++ > 0) {
+          response.end('ok');
+        } else if (afterHeaders) {
+          failedResponse = response;
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.write('data: partial\n\n');
+        } else {
+          response.destroy();
+        }
+      });
+      await new Promise<void>((resolve) =>
+        upstream.listen(0, '127.0.0.1', resolve),
+      );
+      let env: AcceptanceEnv | undefined;
+      try {
+        const { port } = upstream.address() as AddressInfo;
+        env = await startAcceptanceEnv({
+          mode: {
+            kind: 'live',
+            model: {
+              label: 'test',
+              baseUrl: `http://127.0.0.1:${port}`,
+              apiKey: 'test-key',
+              model: 'test',
+            },
+          },
+        });
+        const baseUrl =
+          mocks.spawnDaemon.mock.calls[0][0]?.env?.['OPENAI_BASE_URL'];
+        const signal = AbortSignal.timeout(5_000);
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          body: '{}',
+          signal,
+        });
+        if (afterHeaders) {
+          expect(response.status).toBe(200);
+          const reader = response.body!.getReader();
+          const first = await reader.read();
+          expect(new TextDecoder().decode(first.value)).toBe(
+            'data: partial\n\n',
+          );
+          failedResponse!.destroy();
+          await expect(reader.read()).rejects.toThrow();
+          expect(signal.aborted).toBe(false);
+        } else {
+          expect(response.status).toBe(502);
+          expect(await response.json()).toEqual({
+            error: { message: expect.any(String) },
+          });
+        }
+        const next = await fetch(`${baseUrl}/chat/completions`);
+        expect(next.status).toBe(200);
+        expect(await next.text()).toBe('ok');
+      } finally {
+        await env?.close();
+        upstream.closeAllConnections();
+        await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      }
+    },
+  );
 });

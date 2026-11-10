@@ -208,6 +208,10 @@ async function startRecordingProxy(model: LiveModel): Promise<ModelBackend> {
         }
         response.end();
       } catch (error) {
+        if (response.headersSent) {
+          response.destroy();
+          return;
+        }
         response.writeHead(502, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ error: { message: String(error) } }));
       }

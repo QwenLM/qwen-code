@@ -17,8 +17,10 @@ The issue states results without inputs. `fixtures.ts` chooses inputs so that th
 
 The checklist and the activity form check behavior rather than figures:
 
-- **Checklist:** add, check, filter, delete and repeated undo; then persistence after reload and after reopening the conversation; then isolation from a new conversation.
+- **Checklist:** add, check, filter, delete and repeated undo; then persistence of item text, checked state and undo after reload and after reopening the conversation; then isolation from a new conversation.
 - **Activity form:** edits start no model request; one explicit submission sends every field once; the answer uses the values.
+
+The bill reset check verifies all input values, allocations and the chart against their defaults. Chart comparison uses normalized markup and canvas pixels so regenerated SVG IDs and iframe scrolling do not count as a changed chart.
 
 Checks observe behavior; none assumes a capability is missing. When a precondition fails, dependent checks report `not-applicable` with the reason. For example, isolation cannot be judged when nothing was persisted.
 

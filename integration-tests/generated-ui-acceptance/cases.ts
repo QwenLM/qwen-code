@@ -86,6 +86,38 @@ function describeBill(observed: { total?: number; shares: number[] }) {
   return `total=${observed.total === undefined ? 'unreadable' : formatCents(observed.total)} shares=[${observed.shares.map(formatCents).join(', ')}]`;
 }
 
+async function chartState(view: Frame) {
+  return view.locator('#chart').evaluate((element) => {
+    const clone = element.cloneNode(true) as HTMLElement;
+    const ids = new Map(
+      [...clone.querySelectorAll('[id]')].map((node, index) => [
+        node.id,
+        `chart-id-${index}`,
+      ]),
+    );
+    for (const node of clone.querySelectorAll('*')) {
+      for (const attribute of [...node.attributes]) {
+        if (attribute.name === 'id') {
+          node.id = ids.get(attribute.value)!;
+        } else {
+          node.setAttribute(
+            attribute.name,
+            attribute.value.replace(/#([\w:.-]+)/g, (reference, id: string) =>
+              ids.has(id) ? `#${ids.get(id)}` : reference,
+            ),
+          );
+        }
+      }
+    }
+    return JSON.stringify({
+      html: clone.innerHTML,
+      canvases: [...element.querySelectorAll('canvas')].map((canvas) =>
+        canvas.toDataURL(),
+      ),
+    });
+  });
+}
+
 /** Bill splitter: immediate updates, cent conservation, invalid input, copy, reset. */
 export async function runBillSplitter(
   env: AcceptanceEnv,
@@ -115,6 +147,7 @@ export async function runBillSplitter(
     .locator('#chart')
     .innerHTML()
     .catch(() => '');
+  const chartStateBefore = await chartState(view).catch(() => undefined);
 
   await checks.guard('scenario', 'case 1', async () => {
     await setValue(view, 'people', String(BILL_SCENARIO.people));
@@ -204,19 +237,40 @@ export async function runBillSplitter(
   });
 
   await checks.guard('reset', 'case 1', async () => {
+    await setValue(view, 'subtotal', formatCents(BILL_DEFAULTS.subtotal + 100));
     await view.locator('#reset').click();
-    const reset = await settle(
-      () => readBill(view),
-      (bill) => bill.total === billTotal(BILL_DEFAULTS),
-    );
-    const people = await view.locator('#people').inputValue();
+    const expectedInputs = {
+      subtotal: BILL_DEFAULTS.subtotal / 100,
+      people: BILL_DEFAULTS.people,
+      discount: BILL_DEFAULTS.discount / 100,
+      'service-rate': BILL_DEFAULTS.serviceRate,
+    };
+    const readReset = async () => ({
+      ...(await readBill(view)),
+      inputs: Object.fromEntries(
+        await Promise.all(
+          Object.keys(expectedInputs).map(
+            async (id) =>
+              [id, Number(await view.locator(`#${id}`).inputValue())] as const,
+          ),
+        ),
+      ),
+      chart: await chartState(view),
+    });
+    const matches = (value: Awaited<ReturnType<typeof readReset>>) =>
+      value.total === billTotal(BILL_DEFAULTS) &&
+      JSON.stringify(value.shares) === JSON.stringify(expectedDefault) &&
+      Object.entries(expectedInputs).every(
+        ([id, expected]) => value.inputs[id] === expected,
+      ) &&
+      chartStateBefore !== undefined &&
+      value.chart === chartStateBefore;
+    const reset = await settle(readReset, matches);
     return checks.expect(
       'reset',
       'case 1',
-      reset.total === billTotal(BILL_DEFAULTS) &&
-        JSON.stringify(reset.shares) === JSON.stringify(expectedDefault) &&
-        people === String(BILL_DEFAULTS.people),
-      `after reset: ${describeBill(reset)} people=${people}`,
+      matches(reset),
+      `after reset: ${describeBill(reset)} inputs=${JSON.stringify(reset.inputs)} chart restored=${chartStateBefore === undefined ? 'initial chart unavailable' : reset.chart === chartStateBefore}`,
     );
   });
 
@@ -239,6 +293,21 @@ async function itemTexts(view: Frame): Promise<string[]> {
         .filter(Boolean),
     )
     .catch(() => []);
+}
+
+async function itemStates(view: Frame) {
+  return view.locator('[id^="item-"][id$="-text"]').evaluateAll((elements) =>
+    elements
+      .filter((element) => (element as HTMLElement).offsetParent !== null)
+      .map((element) => ({
+        text: (element.textContent ?? '').trim(),
+        checked: (
+          document.getElementById(
+            element.id.replace(/-text$/, '-check'),
+          ) as HTMLInputElement | null
+        )?.checked,
+      })),
+  );
 }
 
 async function itemSlot(
@@ -359,28 +428,83 @@ export async function runChecklist(
     });
   }
 
-  const saved = await itemTexts(view);
+  const beforeSave = await itemStates(view);
+  const saved = beforeSave.map((item) =>
+    item.text === 'Notes' ? { ...item, checked: true } : item,
+  );
+  const sameState = (a: typeof saved, b: typeof saved) =>
+    JSON.stringify(a) === JSON.stringify(b);
+  const notesSlot = await itemSlot(view, 'Notes');
+  let prepared = false;
+  if (
+    notesSlot &&
+    beforeSave.some((item) => item.text === 'Notes' && !item.checked)
+  ) {
+    await view
+      .locator(`#${notesSlot}-check`)
+      .check()
+      .catch(() => {});
+    await env.page.waitForTimeout(300);
+    prepared = sameState(
+      await settle(
+        () => itemStates(view),
+        (value) => sameState(value, saved),
+      ),
+      saved,
+    );
+  }
+  let hasPersistedItems = false;
   const persistenceChecks = async (
     id: string,
     label: string,
     open: () => Promise<Card>,
   ) =>
     checks.guard(id, 'case 2 / R4', async () => {
+      if (!prepared) {
+        return checks.expect(
+          id,
+          'case 2 / R4',
+          false,
+          'could not prepare a checked item and its undo state',
+        );
+      }
       const reopened = await open();
-      const texts = await settle(
-        () => itemTexts(reopened.view),
-        (value) => value.length === saved.length,
-        5_000,
+      const restored = await settle(
+        () => itemStates(reopened.view),
+        (value) => sameState(value, saved),
+      );
+      hasPersistedItems ||= restored.some((item) =>
+        saved.some((expected) => expected.text === item.text),
+      );
+      if (!sameState(restored, saved)) {
+        return checks.expect(
+          id,
+          'case 2 / R4',
+          false,
+          `${label}: expected ${JSON.stringify(saved)}, saw ${JSON.stringify(restored)}`,
+        );
+      }
+      await reopened.view.locator('#undo').click();
+      const undone = await settle(
+        () => itemStates(reopened.view),
+        (value) => sameState(value, beforeSave),
+      );
+      const restoredSlot = await itemSlot(reopened.view, 'Notes');
+      await reopened.view.locator(`#${restoredSlot}-check`).check();
+      await reopened.view.page().waitForTimeout(300);
+      const resaved = await settle(
+        () => itemStates(reopened.view),
+        (value) => sameState(value, saved),
       );
       return checks.expect(
         id,
         'case 2 / R4',
-        saved.length > 0 && JSON.stringify(texts) === JSON.stringify(saved),
-        `${label}: expected ${JSON.stringify(saved)}, saw ${JSON.stringify(texts)}`,
+        sameState(undone, beforeSave) && sameState(resaved, saved),
+        `${label}: undo expected ${JSON.stringify(beforeSave)}, saw ${JSON.stringify(undone)}; state restored for the next check=${sameState(resaved, saved)}`,
       );
     });
 
-  const persistedAfterReload = await persistenceChecks(
+  await persistenceChecks(
     'persists-after-reload',
     'after reloading the page',
     async () => {
@@ -389,7 +513,7 @@ export async function runChecklist(
     },
   );
 
-  const persistedAfterReopen = await persistenceChecks(
+  await persistenceChecks(
     'persists-after-reopen',
     'after reopening the conversation in a new tab',
     async () => {
@@ -401,7 +525,7 @@ export async function runChecklist(
     },
   );
 
-  if (!persistedAfterReload && !persistedAfterReopen) {
+  if (!hasPersistedItems) {
     checks.add(
       'save-acknowledged',
       'case 2 / R4',

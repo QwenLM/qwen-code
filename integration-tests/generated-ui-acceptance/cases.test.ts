@@ -11,6 +11,7 @@ import {
   FORM_VALUES,
   runActivityForm,
   runBillSplitter,
+  runChecklist,
   runComparator,
 } from './cases.js';
 import {
@@ -142,8 +143,17 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       },
     );
 
-    it.each(['control', 'reversed'] as const)(
-      'checks bill allocation order: %s',
+    it.each([
+      'control',
+      'reversed',
+      'regenerated-chart-id',
+      'stale-subtotal',
+      'stale-discount',
+      'stale-service-rate',
+      'stale-chart',
+      'stale-chart-data',
+    ] as const)(
+      'checks bill allocation order and complete reset behavior: %s',
       async (mode) => {
         const page = await browser.newPage();
         try {
@@ -184,12 +194,33 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 document.getElementById('total').textContent = (total / 100).toFixed(2);
                 document.getElementById('shares').innerHTML = shares.map((share, i) => '<li>Person ' + (i + 1) + ': ' + (share / 100).toFixed(2) + '</li>').join('');
                 document.getElementById('chart').innerHTML = '<svg viewBox="0 0 ' + people * 30 + ' 100"><rect width="' + people + '" height="10"></rect></svg>';
-                if (people === 7 && discount === 6100 && rate === 15) window.observedScenario = [...shares];
+                if (${JSON.stringify(mode)} === 'regenerated-chart-id') {
+                  const svg = document.querySelector('#chart svg');
+                  svg.id = 'chart-' + Math.random();
+                  const gradient = 'gradient-' + Math.random();
+                  svg.insertAdjacentHTML('afterbegin', '<defs><linearGradient id="' + gradient + '"><stop offset="0" stop-color="black" /></linearGradient></defs>');
+                  svg.querySelector('rect').setAttribute('fill', 'url(#' + gradient + ')');
+                }
+                if (${JSON.stringify(mode)} === 'stale-chart-data') {
+                  const svg = document.querySelector('#chart svg');
+                  svg.insertAdjacentHTML('afterbegin', '<style>rect[data-people="7"] { width: 7px; }</style>');
+                  const rect = svg.querySelector('rect');
+                  rect.setAttribute('width', '6');
+                  rect.dataset.people = String(people);
+                }
+                if (food === 90000 && people === 7 && discount === 6100 && rate === 15) window.observedScenario = [...shares];
               }
               document.addEventListener('input', render);
               document.getElementById('reset').onclick = () => {
+                const fault = ${JSON.stringify(mode)}.replace('stale-', '');
+                const staleInput = document.getElementById(fault)?.value;
+                const staleChart = document.getElementById('chart').innerHTML;
+                const staleChartData = document.querySelector('#chart rect').dataset.people;
                 for (const [id, value] of Object.entries({ subtotal: '900', people: '6', discount: '60', 'service-rate': '10' })) document.getElementById(id).value = value;
                 render();
+                if (staleInput !== undefined) document.getElementById(fault).value = staleInput;
+                if (fault === 'chart') document.getElementById('chart').innerHTML = staleChart;
+                if (fault === 'chart-data') document.querySelector('#chart rect').dataset.people = staleChartData;
               };
               document.getElementById('copy').onclick = () => parent.navigator.clipboard.writeText(document.getElementById('total').textContent);
               render();
@@ -211,7 +242,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           );
           const expected = [13784, 13784, 13784, 13784, 13783, 13783, 13783];
           expect(shares).toEqual(
-            mode === 'control' ? expected : [...expected].reverse(),
+            mode === 'reversed' ? [...expected].reverse() : expected,
           );
           expect(
             results.find(({ id }) => id === 'bill.conserves-cents')?.status,
@@ -220,10 +251,108 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             results.find(({ id }) => id === 'bill.fair-rounding')?.status,
           ).toBe('pass');
           expect(results.find(({ id }) => id === 'bill.scenario')?.status).toBe(
-            mode === 'control' ? 'pass' : 'fail',
+            mode === 'reversed' ? 'fail' : 'pass',
+          );
+          expect(results.find(({ id }) => id === 'bill.reset')?.status).toBe(
+            mode.startsWith('stale-') ? 'fail' : 'pass',
           );
         } finally {
           await page.close();
+        }
+      },
+    );
+
+    it.each(['control', 'progress-loss', 'history-loss'] as const)(
+      'checks checklist progress and undo persistence: %s',
+      async (mode) => {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        try {
+          const html = `
+            <input id="new-item"><select id="filter"><option value="all">All</option><option value="open">Open</option><option value="done">Done</option></select>
+            <button id="add">Add</button><button id="undo">Undo</button><p id="empty">Empty</p><ul id="items"></ul>
+            <script>
+              const key = 'checklist-' + new URL(location.href).searchParams.get('session');
+              const saved = JSON.parse(localStorage.getItem(key) || 'null');
+              let items = saved?.items || [];
+              let history = saved?.history || [];
+              const byId = id => document.getElementById(id);
+              const snapshot = () => JSON.parse(JSON.stringify(items));
+              function render() {
+                byId('empty').hidden = !!items.length;
+                byId('items').innerHTML = '';
+                items.forEach((item, index) => {
+                  const slot = 'item-' + (index + 1);
+                  const row = document.createElement('li');
+                  const filter = byId('filter').value;
+                  row.hidden = filter === 'done' ? !item.done : filter === 'open' ? item.done : false;
+                  row.innerHTML = '<input type="checkbox" id="' + slot + '-check"><span id="' + slot + '-text"></span><button id="' + slot + '-delete">Delete</button>';
+                  byId('items').append(row);
+                  byId(slot + '-text').textContent = item.text;
+                  byId(slot + '-check').checked = item.done;
+                  byId(slot + '-check').onchange = event => { history.push(snapshot()); item.done = event.target.checked; render(); };
+                  byId(slot + '-delete').onclick = () => { history.push(snapshot()); items.splice(index, 1); render(); };
+                });
+                localStorage.setItem(key, JSON.stringify({
+                  items: ${JSON.stringify(mode)} === 'progress-loss' ? items.map(item => ({ ...item, done: false })) : items,
+                  history: ${JSON.stringify(mode)} === 'history-loss' ? [] : history,
+                }));
+              }
+              byId('add').onclick = () => { history.push(snapshot()); items.push({ text: byId('new-item').value, done: false }); byId('new-item').value = ''; render(); };
+              byId('filter').onchange = render;
+              byId('undo').onclick = () => { if (history.length) items = history.pop(); render(); };
+              render();
+            </script>`;
+          await context.route('http://acceptance.test/**', async (route) => {
+            const url = new URL(route.request().url());
+            await route.fulfill({
+              contentType: 'text/html',
+              body:
+                url.pathname === '/view'
+                  ? html
+                  : `<iframe name="view" src="/view${url.search}"></iframe>`,
+            });
+          });
+          let starts = 0;
+          let checkedBeforeReload = false;
+          const reload = page.reload.bind(page);
+          vi.spyOn(page, 'reload').mockImplementation(async (options) => {
+            const card = await waitForCardOn(page, 0);
+            checkedBeforeReload = await card.view
+              .locator('#item-2-check')
+              .isChecked();
+            return reload(options);
+          });
+          const env = {
+            page,
+            context,
+            startSession: async () => {
+              await page.goto(`http://acceptance.test/?session=${++starts}`);
+            },
+            waitForCard: (index: number) => waitForCardOn(page, index),
+            waitForIdle: async () => {},
+          } as unknown as AcceptanceEnv;
+
+          const results = await runChecklist(env, 'checklist');
+          expect(checkedBeforeReload).toBe(true);
+          for (const id of ['persists-after-reload', 'persists-after-reopen']) {
+            expect(
+              results.find((check) => check.id === `checklist.${id}`)?.status,
+            ).toBe(mode === 'control' ? 'pass' : 'fail');
+          }
+          for (const id of [
+            'add',
+            'check-and-filter',
+            'delete',
+            'repeated-undo',
+            'isolated-across-sessions',
+          ]) {
+            expect(
+              results.find((check) => check.id === `checklist.${id}`)?.status,
+            ).toBe('pass');
+          }
+        } finally {
+          await context.close();
         }
       },
     );
