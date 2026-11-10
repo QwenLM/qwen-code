@@ -26,10 +26,12 @@
 
 撤权阻止新选用和独立取包。既有已准入 Session 保留固定内容，直接从执行包存储恢复，不重新解析当前业务来源。执行包缺失或损坏时明确失败，不替换为最新内容或静默重新编译。默认启用和强制选择继续由受信业务应用负责。凭据继续走现有加密设置，不进入来源信息或归档句柄。
 
+公共 v2 Session close/delete 在生命周期 effects 完成后，终态释放 Hook 与 MCP owner。普通 Harness detach 保持确定性 owner 可重新获取。生命周期 claim、身份、generation、未决执行与最终 Worker 停止校验仍必须通过，detach 回执不能代替终态 close 证据。
+
 ## 业务接入与验收
 
 DataAgent 适配器留在业务仓，仅依赖 Managed contracts。复用 Skill 与专家套件的现有精确版本和权限规则，不使用吞掉归档错误的对客 DTO 或仅支持当前版本的票据。不根据历史 DTO 字段推断发布资格，不给明确版本增加仅已发布限制。原始 ZIP 摘要兼容由适配器处理，Managed 计算实际字节摘要。
 
 验证自定义 Bean 退让、重复 Provider、严格引用、流清理、不可变存储、同 Key 冲突、并发导入和未知写入；所有新使用/读取路径的来源权限；更新、撤权和进程替换后的固定版本；来源故障期间的原操作重放；CSI 来源恢复。执行 API/SurfaceRegistry、嵌入契约、真实 MySQL 并发/恢复和 Hosted 执行。遵守模块共享十分钟本地 Java 预算，完整 CI 和真实 DataAgent 部署验收分别记录。本设计不声明已经部署。
 
-本地证据包括定向 Java/API 测试、真实 MySQL 8.4 导入并发和 CSI 来源往返、自定义存储 Spring 退让，以及 Boot 3.5.3 来源导入/Session 准入。DataAgent 独立 `managed-extension-sources / pinned-versions` 集合需要候选部署和自有历史 Skill/脚本、专家套件测试资源，当前未在部署环境执行。来源撤权、Provider 故障、进程替换和执行包损坏的部署故障矩阵仍待单独执行。既有 daemon/Muster 旅程不能证明 Managed 验收。DataAgent 完整本地门禁记录过一个 ACP 协议 IT 失败，定向重跑通过，因此完整门禁仍待通过，不能标绿。
+本地证据包括定向 Java/API 测试、真实 MySQL 8.4 导入并发和 CSI 来源往返、自定义存储 Spring 退让，以及 Boot 3.5.3 来源导入/Session 准入。DataAgent 独立 `managed-extension-sources / pinned-versions` 集合需要候选部署和自有历史 Skill/脚本、专家套件测试资源，当前未在部署环境执行。来源撤权、Provider 故障、进程替换和执行包损坏的部署故障矩阵仍待单独执行。既有 daemon/Muster 旅程不能证明 Managed 验收。较早 DataAgent 候选曾记录 ACP 协议 IT 失败，原失败报告继续保留。当前内网宿主候选已通过完整本地门禁（3,222 项单测、墙钟 20.123 秒、聚合行覆盖率 86.93%）、Boot 3.5.3 嵌入装配及 320 项一次性 MySQL 8.4.11 测试。这些检查不代表部署或 Hosted 执行验收通过。
