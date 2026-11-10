@@ -402,6 +402,38 @@ The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
 not maintain a separate public-to-Harness Session mapping.
 
+## Personal memory (opt-in)
+
+Personal memory is disabled by default. Enable it only after qualifying a
+dedicated Mem0 service with cross-service sharing disabled. Configure the
+control plane with `qwen.managed-agent.memory.enabled=true`,
+`qwen.managed-agent.memory.endpoint` and `qwen.managed-agent.memory.api-key`.
+Session Store must also be enabled, and the Hosted Harness must advertise
+`session-memory/1`. The endpoint and service key stay in the control plane;
+do not put them in Harness, sandbox or MCP configuration.
+
+An authenticated actor calls `POST /v1/agents/memory-stores` with an empty body
+or `{}` to create or retrieve their single personal Store. `GET` on the same
+route returns zero or one Store. Add the returned `id` as `memory_store_id` to
+the public Session creation request, or `memoryStoreId` to the WebShell request.
+Omitting the field leaves memory disabled. The binding cannot change after
+creation and participates in creation idempotency. The same user can explicitly
+reuse their Store across authorized Workspaces.
+
+Bound Sessions recall relevant memories for new user inputs and expose
+`context_search`, `context_remember`, `context_get` and `context_forget` through
+the existing tool UI. Remembering and forgetting require explicit user intent
+and follow tool approval and Plan Mode. An uncertain write returns `unknown`;
+it is never automatically resubmitted or reported as successful.
+
+These Sessions and their children are visible only to the owner, in addition to
+the existing Workspace grants. Children do not inherit Store access. Workspace
+file sharing remains unchanged. Deleting a memory affects future retrieval,
+while prior Session history follows the existing retention policy. Existing
+development databases must be recreated after this V1 schema baseline change.
+See the [personal memory design](../../docs/design/2026-11-07-managed-user-memory.md)
+for isolation and recovery requirements.
+
 ## Public Session lifecycle
 
 Close, archive and delete are durable `ma_operation` execution units. Each answers
@@ -1720,6 +1752,10 @@ Set `qwen.managed-agent.extensions.self-service-enabled=true` to allow authorize
 Review normalized resources and non-secret configuration before confirming installation. Workspace service credentials are stored through encrypted extension settings; commands, arguments and resource files are not executed during preparation. Publishing a revision does not change an existing Session. Explicit apply pins the chosen package/settings revision only in an eligible idle Session and preserves unrelated extensions, independent MCP connections and base Hooks. Recovery of old content creates a new configuration revision. An unknown apply outcome keeps the original operation/owner barrier and must be queried or continued before another selection is submitted.
 
 Runtime project Skill snapshots and personal HTTP MCP OAuth are separate dependent deliveries. This installation protocol remains version 1 and adds no personal credential tables or bindings. See the complete [English design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.md) and [Chinese design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.zh-CN.md). Disabling self-service keeps already published and installed content available. Local focused checks and prior whole-branch CI do not establish real MySQL, browser-to-Runtime or process-fault acceptance of a split head.
+
+### Import project Skills from the current Runtime
+
+After first-stage self-service is available, enable `qwen.managed-agent.extensions.runtime-skill-import-enabled` only with the Hosted `managed-runtime-skill-import/1` capability. Use **Import from current Workspace** to discover `.qwen/skills` and `.agents/skills` in the Session's original ready Runtime. Snapshot and archive reads retain the observed owner/generation and filesystem boundary; a changed source or owner fails without fallback or provisioning. Review and explicitly apply the immutable snapshot through the existing installation chain. Re-import publishes a new revision and does not watch or automatically update existing Sessions. See the [English design](../../docs/design/2026-11-08-managed-runtime-skill-import.md) and [Chinese design](../../docs/design/2026-11-08-managed-runtime-skill-import.zh-CN.md). Personal OAuth is a separate delivery and is not required.
 
 ## Linux extension process acceptance
 

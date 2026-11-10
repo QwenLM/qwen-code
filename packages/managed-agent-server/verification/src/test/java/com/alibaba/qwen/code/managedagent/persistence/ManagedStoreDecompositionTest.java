@@ -50,7 +50,7 @@ class ManagedStoreDecompositionTest {
             assertNoSpringComponent(component);
             for (var field : component.getDeclaredFields()) {
                 assertThat(Modifier.isFinal(field.getModifiers())).as(field.toString()).isTrue();
-                assertThat(field.getType()).isNotIn(ManagedAgentStore.class, ManagedSessionStore.class);
+                assertThat(field.getType()).isNotIn(ManagedAgentStore.class, JdbcManagedSessionStore.class);
             }
             assertThat(Arrays.stream(component.getDeclaredMethods()))
                     .noneMatch(method -> method.isAnnotationPresent(Transactional.class));
@@ -93,6 +93,7 @@ class ManagedStoreDecompositionTest {
         assertEntries(ManagedAgentStore.class, """
                 findSessionWorktree/2:- findSessionWorktrees/2:- insertSessionCommand/10::REQUIRED:DEFAULT:false
                 insertSessionCommand/11::REQUIRED:DEFAULT:false
+                insertSessionCommand/12::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-
                 replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false insertCsiSessionCommand/7:- requireCsiRequest/2:-
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
@@ -144,7 +145,7 @@ class ManagedStoreDecompositionTest {
                 appendPublicEventIfAbsent/7::REQUIRED:DEFAULT:false appendLiveSessionEventIfAbsent/5::REQUIRED:DEFAULT:false findLastVisibleStatusBeforeDelete/2:-
                 requireSession/2:- readBinding/1:- insertSessionCommand/9::REQUIRED:DEFAULT:false
                 """);
-        assertEntries(ManagedSessionStore.class, """
+        assertEntries(JdbcManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
@@ -180,7 +181,7 @@ class ManagedStoreDecompositionTest {
     void facadeSourcesContainNoBusinessSql() throws Exception {
         Path sources = Path.of("..", "persistence", "src", "main", "java")
                 .resolve(ManagedAgentStore.class.getPackageName().replace('.', '/'));
-        for (Class<?> facade : List.of(ManagedAgentStore.class, ManagedSessionStore.class)) {
+        for (Class<?> facade : List.of(ManagedAgentStore.class, JdbcManagedSessionStore.class)) {
             assertNoBusinessSql(Files.readString(sources.resolve(facade.getSimpleName() + ".java")));
         }
     }

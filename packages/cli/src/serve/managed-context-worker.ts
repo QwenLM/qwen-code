@@ -744,6 +744,29 @@ export function registerManagedContextRoutes(
         executor.isSessionConfigurationIdle(
           extensionRuntime?.runtimeSessionId(sessionId) ?? sessionId,
         ),
+      skillSource: async (sessionId) => {
+        const binding = contexts.get(sessionId);
+        const directory = binding && (await mount.resolve(binding.cwdRelative));
+        if (!binding || !directory || !admissionOpen())
+          throw new Error('skill_source_unavailable');
+        const real = await fs.realpath(directory);
+        return {
+          directory: real,
+          origin: {
+            workspaceId: boot.workspaceId,
+            workspaceGeneration: boot.workspaceGeneration,
+            cwdRelative: binding.cwdRelative,
+          },
+          admits: async (file) =>
+            admissionOpen() &&
+            (await mount.resolve(binding.cwdRelative)) === directory &&
+            executor.admitsProjectSkillPath(
+              extensionRuntime?.runtimeSessionId(sessionId) ?? sessionId,
+              file,
+              real,
+            ),
+        };
+      },
       compile: async (
         directory,
         _pin,
@@ -871,6 +894,7 @@ export function registerManagedContextRoutes(
         const receipts = await extensionProcesses.stopAll();
         if (receipts.some((entry) => entry.state !== 'stopped'))
           throw new Error('Original extension owners are not stopped.');
+        await extensionRuntime?.closeSkillSnapshots();
       },
     });
     app.post(

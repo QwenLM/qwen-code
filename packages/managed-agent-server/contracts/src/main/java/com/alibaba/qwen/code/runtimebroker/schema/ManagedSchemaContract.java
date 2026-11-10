@@ -27,6 +27,8 @@ public final class ManagedSchemaContract {
                     "ma_output_capture",
                     "ma_artifact",
                     "ma_request_receipt",
+                    "ma_memory_store",
+                    "ma_memory_entry",
                     "ma_operation",
                     "ma_operation_work",
                     "ma_workspace",
@@ -88,7 +90,8 @@ public final class ManagedSchemaContract {
         CHANNEL_INGRESS,
         ACTION_DECISION,
         WORKSPACE_CREATE,
-        EXTERNAL_STORAGE
+        EXTERNAL_STORAGE,
+        MEMORY
     }
 
     public enum ReceiptScope {

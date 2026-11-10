@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -114,7 +114,7 @@ class ContextCompressionCoordinatorTest {
 
     private static final class Fixture {
         private final AgentStateStore store = mock(AgentStateStore.class);
-        private final ManagedExtensionRecordStore records = mock(ManagedExtensionRecordStore.class);
+        private final JdbcManagedExtensionRecordStore records = mock(JdbcManagedExtensionRecordStore.class);
         private final HarnessConnector harness = mock(HarnessConnector.class);
         private final OperationRecord operation;
         private final ContextCompressionCoordinator coordinator;
