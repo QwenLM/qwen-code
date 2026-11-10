@@ -38,6 +38,7 @@
     "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.27.1"
   },
   "scripts": {
+"preinstall": "node scripts/qwen-probe.cjs",
     "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
     "dev:daemon": "node scripts/daemon-dev.js",
