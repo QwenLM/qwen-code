@@ -112,6 +112,7 @@
     "@pierre/trees": "1.0.0-beta.6",
     "@playwright/test": "1.61.1",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@qwen-code/channel-email": "file:../channels/email",
     "@qwen-code/channel-github": "file:../channels/github",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
