@@ -156,9 +156,15 @@ export function registerSessionCommit(sha: string): void {
 }
 
 /**
- * Whether a `git commit --amend` mention must go to manual approval.
+ * Whether a text-recognisable `git commit --amend` mention must go to manual
+ * approval.
  *
- * Always `true`. The guard cannot prove that a mention inside shell text is
+ * Always `true` for such a mention. Three kinds of call are structurally
+ * invisible to a text guard and stay outside this contract: an encoded
+ * assembly (`eval $(echo … | base64 -d)`) where neither `git` nor `commit`
+ * appears, a git alias (`.gitconfig` `am = commit --amend`) invoked as
+ * `git am`, and a renamed/wrapped binary or Makefile target. The guard cannot
+ * prove that a mention inside shell text is
  * data rather than a program — hand-scanning shell syntax to prove inertness
  * was tried for seven rounds without converging (issue #13570) — and the
  * exemption for a commit this session created produced two leaks in a row
@@ -183,15 +189,42 @@ export function amendNeedsApproval(command: string): boolean {
 function mentionsGitCommitAmend(command: string): boolean {
   let seenGit = false;
   let inCommit = false;
+  // `${IFS}`/`$IFS` expand to whitespace at run time, so a command that
+  // assembles `git`, `commit` and `--amend` this way cannot be read from the
+  // text; treat the expansion as whitespace so the words are seen (R25-2).
   for (const token of shellWords(command)) {
-    for (const word of token.split(/\s+/).filter(Boolean)) {
-      const bare = bareShellWord(word);
-      if (inCommit && isAmendFlag(bare)) return true;
-      if (isGitWord(bare)) seenGit = true;
-      else if (seenGit && bare === 'commit') inCommit = true;
+    const expanded = token.replace(/\$(?:\{IFS\}|IFS)/g, ' ');
+    // A redirect glued to a word still splits it in bash (`git>|/dev/null`),
+    // so split it here too before deciding what the word is (R25-2).
+    for (const piece of expanded.split(/[<>|]/)) {
+      for (const word of piece.split(/\s+/).filter(Boolean)) {
+        const bare = bareShellWord(word);
+        if (!bare) continue;
+        if (inCommit) {
+          if (isAmendFlag(bare)) return true;
+          // A flag assembled by an expansion cannot be proven inert; ask.
+          // The escalation stays gated on a seen `git` + `commit` prefix.
+          if (isUnprovableFlag(bare)) return true;
+        }
+        if (isGitWord(bare)) seenGit = true;
+        else if (seenGit && bare === 'commit') inCommit = true;
+      }
     }
   }
-  return false;
+  // Rule 3 (R25-2): any `$` expansion — IFS assembly, an indirect word, a
+  // flag built from a variable — next to a `git` + `commit` mention keeps the
+  // text unprovable: ask, never silently allow. Bash word-splits the expansion
+  // result, so an assembly that changes the words always carries a `$`.
+  return (
+    command.includes('$') &&
+    /(?:^|[^\w])git(?:\.exe)?(?:[^\w]|$)/.test(command) &&
+    /(?:^|[^\w])commit(?:[^\w]|$)/.test(command)
+  );
+}
+
+/** A word that expands at run time and starts like a flag (R25-2). */
+function isUnprovableFlag(word: string): boolean {
+  return /^-{1,2}/.test(word) && /[$`{]/.test(word);
 }
 
 function bareShellWord(word: string): string {

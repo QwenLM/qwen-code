@@ -770,6 +770,27 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write(REPO_SETTINGS)],
     ],
     [
+      // R25-1 (1): a trailing backslash continues the line before parsing, so
+      // the opener on the next physical line is visible and the body's `cd`
+      // is data.
+      'reads a heredoc opener after a line continuation',
+      'cd .qwen \\\n<<EOF\ncd /tmp\nEOF\necho {} > settings.json',
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      // R25-1 (2): `$((` closing on the same line must not latch the depth.
+      'does not latch arithmetic depth past its closing parens',
+      'n=$((1+2))\ncat <<EOF\ncd /tmp\nEOF\necho {} > .qwen/settings.json',
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      // R25-1 (5): an unfinished opener must not discard the delimiters the
+      // same line already produced.
+      'keeps earlier delimiters when a later opener is unfinished',
+      'cat <<A && cat <<EO\\\ncd /tmp\nA\necho {} > .qwen/settings.json',
+      [write(REPO_SETTINGS)],
+    ],
+    [
       // C1: a `<<` inside double quotes is data, not a heredoc opener; the
       // settings write on the next line must still be reported.
       'does not read a heredoc opener inside double quotes',

@@ -2593,6 +2593,9 @@ class HeredocLexer {
 
   scan(line: string): string[] {
     const delimiters: string[] = [];
+    // Bash removes a backslash-newline before reading the next line, so
+    // nothing stays escaped across the boundary (R25-1).
+    this.escaped = false;
     for (let index = 0; index < line.length; index++) {
       const char = line[index]!;
       if (this.escaped) {
@@ -2604,15 +2607,10 @@ class HeredocLexer {
         continue;
       }
       if (this.quote === "'") {
-        // Inside single quotes everything is data, `"` included.
         if (char === "'") this.quote = '';
         continue;
       }
       if (this.quote === '"') {
-        // Inside double quotes `'` is an ordinary character and `<<` is data;
-        // only `"` closes the state (C1). An unterminated quote therefore
-        // keeps this conservative reading across lines, as it did before this
-        // change — a known limitation, not a heredoc decision.
         if (char === '"') this.quote = '';
         continue;
       }
@@ -2639,20 +2637,21 @@ class HeredocLexer {
         if (char === ']') this.legacyArithmetic = false;
         continue;
       }
+      if (this.arithmeticDepth > 0) {
+        // A `<<` inside arithmetic is a shift; keep scanning so the closing
+        // `))` is seen instead of latching the depth past the line (R25-1).
+        if (char === ')' && line[index + 1] === ')') {
+          this.arithmeticDepth--;
+          index++;
+        }
+        continue;
+      }
       if (char === '(' && line[index + 1] === '(') {
         this.arithmeticDepth++;
         index++;
         continue;
       }
-      if (char === ')' && line[index + 1] === ')' && this.arithmeticDepth > 0) {
-        this.arithmeticDepth--;
-        index++;
-        continue;
-      }
-      if (
-        this.arithmeticDepth > 0 ||
-        (char === '#' && (index === 0 || /[\s;&|()]/.test(line[index - 1]!)))
-      ) {
+      if (char === '#' && (index === 0 || /[\s;&|()]/.test(line[index - 1]!))) {
         break;
       }
       if (char !== '<' || line[index + 1] !== '<') continue;
@@ -2661,10 +2660,16 @@ class HeredocLexer {
         continue;
       }
       const delimiter = this.readDelimiter(line, index + 2);
-      if (delimiter === null) return [];
+      if (delimiter === null) {
+        // Keep what this line already found instead of discarding it
+        // (R25-1); the caller analyses the remaining text rather than
+        // swallowing it (fail-closed).
+        break;
+      }
       delimiters.push(delimiter.text);
       index = delimiter.end;
     }
+    this.escaped = false;
     return delimiters;
   }
 

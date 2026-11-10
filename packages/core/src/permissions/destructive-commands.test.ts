@@ -345,6 +345,18 @@ describe('isDestructiveCommand — git commit --amend', () => {
     '<(git commit --amend)',
     "x='git commit --amend'; $x",
     'git commit --amend>/dev/null',
+    // R25-2: redirect glued to the program word, IFS-assembled words, and a
+    // flag produced by an expansion.
+    'git>|/dev/null commit --amend --no-edit --allow-empty',
+    'git${IFS}commit${IFS}--amend --no-edit',
+    'x=amend; git commit --$x',
+    // Rule 3: an indirect word plus IFS assembly still carries a `$`, so the
+    // text is unprovable and must ask rather than fall through to L5.3.
+    `w='git commit --am'; IFS=' '; $w"end"`,
+    // Rule 3 only: the expansion splits the `commit` word, so word scanning
+    // cannot see the subcommand and only the `$`-alongside-git+commit rule
+    // keeps this from falling through to L5.3.
+    'git ${x}commit --amend',
     "git commit --amend\\n'-m' x",
   ])('routes the %s spelling to approval', (command) => {
     expectNeedsApproval(command);
