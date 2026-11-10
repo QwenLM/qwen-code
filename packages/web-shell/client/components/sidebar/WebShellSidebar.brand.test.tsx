@@ -281,6 +281,16 @@ describe('sidebar brand', () => {
     ).not.toBeNull();
     await act(async () => clickSidebarElement(sorts[0], true));
     expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(2);
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ).find((item) => item.textContent === 'Last question');
+    expect(option).toBeDefined();
+    await act(async () => clickSidebarElement(option!));
+    expect(
+      catalogOptions.mock.calls.some(
+        ([options]) => options.sortBy === 'lastUserPromptAt',
+      ),
+    ).toBe(true);
   });
 
   it('renders the built-in name and inline mark when no brand is configured', () => {
