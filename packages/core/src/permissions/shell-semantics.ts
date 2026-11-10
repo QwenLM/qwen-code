@@ -2572,6 +2572,12 @@ interface StrippedHeredocs {
    * unproven, so callers must not silently trust the extracted paths.
    */
   uncertain: boolean;
+  /**
+   * True when the lexer saw a `<<` that cannot be excluded as a heredoc
+   * opener. A `<<` that is provably inert (arithmetic shift, determinate
+   * single-quoted text, here-string) does not set it.
+   */
+  possibleOpener: boolean;
 }
 
 function stripHeredocBodies(command: string): StrippedHeredocs {
@@ -2592,7 +2598,11 @@ function stripHeredocBodies(command: string): StrippedHeredocs {
     pendingDelimiters.push(...lexer.scan(line));
   }
 
-  return { text: kept.join('\n'), uncertain: lexer.hasUncertainty() };
+  return {
+    text: kept.join('\n'),
+    uncertain: lexer.hasUncertainty(),
+    possibleOpener: lexer.hasPossibleOpener(),
+  };
 }
 
 /**
@@ -2650,6 +2660,14 @@ class HeredocLexer {
   /** Sticky: set once a construct makes the heredoc boundaries unproven. */
   private uncertain = false;
   /**
+   * Sticky: set when a `<<` was seen that cannot be excluded as an opener —
+   * a real opener, a `<<` met inside a quote state this lexer cannot trust,
+   * and a `<<` hidden behind an ambiguous comment break.
+   */
+  private possibleOpener = false;
+  /** Sticky: a `$'…'` with an escaped quote made the quote state untrusted. */
+  private ansiCQuoteUntrusted = false;
+  /**
    * True when the previous line ended with an unescaped `$` and a
    * backslash-newline, so a leading `$` on this line forms `$$` (the PID)
    * rather than opening an ANSI-C literal.
@@ -2665,6 +2683,10 @@ class HeredocLexer {
 
   hasUncertainty(): boolean {
     return this.uncertain;
+  }
+
+  hasPossibleOpener(): boolean {
+    return this.possibleOpener;
   }
 
   scan(line: string): string[] {
@@ -2686,6 +2708,15 @@ class HeredocLexer {
       }
       if (this.quote === "'") {
         if (char === "'") this.quote = '';
+        else if (
+          this.ansiCQuoteUntrusted &&
+          char === '<' &&
+          line[index + 1] === '<'
+        ) {
+          // The `$'…'` above may have ended the quote where this lexer did
+          // not, so an opener here cannot be excluded.
+          this.possibleOpener = true;
+        }
         continue;
       }
       if (this.quote === '"') {
@@ -2700,6 +2731,7 @@ class HeredocLexer {
           isAnsiCQuoteStart(line, index, dollarFromPreviousLine) &&
           hasEscapedQuoteInAnsiC(line, index + 2)
         ) {
+          this.ansiCQuoteUntrusted = true;
           this.uncertain = true;
         }
       }
@@ -2769,6 +2801,9 @@ class HeredocLexer {
           )
         ) {
           this.uncertain = true;
+          // The wrong comment break hides the rest of the line, so an opener
+          // there is still possible.
+          if (line.indexOf('<<', index) !== -1) this.possibleOpener = true;
         }
         break;
       }
@@ -2777,6 +2812,7 @@ class HeredocLexer {
         index += 2;
         continue;
       }
+      this.possibleOpener = true;
       const delimiter = this.readDelimiter(line, index + 2);
       if (delimiter === null) {
         // Keep what this line already found instead of discarding it
@@ -2854,7 +2890,11 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const { text: heredocStripped, uncertain } = stripHeredocBodies(command);
+  const {
+    text: heredocStripped,
+    uncertain,
+    possibleOpener,
+  } = stripHeredocBodies(command);
   const subCommands = splitCompoundCommandSegments(heredocStripped);
 
   const ops: ShellOperation[] = [];
@@ -2921,10 +2961,11 @@ function walkCompoundCommand(
   // against a cwd this analysis cannot vouch for. Reuse the existing
   // `cwdUnknown` channel: consumers that enforce protected relative paths then
   // escalate to "ask" instead of silently trusting a possibly wrong path.
-  // Only commands that can actually open a heredoc are affected: without a
-  // `<<` the ambiguous syntax above cannot move a body boundary, and marking
-  // an unrelated command would turn every `$'…'` into a manual approval.
-  return uncertain && command.includes('<<')
+  // Only commands with a `<<` the lexer could not exclude as an opener are
+  // affected; an inert `<<` (arithmetic shift, determinate quote) cannot move
+  // a body boundary, and marking those would turn every `$'…'` into a manual
+  // approval.
+  return uncertain && possibleOpener
     ? markCwdUnknownOps(ops, command, cwd)
     : ops;
 }

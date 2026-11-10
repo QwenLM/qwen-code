@@ -585,6 +585,7 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       "printf '%s' $'a\\'b' <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
       'echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
       'echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
+      "printf %s $'a\\'b'; cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
     ]) {
       expect(forcesReview(command)).toBe(true);
     }
@@ -606,6 +607,8 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       "printf %s $'a\\'b'; echo hi > out.txt",
       'echo a\\ # harmless; echo hi > out.txt',
       'echo $(echo SUB)#note; echo hi > out.txt',
+      "echo $((8<<2)); printf %s $'a\\'b'; echo hi > out.txt",
+      "echo '<<EOF'; printf %s $'a\\'b'; echo hi > out.txt",
     ]) {
       expect(forcesReview(command)).toBe(false);
     }

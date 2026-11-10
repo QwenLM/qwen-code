@@ -787,6 +787,25 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write('/repo/out.txt')],
     ],
     [
+      // R25-1 narrowing: `<<` inside arithmetic is a shift, so a later
+      // ambiguous form must not mark the command.
+      'keeps an arithmetic shift inert for a later escaped quote',
+      "echo $((8<<2)); printf %s $'a\\'b'; echo hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      'keeps a quoted heredoc-looking string inert for a later escaped quote',
+      "echo '<<EOF'; printf %s $'a\\'b'; echo hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      // A real opener after the ambiguous form is still unproven: the body's
+      // `cd` can relocate a later relative write.
+      'marks the cwd unknown when a real opener follows an ambiguous form',
+      "printf %s $'a\\'b'; cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
       // R25-1 fail-closed: `a\ #` has no word boundary before `#`, so bash
       // keeps it in the word and still reads the `<<EOF` opener.
       'marks the cwd unknown when an escaped space precedes a hash',
