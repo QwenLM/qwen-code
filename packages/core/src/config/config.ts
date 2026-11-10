@@ -7265,13 +7265,30 @@ export class Config {
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
-  getFastModel(): string | undefined {
+  getFastModel({ requirePinnedEndpoint = false } = {}): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
+    const pinnedEndpoint = this.fastModel?.trim().split('\0')[1];
+    if (
+      requirePinnedEndpoint &&
+      pinnedEndpoint !== undefined &&
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          model.baseUrl === pinnedEndpoint &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
+      throw new Error(
+        'Fast model is no longer configured at the selected endpoint',
+      );
+    }
     if (
       !available.some(
         (model) =>
