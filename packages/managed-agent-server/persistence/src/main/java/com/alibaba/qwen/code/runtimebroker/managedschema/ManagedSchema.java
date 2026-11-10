@@ -52,6 +52,19 @@ public final class ManagedSchema {
         ManagedSchemaCatalog.validate(Objects.requireNonNull(connection, "connection"), ddl());
     }
 
+    public static void validateSharedCatalog(DataSource source) {
+        Objects.requireNonNull(source, "source");
+        try (Connection connection = source.getConnection()) {
+            validateSharedCatalog(connection);
+        } catch (SQLException exception) {
+            throw new IllegalStateException("Managed shared-catalog schema validation failed", exception);
+        }
+    }
+
+    public static void validateSharedCatalog(Connection connection) throws SQLException {
+        ManagedSchemaCatalog.validateSharedCatalog(Objects.requireNonNull(connection, "connection"), ddl());
+    }
+
     public static String ddl() {
         return read(RESOURCE);
     }

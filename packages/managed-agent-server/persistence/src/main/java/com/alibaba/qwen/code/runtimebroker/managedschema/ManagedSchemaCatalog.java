@@ -101,7 +101,26 @@ final class ManagedSchemaCatalog {
     }
 
     static void validate(Connection connection, String ddl) throws SQLException {
+        validate(connection, ddl, false);
+    }
+
+    static void validateSharedCatalog(Connection connection, String ddl) throws SQLException {
+        validate(connection, ddl, true);
+    }
+
+    private static void validate(Connection connection, String ddl, boolean sharedCatalog) throws SQLException {
         Map<String, String> actual = tables(connection);
+        if (sharedCatalog) {
+            // Keep the closed target set plus every name the predecessor
+            // generations used (R6-1). A prefix test let 49 of the 63 legacy
+            // names fall out before the comparison, so a half-migrated catalog
+            // validated; it also made an unrelated `managed_agent_*` business
+            // table fail forever.
+            actual.entrySet()
+                    .removeIf(entry -> !entry.getKey().startsWith("ma_")
+                            && !ManagedSchemaContract.TABLES.contains(entry.getKey())
+                            && !ManagedSchemaContract.LEGACY_TABLES.contains(entry.getKey()));
+        }
         if (!actual.keySet().equals(ManagedSchemaContract.TABLES)
                 || actual.values().stream()
                         .anyMatch(type -> type.toUpperCase(Locale.ROOT).contains("VIEW"))) {

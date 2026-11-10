@@ -46,6 +46,80 @@ public final class ManagedSchemaContract {
                     "ma_schedule",
                     "ma_schedule_occurrence");
 
+    /**
+     * Every Managed table name the predecessor generations used, parsed from
+     * {@code verification/src/test/resources/original-managed-table-inventory.tsv}.
+     * Consulted only to keep a legacy object visible to the shared-catalog
+     * exact-set comparison: a catalog holding one of these beside the target
+     * set is half-migrated and must be refused, not filtered away. It never
+     * widens {@link #TABLES}, which stays the closed target set.
+     */
+    public static final Set<String> LEGACY_TABLES =
+            Set.of(
+                    "managed_agent_action",
+                    "managed_agent_artifact",
+                    "managed_agent_command",
+                    "managed_agent_consumer_progress",
+                    "managed_agent_definition",
+                    "managed_agent_definition_command",
+                    "managed_agent_event",
+                    "managed_agent_item",
+                    "managed_agent_item_part",
+                    "managed_agent_operation",
+                    "managed_agent_session",
+                    "managed_agent_snapshot",
+                    "managed_agent_tool_result",
+                    "managed_agent_turn",
+                    "managed_session_create_scope",
+                    "managed_session_rename_delivery",
+                    "managed_workspace_access",
+                    "managed_workspace_create_command",
+                    "managed_workspace_csi_registration",
+                    "managed_workspace_csi_retirement",
+                    "managed_workspace_csi_worker_ack",
+                    "managed_workspace_default",
+                    "managed_workspace_execution_lease",
+                    "managed_workspace_migration",
+                    "managed_workspace_operator_recovery",
+                    "managed_workspace_recovery_operation",
+                    "managed_workspace_recovery_session",
+                    "managed_workspace_recovery_work",
+                    "managed_workspace_registry",
+                    "qwen_managed_automation_command",
+                    "qwen_managed_automation_occurrence",
+                    "qwen_managed_automation_schedule",
+                    "qwen_managed_channel_binding",
+                    "qwen_managed_channel_claim",
+                    "qwen_managed_channel_delivery",
+                    "qwen_managed_channel_instance",
+                    "qwen_managed_channel_route",
+                    "qwen_managed_child_result_relay",
+                    "qwen_managed_child_workspace",
+                    "qwen_managed_session_extension_record",
+                    "qwen_managed_session_journal_head",
+                    "qwen_managed_session_journal_tx",
+                    "qwen_managed_session_message_relay",
+                    "qwen_managed_session_resource",
+                    "qwen_managed_session_resource_collection",
+                    "qwen_managed_session_resource_ref",
+                    "qwen_managed_session_task_journal",
+                    "qwen_managed_session_task_journal_cursor",
+                    "qwen_output_put_attempt",
+                    "qwen_output_read_lease",
+                    "qwen_output_session_retirement",
+                    "qwen_runtime_binding",
+                    "qwen_runtime_binding_slot",
+                    "qwen_runtime_harness_drain",
+                    "qwen_runtime_placement_guard",
+                    "qwen_runtime_session",
+                    "qwen_runtime_storage_fence",
+                    "qwen_tool_execution",
+                    "qwen_tool_publication",
+                    "qwen_tool_publication_object",
+                    "qwen_tool_publication_operation",
+                    "qwen_tool_publication_seal",
+                    "qwen_tool_publication_tenant");
+
     private ManagedSchemaContract() {}
 
     public enum OperationKind {
