@@ -1409,6 +1409,41 @@ describe('Repository-only channel access config', () => {
     });
   });
 
+  it('keeps a nested GitLab project narrowed during a temporary switch when the save lands on Open', () => {
+    // The non-Allowlist save path projects draft-only repositories through
+    // repositoryAllowlistIds, which must use the GitLab shape: a nested path
+    // typed during this visit survives the switch back to Open. With the
+    // GitHub shape (the default if the channel type is not threaded) the
+    // 3-segment path is filtered out and its restriction silently vanishes.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'open',
+        groups: { '*': { senders: 'open' } },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    draft.values.groupPolicy = 'open';
+    draft.allowedGroupIds = 'mygroup/subgroup/newproj';
+    draft.groupOverrides['mygroup/subgroup/newproj'] = {
+      requireMention: '',
+      senders: 'allowlist',
+      allowedUsers: 'alice',
+    };
+
+    expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({});
+    const groups = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(groups['mygroup/subgroup/newproj']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
+  });
+
   it('requires owner/repo for an allowlisted repository', () => {
     const draft = createChannelEditorDraft(GITHUB);
     draft.name = 'release-bot';

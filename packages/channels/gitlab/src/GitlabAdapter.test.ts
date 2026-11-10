@@ -280,6 +280,42 @@ describe('GitlabChannel', () => {
       ch.disconnect();
     });
 
+    it('admits a mixed-case project path through the allowlist case-insensitively', async () => {
+      // The allowlist admission path (GroupGate) resolves the group through the
+      // same normalizer; a lower-case chatId must admit the mixed-case key.
+      const config = makeConfig({
+        groupPolicy: 'allowlist',
+        groups: { 'CalcProgrammer1/OpenRGB': { requireMention: false } },
+      });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+
+      const gate = (
+        ch as unknown as {
+          groupGate: {
+            check(
+              envelope: Envelope,
+              options?: { createPairingRequest?: boolean },
+            ): { allowed: boolean; reason?: string };
+          };
+        }
+      ).groupGate;
+      const envelope = {
+        channelName: 'test-gl',
+        senderId: 'alice',
+        senderName: 'alice',
+        chatId: 'calcprogrammer1/openrgb',
+        text: 'hello',
+        isGroup: true,
+        isMentioned: true,
+        isReplyToBot: false,
+      } as Envelope;
+      expect(
+        gate.check(envelope, { createPairingRequest: false }).allowed,
+      ).toBe(true);
+      ch.disconnect();
+    });
+
     it('normalizes operators to lowercase for shared-session commands', async () => {
       const config = makeConfig({ operators: ['Alice'] });
       const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
