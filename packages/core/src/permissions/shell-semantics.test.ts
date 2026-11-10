@@ -849,6 +849,13 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite('/repo/settings.json')],
     ],
     [
+      // The cd's own redirect still belongs to the segment, so the early
+      // return has to carry it: bash writes `out.txt` before the cd fails.
+      'keeps a redirect on the segment of an expanding brace cd',
+      'cd {a}b,c} > out.txt && echo x > settings.json',
+      [write('/repo/out.txt'), uncertainWrite('/repo/settings.json')],
+    ],
+    [
       // Same continuation, one close earlier: bash prints `a}` and `b`.
       'marks a brace group whose close directly precedes the comma',
       'cd {a},b} && echo x > settings.json',
