@@ -4863,7 +4863,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'state_change — the PR is merged or closed',
   'channels.editor.field.github.prWatchLimit': 'PR Watch Limit',
   'channels.editor.field.github.prWatchLimit.description':
-    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one API request per poll, but an unchanged PR answers 304 and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch (~60 requests/hour per PR at the 60s default) and the periodic CI re-checks, so size the budget against those; the old "~80 watched PRs on a 5000/hour budget" figure was set by the state watch and no longer binds. Over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default (30).',
+    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one API request per poll, but an unchanged PR answers 304 and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch (~60 requests/hour per PR at the 60s default) and the periodic CI re-checks, which put a 5000/hour budget at roughly 70-75 bound PRs. The ceiling moved from the state watch to the comment watch — it did not disappear, so do not read "near-free" as "unlimited". Over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default (30).',
   'channels.editor.field.github.prWatchLimit.disabledHint':
     'Enable "Deliver To PR-Bound Sessions" above to set the watch limit.',
   'channels.editor.field.github.prWatchBudgetReserve':
@@ -9640,7 +9640,7 @@ const ZH: Messages = {
     'state_change — PR 被合并或关闭',
   'channels.editor.field.github.prWatchLimit': 'PR 监视上限',
   'channels.editor.field.github.prWatchLimit.description':
-    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮仍约发出一次 API 请求，但未变化的 PR 会得到 304、不计入主速率限制，因此 PR 安静时状态监视近乎免费。仍然计费的是默认开启的评论监视（按默认 60 秒间隔约每小时 60 次/PR）与周期性 CI 复查，请按这两项估预算；旧的「5000 次/小时预算约容纳 80 个被监视 PR」是由状态监视决定的，已不再成立。超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值（30）。',
+    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮仍约发出一次 API 请求，但未变化的 PR 会得到 304、不计入主速率限制，因此 PR 安静时状态监视近乎免费。仍然计费的是默认开启的评论监视（按默认 60 秒间隔约每小时 60 次/PR）与周期性 CI 复查，两者使 5000 次/小时的预算大约落在 70–75 个绑定 PR。上限是从状态监视转移到了评论监视，并没有消失，因此不要把「近乎免费」读成「没有上限」。超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值（30）。',
   'channels.editor.field.github.prWatchLimit.disabledHint':
     '开启上方「投递到 PR 绑定会话」后即可设置监视上限。',
   'channels.editor.field.github.prWatchBudgetReserve': 'PR 监视预算预留',

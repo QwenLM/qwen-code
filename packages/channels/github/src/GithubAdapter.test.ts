@@ -119,6 +119,7 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
 import {
   CONDITIONAL_CACHE_MAX_ENTRIES,
   GithubChannel,
+  MAX_PR_WATCH_LIMIT,
   validateBoundSessionConfig,
 } from './GithubAdapter.js';
 
@@ -19422,12 +19423,16 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         mockOctokit.paginate.mockResolvedValue([]);
         try {
           await wired.connect();
-          expect(mockOctokitConstructor).toHaveBeenCalledWith(
-            expect.objectContaining({
-              request: expect.objectContaining({
-                fetch: expect.any(Function),
-              }),
-            }),
+          // Pin identity, not type: `expect.any(Function)` also admits a
+          // passthrough, so rewiring to globalThis.fetch would keep this green
+          // while no validator is ever sent. Deleting the wiring is only half
+          // the failure mode; replacing it is the other half.
+          const options = mockOctokitConstructor.mock.calls.at(-1)![0] as {
+            request: { fetch: unknown };
+          };
+          expect(options.request.fetch).toBe(
+            (wired as unknown as { conditionalFetch: unknown })
+              .conditionalFetch,
           );
         } finally {
           wired.disconnect();
@@ -19474,6 +19479,11 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         const comments =
           'https://api.github.com/repos/owner/repo/issues/42/comments';
         const thread = 'https://api.github.com/notifications/threads/1';
+        // The pull-scoped comments path shares the watched PR's prefix, so it
+        // is what the `$` anchor on the pulls pattern actually protects.
+        // Without it, dropping that anchor survives the whole group.
+        const reviewComments =
+          'https://api.github.com/repos/owner/repo/pulls/42/comments';
 
         await transport(prUrl, { method: 'GET' });
         // Same URL as the primed cache entry, but a write must not revalidate.
@@ -19482,8 +19492,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         await transport(comments, { method: 'GET' });
         await transport(thread, { method: 'GET' });
         await transport(thread, { method: 'GET' });
+        await transport(reviewComments, { method: 'GET' });
+        await transport(reviewComments, { method: 'GET' });
 
         expect(calls.map((call) => call.ifNoneMatch)).toEqual([
+          null,
+          null,
           null,
           null,
           null,
@@ -19631,10 +19645,14 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           headers: { etag: '"v1"' },
         }));
         const transport = adapterFetch();
-        // Past the default watch limit: the fan-out this channel supports is
-        // up to MAX_PR_WATCH_LIMIT open PRs plus a terminal-drain slice.
+        // One full worst-case sweep, derived from the producer: the open set
+        // plus the terminal-drain slice. A literal below that (200) would let
+        // a cap sized at the open-PR ceiling alone pass, while a real 600-URL
+        // sweep collapses to zero hits.
+        const sweep =
+          MAX_PR_WATCH_LIMIT + Math.max(1, Math.ceil(MAX_PR_WATCH_LIMIT * 0.2));
         const urls = Array.from(
-          { length: 200 },
+          { length: sweep },
           (_, i) => `https://api.github.com/repos/owner/repo/pulls/${i + 1}`,
         );
 
