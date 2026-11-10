@@ -448,6 +448,15 @@ public class HarnessCoordinator {
             renewal.cancel(false);
             if (!terminal) {
                 store.releaseTurnLease(tenantId, sessionId, turnId, owner);
+            } else {
+                // The Turn reached a terminal state and its renewal was just
+                // cancelled, so no further cancellation send can run for it.
+                // Reclaim its dedup and takeover-pace keys here, where the
+                // claim actually finishes; a settled Turn never re-enters the
+                // cancel path, so pruning there would never run.
+                takeoverPace.remove(tenantId + '/' + sessionId + '/' + turnId);
+                String turnPrefix = key(tenantId, sessionId, turnId) + "\n";
+                cancellations.removeIf(cancelKey -> cancelKey.startsWith(turnPrefix));
             }
         }
     }
@@ -1175,18 +1184,8 @@ public class HarnessCoordinator {
         try {
             TurnRecord turn = store.findTurn(tenantId, sessionId, turnId)
                     .orElse(null);
-            if (turn == null || !"CANCELLING".equals(turn.status())) {
-                // The Turn is absent or settled: its cancellation dedup and
-                // takeover-pace keys can never gate another send, so reclaim
-                // them here instead of letting them accumulate for the
-                // process lifetime. A transient read failure throws into the
-                // outer catch and never reaches this prune.
-                takeoverPace.remove(tenantId + '/' + sessionId + '/' + turnId);
-                String turnPrefix = key(tenantId, sessionId, turnId) + "\n";
-                cancellations.removeIf(cancelKey -> cancelKey.startsWith(turnPrefix));
-                return;
-            }
-            if (turn.harnessEventEpoch() == null) {
+            if (turn == null || !"CANCELLING".equals(turn.status())
+                    || turn.harnessEventEpoch() == null) {
                 return;
             }
             SessionRecord session = store.requireSession(tenantId,

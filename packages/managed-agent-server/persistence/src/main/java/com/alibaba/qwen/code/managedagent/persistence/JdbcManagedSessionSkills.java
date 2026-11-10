@@ -48,7 +48,7 @@ public class JdbcManagedSessionSkills
         try {
             return AgentDefinitionExtensions.sessionSkills(json.readValue(resource.bytes(), new TypeReference<List<Map<String, Object>>>() { }));
         } catch (java.io.IOException error) {
-            throw conflict();
+            throw conflict(error);
         }
     }
 
