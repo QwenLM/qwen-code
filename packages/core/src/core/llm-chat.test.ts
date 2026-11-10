@@ -31,6 +31,8 @@ import type {
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import { FinishReason } from './genai-compat.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import {
   LlmChat,
@@ -1031,6 +1033,46 @@ describe('LlmChat', async () => {
       expect(streamMock()).toHaveBeenCalledOnce();
     });
 
+    it.each([0, 64 * 1024])(
+      'copies the prepared conversation only with a positive snapshot budget (%s)',
+      async (maxSnapshotBytes) => {
+        streamMock().mockResolvedValue(
+          streamOf(stopResponse([{ text: 'done' }])),
+        );
+        const clone = vi.spyOn(globalThis, 'structuredClone');
+        const stringify = vi.spyOn(JSON, 'stringify');
+        let copiedDuringCapture = -1;
+        let serializedDuringCapture = -1;
+        const callback = Object.assign(
+          async () => {
+            copiedDuringCapture = clone.mock.calls.length;
+            serializedDuringCapture = stringify.mock.calls.filter(
+              ([value]) =>
+                value &&
+                typeof value === 'object' &&
+                'providerPin' in value &&
+                'request' in value &&
+                'history' in value,
+            ).length;
+          },
+          { maxSnapshotBytes },
+        );
+        const response = await chat.sendMessageStream(
+          'test-model',
+          { message: 'observation only' },
+          'prompt',
+          undefined,
+          { onPreparedRequest: callback },
+        );
+        clone.mockClear();
+        stringify.mockClear();
+        await drain(response);
+        expect(copiedDuringCapture).toBe(maxSnapshotBytes > 0 ? 1 : 0);
+        expect(serializedDuringCapture).toBe(maxSnapshotBytes > 0 ? 1 : 0);
+        expect(streamMock()).toHaveBeenCalledOnce();
+      },
+    );
+
     it('does not send, retry or fall back after a failed durability barrier', async () => {
       const dispatched = vi.fn();
       const callback = vi
@@ -1463,6 +1505,21 @@ describe('LlmChat', async () => {
     /** `send` for any message shape, a bare Part included. */
     const sendAny = (message: Message, promptId: string, target = chat) =>
       target.sendMessageStream('test-model', { message }, promptId);
+
+    it('reports signed-out subscription before processing the request', async () => {
+      mockConfig.getCurrentAuthType = vi
+        .fn()
+        .mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      mockConfig.getContentGeneratorConfig = vi.fn().mockReturnValue(undefined);
+      vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
+        false,
+      );
+
+      await expect(sendAny('hello', 'signed-out')).rejects.toThrow(
+        SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE,
+      );
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
 
     /** A user prompt followed by the model's (unanswered) call. */
     const afterCall = (

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
@@ -129,7 +130,7 @@ public final class SessionResourceCollectionCollector {
 
     private static JsonNode progress(java.util.Map<String, Object> row) {
         Object value = row.get("result_json");
-        return value == null ? JSON.createObjectNode() : ManagedToolResultStore.parse((String) value);
+        return value == null ? JSON.createObjectNode() : JdbcManagedToolResultStore.parse((String) value);
     }
 
     private void ensureLedgers() {
@@ -155,7 +156,7 @@ public final class SessionResourceCollectionCollector {
                                 (String) row.get("session_id"));
                         String tenant = (String) row.get("tenant_id");
                         String session = (String) row.get("session_id");
-                        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+                        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
                         String request =
                                 JSON.createObjectNode()
                                         .put("version", 1)
@@ -185,14 +186,14 @@ public final class SessionResourceCollectionCollector {
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
             Claim claim =
-                    ManagedSessionStore.skipContended(
+                    JdbcManagedSessionStore.skipContended(
                             transactions,
                             status -> {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
                                 String scope = (String) candidate.get("scope_key");
-                                ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                                        jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+                                JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                                        jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     return null;
                                 }
@@ -323,7 +324,7 @@ public final class SessionResourceCollectionCollector {
         if (!jdbc.query(
                         "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
                                 + " operation_kind = 'OBJECT_PUT' AND state <> 'RETURNED' LIMIT 1",
-                (row, index) -> row.getString(1), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             return "put_unresolved";
         }
         // The relay's classifications are all terminal (its discovery page and claim exclude
@@ -333,7 +334,7 @@ public final class SessionResourceCollectionCollector {
                         "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
                             + " operation_kind = 'CHILD_SESSION_START' AND state NOT IN ('done',"
                             + " 'orphaned', 'unknown') LIMIT 1",
-                (row, index) -> row.getString(1), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             return "child_start_unresolved";
         }
         // A recovery capture or verification reads a retired Session's bytes through
@@ -354,8 +355,8 @@ public final class SessionResourceCollectionCollector {
 
     private Boolean page(Claim claim) {
         // Session locks precede the ledger row lock, matching claim()'s order.
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                jdbc, claim.tenant(), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                jdbc, claim.tenant(), JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, claim.tenant(), claim.session());
         var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, claim.tenant(), claim.session());
         var row =

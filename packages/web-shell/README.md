@@ -183,6 +183,9 @@ daemon 自身。页面的防嵌入策略可能要求使用外部打开。远程�
 `true` 或 `undefined` 时由宿主接管，保持旧版无返回值回调的行为。
 未提供回调时仍使用原生行为，`onFileReviewOpen` 保持更高优先级。
 该回调处理右侧面板请求；原生直接外部打开的记录链接仍走外部链接能力。
+提供该回调时，managed 存储产物（仅有 managedId、无 workspace 路径或 URL）的
+卡片动作会标为 Preview，因为宿主可能自行渲染其内容；未提供回调时，这类产物
+在默认面板只有元信息，卡片保持 Open。
 
 `filterArtifact(artifact, { turnId, sourceSessionId })` 返回是否展示消息末尾的
 产物卡片。过滤先于折叠数量计算，并应用于主会话、分屏和嵌套会话。
@@ -843,6 +846,17 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 原方式展示。桌面菜单使用下拉形式，触屏使用抽屉。已有 `composerToolbarActions`
 等配置继续决定默认和高级模式的可选操作，`composerPlaceholders` 占位文字覆盖继续
 生效。
+宿主若已通过 `renderComposerToolbarStart` 渲染自己的附件／添加入口，传入
+`hostOwnsAddMenu: true` 可隐藏内置 ＋ 菜单（主聊天、分屏与托管会话页一致；触屏上
+仅含命令的入口同样让位，该入口图标为斜杠、aria-label 为 All commands／
+「全部命令」），避免出现两个入口。`workflowMode` 的菜单入口随菜单一起隐藏，改由
+默认变体的工具栏提供双向开关：宿主未报告可用状态时（unbound、同步中、未知、
+写入中、未提供变更回调，或未请求且不可用）开关禁用；已请求但当前不可用时仍可关闭。
+`composerVariant: 'simple'` 不渲染工具栏前导区（宿主的
+`renderComposerToolbarStart` 也在其中），该变体因此没有 Workflow 回退，此开关只
+适用于默认变体，设在简洁变体上只会连内置菜单一起去掉。与从
+`composerToolbarActions` 中去掉 `addMenu` 不同（那只作用主输入框），本开关作用于
+各输入框的内置菜单。
 
 ### 品牌（白标）
 

@@ -28,6 +28,7 @@ import {
   channelEventFilePath,
   DEFAULT_BOUND_ROLE_GUIDANCE,
   getWorkspaceScopeDirName,
+  MAX_POLL_INTERVAL_MS,
   PairingStore,
   type ChannelAgentBridge,
   type ChannelBoundSessions,
@@ -72,6 +73,7 @@ vi.mock('@octokit/rest', () => {
       },
       pulls: {
         get: vi.fn(),
+        listReviewComments: vi.fn(),
       },
       checks: {
         listForRef: vi.fn(),
@@ -81,6 +83,24 @@ vi.mock('@octokit/rest', () => {
       },
     },
     paginate: vi.fn(),
+    // connect() registers a request hook to record the success-path budget.
+    // Store the wrapper on a stable property (not the mock call log, which
+    // initChannel's clearAllMocks wipes) so a test can feed it a response
+    // with rate-limit headers. The real-paginator test uses a real Octokit.
+    hook: {
+      wrap: vi.fn((_name: string, wrapper: unknown) => {
+        (
+          mockOctokit as {
+            __requestWrapper?: unknown;
+            __requestHookName?: string;
+          }
+        ).__requestWrapper = wrapper;
+        (mockOctokit as { __requestHookName?: string }).__requestHookName =
+          _name;
+      }),
+    },
+    __requestWrapper: undefined as unknown,
+    __requestHookName: undefined as unknown,
   };
   return {
     Octokit: vi.fn(() => mockOctokit),
@@ -96,7 +116,13 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
   };
 });
 
-import { GithubChannel, validateBoundSessionConfig } from './GithubAdapter.js';
+import {
+  CONDITIONAL_CACHE_MAX_ENTRIES,
+  CONDITIONAL_CACHE_MAX_TOTAL_BYTES,
+  GithubChannel,
+  MAX_PR_WATCH_LIMIT,
+  validateBoundSessionConfig,
+} from './GithubAdapter.js';
 
 const octokitModule = (await import('@octokit/rest')) as unknown as {
   Octokit: Mock;
@@ -124,6 +150,7 @@ const mockOctokit = octokitModule.__mockOctokit as {
     };
     pulls: {
       get: ReturnType<typeof vi.fn>;
+      listReviewComments: ReturnType<typeof vi.fn>;
     };
     checks: {
       listForRef: ReturnType<typeof vi.fn>;
@@ -133,6 +160,9 @@ const mockOctokit = octokitModule.__mockOctokit as {
     };
   };
   paginate: ReturnType<typeof vi.fn>;
+  hook: { wrap: ReturnType<typeof vi.fn> };
+  __requestWrapper: unknown;
+  __requestHookName: unknown;
 };
 
 function makeConfig(
@@ -17534,6 +17564,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     const watchConfig = {
       deliverToBoundSessions: true,
+      // These tests cover the state watch; the orthogonal comment watch is
+      // exercised by its own suite and would otherwise add listComments /
+      // listReviewComments calls to the paginate routing below.
+      prCommentWatch: false,
       prWatchEvents: [
         'ci_failure',
         'merge_conflict',
@@ -17599,13 +17633,78 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockOctokit.rest.pulls.get.mockResolvedValue({ data: makePrMeta(meta) });
     }
 
+    /** A paginate map function, as @octokit/plugin-paginate-rest calls it. */
+    type ChecksMapFn = (
+      response: { data: unknown[]; headers?: { link?: string } },
+      done: () => void,
+    ) => unknown[];
+
     // The watch pass runs before the notification loop, so paginate is
     // routed by API params instead of a shared once-queue: checks fetches
     // must not consume the notifications slot.
+    //
+    // The checks route honours a map function: the adapter accumulates its
+    // observation inside one, so a routing stub that dropped the callback
+    // would leave every CI aggregate reading as 'none'. One page is served
+    // here; mockCheckPages drives the multi-page contract.
     function installWatchPaginateRouting(): void {
       mockOctokit.paginate.mockImplementation(
-        async (_fn: unknown, params: Record<string, unknown> = {}) => {
-          if ('ref' in params) return mockOctokit.rest.checks.listForRef();
+        async (
+          _fn: unknown,
+          params: Record<string, unknown> = {},
+          mapFn?: ChecksMapFn,
+        ) => {
+          if ('ref' in params) {
+            const runs = (await mockOctokit.rest.checks.listForRef()) ?? [];
+            if (mapFn) {
+              mapFn({ data: runs }, () => {});
+              return [];
+            }
+            return runs;
+          }
+          if ('issue_number' in params)
+            return mockOctokit.rest.issues.listComments();
+          return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+        },
+      );
+    }
+
+    /**
+     * Serve check runs as real pages: one listForRef request per page, and
+     * `done()` stops before the next one. The single-page routing cannot
+     * observe an early exit, so request-count assertions need this.
+     */
+    function mockCheckPages(
+      pages: Array<
+        Array<{ status: string; conclusion: string | null; name?: string }>
+      >,
+    ): void {
+      mockOctokit.paginate.mockImplementation(
+        async (
+          _fn: unknown,
+          params: Record<string, unknown> = {},
+          mapFn?: ChecksMapFn,
+        ) => {
+          if ('ref' in params) {
+            for (const [index, page] of pages.entries()) {
+              // Called for its request count only: the page body comes from
+              // the fixture, so assertions count pages actually read.
+              await mockOctokit.rest.checks.listForRef();
+              let stopped = false;
+              // The real iterator follows this header, so every page but the
+              // last carries it — that is how the adapter tells "stopped with
+              // pages left" from "read everything".
+              const headers =
+                index < pages.length - 1
+                  ? { link: '<https://api.github.com/next>; rel="next"' }
+                  : {};
+              mapFn?.({ data: page, headers }, () => {
+                stopped = true;
+              });
+              if (stopped) break;
+            }
+            return [];
+          }
           if ('issue_number' in params)
             return mockOctokit.rest.issues.listComments();
           return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
@@ -18055,6 +18154,1057 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
     });
 
+    // A busy head carries hundreds of check runs, so one CI observation used
+    // to cost one request per page plus a combined-status request. A failure
+    // decides the aggregate on its own: neither a later page nor a commit
+    // status can overturn it.
+    describe('CI aggregate request cost', () => {
+      /** Advance updated_at so the next poll re-observes a settled head. */
+      async function baselineThenRecheck(): Promise<void> {
+        await initChannel(watchConfig, { boundSessions });
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+      }
+
+      /**
+       * Every other case stubs `paginate`, so none can show that the real
+       * plugin issues fewer requests. This drives the production reducer
+       * through a REAL Octokit and the REAL pagination plugin, replacing
+       * only the HTTP transport, and counts what actually goes on the wire.
+       */
+      async function observeWithRealPaginator(
+        pages: Array<Array<{ name: string; conclusion: string }>>,
+      ) {
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        const urls: string[] = [];
+        const client = new Octokit({
+          auth: 'test-token',
+          request: {
+            fetch: async (url: string) => {
+              urls.push(String(url));
+              const parsed = new URL(String(url));
+              const json = (body: unknown, headers: Record<string, string>) =>
+                new Response(JSON.stringify(body), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json', ...headers },
+                });
+              if (parsed.pathname.endsWith('/status')) {
+                return json({ state: 'pending', total_count: 0 }, {});
+              }
+              const page = Number(parsed.searchParams.get('page') ?? '1');
+              const link: Record<string, string> = {};
+              if (page < pages.length) {
+                const next = new URL(parsed);
+                next.searchParams.set('page', String(page + 1));
+                link['link'] = `<${next}>; rel="next"`;
+              }
+              return json(
+                {
+                  total_count: pages.length,
+                  check_runs: pages[page - 1]!.map((run) => ({
+                    ...run,
+                    status: 'completed',
+                  })),
+                },
+                link,
+              );
+            },
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        (channel as unknown as { octokit: unknown }).octokit = client;
+        const observation = await (
+          channel as unknown as {
+            fetchCiAggregate: (
+              owner: string,
+              repo: string,
+              sha: string,
+            ) => Promise<{
+              aggregate: string;
+              failedChecks: string[];
+              namesIncomplete: boolean;
+            }>;
+          }
+        ).fetchCiAggregate('owner', 'repo', 'sha-1');
+        return { observation, urls };
+      }
+
+      it('issues one real request for a red multi-page head', async () => {
+        const { observation, urls } = await observeWithRealPaginator([
+          [{ name: 'lint', conclusion: 'failure' }],
+          [{ name: 'build', conclusion: 'failure' }],
+          [{ name: 'test', conclusion: 'success' }],
+        ]);
+
+        // Before the short-circuit this same fixture cost 3 check-list pages
+        // plus 1 combined status. Counted on the transport, not on a stub.
+        expect(urls).toHaveLength(1);
+        expect(urls[0]).toContain('/check-runs');
+        expect(observation.aggregate).toBe('failure');
+        expect(observation.failedChecks).toEqual(['lint']);
+        expect(observation.namesIncomplete).toBe(true);
+      });
+
+      it('reads every real page and the status while nothing has failed', async () => {
+        const { observation, urls } = await observeWithRealPaginator([
+          [{ name: 'lint', conclusion: 'success' }],
+          [{ name: 'build', conclusion: 'success' }],
+        ]);
+
+        expect(urls).toHaveLength(3);
+        expect(urls.filter((url) => url.includes('/check-runs'))).toHaveLength(
+          2,
+        );
+        expect(urls.filter((url) => url.endsWith('/status'))).toHaveLength(1);
+        expect(observation.aggregate).toBe('success');
+        expect(observation.namesIncomplete).toBe(false);
+      });
+
+      it('stops paging check runs once a page reports a failure', async () => {
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'failure', name: 'build' }],
+          [{ status: 'completed', conclusion: 'failure', name: 'later-page' }],
+          [{ status: 'completed', conclusion: 'success' }],
+        ]);
+        await pollOnce();
+
+        // One page for the baseline, one for the failing head: pages 2 and 3
+        // must never be requested.
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Failed checks: build');
+        expect(prompt).not.toContain('later-page');
+        // Pages went unread, so the list must not read as complete: this
+        // fires once per head, so the marker is the only notice that later
+        // pages went unread.
+        expect(prompt).toContain('list may be incomplete');
+      });
+
+      it('does not mark the list incomplete when the failing page is the last', async () => {
+        // Stopping on the last page read everything, so a marker here would
+        // falsely claim that pages went unread.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'success' }],
+          [{ status: 'completed', conclusion: 'failure', name: 'last-page' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(3);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Failed checks: last-page');
+        expect(prompt).not.toContain('list may be incomplete');
+      });
+
+      it('keeps paging until it finds a failure on a later page', async () => {
+        // The passing control for the early exit, and the risk it carries: a
+        // head whose first pages are clean must still be read to the page
+        // that fails, or the red head is certified green.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [{ status: 'completed', conclusion: 'success' }],
+          [{ status: 'queued', conclusion: null }],
+          [{ status: 'completed', conclusion: 'failure', name: 'late-job' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(4);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Failed checks: late-job',
+        );
+      });
+
+      it('reports every failure name on the page that decided the aggregate', async () => {
+        // The exit is between pages, not inside one: breaking out of the
+        // per-run loop would drop the second name from the same page.
+        await baselineThenRecheck();
+        mockCheckPages([
+          [
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+            { status: 'completed', conclusion: 'timed_out', name: 'slow-job' },
+          ],
+          [{ status: 'completed', conclusion: 'failure', name: 'later-page' }],
+        ]);
+        await pollOnce();
+
+        expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Failed checks: build, slow-job',
+        );
+      });
+
+      it('skips the combined status once a check run has failed', async () => {
+        await baselineThenRecheck();
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await pollOnce();
+
+        // Only the baseline poll consulted it; a decided 'failure' cannot be
+        // changed by a commit status.
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(1);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+      });
+
+      it('still fires ci_failure when the skipped statuses endpoint would fail', async () => {
+        // The behavioural half of the skip, which a resolving mock cannot
+        // show: 403 is fail-fast for the watch, so without the guard the
+        // whole observation aborts, ciResult stays undefined, the baseline
+        // 'success' stands and the red head is silent until the next
+        // re-check interval.
+        await baselineThenRecheck();
+        mockOctokit.rest.repos.getCombinedStatusForRef.mockRejectedValue(
+          Object.assign(new Error('Resource not accessible by integration'), {
+            status: 403,
+          }),
+        );
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'CI failed on head sha-1',
+        );
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        // Baseline only: the failing poll never reached the endpoint, so the
+        // 403 could not be retried either.
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('still reads the combined status when no check run failed', async () => {
+        // The control for the skip: legacy commit statuses are the only CI
+        // signal on a status-only head, so an undecided aggregate must ask.
+        await baselineThenRecheck();
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.repos.getCombinedStatusForRef,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not carry an aborted attempt into the retried observation', async () => {
+        // githubApi retries the whole pagination. A page that dies after an
+        // earlier page read 'pending' must not leave that reading behind to
+        // decide the retry, which observes a fully settled success.
+        await initChannel(watchConfig, { boundSessions });
+        (
+          channel as unknown as {
+            abortableSleep: (ms: number) => Promise<void>;
+          }
+        ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        // The throw must land INSIDE the first pagination, after a page was
+        // already mapped: a rejection on a later paginate call would be a
+        // fresh observation, not a retry of a half-read one.
+        let attempt = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (
+            _fn: unknown,
+            params: Record<string, unknown> = {},
+            mapFn?: ChecksMapFn,
+          ) => {
+            if ('ref' in params) {
+              attempt += 1;
+              await mockOctokit.rest.checks.listForRef();
+              if (attempt === 1) {
+                mapFn?.(
+                  { data: [{ status: 'queued', conclusion: null }] },
+                  () => {},
+                );
+                throw Object.assign(new Error('Server Error'), { status: 500 });
+              }
+              mapFn?.(
+                { data: [{ status: 'completed', conclusion: 'success' }] },
+                () => {},
+              );
+              return [];
+            }
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // Without a second attempt the assertion below would be vacuous.
+        expect(attempt).toBe(2);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'success',
+        );
+      });
+    });
+
+    // The watch runs before the notification lane and is best-effort. When
+    // the last known REST budget is at or below the reserve, the pass yields
+    // so a human mention keeps the budget. The budget is recorded from a
+    // successful response's headers by the request hook connect() registers.
+    describe('watch budget awareness', () => {
+      function degradedRows(reason?: string): Array<Record<string, unknown>> {
+        return readChannelEvents().filter(
+          (event) =>
+            event['type'] === 'poll' &&
+            event['outcome'] === 'degraded' &&
+            (reason === undefined || event['reason'] === reason),
+        );
+      }
+
+      /**
+       * Feed the request hook a successful response carrying rate-limit
+       * headers, exactly as a real GitHub response would. connect() (run by
+       * initChannel) stored the wrapper on __requestWrapper, which survives
+       * initChannel's clearAllMocks.
+       */
+      async function feedBudget(
+        remaining: number | string | undefined,
+        resetEpochSeconds?: number,
+      ): Promise<void> {
+        const wrap = mockOctokit.__requestWrapper as
+          | ((
+              request: (opts: unknown) => Promise<unknown>,
+              opts: unknown,
+            ) => Promise<unknown>)
+          | undefined;
+        if (!wrap) throw new Error('request hook was not registered');
+        const headers: Record<string, string> = {};
+        if (remaining !== undefined) {
+          headers['x-ratelimit-remaining'] = String(remaining);
+        }
+        if (resetEpochSeconds !== undefined) {
+          headers['x-ratelimit-reset'] = String(resetEpochSeconds);
+        }
+        await wrap(async () => ({ headers }), {});
+      }
+
+      /** A watched PR whose CI would fire if the pass ran. */
+      async function armRedHead(): Promise<void> {
+        await initChannel(watchConfig, { boundSessions });
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+      }
+
+      it('records the remaining budget from a successful response', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // The hook must be registered on the 'request' name: a typo would
+        // build a registry nothing dispatches to, silently disabling the gate.
+        expect(mockOctokit.__requestHookName).toBe('request');
+        await feedBudget(4321, Math.floor(Date.now() / 1000) + 3600);
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(4321);
+      });
+
+      it('skips the watch when remaining equals the reserve (boundary)', async () => {
+        // `<=` not `<`: a real GitHub count steps down by one, so landing
+        // exactly on the reserve is common and must still yield.
+        await armRedHead();
+        await feedBudget(200, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('skips the watch pass when budget is at or below the reserve', async () => {
+        await armRedHead();
+        // Below the default reserve of 200, window not yet reset.
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const checksBefore =
+          mockOctokit.rest.checks.listForRef.mock.calls.length;
+        await pollOnce();
+
+        // The red head would fire if the pass ran; it must not.
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(mockOctokit.rest.checks.listForRef.mock.calls.length).toBe(
+          checksBefore,
+        );
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'success',
+        );
+        const low = degradedRows('watch_budget_low');
+        expect(low).toHaveLength(1);
+        expect(low[0]!['detail']).toEqual({ remaining: 150, reserve: 200 });
+      });
+
+      it('runs the watch pass when budget is above the reserve', async () => {
+        // The passing control: a healthy budget must not skip detection.
+        await armRedHead();
+        await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+        // A healthy round must not journal a recovery edge.
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(0);
+      });
+
+      it('does not gate before any budget reading exists', async () => {
+        // No response has carried the header yet: the watch runs normally.
+        await armRedHead();
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+      });
+
+      it('does not gate on a stale reading whose window has reset', async () => {
+        // A low count from a window that already reset must not starve the
+        // watch: the reset time has passed, so the reading is stale.
+        await armRedHead();
+        await feedBudget(50, Math.floor(Date.now() / 1000) - 60);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(readWatchState().entries['owner/repo#42']!['ci']).toBe(
+          'failure',
+        );
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+      });
+
+      it('journals the low-budget edge once, not every poll', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          // Each poll consumes its notification queue; keep the lane fed so
+          // the repeat polls exercise the budget edge, not an empty queue.
+          mockNotificationsOnce([]);
+          await pollOnce();
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        // Three low-budget polls, one edge row.
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('journals recovery when the budget climbs back above the reserve', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+
+        // Budget recovers: the next poll runs the watch and journals recovery.
+        mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+        await pollOnce();
+
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+
+        // A second low episode must journal again: this pins the flag reset
+        // on recovery (without it, every later starvation stays invisible).
+        mockNotificationsOnce([]);
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr2 = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr2.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(2);
+      });
+
+      it('journals the recovery edge once, not on every later healthy poll', async () => {
+        // Closing the episode must CLEAR the open flag. Without that clear,
+        // each subsequent healthy poll re-enters the close path and appends
+        // another recovery row — the edge becomes a per-poll heartbeat and
+        // rotates the useful rows out of the timeline. The existing recovery
+        // case goes low again right after recovering, so it never observes a
+        // second healthy poll and cannot catch this.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode opens
+          mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // episode closes: exactly one recovery row
+          expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+
+          // Two more healthy polls with the episode already closed.
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+      });
+
+      it('honours a configured reserve of 0 as disabling the gate', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 0 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // An exhausted budget (remaining 0) must still not skip when the
+        // reserve is 0: `0 <= 0` would otherwise gate the opted-out watch.
+        await feedBudget(0, Math.floor(Date.now() / 1000) + 3600);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(degradedRows('watch_budget_low')).toHaveLength(0);
+      });
+
+      it('closes the low-budget episode when the watch loses eligibility', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          // Binding refresh starts failing, so the watch block is skipped
+          // wholesale; the budget recovers during that window.
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+      });
+
+      it('journals a fresh skip after an ineligible window, not a suppressed repeat', async () => {
+        // The latch must not survive the watch losing eligibility: otherwise
+        // the second genuine starvation is silently unjournalled and the
+        // timeline's last budget word stays on an episode that already ended.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode 1: skipped for low budget
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          // Still low while ineligible: no false recovery claim.
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+          expect(degradedRows('watch_budget_recovered')).toHaveLength(0);
+
+          // Watch returns, budget still low: a NEW skip must be journalled.
+          boundSessions.listPrBindings.mockResolvedValue({
+            bindings: [makeBinding()],
+            partial: false,
+          });
+          mockPull({ updated_at: '2026-07-02T12:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // episode 2
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_low')).toHaveLength(2);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('uses a configured reserve other than the default', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 1000 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // 500 is above the default 200 but below the configured 1000.
+        await feedBudget(500, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const low = degradedRows('watch_budget_low');
+        expect(low).toHaveLength(1);
+        expect(low[0]!['detail']).toEqual({ remaining: 500, reserve: 1000 });
+      });
+
+      it('keeps the last known budget when a response omits the header', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        // A proxy stripped the header: the real reading must survive.
+        await feedBudget(undefined);
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(150);
+      });
+
+      it('the adapter-registered hook records a real response budget', async () => {
+        // The other cases feed the captured wrapper a hand-built response.
+        // This drives the SAME wrapper connect() registered with a real
+        // Octokit request, so the header parsing is exercised against a real
+        // Response (lowercased header keys, string values) rather than a
+        // fixture shaped to match the parser.
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        const client = new Octokit({
+          auth: 'test-token',
+          request: {
+            fetch: async () =>
+              new Response(JSON.stringify({ total_count: 0, check_runs: [] }), {
+                status: 200,
+                headers: {
+                  'content-type': 'application/json',
+                  'x-ratelimit-remaining': '321',
+                  'x-ratelimit-reset': String(
+                    Math.floor(Date.now() / 1000) + 3600,
+                  ),
+                },
+              }),
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        // The wrapper the adapter installed in connect(), applied to a real
+        // request function. This is the adapter's own code path, not a
+        // re-implementation.
+        const wrap = mockOctokit.__requestWrapper as (
+          request: (
+            opts: unknown,
+          ) => Promise<{ headers: unknown; data: unknown }>,
+          opts: unknown,
+        ) => Promise<{ headers: unknown; data: unknown }>;
+        const res = await wrap(
+          (opts) =>
+            client.request(opts as Parameters<typeof client.request>[0]),
+          { method: 'GET', url: '/repos/o/r/commits/s/check-runs' },
+        );
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(321);
+        // The hook must return the response unchanged: dropping it would
+        // resolve every REST call to undefined and break connect().
+        expect(res.data).toEqual({ total_count: 0, check_runs: [] });
+      });
+
+      it('clears a stale reset when a response omits the reset header', async () => {
+        // A proxy strips only x-ratelimit-reset. The old (expired) reset must
+        // not survive to make the gate treat a fresh low count as stale.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) - 60);
+        await feedBudget(150); // remaining kept, reset header absent
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('clamps an over-ceiling reserve to the hard maximum', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 100000 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // Clamped to 5000: remaining 5000 is at the reserve (skip), 5001 above.
+        await feedBudget(5000, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')[0]!['detail']).toEqual({
+          remaining: 5000,
+          reserve: 5000,
+        });
+      });
+
+      it('rounds a fractional reserve up so it is never smaller than requested', async () => {
+        await initChannel(
+          { ...watchConfig, prWatchBudgetReserve: 200.5 },
+          { boundSessions },
+        );
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // Ceil(200.5) = 201, so remaining 201 is at the reserve and skips.
+        await feedBudget(201, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')[0]!['detail']).toEqual({
+          remaining: 201,
+          reserve: 201,
+        });
+      });
+
+      it('falls back to the default reserve for an invalid configured value', async () => {
+        // validateBoundSessionConfig now rejects a non-numeric reserve at the
+        // boundary, so the getter's fallback is only reachable from a settings
+        // file written before that rule (or hand-edited). Inject it after
+        // connect to exercise that legacy path rather than the rejected one.
+        await initChannel(watchConfig, { boundSessions });
+        (channel as unknown as { config: Record<string, unknown> }).config[
+          'prWatchBudgetReserve'
+        ] = 'abc';
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        // Invalid -> default 200: remaining 150 skips.
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')[0]!['detail']).toEqual({
+          remaining: 150,
+          reserve: 200,
+        });
+      });
+
+      it('still delivers a mention in the very poll whose watch was skipped', async () => {
+        // The feature's whole promise. Every other case queues an EMPTY
+        // notification list, so turning the skip into an early `return`
+        // would starve mentions while they all stayed green.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        // armRedHead leaves an EMPTY notification queued for its next poll;
+        // drop it, or the mention queues behind it and is never consumed.
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockReset();
+        mockNotificationsOnce([
+          makeNotification({
+            reason: 'mention',
+            subject: {
+              title: 'Some issue',
+              url: 'https://api.github.com/repos/owner/repo/issues/99',
+              type: 'Issue',
+            },
+          }),
+        ]);
+        mockOctokit.rest.issues.listComments.mockResolvedValueOnce([]);
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: {
+            title: 'Some issue',
+            body: '@test-bot please look',
+            state: 'open',
+            user: { login: 'alice' },
+          },
+        });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        // Watch skipped...
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+        // ...but the notification lane still ran, claimed the mention as a
+        // task and started it — in this same poll.
+        const mentionTasks = readChannelEvents().filter(
+          (event) => event['type'] === 'task' && event['thread'] === 'issue:99',
+        );
+        expect(
+          mentionTasks.some((event) => event['outcome'] === 'accepted'),
+        ).toBe(true);
+        expect(
+          mentionTasks.some((event) => event['outcome'] === 'running'),
+        ).toBe(true);
+      });
+
+      it('yields mid-pass once the budget reaches the reserve', async () => {
+        // R1-5: the poll-boundary gate alone lets a pass entered just above
+        // the reserve spend it all before the notification lane runs.
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        // Enter one above the reserve; the first PR's own request drops the
+        // reading to the reserve, so the second must not be fetched.
+        await feedBudget(201, Math.floor(Date.now() / 1000) + 3600);
+        mockOctokit.rest.pulls.get.mockImplementation(async () => {
+          await feedBudget(200, Math.floor(Date.now() / 1000) + 3600);
+          return { data: makePrMeta() };
+        });
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(1);
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it('journals recovery when the budget recovers while the watch stays ineligible', async () => {
+        // R1-6: the skip latch is released during the ineligible window, so
+        // gating recovery on that latch alone loses the episode's closing row.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce(); // episode opens
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // still low, ineligible: latch released silently
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce(); // budget recovers, watch STILL ineligible
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(degradedRows('watch_budget_recovered')).toHaveLength(1);
+      });
+
+      it('closes the episode when the window resets, with no payload on the recovery row', async () => {
+        // R1-4: the realistic exhaustion end is the window rolling over, not
+        // a climbing count; and the protocol says the recovery row carries
+        // neither detail nor error.
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+          mockNotificationsOnce([]);
+          mockChecks([
+            { status: 'completed', conclusion: 'failure', name: 'build' },
+          ]);
+          // Same low count, but its window has already reset.
+          await feedBudget(150, Math.floor(Date.now() / 1000) - 60);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        const recovered = degradedRows('watch_budget_recovered');
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]).not.toHaveProperty('detail');
+        expect(recovered[0]).not.toHaveProperty('error');
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps the recovery row payload-free on the eligibility path too', async () => {
+        await armRedHead();
+        await feedBudget(150, Math.floor(Date.now() / 1000) + 3600);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          await pollOnce();
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('daemon gone'),
+          );
+          mockNotificationsOnce([]);
+          await feedBudget(4000, Math.floor(Date.now() / 1000) + 3600);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        const recovered = degradedRows('watch_budget_recovered');
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]).not.toHaveProperty('detail');
+        expect(recovered[0]).not.toHaveProperty('error');
+      });
+
+      it('records the budget on every page of a real paginate', async () => {
+        // R1-1: the hook's stated rationale is per-page coverage, so a single
+        // request cannot pin it. Register the ADAPTER's own captured wrapper
+        // on a real client and paginate for real: if a future @octokit change
+        // stops routing page requests through 'request', the last page's
+        // count never lands and this goes red.
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        const client = new Octokit({
+          auth: 'test-token',
+          request: {
+            fetch: async (url: string) => {
+              const parsed = new URL(String(url));
+              const page = Number(parsed.searchParams.get('page') ?? '1');
+              const headers: Record<string, string> = {
+                'content-type': 'application/json',
+                // Distinct per page: the LAST one must be what survives.
+                'x-ratelimit-remaining': page === 1 ? '4000' : '321',
+                'x-ratelimit-reset': String(
+                  Math.floor(Date.now() / 1000) + 3600,
+                ),
+              };
+              if (page < 2) {
+                const next = new URL(parsed);
+                next.searchParams.set('page', '2');
+                headers['link'] = `<${next}>; rel="next"`;
+              }
+              return new Response(
+                JSON.stringify({
+                  total_count: 2,
+                  check_runs: [
+                    {
+                      name: `job-${page}`,
+                      status: 'completed',
+                      conclusion: 'success',
+                    },
+                  ],
+                }),
+                { status: 200, headers },
+              );
+            },
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        const wrap = mockOctokit.__requestWrapper as Parameters<
+          typeof client.hook.wrap
+        >[1];
+        client.hook.wrap('request', wrap);
+        const rows = await client.paginate(
+          'GET /repos/{owner}/{repo}/commits/{ref}/check-runs',
+          { owner: 'o', repo: 'r', ref: 's', per_page: 1 },
+        );
+        // Two pages really were fetched, and the last page's reading won.
+        expect(rows).toHaveLength(2);
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(321);
+      });
+    });
+
     it('keeps watching known PRs and the baseline when the snapshot is partial', async () => {
       await initChannel(watchConfig, { boundSessions });
       mockPull({});
@@ -18106,6 +19256,659 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
       expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    describe('conditional requests', () => {
+      afterEach(() => {
+        vi.unstubAllGlobals();
+      });
+
+      const prUrl = 'https://api.github.com/repos/owner/repo/pulls/42';
+
+      /** The production transport, bound to the live adapter instance. */
+      function adapterFetch(): typeof fetch {
+        return (channel as unknown as { conditionalFetch: typeof fetch })
+          .conditionalFetch;
+      }
+
+      type WireReply = {
+        status: number;
+        body?: unknown;
+        headers?: Record<string, string>;
+      };
+
+      /**
+       * Replace only the HTTP transport. Every assertion here is about what
+       * actually went on the wire, so a stubbed paginate cannot satisfy it.
+       */
+      function installTransport(reply: (url: URL) => WireReply) {
+        const calls: Array<{ url: string; ifNoneMatch: string | null }> = [];
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: unknown, init?: RequestInit) => {
+            const url = String(input);
+            calls.push({
+              url,
+              ifNoneMatch: new Headers(init?.headers).get('if-none-match'),
+            });
+            const wire = reply(new URL(url));
+            return new Response(
+              wire.body === undefined ? null : JSON.stringify(wire.body),
+              {
+                status: wire.status,
+                headers: {
+                  'content-type': 'application/json',
+                  ...wire.headers,
+                },
+              },
+            );
+          }),
+        );
+        return calls;
+      }
+
+      /** 200 once per URL, then 304 — the quiet-PR steady state. */
+      function installRevalidatingTransport(body: unknown) {
+        const seen = new Set<string>();
+        return installTransport((url) => {
+          if (seen.has(url.href)) {
+            return { status: 304, headers: { etag: '"v1"' } };
+          }
+          seen.add(url.href);
+          return { status: 200, body, headers: { etag: '"v1"' } };
+        });
+      }
+
+      /**
+       * A paged notifications list that answers 304 on every re-read. GitHub
+       * omits Link on a 304 (measured against the live API: the same URL's
+       * 200 carried next+last, the 304 carried neither), so the fixture omits
+       * it too — that omission is the attack this group defends against.
+       */
+      function installPagedNotifications(pages: number) {
+        const seen = new Set<string>();
+        return installTransport((url) => {
+          const page = Number(url.searchParams.get('page') ?? '1');
+          if (seen.has(url.href)) {
+            return {
+              status: 304,
+              headers: { etag: `"p${page}"`, 'x-poll-interval': '60' },
+            };
+          }
+          seen.add(url.href);
+          const next = new URL(url);
+          next.searchParams.set('page', String(page + 1));
+          return {
+            status: 200,
+            body: [
+              { id: String(page), updated_at: '2026-07-02T09:00:00.000Z' },
+            ],
+            headers: {
+              etag: `"p${page}"`,
+              ...(page < pages ? { link: `<${next}>; rel="next"` } : {}),
+            },
+          };
+        });
+      }
+
+      /** Real Octokit + real pagination plugin over the production transport. */
+      async function realClient(log?: { error: (message: unknown) => void }) {
+        const { Octokit } =
+          await vi.importActual<typeof import('@octokit/rest')>(
+            '@octokit/rest',
+          );
+        return new Octokit({
+          auth: 'test-token',
+          request: { fetch: adapterFetch() },
+          // @octokit/core binds console.error at module evaluation, so a
+          // console-level spy installed after import can never see a plugin
+          // log line. Anything asserting on logging must inject the logger.
+          ...(log ? { log } : {}),
+        });
+      }
+
+      function notificationsList(
+        client: Awaited<ReturnType<typeof realClient>>,
+      ) {
+        return client.paginate(
+          client.rest.activity.listNotificationsForAuthenticatedUser,
+          { per_page: 100 },
+        );
+      }
+
+      /** Feed the registered request hook, as a real response would. */
+      async function feedHeaders(
+        headers: Record<string, string>,
+      ): Promise<void> {
+        const wrap = mockOctokit.__requestWrapper as
+          | ((
+              request: (opts: unknown) => Promise<unknown>,
+              opts: unknown,
+            ) => Promise<unknown>)
+          | undefined;
+        if (!wrap) throw new Error('request hook was not registered');
+        await wrap(async () => ({ headers }), {});
+      }
+
+      function pollIntervalMs(): number {
+        return (channel as unknown as { pollInterval: number }).pollInterval;
+      }
+
+      it('sends If-None-Match on the second read and serves the 304 from cache', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installRevalidatingTransport(makePrMeta({}));
+        const transport = adapterFetch();
+
+        const first = await transport(prUrl, { method: 'GET' });
+        const second = await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls[0]!.ifNoneMatch).toBeNull();
+        expect(calls[1]!.ifNoneMatch).toBe('"v1"');
+        // A 304 must surface as a normal success carrying the retained body,
+        // never as a thrown RequestError githubApi would retry.
+        expect(second.status).toBe(200);
+        expect(await second.json()).toEqual(await first.json());
+      });
+
+      it('wires the conditional transport into the client connect() builds', async () => {
+        // Every other case here pulls conditionalFetch off the instance and
+        // builds its own client, so none of them would notice the wiring being
+        // deleted: @octokit/request falls back to globalThis.fetch, requests
+        // still succeed, and the feature ships inert with a green suite.
+        const wired = new TestableGithubChannel(
+          'test-github',
+          makeConfig(watchConfig),
+          makeBridge(),
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        try {
+          await wired.connect();
+          // Pin identity, not type: `expect.any(Function)` also admits a
+          // passthrough, so rewiring to globalThis.fetch would keep this green
+          // while no validator is ever sent. Deleting the wiring is only half
+          // the failure mode; replacing it is the other half.
+          const options = mockOctokitConstructor.mock.calls.at(-1)![0] as {
+            request: { fetch: unknown };
+          };
+          expect(options.request.fetch).toBe(
+            (wired as unknown as { conditionalFetch: unknown })
+              .conditionalFetch,
+          );
+        } finally {
+          wired.disconnect();
+        }
+      });
+
+      it('serves the fresh body and re-caches when the ETag changes', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        let version = 1;
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({ title: `v${version}` }),
+          headers: { etag: `"v${version}"` },
+        }));
+        const transport = adapterFetch();
+        const titleOf = async (response: Response) =>
+          ((await response.json()) as { title: string }).title;
+
+        expect(await titleOf(await transport(prUrl, { method: 'GET' }))).toBe(
+          'v1',
+        );
+
+        // The resource changed, so GitHub answers 200 despite the validator.
+        // Serving the retained body here would freeze the watch on the old
+        // head/state forever.
+        version = 2;
+        const second = await transport(prUrl, { method: 'GET' });
+        expect(calls[1]!.ifNoneMatch).toBe('"v1"');
+        expect(await titleOf(second)).toBe('v2');
+
+        // The new validator replaced the old one rather than being ignored.
+        await transport(prUrl, { method: 'GET' });
+        expect(calls[2]!.ifNoneMatch).toBe('"v2"');
+      });
+
+      it('leaves out-of-scope endpoints and every write unconditional', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: {},
+          headers: { etag: '"x"' },
+        }));
+        const transport = adapterFetch();
+        const comments =
+          'https://api.github.com/repos/owner/repo/issues/42/comments';
+        const thread = 'https://api.github.com/notifications/threads/1';
+        // The pull-scoped comments path shares the watched PR's prefix, so it
+        // is what the `$` anchor on the pulls pattern actually protects.
+        // Without it, dropping that anchor survives the whole group.
+        const reviewComments =
+          'https://api.github.com/repos/owner/repo/pulls/42/comments';
+
+        await transport(prUrl, { method: 'GET' });
+        // Same URL as the primed cache entry, but a write must not revalidate.
+        await transport(prUrl, { method: 'POST' });
+        await transport(comments, { method: 'GET' });
+        await transport(comments, { method: 'GET' });
+        await transport(thread, { method: 'GET' });
+        await transport(thread, { method: 'GET' });
+        await transport(reviewComments, { method: 'GET' });
+        await transport(reviewComments, { method: 'GET' });
+
+        expect(calls.map((call) => call.ifNoneMatch)).toEqual([
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ]);
+      });
+
+      it('returns every notifications page when every page answers 304', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installPagedNotifications(3);
+        const client = await realClient();
+
+        const first = await notificationsList(client);
+        const second = await notificationsList(client);
+
+        expect(first.map((n) => n.id)).toEqual(['1', '2', '3']);
+        // Dropping the cached Link stops this at ['1'] — silently, with no
+        // error raised. The full page set is the only thing that notices.
+        expect(second.map((n) => n.id)).toEqual(['1', '2', '3']);
+        expect(calls).toHaveLength(6);
+        expect(calls.slice(3).every((c) => c.ifNoneMatch !== null)).toBe(true);
+      });
+
+      it('produces no error-level log for a 304', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const seen = new Set<string>();
+        installTransport((url) => {
+          if (url.pathname !== '/notifications') {
+            // Out of scope, so the transport forwards it untouched and the
+            // 304 reaches Octokit as a RequestError.
+            return { status: 304, headers: { etag: '"x"' } };
+          }
+          if (seen.has(url.href)) {
+            return { status: 304, headers: { etag: '"n"' } };
+          }
+          seen.add(url.href);
+          return {
+            status: 200,
+            body: [{ id: '1', updated_at: '2026-07-02T09:00:00.000Z' }],
+            headers: { etag: '"n"' },
+          };
+        });
+        const errors: string[] = [];
+        const client = await realClient({
+          error: (message) => errors.push(String(message)),
+        });
+
+        await notificationsList(client);
+        await notificationsList(client);
+
+        // plugin-request-log logs every RequestError at error level. Handling
+        // the 304 above the transport would emit one line per 304
+        // (~1,800/hour at the watch cap).
+        expect(errors).toEqual([]);
+
+        // Positive control: the injected logger really does receive
+        // plugin-request-log output. Without this the assertion above could
+        // be green merely because nothing is wired to the logger — which is
+        // exactly how a console-level spy behaves here.
+        await expect(
+          client.rest.issues.listComments({
+            owner: 'owner',
+            repo: 'repo',
+            issue_number: 42,
+          }),
+        ).rejects.toThrow();
+        expect(errors.length).toBeGreaterThan(0);
+      });
+
+      it('keys the cache on the full URL so a moved since cursor is a fresh read', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: [],
+          headers: { etag: '"n"' },
+        }));
+        const transport = adapterFetch();
+
+        await transport(
+          'https://api.github.com/notifications?since=2026-07-01T00:00:00.000Z',
+          { method: 'GET' },
+        );
+        await transport(
+          'https://api.github.com/notifications?since=2026-07-02T00:00:00.000Z',
+          { method: 'GET' },
+        );
+
+        expect(calls.map((call) => call.ifNoneMatch)).toEqual([null, null]);
+      });
+
+      it('drops the cache and the poll floor on disconnect', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
+        const calls = installRevalidatingTransport(makePrMeta({}));
+        const transport = adapterFetch();
+
+        await transport(prUrl, { method: 'GET' });
+        await feedHeaders({ 'x-poll-interval': '60' });
+        expect(pollIntervalMs()).toBe(60_000);
+
+        channel.disconnect();
+        await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls[1]!.ifNoneMatch).toBeNull();
+        // The floor came from the previous connection's endpoint; a reconnect
+        // must re-learn it rather than inherit it.
+        expect(pollIntervalMs()).toBe(10_000);
+      });
+
+      it('evicts the oldest entry past the cap while keeping the newest', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        const pull = (n: number) =>
+          `https://api.github.com/repos/owner/repo/pulls/${n}`;
+        const newest = CONDITIONAL_CACHE_MAX_ENTRIES + 1;
+
+        // One past the cap, read from the producer rather than restated here.
+        for (let n = 1; n <= newest; n++) {
+          await transport(pull(n), { method: 'GET' });
+        }
+        await transport(pull(1), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBeNull();
+
+        // Control: the newest entry survived, so an all-unconditional result
+        // above is eviction rather than a cache that never stored anything.
+        await transport(pull(newest), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+      });
+
+      it('keeps hitting across a full watch sweep larger than the default limit', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        // One full worst-case sweep, derived from the producer: the open set
+        // plus the terminal-drain slice. A literal below that (200) would let
+        // a cap sized at the open-PR ceiling alone pass, while a real 600-URL
+        // sweep collapses to zero hits.
+        const sweep =
+          MAX_PR_WATCH_LIMIT + Math.max(1, Math.ceil(MAX_PR_WATCH_LIMIT * 0.2));
+        const urls = Array.from(
+          { length: sweep },
+          (_, i) => `https://api.github.com/repos/owner/repo/pulls/${i + 1}`,
+        );
+
+        for (const url of urls) await transport(url, { method: 'GET' });
+        const secondSweep = calls.length;
+        for (const url of urls) await transport(url, { method: 'GET' });
+
+        // A cache smaller than the sweep does not degrade proportionally, it
+        // collapses: each miss evicts the entry the sweep is about to read, so
+        // every read of every later pass misses and the saving is zero for
+        // exactly the high-fan-out deployments this change is meant to help.
+        expect(
+          calls.slice(secondSweep).every((c) => c.ifNoneMatch !== null),
+        ).toBe(true);
+      });
+
+      it('keeps a live PR cached while dead cursor entries churn past the cap', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        let prServed = false;
+        const calls = installTransport((url) => {
+          // The PR must answer 304 from the second read on: a 200 re-inserts
+          // through the write path and would hide the hit-path refresh.
+          if (url.href === prUrl && prServed) {
+            return { status: 304, headers: { etag: '"v1"' } };
+          }
+          if (url.href === prUrl) prServed = true;
+          return {
+            status: 200,
+            body: makePrMeta({}),
+            headers: { etag: '"v1"' },
+          };
+        });
+        const transport = adapterFetch();
+
+        await transport(prUrl, { method: 'GET' });
+        // Each moved `since` cursor mints an entry that is never read again.
+        // Interleaving a PR read with each one means the PR is the most
+        // recently used entry every round, so write-order eviction would
+        // wrongly drop it while recency-on-hit keeps it.
+        for (let i = 0; i <= CONDITIONAL_CACHE_MAX_ENTRIES; i++) {
+          await transport(prUrl, { method: 'GET' });
+          await transport(
+            `https://api.github.com/notifications?since=cursor-${i}`,
+            { method: 'GET' },
+          );
+        }
+
+        await transport(prUrl, { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+      });
+
+      it('leaves a 200 without an ETag unconditional', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // No validator means nothing to revalidate against: the response must
+        // pass through untouched and must not occupy a cache slot.
+        const calls = installTransport(() => ({
+          status: 200,
+          body: makePrMeta({}),
+        }));
+        const transport = adapterFetch();
+
+        const first = await transport(prUrl, { method: 'GET' });
+        const second = await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls.map((call) => call.ifNoneMatch)).toEqual([null, null]);
+        expect(second.status).toBe(200);
+        expect(await second.json()).toEqual(await first.json());
+        expect(
+          (channel as unknown as { conditionalCacheBytes: number })
+            .conditionalCacheBytes,
+        ).toBe(0);
+      });
+
+      it('evicts on total bytes even while under the entry cap', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // One shared string keeps the fixture cheap while the accounting still
+        // sums per entry: enough maximum-size bodies to cross the byte budget
+        // without approaching the entry cap.
+        const filler = 'x'.repeat(256 * 1024 - 64);
+        const needed =
+          Math.ceil(CONDITIONAL_CACHE_MAX_TOTAL_BYTES / (256 * 1024)) + 1;
+        expect(needed).toBeLessThan(CONDITIONAL_CACHE_MAX_ENTRIES);
+        const calls = installTransport(() => ({
+          status: 200,
+          body: { title: filler },
+          headers: { etag: '"v1"' },
+        }));
+        const transport = adapterFetch();
+        const pull = (n: number) =>
+          `https://api.github.com/repos/owner/repo/pulls/${n}`;
+
+        for (let n = 1; n <= needed; n++) {
+          await transport(pull(n), { method: 'GET' });
+        }
+
+        // The oldest was evicted by bytes, not by count.
+        await transport(pull(1), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBeNull();
+        // Control: the newest survived, and the running total stayed in step
+        // with the map rather than drifting negative or over-counting.
+        await transport(pull(needed), { method: 'GET' });
+        expect(calls.at(-1)!.ifNoneMatch).toBe('"v1"');
+        expect(
+          (channel as unknown as { conditionalCacheBytes: number })
+            .conditionalCacheBytes,
+        ).toBeLessThanOrEqual(CONDITIONAL_CACHE_MAX_TOTAL_BYTES);
+      });
+
+      it('declines to cache an oversized body', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        // 100k characters but 300 KB of UTF-8: under the cap when measured in
+        // code units, over it when measured in bytes. A PR title is
+        // operator-controlled text, so multibyte is the realistic case.
+        const calls = installTransport(() => ({
+          status: 200,
+          body: { title: '中'.repeat(100_000) },
+          headers: { etag: '"big"' },
+        }));
+        const transport = adapterFetch();
+
+        await transport(prUrl, { method: 'GET' });
+        await transport(prUrl, { method: 'GET' });
+
+        expect(calls).toHaveLength(2);
+        expect(calls[1]!.ifNoneMatch).toBeNull();
+      });
+
+      it('records the fresh budget from a 304, not the cached reading', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        let served = 0;
+        installTransport(() => {
+          served++;
+          return served === 1
+            ? {
+                status: 200,
+                body: makePrMeta({}),
+                headers: { etag: '"v1"', 'x-ratelimit-remaining': '5000' },
+              }
+            : {
+                status: 304,
+                headers: { etag: '"v1"', 'x-ratelimit-remaining': '4321' },
+              };
+        });
+        const client = await realClient();
+        // Reproduce production wiring: the budget hook sits above the
+        // transport, so it must see the 304's own budget header.
+        const wrap = mockOctokit.__requestWrapper as Parameters<
+          typeof client.hook.wrap
+        >[1];
+        client.hook.wrap('request', wrap);
+        (channel as unknown as { octokit: unknown }).octokit = client;
+
+        await client.rest.pulls.get({
+          owner: 'owner',
+          repo: 'repo',
+          pull_number: 42,
+        });
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(5000);
+        await client.rest.pulls.get({
+          owner: 'owner',
+          repo: 'repo',
+          pull_number: 42,
+        });
+        expect(
+          (channel as unknown as { lastRateLimitRemaining: number })
+            .lastRateLimitRemaining,
+        ).toBe(4321);
+      });
+
+      it('raises the poll interval to X-Poll-Interval', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
+        expect(pollIntervalMs()).toBe(10_000);
+        await feedHeaders({ 'x-poll-interval': '60' });
+        expect(pollIntervalMs()).toBe(60_000);
+      });
+
+      it('never lowers a slower configured poll', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 300_000 },
+          { boundSessions },
+        );
+        await feedHeaders({ 'x-poll-interval': '60' });
+        expect(pollIntervalMs()).toBe(300_000);
+      });
+
+      it('never raises the poll interval past the runtime ceiling', async () => {
+        await initChannel(
+          { ...watchConfig, pollInterval: 10_000 },
+          { boundSessions },
+        );
+        // The header is server-controlled, and the base class bounds both
+        // ends of the configured value for a reason: Node clamps a timeout
+        // above its 32-bit range to 1ms, so an unbounded floor would turn the
+        // poll loop into a hot loop that burns the very quota this saves.
+        // 2_147_484s is just past that range.
+        await feedHeaders({ 'x-poll-interval': '2147484' });
+        expect(pollIntervalMs()).toBe(MAX_POLL_INTERVAL_MS);
+      });
+
+      it('still re-checks CI on its interval while every PR read is a 304', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-02T09:00:00.000Z'));
+        await initChannel(watchConfig, { boundSessions });
+        const prSeen = new Set<string>();
+        const checkCalls: string[] = [];
+        installTransport((url) => {
+          if (url.pathname.endsWith('/check-runs')) {
+            checkCalls.push(url.href);
+            return {
+              status: 200,
+              body: {
+                total_count: 1,
+                check_runs: [
+                  { name: 'build', status: 'completed', conclusion: 'success' },
+                ],
+              },
+            };
+          }
+          if (url.pathname.endsWith('/status')) {
+            return { status: 200, body: { state: 'success', total_count: 0 } };
+          }
+          if (url.pathname === '/notifications') {
+            return { status: 200, body: [] };
+          }
+          if (prSeen.has(url.href)) {
+            return { status: 304, headers: { etag: '"pr"' } };
+          }
+          prSeen.add(url.href);
+          return {
+            status: 200,
+            body: makePrMeta({}),
+            headers: { etag: '"pr"' },
+          };
+        });
+        (channel as unknown as { octokit: unknown }).octokit =
+          await realClient();
+
+        await pollOnce();
+        expect(checkCalls).toHaveLength(1);
+
+        // Same head, same updated_at, and every pulls.get from here is a 304.
+        // GitHub does not advance updated_at on check activity, so only the
+        // periodic timer can trigger this re-fetch.
+        vi.setSystemTime(new Date('2026-07-02T09:11:00.000Z'));
+        await pollOnce();
+        expect(checkCalls).toHaveLength(2);
+        expect(prSeen.size).toBe(1);
+      });
     });
 
     function watchStatePath(): string {
@@ -23850,6 +25653,1179 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
               event['type'] === 'task' && event['outcome'] === 'retired',
           ),
         ).toHaveLength(0);
+      });
+    });
+
+    describe('PR comment watch', () => {
+      const commentWatchConfig = {
+        deliverToBoundSessions: true,
+        prWatchEvents: [],
+        prCommentWatch: true,
+      };
+
+      function routeCommentPaginate(): void {
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('ref' in params) return mockOctokit.rest.checks.listForRef();
+            if ('pull_number' in params)
+              return mockOctokit.rest.pulls.listReviewComments();
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+          [],
+        );
+      }
+
+      function seedCommentBaseline(): void {
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          },
+        });
+      }
+
+      function conversationComment(overrides: Record<string, unknown> = {}) {
+        return {
+          id: 555,
+          node_id: 'IC_555',
+          body: 'please fix the overflow',
+          created_at: '2026-07-02T10:00:00.000Z',
+          // Same account the channel authenticates as: the watch closes the
+          // same-account gap; other-account comments go to the notification lanes.
+          user: { login: 'test-bot' },
+          ...overrides,
+        };
+      }
+
+      it('delivers a new conversation comment to the bound session', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0]!;
+        expect(sessionId).toBe('bound-session');
+        expect(prompt).toContain('New comment by @test-bot');
+        expect(prompt).toContain('please fix the overflow');
+      });
+
+      it('renders the observed PR title in the comment prompt metadata', async () => {
+        // The watch carries the last observed title so %title% is not empty.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            title: 'Fix the overflow',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          },
+        });
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
+        expect(prompt).toContain('Title: Fix the overflow');
+      });
+
+      it('leaves other-account comments to the notification lanes (no consumption)', async () => {
+        // A comment by a different account produces a GitHub notification and is
+        // delivered by the notification lanes under the thread's reason/roles.
+        // The watch must not consume it: recording the shared dedupe key after
+        // reaching only a subset of roles would starve the other roles.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'someone-else' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('IC_555');
+      });
+
+      it('leaves other-account inline review comments to the notification lanes', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 780,
+            node_id: 'PRRC_780',
+            body: 'an external reviewer note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'someone-else' },
+            path: 'src/a.ts',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('PRRC_780');
+      });
+
+      it('does not re-deliver an already-dispatched comment on a re-list', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        // A held window re-lists the same comment; the dedupe key must skip it.
+        const ch = channel as unknown as {
+          cursor: { dispatchedComments?: string[] };
+          prWatchState: {
+            entries: Record<string, { commentLastFetchAt?: number }>;
+          };
+        };
+        ch.prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('fails open when the attribution lookup throws', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockRejectedValue(new Error('lookup unavailable'));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // Missing authorship evidence must not withhold the comment.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('withholds a comment the bound session itself posted', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        // Same account as the channel, but authored by the bound session.
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // No target is left to receive it and the notification lanes cannot see
+        // a same-account comment, so the skip row is its only journal trace.
+        const rows = readChannelEvents().filter(
+          (event) => event['reason'] === 'comment_watch_no_target',
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          type: 'inbound',
+          outcome: 'skipped',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+          messageId: 'IC_555',
+        });
+      });
+
+      it('delivers a same-account comment posted by a different session', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        // The bound session did NOT post ic:555 (another session did, under
+        // the same GitHub login the channel authenticates as).
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('withholds a same-account comment only from its author among multiple role targets', async () => {
+        // The central fix/verify topology: two roles bound to the PR, the fix
+        // session authored the comment. Exclusion must be per-target — the
+        // verify session still receives it. Mutating the filter to "any
+        // excluded session drops all targets" reds this case.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: {
+              'fix:comment': 'Address the findings (fix).',
+              'verify:comment': 'Re-verify the findings.',
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: ['fix', 'verify'].map((role) =>
+            makeBinding({
+              sessionId: `${role}-session`,
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role,
+                },
+              ],
+            }),
+          ),
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'fix-session' ? new Set(['ic:555']) : new Set(),
+          );
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe(
+          'verify-session',
+        );
+      });
+
+      it('defers consumption on a partial bindings snapshot instead of retiring no-target', async () => {
+        // R2-2: a partial scan sees only the author; the session that should
+        // receive the comment is in the unscanned workspace. Consuming the
+        // comment (no-target retire + cursor advance) on incomplete evidence
+        // would skip it past that session forever. Defer, keeping commentSince.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-session',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+          ],
+          partial: true,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const ch = channel as unknown as {
+          prWatchState: { entries: Record<string, { commentSince?: string }> };
+        };
+        expect(ch.prWatchState.entries['owner/repo#42']!.commentSince).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+        expect(
+          readChannelEvents().filter(
+            (event) => event['reason'] === 'comment_watch_no_target',
+          ),
+        ).toHaveLength(0);
+      });
+
+      it('does not hand a watched comment back to its author when the target is Gone', async () => {
+        // R2-3: same role — B is the routing winner (most recent), A authored
+        // the comment and is NOT a primary target. When B is Gone the fallback
+        // re-resolves over the followers; it must skip the author A, not deliver
+        // the comment back to it.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) => {
+            if (sessionId === 'winner-B') {
+              throw new BoundSessionGoneError(sessionId);
+            }
+            return undefined;
+          });
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it('does not reselect the author during task recovery after a queue-full deferral (R2-3)', async () => {
+        // The author exclusion must constrain the recovery/revalidation
+        // reselection too, not only the Gone loop: a deferred task carries
+        // delivery=B and authorExclude=[A]; A then becomes the newest same-role
+        // session, and recovery must not retarget the comment to A.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:comment': 'Address the findings.' },
+          },
+          { boundSessions },
+        );
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        // The queue-full-deferred task as persisted: delivery=B, exclusion=[A].
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'deferred-comment-task',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'winner-B',
+              role: 'fix',
+            },
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // A becomes the newest same-role session before recovery runs.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it.each([
+        // The silent shapes matter most: a string is iterable and null is
+        // defaulted away, so neither throws at the delivery loop — they just
+        // exclude nobody and hand the comment back to its author.
+        ['a bare string', 'author-A'],
+        ['null', null],
+        ['a number', 42],
+        ['an object', { author: 'author-A' }],
+        ['an array with a non-string member', ['author-A', 7]],
+      ])(
+        'rejects a task record whose authorExclude is %s',
+        async (_name, authorExclude) => {
+          await initChannel(commentWatchConfig, { boundSessions });
+          boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+          writeInboundTasks([
+            makeInboundTaskRecord({
+              id: 'corrupt-author-exclude',
+              state: 'accepted',
+              issueNumber: 42,
+              delivery: { kind: 'bound-session', sessionId: 'winner-B' },
+              privateOnly: true,
+              authorExclude: authorExclude as unknown as string[],
+            }),
+          ]);
+          const recovery = channel as unknown as {
+            recoverInboundTasks: () => Promise<void>;
+            inboundPersistenceBlocked: boolean;
+          };
+          await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+            'invalid GitHub inbound task state',
+          );
+          expect(recovery.inboundPersistenceBlocked).toBe(true);
+          expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        },
+      );
+
+      it('names the offending record when the task store is rejected', async () => {
+        // One bad record blocks every healthy task in the file, so the
+        // rejection has to locate it for whoever repairs the store by hand.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({ id: 'healthy-task' }),
+          makeInboundTaskRecord({
+            id: 'corrupt-author-exclude',
+            state: 'accepted',
+            issueNumber: 42,
+            delivery: { kind: 'bound-session', sessionId: 'winner-B' },
+            privateOnly: true,
+            authorExclude: 42 as unknown as string[],
+          }),
+        ]);
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+        };
+        await expect(recovery.recoverInboundTasks()).rejects.toThrow(
+          'invalid GitHub inbound task state at record 1 (corrupt-author-exclude)',
+        );
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('does not reselect the author during LEGACY-mode task recovery (F3)', async () => {
+        // Same exclusion contract without boundSessionActions: legacy mode
+        // re-resolves the single winner, so once the author becomes the newest
+        // binding the recovered task must retire instead of delivering to it.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const prEntry = {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role: 'fix',
+        };
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'deferred-legacy-comment-task',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'winner-B',
+              role: 'fix',
+            },
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // The author is now the single legacy winner.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: '2026-07-03T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+            makeBinding({
+              sessionId: 'winner-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prEntry],
+            }),
+          ],
+          partial: false,
+        });
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it('a reconstructed fan-out sibling inherits authorExclude (R2-3)', async () => {
+        // A crash between the two claims leaves only the carrier, holding
+        // fanout=[B,V] and authorExclude=[A]. Recovery rebuilds V's task; once A
+        // becomes the newest verify session that sibling must still exclude A.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: {
+              'fix:comment': 'Address the findings.',
+              'verify:comment': 'Re-verify the findings.',
+            },
+          },
+          { boundSessions },
+        );
+        const prFor = (role: string) => ({
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+          role,
+        });
+        const bindingsWith = (authorNewest: boolean) => ({
+          bindings: [
+            makeBinding({
+              sessionId: 'fix-B',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [prFor('fix')],
+            }),
+            makeBinding({
+              sessionId: 'verify-V',
+              updatedAt: '2026-07-01T00:00:00.000Z',
+              prs: [prFor('verify')],
+            }),
+            makeBinding({
+              sessionId: 'author-A',
+              updatedAt: authorNewest
+                ? '2026-07-03T00:00:00.000Z'
+                : '2026-06-30T00:00:00.000Z',
+              prs: [prFor('verify')],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.listPrBindings.mockResolvedValue(bindingsWith(false));
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'author-A' ? new Set(['ic:555']) : new Set(),
+          );
+        boundSessions.deliverPrompt = vi.fn().mockResolvedValue(undefined);
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            id: 'fanout-carrier',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+            },
+            envelope: {
+              ...makeInboundTaskRecord().envelope,
+              threadId: 'pr:42',
+              messageId: 'IC_555',
+              text: 'New comment by @test-bot',
+              metadata: 'Trigger: comment.',
+            },
+            dedupe: { dispatchedComments: ['IC_555'] },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'fix-B',
+              role: 'fix',
+            },
+            fanout: [
+              { sessionId: 'fix-B', role: 'fix', completed: true },
+              { sessionId: 'verify-V', role: 'verify' },
+            ],
+            authorExclude: ['author-A'],
+            privateOnly: true,
+          }),
+        ]);
+        // A becomes the newest verify session before recovery rebuilds V.
+        boundSessions.listPrBindings.mockResolvedValue(bindingsWith(true));
+        const recovery = channel as unknown as {
+          recoverInboundTasks: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await recovery.refreshBoundSessions();
+        await recovery.recoverInboundTasks();
+        const deliveredTo = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(deliveredTo).not.toContain('author-A');
+      });
+
+      it('delivers a same-account comment under a sender allowlist that excludes the channel account', async () => {
+        // The recommended senders:allowlist policy excludes the channel's own
+        // login; the private comment watch must still deliver (sender gate
+        // waived for this lane) rather than retire as preflight_rejected.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            groupPolicy: 'allowlist',
+            groups: {
+              'owner/repo': { senders: 'allowlist', allowedUsers: ['alice'] },
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('delivers an inline review comment with file/line context', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 777,
+            node_id: 'PRRC_777',
+            body: 'guard this branch',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            path: 'src/a.ts',
+            line: 12,
+            side: 'RIGHT',
+            html_url: 'https://github.com/owner/repo/pull/42#discussion_r777',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
+        expect(prompt).toContain('inline review comment by @test-bot');
+        expect(prompt).toContain('src/a.ts');
+        expect(prompt).toContain('(line 12, RIGHT)');
+        expect(prompt).toContain('guard this branch');
+      });
+
+      it('excluded self-authored comments do not block the batch tail', async () => {
+        // A run of same-second comments all posted by the bound session must not
+        // occupy the per-pass batch slots and stall the cursor: a later comment
+        // by another session still has to be delivered.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const own = new Set<string>();
+        const selfComments = Array.from({ length: 25 }, (_, i) => {
+          own.add(`ic:${900 + i}`);
+          return {
+            id: 900 + i,
+            node_id: `IC_${900 + i}`,
+            body: 'my own note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+          };
+        });
+        const tail = {
+          id: 999,
+          node_id: 'IC_999',
+          body: 'a finding from another session',
+          created_at: '2026-07-02T10:00:01.000Z',
+          user: { login: 'test-bot' },
+        };
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(own);
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          ...selfComments,
+          tail,
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'a finding from another session',
+        );
+      });
+
+      it('withholds an inline review comment the bound session posted', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['rc:777']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 777,
+            node_id: 'PRRC_777',
+            body: 'my own note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            path: 'src/a.ts',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('baselines silently on first observation (no backlog delivery)', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        // No seeded watch state: the first pass must baseline, not deliver.
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(
+          readWatchState().entries['owner/repo#42']!['commentBaseline'],
+        ).toBeDefined();
+      });
+
+      it('does not watch comments when prCommentWatch is false', async () => {
+        await initChannel(
+          { ...commentWatchConfig, prCommentWatch: false },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+      });
+
+      it('does not consume a comment it cannot route, leaving it to the notification lanes', async () => {
+        // Role-aware actions with only a reason-specific key: the watch resolves
+        // the narrower `comment` class and matches nothing, so it must not record
+        // the shared dedupe key — that would make the mention lane skip the same
+        // comment as a duplicate and lose a delivery that worked before.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:mention': 'reply' },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('IC_555');
+      });
+
+      it('keeps the comment cursor when a dispatch does not settle', async () => {
+        // dispatchEnvelope returns false before a durable claim when the
+        // publication audit is unreadable; advancing commentSince here would
+        // skip the comment past with no task and no re-delivery chance.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const dispatch = vi
+          .spyOn(
+            channel as unknown as {
+              dispatchEnvelope: (...args: unknown[]) => Promise<boolean>;
+            },
+            'dispatchEnvelope',
+          )
+          .mockResolvedValue(false);
+        try {
+          await pollOnce();
+        } finally {
+          dispatch.mockRestore();
+        }
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+      });
+
+      it('fails fast on a rate-limited comment fetch instead of sleep-retrying', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockRejectedValue(
+          Object.assign(new Error('rate limited'), {
+            status: 429,
+            response: { headers: {} },
+          }),
+        );
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // The fail-fast predicate throws on the first 429 (no sleep-retry), and
+        // the shared error aborts the watch pass rather than being swallowed.
+        expect(mockOctokit.rest.issues.listComments).toHaveBeenCalledTimes(1);
+      });
+
+      it('issues no pulls.get for a comment-only channel', async () => {
+        // commentWatchConfig subscribes no state events, so the per-poll state
+        // observation is skipped and the comment fetch is the only watch call.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+      });
+
+      it('records comment times so watch dedupe keys stay evictable', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const cursor = (
+          channel as unknown as {
+            cursor: { dispatchedCommentTimes?: Record<string, string> };
+          }
+        ).cursor;
+        expect(cursor.dispatchedCommentTimes?.['IC_555']).toBe(
+          '2026-07-02T10:00:00.000Z',
+        );
+      });
+
+      it('caps a deliverable burst at the batch size and resumes before the tail', async () => {
+        // 21 deliverable comments (none self-authored) must enter the capped
+        // branch: 20 dispatch this pass, and the cursor resumes before the last
+        // processed comment so the tail drains next pass instead of dropping.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        const burst = Array.from({ length: 21 }, (_, i) => ({
+          id: 1000 + i,
+          node_id: `IC_${1000 + i}`,
+          body: `finding ${i}`,
+          created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+          user: { login: 'test-bot' },
+        }));
+        mockOctokit.rest.issues.listComments.mockResolvedValue(burst);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(20);
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-02T10:00:18.000Z',
+        );
+      });
+
+      it('skips the fetch inside the recheck interval', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: Date.now(),
+          },
+        });
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('is on by default when prCommentWatch is omitted', async () => {
+        await initChannel(
+          { deliverToBoundSessions: true, prWatchEvents: [] },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('drains a merged binding in a comment-only channel (no perpetual fetch)', async () => {
+        // watchOnePr (the only prState writer) is skipped for comment-only
+        // channels, so without draining on the binding's terminal state a
+        // merged PR would be comment-fetched every interval forever.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'merged',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('shares one burst budget across watched PRs in a pass', async () => {
+        // Two due PRs with 21 deliverable comments each: a per-PR cap would
+        // claim 40 tasks in one poll; the pass-wide budget claims 20 and leaves
+        // the second PR's cursor untouched so its tail resumes next pass.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        const seeded = {
+          headSha: 'sha-1',
+          prState: 'open',
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+        };
+        seedWatchState({
+          'owner/repo#42': { ...seeded },
+          'owner/repo#43': { ...seeded },
+        });
+        mockPull({});
+        const burstFor = (pr: number) =>
+          Array.from({ length: 21 }, (_, i) => ({
+            id: pr * 1000 + i,
+            node_id: `IC_${pr}_${i}`,
+            body: `finding ${i}`,
+            created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+            user: { login: 'test-bot' },
+          }));
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('pull_number' in params) return [];
+            if ('issue_number' in params)
+              return params['issue_number'] === 42
+                ? burstFor(42)
+                : burstFor(43);
+            return [];
+          },
+        );
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(20);
+        expect(readWatchState().entries['owner/repo#43']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+      });
+
+      it('delivers a single long comment intact, not cut to the aggregate batch budget', async () => {
+        // A watch delivery carries one comment; the aggregate lane's 400-char
+        // per-comment budget would cut the actionable steps past the cut.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({
+            body: `${'repro detail '.repeat(100)} FINAL-ACTIONABLE-STEP`,
+          }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'FINAL-ACTIONABLE-STEP',
+        );
       });
     });
   });
