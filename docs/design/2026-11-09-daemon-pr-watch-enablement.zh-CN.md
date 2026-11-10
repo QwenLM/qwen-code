@@ -6,10 +6,10 @@
 
 ## 问题
 
-drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。由此有三个后果，每一个在 PR B 打开开关的那一刻就是缺陷：
+drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。PR B 打开开关后有三个后果——两个是正确性问题，一个是延迟问题：
 
 - 休眠接收者永远无法被唤醒。真实 restore 原先位于 `restoreSessionHandler`——`registerSessionRoutes` 内的一个路由闭包，只能经 HTTP 到达；§1 已把它的可复用核心移入 `server/session-restore.ts`。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1057-1063`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
-- `wakeDormant: false` 会永久搁浅条目。drain 把它们留到会话下一次 live turn，但没有 resume 后 drain 的钩子，因此无人消费。
+- `wakeDormant: false` 会把投递推迟最多一个 refresh interval，**不会**永久搁浅条目：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
 - 关停会与后继者重叠。没有任何东西停止 watch 或释放 owner 记录，因此后继 daemon 可能在前任的 restore 与准入仍在途时就 claim（主 §2）。
 
 另有两处缺口关乎正确性而非可达性：观测丢弃了绑定扫描的 `partial` 标志（其自身注释明写启用增量必须在任何负面决策前透传它），以及 slim listing 从不把 `state` 写进 watch 文件、也不提供 `listedKeys`，因此 listing 已返回的 closed PR 会永远留在 view 轮转里。
@@ -29,7 +29,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 - 把 restore 核心抽取为路由与 drain 都能进程内调用的函数，且路由的 HTTP 行为逐字节兼容。
 - 给 drain 一个真实的 `wakeSession`，铸造并释放 client registration，并按 channel 的方式划分结果。
-- 在 resume 时 drain，使 `wakeDormant: false` 的条目在会话下一次 live turn 被消费。
+- 在 resume 那一刻触发 drain，使 `wakeDormant: false` 的条目在会话变 live 时立即投递，而不是等到下一个 refresh tick。
 - 关停时停止 watch 并释放 owner 记录，且在途工作落定之后才释放。
 - 填充两个 deps 接缝：watch 目录与锁 registry、allowed hosts、准入、restore、自推账本，以及扫描的 `partial`。
 - 把 slim listing 的 `state` 写进 watch 文件并提供 `listedKeys`。
@@ -64,7 +64,9 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 ### 2. resume 后 drain 钩子（尚未落地）
 
-共享 restore 接受可选的 `onRestored` 回调，在会话已 live 且 generation 断言通过之后、函数返回之前调用。路由不传（行为不变）；drain 的 `wakeSession` 填充传入一个为该会话所绑定 PR 调度 drain 的钩子。
+这是**延迟优化，不是正确性修复**。没有它投递也会发生：drain 每个 tick 都跑、重读 `pending`，并在 `isSessionLive` 为真时投递给该接收者。钩子消除的是「用户 resume」到「下一个 tick」之间的等待。
+
+共享 restore 接受可选的 `onRestored` 回调，在会话已 live 且 generation 断言通过之后调用。**真正要紧的调用方是路由，不是 drain。** 若只由 drain 自己的 `wakeSession` 填充传钩子，它只会在 `wakeDormant: true` 路径（drain 自己恢复会话）上触发，永远不会在用户 resume 时触发，也就覆盖不了本节存在的理由。因此接线需要一个路由→drain 的接缝：给会话路由注入一个 `onSessionRestored` 式依赖，由与 drain deps 相同的 late-bound getter 填充，为该会话所绑定的 PR 调度一次 drain。在该接缝存在之前这个回调没有调用方，所以它要么与接缝一起落地，要么不落。
 
 钩子**绝不能在 restore 内被 await**。`PathMutexRegistry.runExclusive` 不可重入，而 drain 自己的 `restoreAndAdmit` 在 wake 之后会重新取同一把 per-PR 锁。从「由 drain 派发的 restore」内部 await 一个 drain 会反转 await 方向并可能死锁。因此钩子不等待地触发 drain（`void`，自带失败日志），正如 drain 已经不等待地触发 restore。它还在核心的 `finally` 释放 reservation 与 worktree 锁之后运行——§1 已把两处释放移入核心，故钩子必须排在该 `finally` 之后而非之前——因此重新进入同一会话 restore 的 drain 不会撞上 pending reservation 计数。
 
@@ -157,7 +159,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 1. 开关关闭时，生产行为与 API 量不变；不读取任何新接缝。
 2. 路由 HTTP 行为逐字节兼容：每条既有 load/resume 测试在断言、标题与计数不变的前提下通过。
 3. 开关打开（测试）时，休眠接收者经共享核心被恢复、获投递，且其 registration 在 prompt 落定后释放。
-4. `wakeDormant: false` 的条目在会话下一次 resume 时被消费。
+4. `wakeDormant: false` 的条目在 resume 当次即被投递，而非等到下一个 refresh tick。（没有本片时「下一个 tick 投递」已经成立；本条验收的是延迟，不是投递本身。）
 5. 关停停止 watch、等待在途工作，然后才释放 owner 记录。
 6. slim listing 已返回的 closed PR 不再被 view；listing 的 `state` 到达 watch 文件。
 7. view 只发往 allowed hosts；任何其他主机上的绑定不引发 `gh` 调用。
