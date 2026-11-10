@@ -52,7 +52,7 @@ Your client will then start Qwen Code with that configuration. You can also conf
 
 ### Approval modes
 
-Every new ACP session starts in the mode set by `tools.approvalMode`, which is **Auto** unless you change it. In Auto, a classifier approves actions it judges safe and blocks risky ones, so some file edits and shell commands run without asking you.
+Every new ACP session starts in **Auto** unless you choose another mode. `--approval-mode` (or `--yolo`) in the agent's arguments takes precedence, then `tools.approvalMode` in `settings.json`. In Auto, a classifier approves actions it judges safe and blocks risky ones, so some file edits and shell commands run without asking you.
 
 | Mode        | What it does                                                 |
 | ----------- | ------------------------------------------------------------ |
@@ -64,7 +64,12 @@ Every new ACP session starts in the mode set by `tools.approvalMode`, which is *
 
 Qwen Code offers all five modes to the client when a session starts. A client can switch modes at any time with the ACP `session/set_mode` request, and many show a mode picker for this.
 
-To have every ACP session start by asking before edits and commands, do one of these:
+Two cases work differently:
+
+- **Untrusted folders.** [Trusted Folders](./configuration/trusted-folders.md) is off by default, and while it is off every folder counts as trusted. If you turn it on and open a folder you have not trusted, the session starts in `default`, and `session/set_mode` refuses `auto-edit`, `auto` and `yolo` until you trust the folder.
+- **Resumed sessions.** When a client resumes a saved session, the session keeps the mode it was saved with rather than the one you configured.
+
+To have every new ACP session start by asking before edits and commands, do one of these:
 
 - Add `--approval-mode default` to the agent's arguments in your client: `"args": ["--acp", "--approval-mode", "default"]`
 - Set it in `settings.json`, for all projects (`~/.qwen/settings.json`) or one project (`.qwen/settings.json`):
