@@ -34,9 +34,15 @@ vi.mock('./api.js', () => ({
   fetchGatewayUrl: vi.fn(),
 }));
 
+const { mockLoadCredentials } = vi.hoisted(() => ({
+  mockLoadCredentials: vi.fn<() => { appId: string; appSecret: string } | null>(
+    () => null,
+  ),
+}));
+
 vi.mock('./accounts.js', () => ({
   getCredsFilePath: () => '/tmp/test-creds.json',
-  loadCredentials: () => null,
+  loadCredentials: mockLoadCredentials,
   saveCredentials: vi.fn(),
 }));
 
@@ -674,6 +680,70 @@ describe('channel-base test double', () => {
     expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
     expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
     expect(mocked.unwrapMessageRoutingKey).toBe(actual.unwrapMessageRoutingKey);
+  });
+});
+
+describe('shared credentials file adoption', () => {
+  const FOREIGN = { appId: 'OTHER-WORKSPACE-APPID', appSecret: 'other-secret' };
+  const originalServe = process.env['QWEN_CODE_SERVE'];
+
+  const channel = () =>
+    new QQChannel(
+      'qq-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+      },
+      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    );
+
+  afterEach(() => {
+    if (originalServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = originalServe;
+    mockLoadCredentials.mockReset();
+    mockLoadCredentials.mockReturnValue(null);
+    vi.restoreAllMocks();
+  });
+
+  it('never adopts the name-keyed file in a daemon worker', async () => {
+    process.env['QWEN_CODE_SERVE'] = '1';
+    mockLoadCredentials.mockReturnValue(FOREIGN);
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const ch = channel();
+    await expect(
+      (ch as unknown as { fetchToken: () => Promise<void> }).fetchToken.call(
+        ch,
+      ),
+    ).rejects.toThrow(/has no appID\/appSecret/);
+    // The file holds another workspace's bot; it must not be consulted at all.
+    expect(mockLoadCredentials).not.toHaveBeenCalled();
+    expect(mockFetchAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('still adopts the file for an interactive CLI run', async () => {
+    delete process.env['QWEN_CODE_SERVE'];
+    mockLoadCredentials.mockReturnValue(FOREIGN);
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'tok',
+      expiresIn: 7200,
+    });
+    const ch = channel();
+    await expect(
+      (ch as unknown as { fetchToken: () => Promise<void> }).fetchToken.call(
+        ch,
+      ),
+    ).resolves.toBeUndefined();
+    expect(mockFetchAccessToken).toHaveBeenCalledWith(
+      FOREIGN.appId,
+      FOREIGN.appSecret,
+    );
   });
 });
 
