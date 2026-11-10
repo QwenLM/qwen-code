@@ -3099,7 +3099,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false,"clientFiles":false}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }

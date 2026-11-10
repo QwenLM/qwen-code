@@ -1385,6 +1385,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/client-files/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Registers the calling actor's client directory grant into the Session and issues the one-time relay credential for the Runtime MCP leg. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state; no file content is persisted. */
+        post: operations["registerWebShellClientFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/unregister": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Closes the calling actor's registration (or an operator's teardown of it) and fails every queued request with the structured offline error. */
+        post: operations["unregisterWebShellClientFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Reads the Session's binding summary without the credential; an absent binding answers an empty 200. */
+        post: operations["queryWebShellClientFilesStatus"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/requests/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description The browser downlink: SSE events named request carrying opaque JSON-RPC payloads for the registering actor's own active binding generation. Each poll revalidates the read grant. */
+        post: operations["streamWebShellClientFilesRequests"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/responses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description The browser uplink: settles one queued JSON-RPC request with either a response payload or a structured error code, never both. */
+        post: operations["respondWebShellClientFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/session-side-queries/create": {
         parameters: {
             query?: never;
@@ -1815,6 +1900,11 @@ export interface components {
             btw?: boolean;
             /** @default false */
             recap?: boolean;
+            /**
+             * @description Browser local-files registration is available for this Session: the deployment enables the client-files relay and the Harness supports it. Workspace-bound Sessions additionally require current execution authority. Registration admission still checks the actor grant and idle state separately.
+             * @default false
+             */
+            clientFiles?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -3773,6 +3863,46 @@ export interface components {
             cursor?: string;
             limit?: number;
             requestId?: string;
+        };
+        WebShellClientFilesRegisterRequest: {
+            sessionId: string;
+        };
+        WebShellClientFilesUnregisterRequest: {
+            sessionId: string;
+        };
+        WebShellClientFilesStatusRequest: {
+            sessionId: string;
+        };
+        WebShellClientFilesStreamRequest: {
+            sessionId: string;
+            generation: number;
+        };
+        WebShellClientFilesRespondRequest: {
+            sessionId: string;
+            generation: number;
+            /** @description The JSON-RPC request identity being settled; distinct from the HTTP request id echo field. */
+            rpcRequestId: string;
+            responseJson?: string;
+            errorCode?: string;
+        };
+        WebShellClientFilesRegistration: {
+            serverId: string;
+            generation: number;
+            /** @description The one-time relay credential for the Runtime MCP leg; never persisted. */
+            token: string;
+            /** @description Binding deadline in Unix epoch milliseconds. */
+            expiresAt: number;
+        };
+        WebShellClientFilesStatus: {
+            serverId: string;
+            generation: number;
+            /** @enum {unknown} */
+            state: "active" | "closed";
+            /** @description Binding deadline in Unix epoch milliseconds. */
+            expiresAt: number;
+        };
+        WebShellClientFilesRespondReceipt: {
+            settled: boolean;
         };
     };
     responses: {
@@ -6620,6 +6750,154 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    registerWebShellClientFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description The registration with its one-time relay credential. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesRegistration"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    unregisterWebShellClientFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesUnregisterRequest"];
+            };
+        };
+        responses: {
+            /** @description The closed binding summary. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    queryWebShellClientFilesStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesStatusRequest"];
+            };
+        };
+        responses: {
+            /** @description The binding summary, or an empty body when nothing is registered. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    streamWebShellClientFilesRequests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesStreamRequest"];
+            };
+        };
+        responses: {
+            /** @description Queued JSON-RPC requests as SSE events. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    respondWebShellClientFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesRespondRequest"];
+            };
+        };
+        responses: {
+            /** @description The request was settled. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesRespondReceipt"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
     createWebShellSessionSideQuery: {

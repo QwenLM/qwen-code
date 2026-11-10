@@ -271,6 +271,7 @@ export interface ManagedAgentSessionSummary {
     inputAttachments?: boolean;
     btw?: boolean;
     recap?: boolean;
+    clientFiles?: boolean;
   };
   failure?: { code: string; message: string };
   recovery?: ManagedSessionRecovery;

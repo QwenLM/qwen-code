@@ -262,7 +262,7 @@ Hosted Harness worker — ManagedMcpRuntime
 2. **Runtime 临时注册**：定义安装/丢弃、catalog 汇入、审批接线、worker 故障
    测试。
 3. **Web Shell**：managed relay 传输、Managed 本地文件入口与阶段、provider
-   capability、UI 测试。
+   capability、会话摘要 capability 门控、UI 测试。
 4. **联合验收**：集成夹具、真实浏览器 E2E、故障门禁、双语文档刷新。
 
 每个切片带自己的验证落地；靠前的切片不对用户启用功能。
@@ -288,3 +288,9 @@ Hosted Harness worker — ManagedMcpRuntime
    读工具同样不预批准。
 5. File System Access 权限跨页面刷新的持久化（`needs-gesture` 阶段）——原样
    复用 daemon 句柄存储行为，但需确认 Managed provider 的存储分区。
+6. Managed 入口如何在不改 boot 载荷的前提下得知部署开关。2026-11-10 已解决：
+   会话摘要携带 `clientFiles` capability（`WebShellSessionCapabilities`），
+   取值为部署开关 AND harness 支持 AND 可见 ACTIVE 会话（绑定 Workspace 的
+   会话还要求当前执行授权），沿用 side-query capability 的模式。Web Shell
+   把它投影进摘要镜像类型并据此门控头部入口；provider 仍无条件下发传输。
+   boot 载荷不变。

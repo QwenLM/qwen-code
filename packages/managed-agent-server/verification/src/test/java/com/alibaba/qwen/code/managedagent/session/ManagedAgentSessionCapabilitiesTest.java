@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -209,5 +210,36 @@ class ManagedAgentSessionCapabilitiesTest {
             assertThat(view.capabilities().sessionDelete())
                     .isEqualTo(!csi && ("CLOSED".equals(status) || bindingSupport && harnessSupport));
         });
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "true,true,ACTIVE,true",
+        "true,true,CLOSED,false",
+        "false,true,ACTIVE,false",
+        "true,false,ACTIVE,false"
+    })
+    void clientFilesCapabilityRequiresTheDeploymentFlagHarnessSupportAndAnActiveSession(boolean enabled,
+            boolean harnessSupports, String status, boolean expected) {
+        var store = mock(AgentStateStore.class);
+        var harness = mock(HarnessConnector.class);
+        var service = new ManagedAgentService(store, new RequestDigests(),
+                mock(HarnessCoordinator.class), harness, mock(JdbcManagedWorkspaceRegistry.class),
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var session = new SessionRecord("tenant", "session", "qwen-code", "title", status,
+                null, null, 0, 0, 1, 1, null, 1);
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().clientFiles()).isFalse();
+
+        var settings = mock(ManagedAgentSettings.class);
+        var clientFiles = mock(ManagedAgentSettings.ClientFiles.class);
+        when(settings.getClientFiles()).thenReturn(clientFiles);
+        when(clientFiles.isEnabled()).thenReturn(enabled);
+        when(harness.supportsClientFiles()).thenReturn(harnessSupports);
+        service.configureClientFiles(settings);
+
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().clientFiles()).isEqualTo(expected);
     }
 }

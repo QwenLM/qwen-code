@@ -1412,7 +1412,7 @@ function ManagedSessionsContent({
       </Button>
     ) : null;
   const localFilesButton =
-    provider.clientFiles && currentSummary ? (
+    provider.clientFiles && currentSummary?.capabilities.clientFiles ? (
       <ManagedLocalFilesControl
         provider={provider}
         sessionId={currentSummary.sessionId}
@@ -2018,6 +2018,7 @@ function ManagedSessionsContent({
               )}
               {diagnosticsButton}
               {sideQueryButtons}
+              {localFilesButton}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (

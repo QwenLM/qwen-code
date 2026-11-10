@@ -12201,6 +12201,12 @@
           "recap": {
             "type": "boolean",
             "default": false
+          },
+          "clientFiles": {
+            "type": "boolean",
+            "default": false,
+            "description": "Browser local-files registration is available for this Session: the deployment enables the client-files relay and the Harness supports it. Workspace-bound Sessions additionally require current execution authority. Registration admission still checks the actor grant and idle state separately.",
+            "x-qwen-implementation-status": "implemented"
           }
         }
       },

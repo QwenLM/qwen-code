@@ -8,10 +8,8 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { FolderOpenIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
-import {
-  useManagedLocalFilesBridge,
-  type LocalFilesPhase,
-} from '../local-files/useManagedLocalFilesBridge';
+import { useManagedLocalFilesBridge } from '../local-files/useManagedLocalFilesBridge';
+import type { LocalFilesPhase } from '../local-files/useLocalFilesBridge';
 import type { ManagedFetch } from '../local-files/managed-client-files-bridge';
 import type { ManagedAgentProvider } from './managed/managed-agent-provider';
 import { LocalFilesPanel } from './LocalFilesControl';

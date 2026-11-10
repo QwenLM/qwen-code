@@ -329,7 +329,7 @@ Per the repository's route-ownership rule:
 2. **Runtime ephemeral registration**: definition install/drop, catalog
    contribution, approval wiring, worker fault tests.
 3. **Web Shell**: managed relay transport, Managed local-files entry and
-   phases, provider capability, UI tests.
+   phases, provider capability, session-summary capability gating, UI tests.
 4. **Joint qualification**: integration fixtures, real-browser E2E, fault
    gates, bilingual documentation refresh.
 
@@ -363,3 +363,11 @@ feature for users.
 5. File System Access permission persistence across page reloads
    (`needs-gesture` phase) — reuse the daemon's handle-store behavior
    unchanged, but confirm the Managed provider's storage partitioning.
+6. How the Managed entry learns the deployment flag without a boot payload
+   change. Resolved 2026-11-10: the session summary carries a `clientFiles`
+   capability (`WebShellSessionCapabilities`), computed as the deployment
+   flag AND harness support AND a visible ACTIVE Session (Workspace-bound
+   Sessions also require current execution authority), following the
+   side-query capability pattern. The Web Shell projects it into the
+   summary mirror and gates the header entry on it; the provider keeps
+   exposing the transport unconditionally. The boot payload is unchanged.
