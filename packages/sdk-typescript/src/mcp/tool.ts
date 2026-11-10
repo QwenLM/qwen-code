@@ -9,19 +9,40 @@
  */
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { z, ZodRawShape, ZodObject } from 'zod';
+
+type ToolSchemaField = {
+  readonly '~standard': {
+    readonly types?: { readonly output: unknown } | undefined;
+  };
+} & (
+  | { readonly _zod: unknown }
+  | { readonly _def: unknown; readonly _output: unknown }
+);
+type ToolSchema = Record<string, ToolSchemaField>;
+type ToolFieldOutput<Field extends ToolSchemaField> = NonNullable<
+  Field['~standard']['types']
+>['output'];
+type OptionalToolKeys<Schema extends ToolSchema> = {
+  [Key in keyof Schema]: undefined extends ToolFieldOutput<Schema[Key]>
+    ? Key
+    : never;
+}[keyof Schema];
+type ToolArgs<Schema extends ToolSchema> = {
+  [Key in Exclude<keyof Schema, OptionalToolKeys<Schema>>]: ToolFieldOutput<
+    Schema[Key]
+  >;
+} & {
+  [Key in OptionalToolKeys<Schema>]?: ToolFieldOutput<Schema[Key]>;
+};
 
 /**
  * SDK MCP Tool Definition with Zod schema type inference
  */
-export type SdkMcpToolDefinition<Schema extends ZodRawShape = ZodRawShape> = {
+export type SdkMcpToolDefinition<Schema extends ToolSchema = ToolSchema> = {
   name: string;
   description: string;
   inputSchema: Schema;
-  handler: (
-    args: z.infer<ZodObject<Schema>>,
-    extra: unknown,
-  ) => Promise<CallToolResult>;
+  handler: (args: ToolArgs<Schema>, extra: unknown) => Promise<CallToolResult>;
 };
 
 /**
@@ -43,14 +64,11 @@ export type SdkMcpToolDefinition<Schema extends ZodRawShape = ZodRawShape> = {
  * );
  * ```
  */
-export function tool<Schema extends ZodRawShape>(
+export function tool<Schema extends ToolSchema>(
   name: string,
   description: string,
   inputSchema: Schema,
-  handler: (
-    args: z.infer<ZodObject<Schema>>,
-    extra: unknown,
-  ) => Promise<CallToolResult>,
+  handler: (args: ToolArgs<Schema>, extra: unknown) => Promise<CallToolResult>,
 ): SdkMcpToolDefinition<Schema> {
   if (!name || typeof name !== 'string') {
     throw new Error('Tool name must be a non-empty string');

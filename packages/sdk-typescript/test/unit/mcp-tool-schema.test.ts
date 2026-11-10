@@ -250,8 +250,6 @@ it.each([
   },
 );
 
-type ZodV3Shape = { value: z.ZodString; count: z.ZodNumber };
-
 it.each([
   ['sdk', tool, createSdkMcpServer],
   ['daemon', daemonTool, createDaemonSdkMcpServer],
@@ -269,8 +267,10 @@ it.each([
           {
             value: z3.string(),
             count: z3.number().int().min(1),
-          } as unknown as ZodV3Shape,
+          },
           async (args) => {
+            expectTypeOf(args.value).toEqualTypeOf<string>();
+            expectTypeOf(args.count).toEqualTypeOf<number>();
             v3Observed(args);
             return {
               content: [{ type: 'text', text: `${args.value}:${args.count}` }],
