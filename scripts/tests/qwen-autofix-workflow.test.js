@@ -281,22 +281,39 @@ function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
 
-// A step's timeout-minutes, per self-review arm (af-156): a plain number
-// applies to both arms; the address step carries the one per-arm expression
-// the workflow uses, `${{ steps.prepare.outputs.self_review_arm == 'on' &&
-// <armed> || <unarmed> }}`.
+// A step's timeout-minutes, per runner class (af-050/af-125): a plain
+// number applies to both; the address step carries the runner-split
+// expression `${{ runner.environment == 'github-hosted' && <hosted> ||
+// <selfHosted> }}`. Both self-review arms share the self-hosted cap.
 function stepCapsOf(step) {
   const plain = step.match(/\n {8}timeout-minutes: (\d+)\n/)?.[1];
   if (plain !== undefined) {
-    return { armed: Number(plain), unarmed: Number(plain) };
+    return { hosted: Number(plain), selfHosted: Number(plain) };
   }
-  const perArm = step.match(
-    /\n {8}timeout-minutes: "\$\{\{ steps\.prepare\.outputs\.self_review_arm == 'on' && (\d+) \|\| (\d+) \}\}"\n/,
+  const perRunner = step.match(
+    /\n {8}timeout-minutes: "\$\{\{ runner\.environment == 'github-hosted' && (\d+) \|\| (\d+) \}\}"\n/,
   );
   return {
-    armed: perArm ? Number(perArm[1]) : Number.NaN,
-    unarmed: perArm ? Number(perArm[2]) : Number.NaN,
+    hosted: perRunner ? Number(perRunner[1]) : Number.NaN,
+    selfHosted: perRunner ? Number(perRunner[2]) : Number.NaN,
   };
+}
+
+// The review-address job cap is runner-split (af-050): the runs-on
+// self-hosted predicate repeated VERBATIM, because `runner` is not an
+// allowed context in job-level timeout-minutes. Parse both arms AND pin
+// the predicate against runs-on so the two copies cannot drift.
+function jobCapsOf(jobBlock) {
+  const expr = jobBlock.match(
+    /\n {4}timeout-minutes: '\$\{\{ (.+) && (\d+) \|\| (\d+) \}\}'\n/,
+  );
+  expect(expr, 'review-address job timeout expression').toBeTruthy();
+  const runsOnPredicate = jobBlock.match(
+    /\n {4}runs-on: '\$\{\{ (.+) && fromJSON/,
+  )?.[1];
+  expect(runsOnPredicate, 'review-address runs-on predicate').toBeTruthy();
+  expect(expr[1]).toBe(runsOnPredicate);
+  return { selfHosted: Number(expr[2]), hosted: Number(expr[3]) };
 }
 
 function withRunnerDir(fn) {
@@ -620,9 +637,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 345-minute cap) so an active run is never aged out
-    // mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=375');
+    // job runs up to its 465-minute self-hosted cap) so an active run is never
+    // aged out mid-flight.
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=495');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -5289,7 +5306,7 @@ describe('qwen-autofix workflow', () => {
     // No rollup entries → dispatchable.
     expect(runMarkerCheck([])).toBe('pass');
 
-    // A stranded marker must NOT keep blocking through the 375-minute
+    // A stranded marker must NOT keep blocking through the 495-minute
     // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
     // over fixture rollups.
     const pendingGate = reviewScanJob.match(
@@ -5339,7 +5356,7 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
       ]),
     ).toBe('true');
-    // ...a check stuck past the 375-minute horizon is aged out...
+    // ...a check stuck past the 495-minute horizon is aged out...
     expect(
       runPendingGate([
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
@@ -18441,7 +18458,7 @@ exit 1
 
   it('announces a working round up front and closes the same status comment', () => {
     // The whole point: the live run link reaches the thread BEFORE the
-    // 130-minute agent step, not after it. Without this the PR is silent from
+    // 250-minute self-hosted agent step, not after it. Without this the PR is silent from
     // takeover until "Push and report", so a working round and a stuck one
     // look identical.
     expect(postStatusCommentStep.length).toBeGreaterThan(0);
@@ -22460,23 +22477,22 @@ exit 1
         /\n {2}review-address:\n[\s\S]*?(?=\n {2}\w[\w-]*:\n|$)/,
       )?.[0] ?? '';
     expect(addressJobBlock).toBeTruthy();
-    const jobCapMin = Number(
-      addressJobBlock.match(/\n {4}timeout-minutes: (\d+)/)?.[1],
-    );
-    expect(Number.isFinite(jobCapMin)).toBe(true);
+    const jobCaps = jobCapsOf(addressJobBlock);
 
-    // af-039 quotes the cap as runner-hours per slot and as a fleet total at
-    // the max-parallel fallback, derived the same way as 'bounds fleet-wide
-    // simultaneity below the per-scan target budget'.
+    // af-039 quotes EACH runner's cap as runner-hours per slot and as a
+    // fleet total at the max-parallel fallback, derived the same way as
+    // 'bounds fleet-wide simultaneity below the per-scan target budget'.
     const parallel = Number(
       reviewAddressJob.match(/max-parallel:.*?\|\|\s*(\d+)/)?.[1],
     );
     expect(Number.isInteger(parallel)).toBe(true);
-    expect(designDoc).toContain(`${jobCapMin}-minute job cap`);
-    expect(designDoc).toContain(`${jobCapMin / 60} runner-hours per`);
-    expect(designDoc).toContain(
-      `(${(jobCapMin / 60) * parallel} across the fleet at ${parallel})`,
-    );
+    for (const jobCapMin of [jobCaps.hosted, jobCaps.selfHosted]) {
+      expect(designDoc).toContain(`${jobCapMin}-minute job cap`);
+      expect(designDoc).toContain(`${jobCapMin / 60} runner-hours per`);
+      expect(designDoc).toContain(
+        `(${(jobCapMin / 60) * parallel} across the fleet at ${parallel})`,
+      );
+    }
     expect(designDoc).not.toContain('300-minute job cap');
 
     // af-050's budget table: the Repair row is the derived step cap, and the
@@ -22496,11 +22512,13 @@ exit 1
     const repairCapMin = stepCapsOf(
       longSteps.find((b) => b.startsWith("'Repair deterministic rejection'")) ??
         '',
-    ).unarmed;
+    ).selfHosted;
     expect(Number.isFinite(repairCapMin)).toBe(true);
     // No trailing \n: this row carries a rationale parenthetical like its
     // siblings. Still unique in the doc — 'Repair verification' is not
-    // followed by digits.
+    // followed by digits. The hosted table comes first, so the plain
+    // regexes read it; the self-hosted table's worst-case line carries a
+    // '(self-hosted)' tag the plain regex does not match.
     const repairRowMin = Number(designDoc.match(/\n {2}Repair +(\d+)/)?.[1]);
     expect(Number.isFinite(repairRowMin)).toBe(true);
     expect(repairRowMin).toBe(repairCapMin);
@@ -22509,19 +22527,32 @@ exit 1
     const reportRowMin = Number(designDoc.match(/\n {2}report +(\d+)\n/)?.[1]);
     expect(Number.isFinite(setupRowMin)).toBe(true);
     expect(Number.isFinite(reportRowMin)).toBe(true);
-    const longStepSumMin = longSteps.reduce(
-      (a, b) => a + stepCapsOf(b).unarmed,
+    const longStepSumHosted = longSteps.reduce(
+      (a, b) => a + stepCapsOf(b).hosted,
+      0,
+    );
+    const longStepSumSelf = longSteps.reduce(
+      (a, b) => a + stepCapsOf(b).selfHosted,
       0,
     );
     const worstCase = designDoc.match(
       /\n {2}worst case +(\d+) +=> job timeout (\d+)/,
     );
-    expect(worstCase, 'af-050 worst-case line').toBeTruthy();
+    expect(worstCase, 'af-050 hosted worst-case line').toBeTruthy();
     expect(Number(worstCase[1])).toBe(
-      setupRowMin + longStepSumMin + reportRowMin,
+      setupRowMin + longStepSumHosted + reportRowMin,
     );
-    expect(Number(worstCase[2])).toBe(jobCapMin);
-    expect(Number(worstCase[1])).toBeLessThanOrEqual(jobCapMin);
+    expect(Number(worstCase[2])).toBe(jobCaps.hosted);
+    expect(Number(worstCase[1])).toBeLessThanOrEqual(jobCaps.hosted);
+    const worstCaseSelf = designDoc.match(
+      /\n {2}worst case \(self-hosted\) +(\d+) +=> job timeout (\d+)/,
+    );
+    expect(worstCaseSelf, 'af-050 self-hosted worst-case line').toBeTruthy();
+    expect(Number(worstCaseSelf[1])).toBe(
+      setupRowMin + longStepSumSelf + reportRowMin,
+    );
+    expect(Number(worstCaseSelf[2])).toBe(jobCaps.selfHosted);
+    expect(Number(worstCaseSelf[1])).toBeLessThanOrEqual(jobCaps.selfHosted);
     expect(designDoc).not.toContain('=> job timeout 300');
   });
 
@@ -22546,10 +22577,7 @@ exit 1
         /\n {2}review-address:\n[\s\S]*?(?=\n {2}\w[\w-]*:\n|$)/,
       )?.[0] ?? '';
     expect(jobBlock).toBeTruthy();
-    const jobCapMin = Number(
-      jobBlock.match(/\n {4}timeout-minutes: (\d+)/)?.[1],
-    );
-    expect(Number.isFinite(jobCapMin)).toBe(true);
+    const jobCaps = jobCapsOf(jobBlock);
 
     const stepBlocks = jobBlock.split(/\n {6}- name: /).slice(1);
     const longSteps = stepBlocks.filter((b) =>
@@ -22561,21 +22589,23 @@ exit 1
     expect(longSteps).toHaveLength(4);
     const stepCaps = longSteps.map((b) => stepCapsOf(b));
     for (const cap of stepCaps) {
-      expect(Number.isFinite(cap.armed)).toBe(true);
-      expect(Number.isFinite(cap.unarmed)).toBe(true);
+      expect(Number.isFinite(cap.hosted)).toBe(true);
+      expect(Number.isFinite(cap.selfHosted)).toBe(true);
     }
     // The setup/report steps (Prepare, Push, Finalize) are NOT bounded at
     // runtime — this reserve is an ASSUMPTION that they stay under 25m
     // (measured 5-7m + 3-4s), not a proven headroom. A hung gh call in any
     // of them can still eat the job timeout.
     const SETUP_AND_REPORT_MIN = 25;
-    // Two round shapes (af-156). Unarmed: every long step at its cap.
-    // Armed: the address step at its armed cap, and the repair chain does
-    // not run — its `if:` excludes the arm, and the repair gate only runs
-    // after an attempted repair — so only the first gate follows it.
-    const unarmedWorstMin =
-      stepCaps.reduce((a, b) => a + b.unarmed, 0) + SETUP_AND_REPORT_MIN;
-    expect(unarmedWorstMin).toBeLessThanOrEqual(jobCapMin);
+    // Unarmed worst case PER RUNNER CLASS: every long step at that
+    // runner's cap. The self-hosted chain (250+60+70+60+25=465) is what
+    // the 465m job cap holds; the hosted chain stays at the 345m shape.
+    const unarmedWorstHosted =
+      stepCaps.reduce((a, b) => a + b.hosted, 0) + SETUP_AND_REPORT_MIN;
+    expect(unarmedWorstHosted).toBeLessThanOrEqual(jobCaps.hosted);
+    const unarmedWorstSelf =
+      stepCaps.reduce((a, b) => a + b.selfHosted, 0) + SETUP_AND_REPORT_MIN;
+    expect(unarmedWorstSelf).toBeLessThanOrEqual(jobCaps.selfHosted);
     const repairStep = longSteps.find((b) =>
       b.startsWith("'Repair deterministic rejection'"),
     );
@@ -22588,21 +22618,31 @@ exit 1
       "steps.prepare.outputs.self_review_arm != 'on'",
     );
     expect(repairGate).toContain("steps.repair.outputs.attempted == 'true'");
+    // Armed rounds only run on the self-hosted pool (prepare forces the
+    // arm off on github-hosted), and the repair chain does not run — its
+    // `if:` excludes the arm, and the repair gate only runs after an
+    // attempted repair — so only the first gate follows the address step.
     const armedWorstMin =
       longSteps
         .filter((b) => b !== repairStep && b !== repairGate)
-        .reduce((a, b) => a + stepCapsOf(b).armed, 0) + SETUP_AND_REPORT_MIN;
-    expect(armedWorstMin).toBeLessThanOrEqual(jobCapMin);
-    expect(jobCapMin).toBeLessThanOrEqual(360);
+        .reduce((a, b) => a + stepCapsOf(b).selfHosted, 0) +
+      SETUP_AND_REPORT_MIN;
+    expect(armedWorstMin).toBeLessThanOrEqual(jobCaps.selfHosted);
+    // GitHub-hosted jobs are cut at 360 minutes whatever timeout-minutes
+    // says; only the hosted arm is bound by that ceiling.
+    expect(jobCaps.hosted).toBeLessThanOrEqual(360);
 
-    // The pending-check staleness bound (review-scan) must sit ABOVE this job
-    // cap, or a live review-address run ages out of HAS_PENDING_CHECKS
-    // mid-flight and the PR is enqueued against its own still-running check.
+    // The pending-check staleness bound (review-scan) must sit ABOVE the
+    // LARGER job cap, or a live review-address run ages out of
+    // HAS_PENDING_CHECKS mid-flight and the PR is enqueued against its own
+    // still-running check.
     const pendingStaleMin = Number(
       reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1],
     );
     expect(Number.isFinite(pendingStaleMin)).toBe(true);
-    expect(pendingStaleMin).toBeGreaterThan(jobCapMin);
+    expect(pendingStaleMin).toBeGreaterThan(
+      Math.max(jobCaps.hosted, jobCaps.selfHosted),
+    );
 
     // continue-on-error makes bounding the verification gates a graceful
     // degrade: a timed-out gate falls through to the report step.
@@ -22616,21 +22656,44 @@ exit 1
     }
 
     // QWEN_TIMEOUT_MS is the budget that actually ends a round; the step
-    // timeout is only a backstop. Derive both from the workflow and assert
-    // the margin so the pair cannot drift silently.
-    const stepCapMin = stepCapsOf(addressStep).unarmed;
-    const budgetMs = Number(
-      addressStep.match(
-        /QWEN_TIMEOUT_MS: '\$\{\{[^}]*\|\|\s*(\d+)\s*\}\}'/,
-      )?.[1],
-    );
-    expect(Number.isFinite(stepCapMin)).toBe(true);
-    expect(Number.isFinite(budgetMs)).toBe(true);
-    const marginMin = stepCapMin - budgetMs / 60000;
-    // Under the cap, or the cap fires first and the internal kill path never
-    // writes `agent-timeout` — the file the report step reads to tell a
-    // timeout apart from a crash.
-    expect(marginMin).toBeGreaterThanOrEqual(1);
+    // timeout is only a backstop. Derive both PER RUNNER CLASS from the
+    // workflow and assert the margin so the pair cannot drift silently.
+    const addressCaps = stepCapsOf(addressStep);
+    // The unset-variable default resolves in the run body (not in the env
+    // fallback), runner-split. Replay the ACTUAL resolution block so a
+    // flipped runner test or a wrong default fails here, not in production.
+    const defaultBlock = addressStep.match(
+      /if \[\[ -z "\$\{QWEN_TIMEOUT_MS\}" \]\]; then\n[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(defaultBlock, 'runner-split default resolution block').toBeTruthy();
+    const runDefault = (runnerEnvironment) =>
+      execFileSync(
+        'bash',
+        ['-c', `${defaultBlock}\nprintf '%s' "$QWEN_TIMEOUT_MS"`],
+        {
+          env: {
+            ...process.env,
+            QWEN_TIMEOUT_MS: '',
+            RUNNER_ENVIRONMENT: runnerEnvironment,
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    const budgetMsHosted = Number(runDefault('github-hosted'));
+    const budgetMsSelf = Number(runDefault('self-hosted'));
+    expect(budgetMsHosted).toBe(7200000);
+    expect(budgetMsSelf).toBe(14400000);
+    for (const [budgetMs, stepCapMin] of [
+      [budgetMsHosted, addressCaps.hosted],
+      [budgetMsSelf, addressCaps.selfHosted],
+    ]) {
+      expect(Number.isFinite(stepCapMin)).toBe(true);
+      const marginMin = stepCapMin - budgetMs / 60000;
+      // Under the cap, or the cap fires first and the internal kill path
+      // never writes `agent-timeout` — the file the report step reads to
+      // tell a timeout apart from a crash.
+      expect(marginMin).toBeGreaterThanOrEqual(1);
+    }
     // The repair attempt stays inside its own smaller step the same way.
     const repairCapMin = Number(
       repairDeterministicRejectionStep.match(/timeout-minutes: (\d+)/)?.[1],
@@ -22645,70 +22708,100 @@ exit 1
     // the floor guards the likelier mistake: this variable is the one place
     // that wants milliseconds while everything around it says minutes.
     expect(addressStep).toContain('BUDGET_CAP_MS=7200000');
+    expect(addressStep).toContain('BUDGET_CAP_MS=14400000');
     expect(addressStep).toContain('BUDGET_FLOOR_MS=60000');
     expect(addressStep).toMatch(
       /QWEN_TIMEOUT_MS.*MILLISECONDS in \[.*\].*clamping to/,
     );
-    // The clamp ceiling must stay under the step backstop with the SAME margin
-    // rule as the fallback above, or the cap fires first and the internal kill
-    // path never writes `agent-timeout`.
-    const clampMs = Number(addressStep.match(/BUDGET_CAP_MS=(\d+)/)?.[1]);
-    expect(Number.isFinite(clampMs)).toBe(true);
-    expect(clampMs / 60000).toBeLessThanOrEqual(stepCapMin - 1);
-    // The clamp ceiling IS the fallback budget: raising the default below the
-    // || without raising BUDGET_CAP_MS would be silently pulled back down (with
-    // a ::warning::) on every run.
-    expect(budgetMs).toBeLessThanOrEqual(clampMs);
 
     // Replay the ACTUAL clamp block so the guard condition is executed, not
-    // merely string-matched: a flipped operator, a dropped width bound, or a
-    // missing 10# must fail here rather than survive green.
+    // merely string-matched: a flipped operator, a dropped width bound, a
+    // missing 10#, or a runner branch that never raises the ceiling must
+    // fail here rather than survive green.
     const clampBlock = addressStep.match(
       /BUDGET_CAP_MS=\d+\n[\s\S]*?export QWEN_TIMEOUT_MS/,
     )?.[0];
     expect(clampBlock).toBeTruthy();
-    const runClamp = (value) =>
+    const runClamp = (value, runnerEnvironment) =>
       execFileSync(
         'bash',
         ['-c', `${clampBlock}\nprintf '%s' "$QWEN_TIMEOUT_MS"`],
-        { env: { ...process.env, QWEN_TIMEOUT_MS: value }, encoding: 'utf8' },
+        {
+          env: {
+            ...process.env,
+            QWEN_TIMEOUT_MS: value,
+            RUNNER_ENVIRONMENT: runnerEnvironment,
+          },
+          encoding: 'utf8',
+        },
       )
         .trim()
         .split('\n')
         .pop();
-    // In-range values pass through untouched; both bounds are inclusive.
-    expect(runClamp('60000')).toBe('60000');
-    expect(runClamp('7200000')).toBe('7200000');
-    // Over-cap, malformed, zero-padded (octal), and int64-overflowing values
-    // all clamp to the ceiling instead of reaching run-agent.mjs unclamped.
-    expect(runClamp('9999999')).toBe('7200000');
-    expect(runClamp('abc')).toBe('7200000');
-    expect(runClamp('09999999')).toBe('7200000');
-    expect(runClamp('9223372036854775808')).toBe('7200000');
+    for (const [runner, ceiling, stepCapMin] of [
+      ['github-hosted', '7200000', addressCaps.hosted],
+      ['self-hosted', '14400000', addressCaps.selfHosted],
+    ]) {
+      // The clamp ceiling must stay under THAT runner's step backstop with
+      // the SAME margin rule as the default above, or the cap fires first
+      // and the internal kill path never writes `agent-timeout`.
+      expect(Number(ceiling) / 60000).toBeLessThanOrEqual(stepCapMin - 1);
+      // In-range values pass through untouched; both bounds are inclusive.
+      expect(runClamp('60000', runner)).toBe('60000');
+      expect(runClamp(ceiling, runner)).toBe(ceiling);
+      // Over-cap, malformed, and int64-overflowing values all clamp to the
+      // ceiling instead of reaching run-agent.mjs unclamped. 99999999
+      // (8 digits) is over BOTH ceilings while staying inside the {1,8}
+      // width bound.
+      expect(runClamp('99999999', runner)).toBe(ceiling);
+      expect(runClamp('abc', runner)).toBe(ceiling);
+      expect(runClamp('9223372036854775808', runner)).toBe(ceiling);
 
-    // The FLOOR, and the reason it exists: every comment, the PR body and the
-    // operator message speak in minutes while this variable wants
-    // milliseconds. `120` is not a contrived input — it is what a maintainer
-    // told to "raise the agent time budget" types. Unclamped it arms a 120 ms
-    // timer, so every round SIGTERMs instantly and reports a timeout until
-    // TIMEOUT_WINDOW_CAP stops AutoFix on the PR, advising the human to raise
-    // the budget they just raised, with no warning anywhere in that loop.
-    for (const minutesShaped of ['1', '30', '60', '120', '999']) {
-      expect(runClamp(minutesShaped)).toBe('7200000');
+      // The FLOOR, and the reason it exists: every comment, the PR body and
+      // the operator message speak in minutes while this variable wants
+      // milliseconds. `120` is not a contrived input — it is what a
+      // maintainer told to "raise the agent time budget" types. Unclamped it
+      // arms a 120 ms timer, so every round SIGTERMs instantly and reports a
+      // timeout until TIMEOUT_WINDOW_CAP stops AutoFix on the PR, advising
+      // the human to raise the budget they just raised, with no warning
+      // anywhere in that loop.
+      for (const minutesShaped of ['1', '30', '60', '120', '240', '999']) {
+        expect(runClamp(minutesShaped, runner)).toBe(ceiling);
+      }
+      // `0` and `000` passed the bare regex while the message claimed the
+      // value had to be positive.
+      expect(runClamp('0', runner)).toBe(ceiling);
+      expect(runClamp('000', runner)).toBe(ceiling);
+      // Just under and just over the floor, so the boundary is pinned in
+      // both directions rather than only from inside.
+      expect(runClamp('59999', runner)).toBe(ceiling);
+      expect(runClamp('60001', runner)).toBe('60001');
     }
-    // `0` and `000` passed the bare regex while the message claimed the value
-    // had to be positive.
-    expect(runClamp('0')).toBe('7200000');
-    expect(runClamp('000')).toBe('7200000');
-    // Just under and just over the floor, so the boundary is pinned in both
-    // directions rather than only from inside.
-    expect(runClamp('59999')).toBe('7200000');
-    expect(runClamp('60001')).toBe('60001');
+    // The runner split is real, not cosmetic: a value between the two
+    // ceilings passes on self-hosted and clamps on hosted.
+    expect(runClamp('10800000', 'self-hosted')).toBe('10800000');
+    expect(runClamp('10800000', 'github-hosted')).toBe('7200000');
+    // Zero-padded (the octal hazard 10# exists for): 09999999 = 9,999,999
+    // ms is OVER the hosted ceiling, so it clamps there; on self-hosted it
+    // is IN range and must pass through unchanged — without 10# the (( ))
+    // comparison would error on the leading zero instead of parsing it as
+    // decimal.
+    expect(runClamp('09999999', 'github-hosted')).toBe('7200000');
+    expect(runClamp('09999999', 'self-hosted')).toBe('09999999');
+    // Each default IS its runner's ceiling: raising a default without
+    // raising BUDGET_CAP_MS would be silently pulled back down (with a
+    // ::warning::) on every run.
+    expect(budgetMsHosted).toBeLessThanOrEqual(7200000);
+    expect(budgetMsSelf).toBeLessThanOrEqual(14400000);
 
     // The message has to name the units, since a units confusion is the whole
     // failure mode this branch exists for.
     const warned = execFileSync('bash', ['-c', `${clampBlock}\n:`], {
-      env: { ...process.env, QWEN_TIMEOUT_MS: '120' },
+      env: {
+        ...process.env,
+        QWEN_TIMEOUT_MS: '120',
+        RUNNER_ENVIRONMENT: 'self-hosted',
+      },
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -32346,7 +32439,7 @@ describe('in-round self-review A/B (af-156)', () => {
       `SELF_REVIEW_ARM: "\${{ steps.prepare.outputs.self_review_arm || 'off' }}"`,
     );
     expect(addressStep).toContain(
-      `timeout-minutes: "\${{ steps.prepare.outputs.self_review_arm == 'on' && 190 || 130 }}"`,
+      `timeout-minutes: "\${{ runner.environment == 'github-hosted' && 130 || 250 }}"`,
     );
     expect(workflow).toContain(
       "steps.sandbox_image.outcome == 'success' && steps.prepare.outputs.self_review_arm != 'on' }}",
@@ -32356,16 +32449,20 @@ describe('in-round self-review A/B (af-156)', () => {
       '--self-review-cli "node ${GITHUB_WORKSPACE}/dist/cli.js"',
     );
     expect(addressStep).toContain('--deadline "${ROUND_DEADLINE}"');
-    // An armed round's budget stays under the step backstop with the same
-    // margin rule the unarmed budget follows.
-    const stepCapMin = stepCapsOf(addressStep).armed;
-    expect(addressStep).toContain('BUDGET_CAP_MS=10800000');
-    expect(10800000 / 60000).toBeLessThanOrEqual(stepCapMin - 1);
-    expect(7200000 / 60000).toBeLessThanOrEqual(
-      stepCapsOf(addressStep).unarmed - 1,
-    );
+    // An armed round's budget stays under the self-hosted step backstop
+    // with the same margin rule the unarmed budget follows; the arm never
+    // runs on github-hosted, where the 120m/130m shape holds.
+    const addressCaps = stepCapsOf(addressStep);
+    expect(addressStep).toContain('BUDGET_CAP_MS=14400000');
+    expect(14400000 / 60000).toBeLessThanOrEqual(addressCaps.selfHosted - 1);
+    expect(7200000 / 60000).toBeLessThanOrEqual(addressCaps.hosted - 1);
     expect(workflow).toContain(
-      "SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'",
+      "SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 14400000 }}'",
+    );
+    // The armed branch takes its budget from SELF_REVIEW_TIMEOUT_MS with
+    // the same 240m fallback as the unarmed self-hosted default.
+    expect(addressStep).toContain(
+      'QWEN_TIMEOUT_MS="${SELF_REVIEW_TIMEOUT_MS:-14400000}"',
     );
     // Replay the arm block: the split runs on the PR number alone.
     const armBlock = prepareStep.match(
