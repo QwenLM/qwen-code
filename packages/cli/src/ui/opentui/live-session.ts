@@ -32,7 +32,15 @@ import {
   type InteractiveCompletedToolCall,
   type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
-import { createNotStartedToolErrorResponse } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  createNotStartedToolErrorResponse,
+  LlmEventType,
+} from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
+  type GoalTurnPermit,
+} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import {
   LoopReason,
   LoopType,
@@ -726,6 +734,87 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
 export const STARTUP_CHAT_WAIT_MS = 15_000;
 const STARTUP_CHAT_POLL_MS = 100;
 
+async function finishToolGoalTurn(
+  config: Config,
+  promptId: string,
+  permit: GoalTurnPermit,
+  signal: AbortSignal,
+  isCurrentSession: () => boolean,
+): Promise<ServerLlmStreamEvent[]> {
+  if (!isCurrentSession()) return [];
+  const runtime = config.getGoalRuntime();
+  const ownsPermit = () => {
+    if (!isCurrentSession()) return false;
+    const admitted = runtime.permitForTurn(promptId);
+    return (
+      admitted?.turnId === permit.turnId &&
+      admitted.goalId === permit.goalId &&
+      admitted.revision === permit.revision
+    );
+  };
+  if (!ownsPermit()) return [];
+
+  const events: ServerLlmStreamEvent[] = [];
+  const unsubscribe = runtime.subscribe((value, cause) => {
+    if (
+      value.goal?.goalId === permit.goalId &&
+      value.goal.revision === permit.revision
+    )
+      events.push({ type: LlmEventType.GoalState, value, cause });
+  });
+  let finishing = false;
+  const pauseGoal = async (reason: string) => {
+    try {
+      if (!isCurrentSession()) return;
+      if (!ownsPermit()) {
+        // The runtime releases the permit before awaiting its verifier.
+        if (!finishing) return;
+        const { goal, activity } = runtime.getSnapshot();
+        if (
+          activity !== 'verifying' ||
+          goal?.goalId !== permit.goalId ||
+          goal.revision !== permit.revision
+        )
+          return;
+      }
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+        reason,
+      });
+    } catch (error) {
+      liveLogger.warn('Failed to pause the interrupted Goal', error);
+    }
+  };
+  let pauseOnAbort: Promise<void> | undefined;
+  const onAbort = () => {
+    pauseOnAbort ??= pauseGoal(GOAL_PAUSE_REASON_USER_INTERRUPT);
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    if (signal.aborted) onAbort();
+    else {
+      // The verifier reads the recorded tool results from this turn.
+      await config.getChatRecordingService()?.flush();
+      if (!signal.aborted && ownsPermit()) {
+        finishing = true;
+        await runtime.finishTurn(permit);
+      }
+    }
+  } catch (error) {
+    if (!signal.aborted && isCurrentSession()) {
+      await pauseGoal(goalPauseReasonForFailure(getErrorMessage(error)));
+      throw error;
+    }
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    await pauseOnAbort;
+    unsubscribe();
+  }
+  return events;
+}
+
 /**
  * Sends one user prompt through the real client and yields neutral events.
  * The caller (backend) drains this into the streaming model.
@@ -778,6 +867,8 @@ export async function* livePromptEvents(
   }
   const sessionId = config.getSessionId();
   const current = () => options?.isCurrentTurn?.() !== false;
+  const isCurrentSession = () =>
+    current() && config.getSessionId() === sessionId;
   const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
@@ -1192,9 +1283,11 @@ export async function* livePromptEvents(
     >();
     const groupId = options?.checkpointHistory?.allocateId();
     const batchId = `tool-batch-${randomUUID()}`;
-    const publishToolHistory = (calls: InteractiveToolCall[]) => {
+    const toolHistoryEvent = (
+      calls: InteractiveToolCall[],
+    ): OpenTuiStreamEvent | undefined => {
       if (groupId === undefined || calls.length === 0) return;
-      live.push({
+      return {
         type: 'tool-history',
         item: {
           ...mapToDisplay(calls, config.getProjectRoot()),
@@ -1207,8 +1300,18 @@ export async function* livePromptEvents(
             call.status !== 'error' &&
             call.status !== 'cancelled',
         ),
-      });
+      };
     };
+    const publishToolHistory = (calls: InteractiveToolCall[]) => {
+      const event = toolHistoryEvent(calls);
+      if (event) live.push(event);
+    };
+    const skippedCalls = (status: 'cancelled' | 'error', message: string) =>
+      pending.map((request) => ({
+        request,
+        status,
+        response: createNotStartedToolErrorResponse(request, message),
+      }));
     let shellOwnerOpen = true;
     // Settles the shared batch once the scheduler completed it.
     let settleBatch: (() => void) | undefined;
@@ -1355,34 +1458,30 @@ export async function* livePromptEvents(
         live.close();
       },
     });
-    // The calls a schedule failed for get their cards closed.
-    const onScheduleFailed =
-      (calls: readonly ToolCallRequestInfo[]) => (error: unknown) => {
-        if (shellOwnerOpen) {
-          shellOwnerOpen = false;
-          options?.onExecutingShells?.([]);
-        }
-        const cancelled =
-          abort.aborted ||
-          (error instanceof Error && error.name === 'AbortError');
-        const ids = new Set([
-          ...calls.map((call) => call.callId),
-          ...waitingSeen,
-          ...queuedSeen,
-          ...descriptionSeen,
-        ]);
-        for (const id of ids) {
-          live.push({ type: 'tool-queued', id, queued: false });
-          live.push({ type: 'confirm-resolved', id, outcome: 'rejected' });
-          live.push({
-            type: 'tool-end',
-            id,
-            success: false,
-            summary: cancelled ? 'cancelled' : 'error',
-          });
-        }
-        live.close();
-      };
+    const onScheduleFailed = (error: unknown) => {
+      if (shellOwnerOpen) {
+        shellOwnerOpen = false;
+        options?.onExecutingShells?.([]);
+      }
+      const cancelled =
+        abort.aborted ||
+        (error instanceof Error && error.name === 'AbortError');
+      const summary = cancelled ? 'cancelled' : 'error';
+      if (sharedRound)
+        publishToolHistory(skippedCalls(summary, getErrorMessage(error)));
+      const ids = new Set([
+        ...pending.map((call) => call.callId),
+        ...waitingSeen,
+        ...queuedSeen,
+        ...descriptionSeen,
+      ]);
+      for (const id of ids) {
+        live.push({ type: 'tool-queued', id, queued: false });
+        live.push({ type: 'confirm-resolved', id, outcome: 'rejected' });
+        live.push({ type: 'tool-end', id, success: false, summary });
+      }
+      live.close();
+    };
     // On the shared agent loop (`experimental.unifiedAgentLoop`), the round's
     // calls run as one batch of the loop on this scheduler: the batch answers
     // a replay in place, and finalizes, counts and records the results.
@@ -1433,11 +1532,10 @@ export async function* livePromptEvents(
                     }),
                   ),
                 );
-              const run = scheduler.schedule(launched as never, signal);
-              void run.catch((error: unknown) => {
-                onScheduleFailed(launched)(error);
-                reject(error);
-              });
+              void scheduler.schedule(launched as never, signal).catch(reject);
+            }).catch((error: unknown) => {
+              onScheduleFailed(error);
+              throw error;
             });
           },
         },
@@ -1458,7 +1556,7 @@ export async function* livePromptEvents(
         pending.map((request) => ({ status: 'scheduled', request })),
       );
       scheduled = scheduler.schedule(pending as never, abort);
-      void scheduled.catch(onScheduleFailed(pending));
+      void scheduled.catch(onScheduleFailed);
     }
     for (;;) {
       const ev = await live.next();
@@ -1511,15 +1609,14 @@ export async function* livePromptEvents(
       // The batch ran nothing: the model repeated a call id it was already
       // answered for, which stops the turn as a loop, as Ink does.
       const message = 'Tool skipped because the model repeated a tool-call id.';
-      for (const call of pending) {
-        if (current())
-          dualOutput?.emitToolResult(
-            call,
-            createNotStartedToolErrorResponse(call, message),
-          );
+      const skipped = skippedCalls('cancelled', message);
+      const history = toolHistoryEvent(skipped);
+      if (history) yield history;
+      for (const { request, response } of skipped) {
+        if (isCurrentSession()) dualOutput?.emitToolResult(request, response);
         yield {
           type: 'tool-end',
-          id: call.callId,
+          id: request.callId,
           success: false,
           summary: 'cancelled',
         };
@@ -1605,11 +1702,30 @@ export async function* livePromptEvents(
     }
     // The batch's results: in request order and finalized, with the answers
     // to the calls it did not run, which close their cards here.
-    const ran = new Set(completed.map((call) => call.request.callId));
+    const displayed = new Map(
+      completed.map((call) => [call.request.callId, call]),
+    );
     const answeredOnly = answered.filter(
-      ({ request }) => !ran.has(request.callId),
+      ({ request }) => !displayed.has(request.callId),
     );
     if (shared) {
+      if (answeredOnly.length > 0) {
+        for (const { request, response } of answeredOnly) {
+          displayed.set(
+            request.callId,
+            response.error
+              ? { request, response, status: 'error' }
+              : { request, response, status: 'success' },
+          );
+        }
+        const ordered = new Set(
+          pending.map(({ callId }) => displayed.get(callId)),
+        );
+        const history = toolHistoryEvent(
+          [...ordered].filter((call) => call !== undefined),
+        );
+        if (history) yield history;
+      }
       for (const { request, response } of answeredOnly) {
         const result = toolResultEvent(request.callId, response.resultDisplay);
         if (result) yield result;
@@ -1621,15 +1737,10 @@ export async function* livePromptEvents(
         };
       }
       responseParts.splice(0, responseParts.length, ...shared.parts);
-      if (current() && config.getSessionId() === sessionId) {
+      if (isCurrentSession()) {
         for (const response of shared.responses ?? []) response.record?.();
       }
     }
-    const emitAnswered = () => {
-      if (abort.aborted || !current()) return;
-      for (const { request, response } of answeredOnly)
-        dualOutput?.emitToolResult(request, response);
-    };
     // Client-initiated slash tools finish locally in Ink. Leave queued user
     // input for its own turn rather than attaching it to tool responses.
     if (initialTool) {
@@ -1673,45 +1784,54 @@ export async function* livePromptEvents(
       }
       return;
     }
-    // ink use-llm-stream parity (:5328): when every tool in the batch was
-    // cancelled, the cancelled responses go to history only — no follow-up
-    // model request. Checked before the steering drain so surviving steered
-    // texts stay parked for the post-turn queue drain instead of riding a
-    // request that will never be sent.
-    // A batch that ran no call, e.g. one of replays alone, sends its answers
-    // as the next round, as Ink does; the batch stops a model that keeps
-    // replaying.
-    if (
-      (!shared || completed.length > 0) &&
-      completed.every((call) => call.status === 'cancelled')
-    ) {
-      emitAnswered();
-      if (responseParts.length > 0) {
-        await client.addHistory({ role: 'user', parts: responseParts });
-      }
-      options?.onToolsCancelled?.();
-      return;
-    }
-    if (!turnModel.inline && !turnModel.current?.endsWith('\0')) {
+    if (shared && !isCurrentSession()) return;
+    // Replay answers keep a declined batch going. Esc stops the whole batch
+    // and pairs its retained results without sending another request.
+    const cancelled =
+      (shared !== undefined && abort.aborted) ||
+      (answeredOnly.length === 0 &&
+        completed.every((call) => call.status === 'cancelled'));
+    if (!cancelled && !turnModel.inline && !turnModel.current?.endsWith('\0')) {
       for (const call of completed) {
         if ('modelOverride' in call.response)
           turnModel.current = call.response.modelOverride;
       }
     }
 
-    if (!abort.aborted && current()) {
+    if (!cancelled && !abort.aborted && current()) {
       for (const [index, call] of completed.entries()) {
         dualOutput?.emitToolResult(call.request, {
           ...call.response,
           ...finalResponses[index],
         });
       }
+      for (const { request, response } of answeredOnly)
+        dualOutput?.emitToolResult(request, response);
     }
-    emitAnswered();
-    // A tool that ends the turn ends it, with the results in history, as in
-    // Ink on the shared loop.
-    if (shared?.stop === 'tool_ended_turn') {
-      await client.addHistory({ role: 'user', parts: responseParts });
+    if (cancelled || shared?.stop === 'tool_ended_turn') {
+      if (responseParts.length > 0) {
+        await client.addHistory({ role: 'user', parts: responseParts });
+      }
+      if (cancelled && (!shared || isCurrentSession()))
+        options?.onToolsCancelled?.();
+      const permit =
+        shared &&
+        completed.find((call) => call.response.terminateTurn)?.request
+          .goalContext;
+      if (permit) {
+        const events = await finishToolGoalTurn(
+          config,
+          promptId,
+          permit,
+          abort,
+          isCurrentSession,
+        );
+        for (const event of events) {
+          if (!isCurrentSession()) return;
+          dualOutput?.processEvent(event);
+          yield* map(event);
+        }
+      }
       return;
     }
     // Sampling boundary: drained steering rides after the tool responses as
