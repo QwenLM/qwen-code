@@ -171,6 +171,13 @@ class TrackedChild implements TrackedChildProcess {
   readonly exited: Promise<AcpChannelExitInfo | undefined>;
   private readonly knownGroups = new Set<number>();
   private cleanupProofError: Error | undefined;
+  /**
+   * The first signal the kernel refused with EPERM. Not proof of a failed
+   * shutdown, so it never throws on its own, but it is the only thing that
+   * tells "we lost permission or the pgid was reused" apart from "our own
+   * process tree is wedged", so it rides along on the deadline error.
+   */
+  private cleanupRefusalNote: string | undefined;
   private exitInfo: AcpChannelExitInfo | undefined;
   private exitedSettled = false;
   private forceKillRequested = false;
@@ -441,9 +448,12 @@ class TrackedChild implements TrackedChildProcess {
         const proof = this.cleanupProofError
           ? `; ${this.cleanupProofError.message}`
           : '';
+        const refusal = this.cleanupRefusalNote
+          ? `; ${this.cleanupRefusalNote}`
+          : '';
         throw new Error(
           `ACP child pid=${rootPid} did not exit with its owned process groups ` +
-            `within ${EXIT_DEADLINE_MS}ms (surviving pgids=${groups})${proof}`,
+            `within ${EXIT_DEADLINE_MS}ms (surviving pgids=${groups})${proof}${refusal}`,
         );
       }
       await delay(
@@ -568,7 +578,12 @@ class TrackedChild implements TrackedChildProcess {
         // table settle it — a group still alive at the deadline fails loudly in
         // the `surviving pgids=` error below. `survivingGroups` already treats
         // EPERM as provisional for the same reason.
-        if (isErrno(error, 'EPERM')) continue;
+        if (isErrno(error, 'EPERM')) {
+          this.cleanupRefusalNote ??=
+            `ACP child pid=${rootPid ?? 'unknown'} was refused ${signal} ` +
+            `to pgid=${group}: ${toError(error).message}`;
+          continue;
+        }
         this.recordCleanupProofError(
           `ACP child pid=${rootPid ?? 'unknown'} could not send ${signal} ` +
             `to pgid=${group}: ${toError(error).message}`,

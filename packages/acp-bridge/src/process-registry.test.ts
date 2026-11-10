@@ -792,6 +792,11 @@ describe('ProcessRegistry', () => {
         'did not exit with its owned process groups within 10000ms',
       ),
     });
+    // A group can be alive and unsignalable at the same time: without the
+    // refusal the deadline error cannot be told apart from a wedged tree.
+    await expect(terminating).resolves.toMatchObject({
+      message: expect.stringContaining('was refused SIGTERM to pgid=1234'),
+    });
   });
 
   it.each([
