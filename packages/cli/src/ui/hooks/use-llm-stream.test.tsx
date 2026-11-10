@@ -543,6 +543,7 @@ describe('useLlmStream', () => {
     modelSwitchedFromQuotaError = false,
     onPromptReturned?: Parameters<typeof useLlmStream>[25],
     midTurnDrainRef?: Parameters<typeof useLlmStream>[19],
+    isCommandCancellationBlocked?: Parameters<typeof useLlmStream>[26],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -626,6 +627,7 @@ describe('useLlmStream', () => {
           undefined, // midTurnRestoreRef
           goalQueueRef,
           onPromptReturned,
+          isCommandCancellationBlocked,
         );
       },
       {
@@ -1379,7 +1381,7 @@ describe('useLlmStream', () => {
           setDebugMessage: vi.fn(),
           dispatchExtensionStateUpdate: vi.fn(),
           addConfirmUpdateExtensionRequest: vi.fn(),
-        } as unknown as Parameters<typeof useSlashCommandProcessor>[12];
+        } as unknown as Parameters<typeof useSlashCommandProcessor>[11];
         const logger = { logMessage } as unknown as NonNullable<
           Parameters<typeof useLlmStream>[20]
         >;
@@ -1398,7 +1400,7 @@ describe('useLlmStream', () => {
           const handler = useRef<Parameters<typeof useLlmStream>[7]>(
             async () => false,
           );
-          const [processing, setProcessing] = useState(false);
+          const [, setProcessing] = useState(false);
           const llm = useLlmStream(
             client,
             history,
@@ -1431,7 +1433,6 @@ describe('useLlmStream', () => {
             loadHistory,
             vi.fn(),
             async () => false,
-            processing,
             setProcessing,
             idle,
             vi.fn(),
@@ -1515,8 +1516,7 @@ describe('useLlmStream', () => {
             StreamingState.Responding,
           );
           const itemsBeforeOldFs = mockAddItem.mock.calls.slice();
-          // Only LLM ownership was cancelled; the command signal stays healthy.
-          expect(oldCommandSignal.aborted).toBe(false);
+          expect(oldCommandSignal.aborted).toBe(true);
           await act(async () => {
             releaseFs();
             await pending;
@@ -1643,6 +1643,140 @@ describe('useLlmStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle);
     },
   );
+
+  it('hands an idle-started slash dispatch a current submission while the app reads busy', async () => {
+    let releaseLog!: () => void;
+    const heldLog = new Promise<void>((resolve) => {
+      releaseLog = resolve;
+    });
+    const logMessage = vi.fn().mockReturnValue(heldLog);
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    const observed: Array<[StreamingState, boolean | undefined]> = [];
+    mockHandleSlashCommand.mockImplementation(async (...args: unknown[]) => {
+      const isCurrentSubmission = args[5] as (() => boolean) | undefined;
+      observed.push([result.current.streamingState, isCurrentSubmission?.()]);
+      return { type: 'handled' };
+    });
+    let request!: Promise<void>;
+    await act(async () => {
+      request = result.current.submitQuery('/branch');
+    });
+    // The submission has rendered as busy before the command runs.
+    await waitFor(() => expect(logMessage).toHaveBeenCalledOnce());
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+    await act(async () => {
+      releaseLog();
+      await request;
+    });
+    expect(observed).toEqual([[StreamingState.Responding, true]]);
+  });
+
+  it.each([SendMessageType.UserQuery, SendMessageType.Cron])(
+    'aborts a cancelled %s slash dispatch and stops treating it as current',
+    async (submitType) => {
+      let releaseLog!: () => void;
+      const heldLog = new Promise<void>((resolve) => {
+        releaseLog = resolve;
+      });
+      const logMessage = vi.fn().mockReturnValue(heldLog);
+      const { result } = renderTestHook([], undefined, undefined, undefined, {
+        logMessage,
+      } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+      let isCurrentSubmission: (() => boolean) | undefined;
+      let submissionSignal: AbortSignal | undefined;
+      let releaseCommand!: () => void;
+      const heldCommand = new Promise<void>((resolve) => {
+        releaseCommand = resolve;
+      });
+      mockHandleSlashCommand.mockImplementation(async (...args: unknown[]) => {
+        isCurrentSubmission = args[5] as () => boolean;
+        submissionSignal = args[6] as AbortSignal;
+        await heldCommand;
+        return { type: 'handled' };
+      });
+      let request!: Promise<void>;
+      await act(async () => {
+        request = result.current.submitQuery('/branch', submitType);
+      });
+      await act(async () => {
+        releaseLog();
+      });
+      await waitFor(() => expect(isCurrentSubmission).toBeDefined());
+      expect(result.current.streamingState).toBe(
+        submitType === SendMessageType.Cron
+          ? StreamingState.Idle
+          : StreamingState.Responding,
+      );
+      expect(isCurrentSubmission!()).toBe(true);
+      expect(submissionSignal?.aborted).toBe(false);
+      await act(async () => {
+        expect(result.current.cancelOngoingRequest()).toBe(true);
+      });
+      expect(isCurrentSubmission!()).toBe(false);
+      expect(submissionSignal?.aborted).toBe(true);
+      await act(async () => {
+        releaseCommand();
+        await request;
+      });
+    },
+  );
+
+  it('keeps the submission lease while a slash command finishes its state change', async () => {
+    let finishCommand!: () => void;
+    const command = new Promise<void>((resolve) => {
+      finishCommand = resolve;
+    });
+    const isCommandCancellationBlocked = () => true;
+    const submissionInFlightRef = { current: false };
+    const { result } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        current: {
+          peekNextUserBatchKey: () => undefined,
+          submissionInFlightRef,
+        },
+      },
+      false,
+      undefined,
+      undefined,
+      isCommandCancellationBlocked,
+    );
+    mockHandleSlashCommand.mockImplementation(async () => {
+      await command;
+      return { type: 'handled' };
+    });
+    let request!: Promise<void>;
+    await act(async () => {
+      request = result.current.submitQuery('/branch');
+    });
+    try {
+      await waitFor(() =>
+        expect(mockHandleSlashCommand).toHaveBeenCalledOnce(),
+      );
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      act(() => {
+        expect(result.current.cancelOngoingRequest()).toBe(false);
+      });
+      expect(submissionInFlightRef.current).toBe(true);
+      await act(async () => {
+        await result.current.submitQuery('follow-up');
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => {
+        finishCommand();
+        await request;
+      });
+    }
+    expect(submissionInFlightRef.current).toBe(false);
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+  });
 
   it('rejects slash rewind admission while a model response is held', async () => {
     let releaseStream!: () => void;
@@ -16948,6 +17082,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
@@ -16981,6 +17116,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
 
         expect(localMockSendMessageStream).not.toHaveBeenCalledWith(
@@ -17025,6 +17161,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
         expect(localMockSendMessageStream).toHaveBeenCalledWith(
           '',
@@ -18184,6 +18321,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               expect.any(Function),
+              expect.any(AbortSignal),
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -18272,6 +18410,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               expect.any(Function),
+              expect.any(AbortSignal),
             ),
           );
 
@@ -24628,6 +24767,7 @@ describe('useLlmStream', () => {
           undefined,
           'test-session-id########5',
           expect.any(Function),
+          expect.any(AbortSignal),
         );
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {

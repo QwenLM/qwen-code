@@ -820,6 +820,7 @@ export const useLlmStream = (
     existingInvocationItemId?: number,
     invocationPromptId?: string,
     isCurrentSubmission?: () => boolean,
+    submissionSignal?: AbortSignal,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -861,6 +862,7 @@ export const useLlmStream = (
     text: string,
     pasteExpansions?: ReadonlyMap<string, string>,
   ) => void,
+  isCommandCancellationBlocked?: () => boolean,
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
@@ -1785,6 +1787,8 @@ export const useLlmStream = (
     // notice, the loop stop or the composer restore.
     const quiet = quietCancelRef.current;
     quietCancelRef.current = false;
+    // Keep the submission lease until the command's state change settles.
+    if (isCommandCancellationBlocked?.()) return false;
     setWorkflowKeywordActive(false);
     if (turnCancelledRef.current) {
       for (const controller of detachedToolContinuationAbortControllersRef.current) {
@@ -1799,11 +1803,15 @@ export const useLlmStream = (
     }
     // A Mod can end its turn before React renders the turn's admission:
     // the turn and the stream it opened already count.
+    const hasIdleSubmission =
+      streamingState === StreamingState.Idle &&
+      isSubmittingQueryRef.current &&
+      abortControllerRef.current?.signal.aborted === false;
     if (
       quiet
         ? streamingState === StreamingState.Idle &&
           !(modTurnRef.current && activeModelStreamsRef.current > 0)
-        : streamingState !== StreamingState.Responding
+        : streamingState !== StreamingState.Responding && !hasIdleSubmission
     ) {
       return false;
     }
@@ -1970,6 +1978,7 @@ export const useLlmStream = (
     return true;
   }, [
     streamingState,
+    isCommandCancellationBlocked,
     addItem,
     commitPendingAssistantItems,
     commitItemInOrder,
@@ -2278,6 +2287,7 @@ export const useLlmStream = (
               undefined,
               submitType === SendMessageType.UserQuery ? prompt_id : undefined,
               isCurrentSubmission,
+              abortSignal,
             )
           : false;
 

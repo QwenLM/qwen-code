@@ -135,6 +135,7 @@ import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
 import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
+import { registerWeixinAuthRoutes } from './routes/weixin-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -214,6 +215,7 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedSideQueryRoutes } from './hosted-side-query.js';
 import {
   registerHostedPackagePreparation,
   HOSTED_PACKAGE_PREPARATION_PREFIX,
@@ -2379,6 +2381,8 @@ export function createServeApp(
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        req.path === '/side-queries' ||
+        req.path.startsWith('/side-queries/') ||
         req.path.startsWith(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/`) ||
         (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
@@ -2641,6 +2645,7 @@ export function createServeApp(
       hostedHarness,
       ordinary,
     );
+    registerHostedSideQueryRoutes(app, hostedHarness, ordinary);
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
       else res.sendStatus(404);
@@ -3623,6 +3628,9 @@ export function createServeApp(
   );
   app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
 
+  const stopWeixinAuth = registerWeixinAuthRoutes(app, mutate);
+  app.locals['stopWeixinAuth'] = stopWeixinAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -4476,6 +4484,7 @@ export function createServeApp(
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(stopSubscriptionAuth);
+      stopAppResource(stopWeixinAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());
