@@ -2,13 +2,13 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-状态：proposed（2026-11-09），部分已落地（#16732）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**#16732 已落地：完整的 §3，外加 §4 中的 host 枚举器。**§1、§2、§4 的其余部分与 §5 仍在后面；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
+状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732），外加本增量的 §1 共享 restore。**§2、§4 的其余部分与 §5 仍在后面；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
 
 ## 问题
 
 drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。由此有三个后果，每一个在 PR B 打开开关的那一刻就是缺陷：
 
-- 休眠接收者永远无法被唤醒。真实 restore 位于 `restoreSessionHandler`——`registerSessionRoutes` 内约 650 行的闭包（`packages/cli/src/serve/routes/session.ts:4273-4922`），只能经 HTTP 到达。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1057-1063`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
+- 休眠接收者永远无法被唤醒。真实 restore 原先位于 `restoreSessionHandler`——`registerSessionRoutes` 内的一个路由闭包，只能经 HTTP 到达；§1 已把它的可复用核心移入 `server/session-restore.ts`。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1057-1063`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
 - `wakeDormant: false` 会永久搁浅条目。drain 把它们留到会话下一次 live turn，但没有 resume 后 drain 的钩子，因此无人消费。
 - 关停会与后继者重叠。没有任何东西停止 watch 或释放 owner 记录，因此后继 daemon 可能在前任的 restore 与准入仍在途时就 claim（主 §2）。
 
@@ -48,7 +48,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 新模块 `packages/cli/src/serve/server/session-restore.ts` 导出 `restoreSessionCore`，接收 runtime、session id、action、已校验的选项，以及路由此前捕获的闭包态（`archiveCoordinator`、`requestedSessionIdAdmission`、generation 断言、`materializeLiveConversationDirectory`、`daemonLog`）。它返回 `{ kind: 'restored', session }` 或 `{ kind: 'cancelled' }`，并**抛出既有的 typed error**而不是写响应。
 
-路由保留全部 HTTP 专属部分：解析、`resolveRuntimeForSessionRestore`、telemetry sink、脱敏与 `sendBridgeError` 翻译。它在 `try`/`catch` 内调用核心；reservation 与 worktree ownership 锁在核心**内部**声明、获取与释放，因此依赖它们的每一次读取都留在锁窗口内。169 条 HTTP parity 判据通过，且每条断言、标题与计数均未改动。
+路由保留全部 HTTP 专属部分：解析、`resolveRuntimeForSessionRestore`、telemetry sink、脱敏与 `sendBridgeError` 翻译。它在 `try`/`catch` 内调用核心；reservation 与 worktree ownership 锁在核心**内部**声明、获取与释放，因此依赖它们的每一次读取都留在锁窗口内。169 条 parity 判据通过，且每条断言、标题与计数均未改动。
 
 新模块按仓库对「legacy barrel 白名单之外文件」的要求，从定义符号的模块导入 core 符号。有两个套件把 worktree 原语 mock 在 barrel 上，因此搬移静默绕过了它们的 double，restore 读了真实磁盘——这两个套件共 35 条用例由绿转红。所以改的是它们的 mock 接线而非断言：double 现在落在深模块上，barrel mock 反过来重导出它们，两个读取端观察到同一个 double。有两条约束决定了这个方向是强制的。深模块的工厂绝不能 import 被 mock 的 barrel——barrel 自己的 `importOriginal` 会到达深模块，成环并让整轮跑挂死。而 `importOriginal` 并不递归绕过 mock，因此真实实现必须在深工厂里捕获；从 barrel 捕获拿到的是 spy 自身，会无限递归。
 
@@ -106,6 +106,8 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | `packages/cli/src/serve/server/session-restore.ts`（新）         | 共享 restore 核心、typed error、必填 `isCancelled`、可选 telemetry sink；worktree 复挂与它的两个锁 helper 搬移至此 |
 | `packages/cli/src/serve/routes/session.ts`                       | 路由委托给共享核心；保留解析、runtime 解析、virtual-subagent 与 legacy standalone 分支、telemetry、脱敏、错误映射  |
 | `packages/cli/src/serve/server/worktree-ownership-op.test.ts`    | 改从新家导入锁 key 别名；断言不变                                                                                  |
+| `packages/cli/src/serve/server/session-restore.test.ts`（新）    | 核心直调用例，钉住两条取消臂、telemetry sink 与 reservation 释放                                                   |
+| `packages/cli/src/serve/server/worktree-ownership-op.ts`         | 锁 key 的反向引用改为指向真正拥有该推导的模块                                                                      |
 | `packages/cli/src/serve/server.test.ts`                          | worktree double 移到 core 深模块，barrel mock 重导出它们；断言、标题与计数均不变                                   |
 | `packages/cli/src/serve/routes/session-worktree-reset.test.ts`   | sidecar spy 同样重指，并改在该处捕获真实实现                                                                       |
 | `packages/cli/src/serve/server/pr-watch-drain.ts`                | drain state 上的 `idle()` 落定信号，以及 `stopPrWatch`（停止、等待、再释放）                                       |
@@ -117,7 +119,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入、`listedKeys`、`partial` 透传；`stopWatch` 与 tick 落定信号                                     |
 | `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN） | 本设计                                                                                                             |
 
-`session-restore.ts`、`routes/session.ts` 与三个测试文件的行不属于 #16732——它们随 §1 在本增量落地。`pr-watch-deps.ts` 随 §4 的其余部分落地。另有两行是部分的：`session-pr-refresh.ts` 已落地 `stopWatch` 与 tick 落定信号，但 listing 写入、`listedKeys` 与 `partial` 透传尚未；`run-qwen-serve.ts` 已落地关停 drain 注册，但两个接缝尚未。
+`session-restore.ts`、`routes/session.ts`、`worktree-ownership-op.ts` 与四个测试文件的行不属于 #16732——它们随 §1 在本增量落地。`pr-watch-deps.ts` 随 §4 的其余部分落地。另有两行是部分的：`session-pr-refresh.ts` 已落地 `stopWatch` 与 tick 落定信号，但 listing 写入、`listedKeys` 与 `partial` 透传尚未；`run-qwen-serve.ts` 已落地关停 drain 注册，但两个接缝尚未。
 
 ## 关键设计决策
 
@@ -131,16 +133,17 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 
 ## 约束与风险
 
-- restore 抽取是风险最高的改动：对一个 440 行的核心做字节等价重构，169 条 HTTP 判据外加 worktree、multi-workspace 与 prompt-terminal 套件钉住它。路由必须保持完全相同的状态码、响应字段与 `Retry-After` 头。搬移用机械方式核验而非目测：把搬移后的文本与改动前文件做空白与尾逗号归一化后比对，只允许出现已声明的那几处适配差异。
+- restore 抽取是风险最高的改动：对一个 440 行的核心做字节等价重构，由 169 条 parity 判据（93 条 load/resume + 76 条 worktree-reset/prompt-terminal/REST 契约）外加 214 条 multi-workspace 与 4 条锁 key 用例钉住它。路由必须保持完全相同的状态码、响应字段与 `Retry-After` 头。搬移用机械方式核验而非目测：把搬移后的文本与改动前文件做空白与尾逗号归一化后比对，只允许出现已声明的那几处适配差异。该比对担保的是被搬移的文本，而不是那几处适配本身——后者由验证计划里的核心直调用例钉住。
 - 关闭态 parity 必须成立：开关关闭时不 claim、不 view、不写 watch、不准入、不 restore，且从未 claim 的 daemon 不尝试释放 owner 记录。
 - `run-qwen-serve.ts` 位于 serve 快路径的 pre-listen 闭包内。新 deps 模块绝不能把 SessionService 链拉进该静态闭包；refresh timer 既有的动态 import 边界是范本。
 - lifecycle 等待必须有限：挂起的 restore 不能把 shutdown 拖过 controller 的 deadline。
 
 ## 验证计划
 
-- 路由 parity（§1，判据）：既有 load/resume、worktree 分类、prompt-terminal、multi-workspace 与 REST 契约套件是字节兼容的判据。它们的断言、标题与计数均未改动，只把 worktree 的 mock 接线重指到 core 深模块。在切出点测得、并在搬移后复现：93 条 load/resume + 76 条 worktree-reset/prompt-terminal/REST 契约 = 169，另加 214 条 multi-workspace 与 4 条锁 key 用例。重指本身是承重的：不重指时 restore 绕过 double，这两个套件共 35 条用例变红，因此重指之前的绿跑不构成证据。
-- 对适配接缝做变异见证，每条都同时对搬移后的核心与抽取前的路由各跑一次：去掉 worktree 锁释放被击杀（15 条红）；只改日志措辞的对照存活，说明装置不是整片打红。有四处接缝在**两侧都存活**——两条断连臂、internal runtime 的 telemetry sink、以及 reservation 释放——因此它们是既有缺口，不是搬移弄丢的覆盖。路由自己的注释记录了断连臂为何没有路由侧测试（supertest 加 Node 的 close 事件时序在 CI 上 flaky）。这四处由字节等价性证明作证，§2/§4 再补进程内测试。
-- 单元（共享 restore，随 §2 与 §4）：`isCancelled` 触发与断连相同的清理；`release()` 恰好 detach 一次；`onRestored` 在锁释放后触发且不被 await。这些接缝在那之前没有调用方，故 §1 不为它们加测试。
+- 路由 parity（§1，判据）：**169 条 parity 判据**＝93 条 load/resume + 76 条 worktree-reset、prompt-terminal 与 REST 契约用例。214 条 multi-workspace 与 4 条锁 key 用例是额外守卫，**不计入** 169。本文所有数字都用这一个定义。判据套件的断言、标题与计数均未改动，只把 worktree 的 mock 接线重指到 core 深模块。在切出点测得、并在搬移后复现。重指本身是承重的：不重指时 restore 绕过 double，这两个套件共 35 条用例变红，因此重指之前的绿跑不构成证据。
+- 对适配接缝做变异见证，每条都同时对搬移后的核心与抽取前的路由各跑一次。仅就 HTTP 判据而言：去掉 worktree 锁释放被击杀（15 条红），只改日志措辞的对照存活；但有四处接缝在**两侧都存活**——两条取消臂、internal runtime 的 telemetry sink、以及 reservation 释放。它们是既有缺口，不是搬移弄丢的覆盖。字节等价比对**无法**担保其中三处，因为那三处本身就是已声明的适配；只有 reservation 释放落在字节一致区内。因此这四处改由下面的核心直调用例钉住，而不是留给静态比对。
+- 单元（共享 restore 核心）：同源共置的套件直接驱动 `restoreSessionCore`，不经 HTTP。它按**位置**钉住每条取消臂——复挂之前只读一次 sidecar，之后读两次——并按**清理语义**钉住 `void` 与 `await` 的区别，用一个受控闸门的 kill 观测，使断言完全不依赖时序。它同时钉住 internal runtime 的 telemetry sink，以及成功与失败两条路径上的 reservation 释放。六个变异体死亡：两条臂各自永不取消、telemetry sink 被删、reservation 永不释放、以及 `void`/`await` 两个方向的互换；只改日志措辞的对照存活。刻意不走 HTTP 断连——`server.test.ts:18935` 的注释记录了 supertest 加 Node 的 close 事件时序在 CI 上 flaky，该注释现已指向本套件。
+- 单元（随 §2 与 §4）：`release()` 恰好 detach 一次；`onRestored` 在锁释放后触发且不被 await。这两者在那之前没有调用方，故 §1 不为它们加测试。`isCancelled` **不属于**这一组——它是必填的、路由今天就在传，上面的核心套件已覆盖它。
 - 单元（wake 映射）：每个 Gone 码映射为 `gone`，每个临时码映射为 `unavailable`，成功映射为带「恰好 detach 一次」release 的 `restored`。
 - 单元（钩子）：resume 会 drain 该会话绑定的 PR；挂起的 drain 不拉长 restore；per-PR 锁绝不被重入。
 - 单元（lifecycle）：close 停 timer、等在途工作、然后释放记录；挂起的 restore 超时而非阻塞；非 owner 不释放。两个次序用例承重：关停落在 observation 中途（此时 drain 空闲已为真），以及关停落在 observation 中途、该 tick 随后派发一个比它活得更久的 restore——记录必须存活到那个 restore 落定。身份：claim 拒绝的记录（外部 boot，或 process token 仍匹配的外部 PID namespace）在任何平台都绝不删除；由另一个存活 PID 持有、且没有 process token 的记录同样拒绝。停止 timer 的**两条臂**都按效果而非机制钉住：开关打开时，`stopWatch` 之后再推进三个 interval，不得产生 view、listing 或重新 claim；开关关闭时，早退分支的 `dispose()` 用「在任何 tick 之前停止、再推进一整天且无 listing」来钉。关闭态用例必须在 tick 之前停止——一旦有 sweep 在途，其 `running` 守卫会在 fake timer 下跳过后续 tick，因此 sweep 之后的计数无法区分 timer 是上膛还是已停。被拒绝的释放要记日志，从未 claim 的保持静默。接线：一次真实 daemon 启动（refresh timer 打桩）必须经 `close()` 到达 `stopWatch`——兄弟 serve 套件把 refresh chunk mock 成抛错，所以这条放在自己的文件里。Windows 的 `%AppData%` 分支用平台打桩来执行，而不是按平台门控，因为 PR 的 CI profile 跳过 Windows 车道。

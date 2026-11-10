@@ -18932,15 +18932,16 @@ describe('createServeApp', () => {
       },
     );
 
-    // The restore handler's `!res.writable` cleanup branch (kill on
-    // !attached, detach on attached) is line-for-line identical to
-    // the matching branch on `POST /session`; routing-side
-    // disconnect tests for that handler weren't added when the
-    // cleanup was originally introduced because the supertest +
-    // Node http close-event timing makes the assertion flaky in
-    // CI. The same constraint applies here. The cleanup behavior
-    // is exercised manually via the route handler closure shared
-    // between both routes in `restoreSessionHandler`.
+    // The restore's disconnect cleanup (kill on !attached, detach on
+    // attached) is line-for-line identical to the matching branch on
+    // `POST /session`; routing-side disconnect tests for it weren't
+    // added when the cleanup was originally introduced because the
+    // supertest + Node http close-event timing makes the assertion
+    // flaky in CI. The same constraint applies here. The workspace-session
+    // arms now live in `restoreSessionCore` behind its `isCancelled`
+    // predicate, and `server/session-restore.test.ts` drives that predicate
+    // directly — no HTTP disconnect needed — so both arms, the telemetry
+    // sink and the reservation release are pinned there.
 
     it('restores worktree isolation on load when sidecar exists', async () => {
       const bridge = fakeBridge();
