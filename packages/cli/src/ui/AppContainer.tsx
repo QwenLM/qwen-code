@@ -1270,9 +1270,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery.
+      // or Mod startup wait for asynchronous session recovery. Reply rows are
+      // offered only where the viewport can draw a committed row again; the
+      // terminal scrollback cannot.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
+        ?.initialize(
+          useTerminalBuffer
+            ? ['AbovePrompt', 'AssistantMessage']
+            : ['AbovePrompt'],
+          { prompts: true, runsPrompts: true },
+        )
         .catch(() => {});
 
       if (resumedSessionData) {

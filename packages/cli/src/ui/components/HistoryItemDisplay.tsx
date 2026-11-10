@@ -5,7 +5,14 @@
  */
 
 import type React from 'react';
-import { memo, useMemo, useRef, useCallback, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
@@ -61,6 +68,9 @@ import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { useModRow } from '../hooks/use-mod-row.js';
+import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useToolDetailsExpanded } from '../contexts/ToolDetailsExpandedContext.js';
@@ -104,6 +114,11 @@ interface HistoryItemDisplayProps {
    * Used to expand/collapse the whole group as a unit on click.
    */
   thoughtHeadId?: number;
+  /**
+   * Whether this item is a row of the main transcript the Mods may draw.
+   * Set where a committed item can be drawn again, never for <Static>.
+   */
+  modRows?: boolean;
 }
 
 /**
@@ -374,8 +389,27 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   thoughtExpanded,
   fullDetail = false,
   thoughtHeadId,
+  modRows = false,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
+  // A committed reply block is offered to the Mods, which may rewrite the
+  // text it shows; the stored item keeps its own.
+  const config = useContext(ConfigContext);
+  const modInput = useMemo<ModAssistantMessageInput | undefined>(
+    () =>
+      modRows &&
+      !isPending &&
+      (item.type === 'gemini' || item.type === 'gemini_content')
+        ? {
+            surface: 'terminal',
+            component: 'AssistantMessage',
+            requestId: String(item.id),
+            props: { text: item.text, isFirstOfReply: item.type === 'gemini' },
+          }
+        : undefined,
+    [modRows, isPending, item],
+  );
+  const modProps = useModRow(config, modInput);
 
   const {
     allExpanded,
@@ -400,7 +434,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
-  const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
+  const itemForDisplay = useMemo(
+    () =>
+      escapeAnsiCtrlCodes(
+        modProps && (item.type === 'gemini' || item.type === 'gemini_content')
+          ? { ...item, text: modProps.text }
+          : item,
+      ),
+    [item, modProps],
+  );
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
 

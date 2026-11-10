@@ -508,6 +508,7 @@ export const MainContent = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
           fullDetail={fullDetail}
+          modRows
         />
       );
     },

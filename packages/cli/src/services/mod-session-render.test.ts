@@ -10,7 +10,7 @@ import type { ModRenderHost } from '@qwen-code/qwen-code-core/mods/runtime.js';
 import {
   ENGINE_NODE,
   type ModRenderElement,
-  type ModRenderInput,
+  type ModBandInput,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { ModSession, type ModTerminalHost } from './mod-session.js';
@@ -38,7 +38,7 @@ const input = ({
   rows?: number;
   maxRows?: number;
   isWorking?: boolean;
-} = {}): ModRenderInput => ({
+} = {}): ModBandInput => ({
   surface: 'terminal',
   component: 'AbovePrompt',
   requestId: 'above-prompt',
@@ -114,12 +114,15 @@ describe('Mod session band renders', () => {
     const runtime = {
       hasToolHooks: false,
       renderHooks: ['token-weather'],
+      renderHooksFor(site: string): readonly string[] {
+        return site === 'AbovePrompt' ? this.renderHooks : [];
+      },
       turnHooks: { start: false, complete: [] as string[] },
       getCommands: () => [],
       runTool: vi.fn<ModToolCall>(async (call, next, signal) =>
         next(call, signal, async (_input, verdict) => verdict),
       ),
-      render: vi.fn(async (request: ModRenderInput, _signal: AbortSignal) => {
+      render: vi.fn(async (request: ModBandInput, _signal: AbortSignal) => {
         order.push(`render ${request.viewport?.columns}`);
         return { tree: line(`${request.viewport?.columns}`), notes: [] };
       }),

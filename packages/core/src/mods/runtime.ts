@@ -22,6 +22,7 @@ import {
 import {
   ENGINE_NODE,
   adjustRenderTree,
+  invalidRenderText,
   validateRenderTree,
   type ModRenderElement,
   type ModRenderInput,
@@ -97,7 +98,8 @@ export class ModRuntime {
     complete: [],
   };
   private prompts: string[] = [];
-  private renders: string[] = [];
+  // Per site the host draws, the plugins whose render hooks may hear it.
+  private renders: Partial<Record<ModRenderSite, string[]>> = {};
   // Asked for during the load, before the host knows which plugins draw.
   private early?: Set<string> = new Set();
   // Refusal lines are said once per load and reason, adjustment lines once
@@ -165,7 +167,11 @@ export class ModRuntime {
       else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
-        else if (this.renders.includes(reply.plugin))
+        else if (
+          Object.values(this.renders).some((names) =>
+            names.includes(reply.plugin),
+          )
+        )
           this.renderHost?.invalidate(reply.plugin);
       } else if (reply.type === 'activity') {
         if (
@@ -289,7 +295,12 @@ export class ModRuntime {
         typeof result['turnStart'] !== 'boolean' ||
         !names(promptSubmit) ||
         !names(turnComplete) ||
-        !names(renders)
+        !record(renders) ||
+        Object.entries(renders).some(
+          ([site, plugins]) =>
+            !(render?.sites ?? []).includes(site as ModRenderSite) ||
+            !names(plugins),
+        )
       )
         throw new Error('Invalid Mod declarations.');
       const commands = result['commands'];
@@ -315,11 +326,16 @@ export class ModRuntime {
         complete: turnComplete,
       };
       runtime.prompts = promptSubmit;
-      runtime.renders = renders;
+      runtime.renders = renders as Partial<Record<ModRenderSite, string[]>>;
       const early = runtime.early!;
       runtime.early = undefined;
       for (const plugin of early)
-        if (renders.includes(plugin)) render?.invalidate(plugin);
+        if (
+          Object.values(runtime.renders).some((plugins) =>
+            plugins.includes(plugin),
+          )
+        )
+          render?.invalidate(plugin);
       return runtime;
     } catch (error) {
       await runtime.dispose();
@@ -350,9 +366,9 @@ export class ModRuntime {
     return this.prompts;
   }
 
-  /** The plugins whose `ui.render` hooks may draw where this host draws. */
-  get renderHooks(): readonly string[] {
-    return this.renders;
+  /** The plugins whose `ui.render` hooks may hear a site this host draws. */
+  renderHooksFor(site: ModRenderSite): readonly string[] {
+    return this.renders[site] ?? [];
   }
 
   /**
@@ -364,9 +380,16 @@ export class ModRuntime {
   async render(
     input: ModRenderInput,
     signal: AbortSignal,
-  ): Promise<{ tree: ModRenderElement; notes: string[] }> {
-    const settled = await this.request({ type: 'render', input }, signal);
-    const owner = this.renders.length === 1 ? this.renders[0] : 'hooks';
+  ): Promise<{
+    tree: ModRenderElement;
+    notes: string[];
+    /** At a row, the props the engine draws with: what last reached it. */
+    props?: ModRenderInput['props'];
+  }> {
+    const answer = await this.request({ type: 'render', input }, signal);
+    const settled = record(answer) ? answer['tree'] : undefined;
+    const hooks = this.renderHooksFor(input.component);
+    const owner = hooks.length === 1 ? hooks[0] : 'hooks';
     const notes: string[] = [];
     const note = (line: string, key = line) => {
       if (this.noted.has(key)) return;
@@ -380,6 +403,33 @@ export class ModRuntime {
         `ui.render (${input.component}) refused: ${error instanceof Error ? error.message : String(error)}; nothing was drawn`,
       );
       return { tree: ENGINE_NODE, notes };
+    }
+    if (input.component === 'AssistantMessage') {
+      // A row draws the engine's own message, with the props that reached it.
+      if (
+        !record(settled) ||
+        settled['type'] !== 'engine' ||
+        settled['ref'] !== 0
+      ) {
+        note(
+          `ui.render (${input.component}) answered a tree; this host draws only a rewrite of the row's props, so the row was left as it was`,
+        );
+        return { tree: ENGINE_NODE, notes, props: input.props };
+      }
+      const props = record(answer) ? answer['props'] : undefined;
+      const text = record(props) ? props['text'] : undefined;
+      if (
+        !record(props) ||
+        typeof text !== 'string' ||
+        (text !== input.props.text && invalidRenderText(text) !== undefined) ||
+        props['isFirstOfReply'] !== input.props.isFirstOfReply
+      )
+        return { tree: ENGINE_NODE, notes, props: input.props };
+      return {
+        tree: ENGINE_NODE,
+        notes,
+        props: { ...input.props, text },
+      };
     }
     const adjusted = adjustRenderTree(
       settled as ModRenderElement,
