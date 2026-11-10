@@ -5199,7 +5199,8 @@ jobs:
               QWEN_TIMEOUT_MS=14400000
             fi
           fi
-          # Clamp the override to the runner's ceiling → af-051.
+          # Clamp the override to the runner's ceiling.
+          # Full rationale → qwen-autofix.md#af-051
           BUDGET_CAP_MS=7200000
           BUDGET_FLOOR_MS=60000
           if [[ "${RUNNER_ENVIRONMENT:-}" != 'github-hosted' ]]; then
