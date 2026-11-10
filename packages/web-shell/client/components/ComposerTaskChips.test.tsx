@@ -186,6 +186,49 @@ describe('ComposerTaskChips', () => {
     ).toBeNull();
   });
 
+  it.each([false, true])(
+    'selects a task after an inside pointerdown (shadow root: %s)',
+    (useShadowRoot) => {
+      let scope: ParentNode = container;
+      if (useShadowRoot) {
+        act(() => root.unmount());
+        const shadowRoot = container.attachShadow({ mode: 'open' });
+        const mount = document.createElement('div');
+        shadowRoot.append(mount);
+        root = createRoot(mount);
+        scope = shadowRoot;
+      }
+      const first = workflow('wf-1');
+      const second = workflow('wf-2');
+      const { onSelectTask } = render([first, second]);
+      const chip = scope.querySelector<HTMLButtonElement>('[data-kind]')!;
+      act(() => chip.click());
+      const list = scope.querySelector('[data-testid="composer-task-list"]')!;
+      const row = list.querySelectorAll('button')[1];
+
+      act(() => {
+        row
+          .querySelector('span')!
+          .dispatchEvent(
+            new Event('pointerdown', { bubbles: true, composed: true }),
+          );
+      });
+      expect(list.isConnected).toBe(true);
+      act(() => row.click());
+      expect(onSelectTask).toHaveBeenCalledExactlyOnceWith(second);
+
+      act(() => chip.click());
+      act(() => {
+        outsideInput.dispatchEvent(
+          new Event('pointerdown', { bubbles: true, composed: true }),
+        );
+      });
+      expect(
+        scope.querySelector('[data-testid="composer-task-list"]'),
+      ).toBeNull();
+    },
+  );
+
   it('focuses the first choice on opening without stealing focus on refresh', () => {
     render([workflow('wf-1'), workflow('wf-2')]);
     act(() => chips()[0].click());

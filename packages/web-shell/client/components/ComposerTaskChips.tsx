@@ -166,10 +166,7 @@ export const ComposerTaskChips = forwardRef<
   useEffect(() => {
     if (!openGroup) return;
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
-      if (
-        event.target instanceof Node &&
-        rootRef.current?.contains(event.target)
-      ) {
+      if (rootRef.current && event.composedPath().includes(rootRef.current)) {
         return;
       }
       focusedElementRef.current = null;
