@@ -163,7 +163,17 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean terminal) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
+                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
+                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
+                Boolean modelChange, Boolean approvalModeChange, Boolean inputAttachments, Boolean rename,
+                boolean contextCompression, Boolean childAgents) {
+            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
+                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
+                    inputAttachments, rename, contextCompression, childAgents, false, false, null);
+        }
         @JsonProperty("diagnostics")
         public boolean diagnostics() {
             return tasks;

@@ -128,11 +128,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private java.util.function.Supplier<java.time.Duration> renameLeaseDuration = () -> java.time.Duration.ofSeconds(60);
     private Clock renameClock = Clock.systemUTC();
     private BooleanSupplier sideQueriesEnabled = () -> false;
+    private BooleanSupplier terminalEnabled = () -> false;
 
     @Autowired
     void configureSideQueries(ManagedAgentSettings properties) {
         sideQueriesEnabled = () -> properties.isSideQueriesEnabled() && properties.getSessionStore().isEnabled()
                 && harness.supportsSideQueries();
+    }
+
+    @Autowired
+    void configureTerminal(ManagedAgentSettings properties) {
+        terminalEnabled = () -> properties.getRuntimeBroker().isWebTerminal();
     }
 
     private boolean supportsSideQueries(SessionRecord session) {
@@ -1647,7 +1653,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         visible && approvalExecutable && compressionSupported && compression.available(),
                         childAgentsCapability(session, worktree),
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
-                        (session.workspace() == null || maySubmit) && supportsSideQueries(session)),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        // UI hint only; the relay re-runs the full admission on attach.
+                        // Null while the opt-in is off so both surfaces omit it alike.
+                        terminalEnabled.getAsBoolean()
+                                ? maySubmit && Boolean.TRUE.equals(foregroundShell(session, worktree))
+                                : null),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

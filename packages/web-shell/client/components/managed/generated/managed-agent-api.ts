@@ -1815,6 +1815,8 @@ export interface components {
             btw?: boolean;
             /** @default false */
             recap?: boolean;
+            /** @description UI hint that this Session may open a Managed Web Terminal: the terminal deployment opt-in is enabled, the caller may submit (OPERATOR on the bound Workspace), and the Session is a Shell Session. The relay re-runs the full admission on the WebSocket attach; this field does not gate it. */
+            terminal?: boolean | null;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
