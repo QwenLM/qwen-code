@@ -35,6 +35,14 @@ export {
   createJavaManagedAgentProvider,
   type JavaManagedAgentProviderOptions,
 } from './components/managed/java-managed-agent-provider';
+export type {
+  ManagedSideQuery,
+  ManagedSideQueryKind,
+  ManagedSideQueryCreate,
+  ManagedSideQueryContext,
+  ManagedSideQueryPage,
+  ManagedSideQueriesProvider,
+} from './components/managed/managed-side-query-types';
 export {
   ManagedAgentWebShell,
   type ManagedAgentWebShellProps,

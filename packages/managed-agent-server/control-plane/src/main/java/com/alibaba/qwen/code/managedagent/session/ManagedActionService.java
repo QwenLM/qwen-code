@@ -412,7 +412,7 @@ public class ManagedActionService {
                     return null;
                 }
                 text = wrapper.path("payloadJson").asText();
-                JsonNode payload = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(text);
+                JsonNode payload = ManagedExtensionRecordStore.parse(text);
                 if (payload == null
                         || payload.size() != 2
                         || !tool.equals(payload.path("toolName").asText())

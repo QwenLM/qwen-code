@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,16 +17,16 @@ final class JournalLifecycleAuthorization {
     private final JournalStoreRows storeRows;
     private final com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules;
     private final JdbcTemplate jdbc;
-    private final ManagedExtensionRecordStore extensionRecords;
-    private final WorkspaceExecutionStore lifecycleExecution;
+    private final JdbcManagedExtensionRecordStore extensionRecords;
+    private final JdbcWorkspaceExecutionStore lifecycleExecution;
     private final SessionQueryStore lifecycleSessions;
 
     JournalLifecycleAuthorization(JournalFencing fencing,
             JournalStoreRows storeRows,
             com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules,
             JdbcTemplate jdbc,
-            ManagedExtensionRecordStore extensionRecords,
-            WorkspaceExecutionStore lifecycleExecution,
+            JdbcManagedExtensionRecordStore extensionRecords,
+            JdbcWorkspaceExecutionStore lifecycleExecution,
             SessionQueryStore lifecycleSessions) {
         this.fencing = fencing;
         this.storeRows = storeRows;
@@ -42,7 +43,7 @@ final class JournalLifecycleAuthorization {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
-        JournalFencing.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+        JournalFencing.lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         JournalFencing.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
                 JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
@@ -53,7 +54,7 @@ final class JournalLifecycleAuthorization {
                     + " UPDATE",
                 tenantId,
                 sessionId);
-        WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+        JdbcWorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
         if (request.kind() != null) {
             String kind =
                     jdbc.queryForObject(
@@ -64,7 +65,7 @@ final class JournalLifecycleAuthorization {
                             sessionId,
                             authority.operationId());
             if (!kind.toLowerCase(java.util.Locale.ROOT).equals(request.kind())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_operation_conflict");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_operation_conflict");
             }
         } else if (!"DRAINING"
                 .equals(
@@ -77,7 +78,7 @@ final class JournalLifecycleAuthorization {
                                 JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                                 tenantId,
                                 sessionId))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
         }
         JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
@@ -103,7 +104,7 @@ final class JournalLifecycleAuthorization {
         // row, keeping the root-then-head order of every other writer.
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
-        if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
+        if (!"legacy-close".equals(request.kind()) || !JdbcWorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
             fencing.requireOrdinaryAdmission(tenantId, sessionId);
         }
         if (request.kind() != null && request.kind().startsWith("configuration:")) {
@@ -176,17 +177,17 @@ final class JournalLifecycleAuthorization {
                                             + " AND tenant_id = ? AND session_id = ? AND"
                                             + " operation_id = ?", Integer.class,
                 tenantId, sessionId, authority.operationId()) == 2;
-        boolean resourcePhase = v2 && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
+        boolean resourcePhase = v2 && JdbcWorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, recordBytes,
                 reader, v2, resourcePhase)) {
             if (lifecycleExecution == null || lifecycleSessions == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
             }
             try {
                 lifecycleExecution.authorizeLifecycle(lifecycleSessions.requireSession(tenantId, sessionId), authority);
             } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException refusal) {
                 if (refusal.getStatusCode() == 409 && "workspace_unavailable".equals(refusal.getCode())) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked(
+                    throw WorkspaceLifecycleStore.blocked(
                             "workspace_lifecycle_authorization_revoked");
                 }
                 if (refusal.getStatusCode() == 409) {

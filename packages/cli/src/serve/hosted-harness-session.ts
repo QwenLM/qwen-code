@@ -9620,6 +9620,185 @@ export function registerHostedHarnessSessionRoutes(
       .catch(() => error(res, 409, 'hosted_extension_management_unavailable'));
   });
 
+  function skillBroker(
+    session: HostedSession,
+    owner?: { bindingId: string; generation: string },
+  ) {
+    if (
+      !brokerOptions ||
+      session.foregroundOnly ||
+      (session.childDepth ?? 0) !== 0 ||
+      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+        session.toolProfile ?? '',
+      ) ||
+      !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
+    )
+      throw new Error('hosted_skill_import_unsupported');
+    const broker = new HostedWorkspaceBroker(
+      { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+      session.managed.authority.sessionHeader.sessionKey,
+      'skill-management',
+    );
+    if (owner)
+      broker.expectExtensionRuntime({
+        runtimeBindingId: owner.bindingId,
+        generation: owner.generation,
+      });
+    return broker;
+  }
+
+  function skillOwner(value: unknown): {
+    bindingId: string;
+    generation: string;
+  } {
+    const owner = object(value);
+    if (
+      !owner ||
+      Object.keys(owner).sort().join(',') !== 'bindingId,generation' ||
+      typeof owner['bindingId'] !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/u.test(owner['bindingId']) ||
+      typeof owner['generation'] !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(owner['generation']) ||
+      BigInt(owner['generation']) > 2n ** 63n - 1n
+    )
+      throw new Error('invalid_skill_owner');
+    return { bindingId: owner['bindingId'], generation: owner['generation'] };
+  }
+
+  app.get('/session/:id/extensions/skills/candidates', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    void (async () => {
+      const broker = skillBroker(session);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-candidates',
+        operationId: randomUUID(),
+      });
+      if (!broker.runtime || !Array.isArray(result['candidates']))
+        throw new Error('Invalid Skill response.');
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner: {
+          bindingId: broker.runtime.bindingId,
+          generation: broker.runtime.generation,
+        },
+        candidates: result['candidates'],
+      });
+    })().catch((cause) =>
+      error(
+        res,
+        409,
+        cause instanceof HostedWorkspaceBrokerRejection &&
+          typeof cause.code === 'string'
+          ? cause.code
+          : 'hosted_skill_source_unavailable',
+      ),
+    );
+  });
+
+  app.post('/session/:id/extensions/skills/snapshot', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (
+      session.active ||
+      session.hooksBusy ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.blocked
+    )
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    if (
+      !body ||
+      Object.keys(body).sort().join(',') !== 'digest,operationId,owner,path' ||
+      typeof body['operationId'] !== 'string' ||
+      !HOSTED_UUID.test(body['operationId']) ||
+      typeof body['path'] !== 'string' ||
+      typeof body['digest'] !== 'string'
+    )
+      return error(res, 400, 'invalid_skill_snapshot');
+    let owner: { bindingId: string; generation: string };
+    try {
+      owner = skillOwner(body['owner']);
+    } catch {
+      return error(res, 400, 'invalid_skill_snapshot');
+    }
+    session.mcpBusy = true;
+    void (async () => {
+      const broker = skillBroker(session, owner);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-snapshot',
+        operationId: body['operationId'] as string,
+        path: body['path'] as string,
+        digest: body['digest'] as string,
+      });
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner,
+        ...result,
+      });
+    })()
+      .catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_source_unavailable',
+        ),
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.get(
+    '/session/:id/extensions/skills/archives/:preparationId',
+    (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      void (async () => {
+        const owner = skillOwner({
+          bindingId: req.query['bindingId'],
+          generation: req.query['generation'],
+        });
+        const operationId = req.query['operationId'];
+        const offset = req.query['offset'];
+        if (
+          typeof operationId !== 'string' ||
+          !HOSTED_UUID.test(operationId) ||
+          typeof offset !== 'string' ||
+          !/^(?:0|[1-9][0-9]*)$/u.test(offset) ||
+          !Number.isSafeInteger(Number(offset))
+        )
+          throw new Error('Invalid Skill chunk request.');
+        const broker = skillBroker(session, owner);
+        const result = await broker.skillControl({
+          kind: 'extension-skill-archive',
+          operationId,
+          preparationId: String(req.params['preparationId']),
+          offset: Number(offset),
+        });
+        res.json({
+          sessionId:
+            session.managed.authority.sessionHeader.sessionKey.sessionId,
+          owner,
+          ...result,
+        });
+      })().catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_snapshot_unavailable',
+        ),
+      );
+    },
+  );
+
   app.get(
     '/session/:id/extensions/management/operations/:operationId',
     (req, res) => {

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -64,7 +65,7 @@ public final class ToolPublicationDataStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ToolPublicationStore grants;
-    private final ManagedSessionStore sessions;
+    private final JdbcManagedSessionStore sessions;
     private final ToolPublicationObjectStore objects;
     private final Duration operationTimeout;
     private final Duration claimTimeout;
@@ -73,7 +74,7 @@ public final class ToolPublicationDataStore {
     private final DataSource transactionSource;
 
     public ToolPublicationDataStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            ToolPublicationStore grants, ManagedSessionStore sessions, ToolPublicationObjectStore objects,
+            ToolPublicationStore grants, JdbcManagedSessionStore sessions, ToolPublicationObjectStore objects,
             Duration operationTimeout, Duration claimTimeout, VerificationBudget verificationBudget) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(Objects.requireNonNull(manager));
@@ -2064,7 +2065,7 @@ public final class ToolPublicationDataStore {
                 + " WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
         String tenant = (String) capture.get("tenant_id");
         String session = (String) capture.get("session_id");
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String sessionScope = ManagedSessionStore.sessionScopeKey(tenant, session);
         if (resourceId == null) {
             resourceId = "capture-segment-" + ManagedSchemaKeys.key(scope, publicationId, slot);
         }
@@ -2109,7 +2110,7 @@ public final class ToolPublicationDataStore {
                         + " deadline, request_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, ?,"
                         + " 'VERIFYING', 'PENDING', ?, ?, ?, ?, ?, ?, ?)",
                 ManagedSchemaKeys.operationKey(OperationKind.valueOf(kind), scope, ManagedSchemaKeys.key(publicationId), operationId),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey((String) capture.get("tenant_id"), (String) capture.get("session_id")),
+                ManagedSessionStore.sessionScopeKey((String) capture.get("tenant_id"), (String) capture.get("session_id")),
                 scope, kind, operationId, capture.get("tenant_id"), capture.get("workspace_id"),
                 capture.get("session_id"), ManagedSchemaKeys.key(publicationId), publicationId, requestDigest, slot,
                 owner, generation, until, deadline, JSON.createObjectNode().put("version", 1).put("slot", slot).toString(),
