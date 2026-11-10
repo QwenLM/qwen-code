@@ -25978,13 +25978,13 @@ describe('Hosted Harness tool approvals', () => {
       { arm: 'legacy detach', terminal: false, protocol: 1 },
       { arm: 'legacy delete', terminal: true, protocol: 1 },
     ].flatMap((route) =>
-      (['held turn', 'mcp', 'lease', 'ordinary lease'] as const).map(
-        (carrier) => ({
-          ...route,
-          carrier,
-          arm: `${route.arm}, owner carried by ${carrier}`,
-        }),
-      ),
+      (
+        ['held turn', 'mcp', 'lease', 'ordinary lease', 'durable only'] as const
+      ).map((carrier) => ({
+        ...route,
+        carrier,
+        arm: `${route.arm}, owner carried by ${carrier}`,
+      })),
     ),
   )(
     'stops only what it may stop with a restored config-scoped owner ($arm)',
@@ -26174,6 +26174,7 @@ describe('Hosted Harness tool approvals', () => {
         wakeDeps.last as {
           session: {
             heldRuntimeTurns: Set<string>;
+            extensions?: { configRevisions: readonly number[] };
             hooks?: HostedHookSession;
             mcp?: {
               broker: { runtimeSessionId: string };
@@ -26227,6 +26228,14 @@ describe('Hosted Harness tool approvals', () => {
           promptId: ordinary,
           runtimeSessionId: owner,
         };
+      } else if (carrier === 'durable only') {
+        // The blocked-resident shape R5-1 describes: the passive load set
+        // `blocked` and built neither live object, yet the durable
+        // config_install chain still names revision 1. Only that chain can
+        // supply the exemption here.
+        resident.hooks = undefined;
+        resident.mcp = undefined;
+        expect(resident.extensions?.configRevisions).toContain(1);
       } else if (carrier === 'ordinary lease') {
         // The other direction of the same decision: a lease that is NOT a
         // reload-stable owner must still be handed back, or the Workspace
@@ -26286,15 +26295,18 @@ describe('Hosted Harness tool approvals', () => {
         expect(releasedOwners.has(ordinaryLease)).toBe(true);
         expect(resident.runtimeLeaseHeld).toBeUndefined();
       }
-      if (carrier === 'lease' && !terminal) {
-        // R4-1: the lease path names the id it left running, like the drains.
+      if (carrier === 'lease') {
+        // R4-1: the lease path names the id it left running, like the drains
+        // — but only when it really left it running. A terminal close already
+        // released the owner through its own close, so the owed line there
+        // would report a leak that does not exist (R4-1 follow-up).
         expect(
           stderr.mock.calls.some(([line]) =>
             String(line).includes(
               `keeps reload-stable owner ${owner} running: release deferred`,
             ),
           ),
-        ).toBe(true);
+        ).toBe(!terminal);
       }
       // The settle argument is reached on every arm, so a wrong one fails
       // rather than passing silently. A skipped owner proved no stop (R1-1);
@@ -26366,6 +26378,28 @@ describe('Hosted Harness tool approvals', () => {
       mcpId: 'hooks-activation-1',
       exempt: false,
     },
+    {
+      // The blocked-resident shape: bootstrap never completed, so neither
+      // live object exists, yet the durable chain still names the revision
+      // whose owner the restore seeded (R5-1).
+      shape: 'no live broker, but the durable chain names the owner',
+      shared: false,
+      hooksId: undefined,
+      mcpId: undefined,
+      durableIds: [`extensions-components-${'d'.repeat(64)}`],
+      exempt: true,
+    },
+    {
+      // The R1-2 constraint on the same arm: an empty durable chain must not
+      // exempt a client-chosen id that merely shares the prefix.
+      shape: 'no live broker and an empty durable chain',
+      shared: false,
+      hooksId: undefined,
+      mcpId: undefined,
+      durableIds: [],
+      probeId: `extensions-components-${'f'.repeat(64)}`,
+      exempt: false,
+    },
   ])('exempts only reload-stable owners: $shape', (c) => {
     // The route fixtures cannot drive every owner shape — a Session carrying
     // MCP on a workspace profile must settle through v2 and does not release
@@ -26383,8 +26417,9 @@ describe('Hosted Harness tool approvals', () => {
     const owners = reloadStableOwnerIds({
       hooks: hooksBroker ? { broker: hooksBroker } : undefined,
       mcp: mcpBroker ? { broker: mcpBroker } : undefined,
+      configScopedOwnerIds: c.durableIds,
     });
-    const id = c.mcpId ?? c.hooksId;
+    const id = c.probeId ?? c.mcpId ?? c.hooksId ?? c.durableIds?.[0];
     expect(owners.has(id!)).toBe(c.exempt);
     expect(owners.size).toBe(c.exempt ? 1 : 0);
   });

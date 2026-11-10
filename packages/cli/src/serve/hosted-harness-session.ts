@@ -695,17 +695,41 @@ function blockRecovery(
 export function reloadStableOwnerIds(session: {
   hooks?: { broker: { runtimeSessionId: string } };
   mcp?: { broker: { runtimeSessionId: string } };
+  configScopedOwnerIds?: readonly string[];
 }): Set<string> {
   return new Set(
     [
       session.hooks?.broker.runtimeSessionId,
       session.mcp?.broker.runtimeSessionId,
+      ...(session.configScopedOwnerIds ?? []),
     ].filter(
       (id): id is string =>
         id !== undefined &&
         (isHostedConfigScopedOwner(id) || isHostedDurableMcpOwner(id)),
     ),
   );
+}
+
+/**
+ * The live objects alone are not enough: a passive load whose extension
+ * bootstrap never completed sets `blocked` and continues without building a
+ * Hooks or MCP session, while the restore still seeds the owner id from the
+ * Broker's hold rows. The durable config_install chain names every revision
+ * this Session has had, so its owner ids stay exempt on that resident too
+ * (R5-1). Still ids the Harness derives, never a held entry's shape.
+ */
+function sessionReloadStableOwnerIds(session: HostedSession): Set<string> {
+  return reloadStableOwnerIds({
+    hooks: session.hooks,
+    mcp: session.mcp,
+    configScopedOwnerIds: (session.extensions?.configRevisions ?? []).map(
+      (revision) =>
+        hostedConfigScopedOwnerId(
+          session.managed.authority.sessionHeader.sessionKey,
+          revision,
+        ),
+    ),
+  });
 }
 
 interface HostedSession {
@@ -8523,7 +8547,7 @@ export function registerHostedHarnessSessionRoutes(
           // needs a keep-READY drain to close: the release used here would
           // tombstone the deterministic Hook owner (R13-1/R14-1).
           let heldDrainUnproven = false;
-          const reloadStableOwners = reloadStableOwnerIds(session);
+          const reloadStableOwners = sessionReloadStableOwnerIds(session);
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {
               // A detach must never terminally release a reload-stable owner:
@@ -10337,6 +10361,7 @@ export function registerHostedHarnessSessionRoutes(
     options: HostedWorkspaceBrokerOptions,
     lease: NonNullable<HostedSession['runtimeLeaseHeld']>,
     drain = false,
+    terminal = false,
   ): Promise<'released' | 'held' | 'pending' | 'deferred'> => {
     const { promptId, runtimeSessionId } = lease;
     session.cleanupHolds?.delete(promptId);
@@ -10355,12 +10380,15 @@ export function registerHostedHarnessSessionRoutes(
     // The owner's own close is its only terminal releaser, and a delete runs
     // that close, so declining here strands nothing. It still proved no stop,
     // which the close reports rather than certifying one.
-    const deferred = reloadStableOwnerIds(session).has(runtimeSessionId);
+    const deferred = sessionReloadStableOwnerIds(session).has(runtimeSessionId);
     // The lease carrier reaches this decision without passing either drain,
     // so it names the id itself — otherwise the half of the invariant that
     // leaves an owner READY is the half missing from the log (R4-1). Not
     // "detach": a settled prompt and a recovery recheck hand back here too.
-    if (deferred)
+    // A terminal close already released the owner through its own close, so
+    // the owed line would name a leak that does not exist — on the one route
+    // an operator uses as the contrast for a real park (R4-1 follow-up).
+    if (deferred && !terminal)
       writeStderrLineSafe(
         `qwen serve: Hosted Harness keeps reload-stable owner ${runtimeSessionId} running: release deferred, obligation still owed (#16579).`,
       );
@@ -10453,6 +10481,7 @@ export function registerHostedHarnessSessionRoutes(
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
       lease,
       true,
+      terminal,
     ).then(
       (outcome) => {
         if (outcome !== 'released' && outcome !== 'deferred')
@@ -13465,7 +13494,7 @@ export function registerHostedHarnessSessionRoutes(
         // tolerated so the close is not wedged, but it is not a proven stop
         // either — the loops below must still settle runtime_lost.
         let heldDrainUnproven = false;
-        const reloadStableOwners = reloadStableOwnerIds(session);
+        const reloadStableOwners = sessionReloadStableOwnerIds(session);
         if (brokerOptions) {
           for (const heldTurn of [...session.heldRuntimeTurns]) {
             // Same invariant as the v2 drain, and it predates it: the restore
