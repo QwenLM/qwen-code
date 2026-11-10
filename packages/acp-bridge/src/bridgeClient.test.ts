@@ -3162,6 +3162,38 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('forwards a generation reset event', async () => {
+    const sessionId = 'sess:generation-reset';
+    const onGenerationEvent = vi.fn();
+    const client = new BridgeClient(
+      (() => ({ events: { publish: vi.fn() } })) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      undefined,
+      onGenerationEvent,
+    );
+
+    await client.extNotification('qwen/notify/session/generation/event', {
+      v: 1,
+      sessionId,
+      requestId: 'btw-request',
+      event: { type: 'reset' },
+    });
+
+    expect(onGenerationEvent).toHaveBeenCalledWith(sessionId, {
+      type: 'reset',
+      requestId: 'btw-request',
+    });
+  });
+
   it('allows artifact events during an in-flight restore on this channel', async () => {
     const sessionId = 'sess:restore-artifact-event';
     const publish = vi.fn().mockReturnValue(true);

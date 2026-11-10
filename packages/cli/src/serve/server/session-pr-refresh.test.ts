@@ -2319,6 +2319,17 @@ describe('startSessionPrRefreshTimer', () => {
       await vi.waitFor(() => {
         expect(view).toHaveBeenCalledTimes(1);
       });
+      // Tick 1's refresh tail runs after the view and awaits real fs; the
+      // re-entrancy guard silently skips the next interval while it is still
+      // in flight (the race `sweepDone` documents). This tick commits no
+      // sidecar, so the issue lookup that ends the tail is the signal.
+      await vi.waitFor(
+        () => {
+          expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(1);
+        },
+        { timeout: 10_000 },
+      );
+      await vi.advanceTimersByTimeAsync(0);
       // Tick 2: rotation 1 → trusted non-primary first, views PR 43.
       await vi.advanceTimersByTimeAsync(60_000);
       await vi.waitFor(() => {
