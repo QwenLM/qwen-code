@@ -83,7 +83,9 @@ public final class ManagedMcpSettings {
         check(pin.path("serverId").isTextual() && pin.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}")
                 && pin.path("definitionDigest").isTextual() && pin.path("definitionDigest").asText().matches("[a-f0-9]{64}"),
                 "Invalid MCP server pin");
-        ManagedExtensionRecords.count(pin.get("serverRevision"), 1, MAX_REVISION, "MCP server revision");
+        // count() clamps to MAX_COUNT (MAX_REVISION - 1); passing the effective
+        // bound keeps the rejection message truthful with what is enforced.
+        ManagedExtensionRecords.count(pin.get("serverRevision"), 1, MAX_REVISION - 1, "MCP server revision");
         check(!state || Set.of("enabled", "disabled", "removed").contains(pin.path("state").asText()), "Invalid MCP server state");
     }
 
