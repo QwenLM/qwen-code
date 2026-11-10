@@ -595,6 +595,17 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       'cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
       'echo $((8<<2))\necho hi > out.txt',
       '(true)# note <<EOF\necho hi > out.txt',
+      'echo $(echo ok); (true)# note <<EOF\necho hi > out.txt',
+    ]) {
+      expect(forcesReview(command)).toBe(false);
+    }
+  });
+
+  it('does not escalate ambiguous syntax without a heredoc opener', () => {
+    for (const command of [
+      "printf %s $'a\\'b'; echo hi > out.txt",
+      'echo a\\ # harmless; echo hi > out.txt',
+      'echo $(echo SUB)#note; echo hi > out.txt',
     ]) {
       expect(forcesReview(command)).toBe(false);
     }

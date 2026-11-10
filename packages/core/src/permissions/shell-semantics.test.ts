@@ -763,6 +763,30 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite('/tmp/out.txt')],
     ],
     [
+      // Narrowed fail-closed: without a possible heredoc opener the ambiguous
+      // syntax cannot move a body boundary, so the command stays exact.
+      'keeps an ANSI-C escaped quote exact without a heredoc opener',
+      "printf %s $'a\\'b'; echo hi > out.txt",
+      [write('/repo/out.txt')],
+    ],
+    [
+      'keeps an escaped space before a hash exact without a heredoc opener',
+      'echo a\\ # harmless; echo hi > out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'keeps a command-substitution close before a hash exact without a heredoc opener',
+      'echo $(echo SUB)#note; echo hi > out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
+      // The `(` here is a subshell, not a `$(`: an earlier command
+      // substitution on the line must not make this `#` look like word data.
+      'reads a hash after a subshell as a comment even after a substitution',
+      'echo $(echo ok); (true)# note <<EOF\necho hi > out.txt',
+      [write('/repo/out.txt')],
+    ],
+    [
       // R25-1 fail-closed: `a\ #` has no word boundary before `#`, so bash
       // keeps it in the word and still reads the `<<EOF` opener.
       'marks the cwd unknown when an escaped space precedes a hash',

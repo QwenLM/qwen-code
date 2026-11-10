@@ -2655,6 +2655,13 @@ class HeredocLexer {
    * rather than opening an ANSI-C literal.
    */
   private continuedDollar = false;
+  /**
+   * Open parens in scan order. `subst` marks one opened by `$(`; a `)` that
+   * pops `subst` closes a command substitution, so a following `#` is word
+   * data rather than a comment.
+   */
+  private parenStack: Array<'subst' | 'plain'> = [];
+  private closedCommandSubstitution = false;
 
   hasUncertainty(): boolean {
     return this.uncertain;
@@ -2733,13 +2740,36 @@ class HeredocLexer {
         index++;
         continue;
       }
+      if (char === '$' && line[index + 1] === '(' && line[index + 2] !== '(') {
+        // `$((` is arithmetic and is consumed by the branches above; a bare
+        // `$(` opens a command substitution whose `)` does not end a word.
+        this.parenStack.push('subst');
+        index++;
+        continue;
+      }
+      if (char === '(') {
+        this.parenStack.push('plain');
+        continue;
+      }
+      if (char === ')') {
+        this.closedCommandSubstitution = this.parenStack.pop() === 'subst';
+        continue;
+      }
       if (char === '#' && (index === 0 || /[\s;&|()]/.test(line[index - 1]!))) {
         // bash opens a comment only at a word start. Two of the boundary
         // characters above can belong to the previous word instead — an
         // escaped space (`a\ #`) and a `)` that closes a `$(…)` inside the
         // word (`$(echo x)#`). Those forms make this break wrong, so mark the
         // analysis unproven rather than silently dropping the rest of the line.
-        if (this.commentBoundaryIsAmbiguous(line, index)) this.uncertain = true;
+        if (
+          this.commentBoundaryIsAmbiguous(
+            line,
+            index,
+            this.closedCommandSubstitution,
+          )
+        ) {
+          this.uncertain = true;
+        }
         break;
       }
       if (char !== '<' || line[index + 1] !== '<') continue;
@@ -2767,7 +2797,11 @@ class HeredocLexer {
    * lexer but belongs to the previous word for bash, so treating the `#` as a
    * comment would silently discard the rest of the line.
    */
-  private commentBoundaryIsAmbiguous(line: string, index: number): boolean {
+  private commentBoundaryIsAmbiguous(
+    line: string,
+    index: number,
+    closesCommandSubstitution: boolean,
+  ): boolean {
     const previous = line[index - 1];
     if (previous === ' ' || previous === '\t') {
       let backslashes = 0;
@@ -2776,8 +2810,10 @@ class HeredocLexer {
     }
     if (previous === ')') {
       // `(true)#` closes a subshell, where `#` really is a comment; `$(…)#`
-      // closes a command substitution inside the word, where it is data.
-      return line.lastIndexOf('$(', index) !== -1;
+      // closes a command substitution inside the word, where it is data. The
+      // scan tracks which paren this `)` popped, so an earlier `$(` elsewhere
+      // on the line cannot make a subshell look like a substitution.
+      return closesCommandSubstitution;
     }
     return false;
   }
@@ -2885,7 +2921,12 @@ function walkCompoundCommand(
   // against a cwd this analysis cannot vouch for. Reuse the existing
   // `cwdUnknown` channel: consumers that enforce protected relative paths then
   // escalate to "ask" instead of silently trusting a possibly wrong path.
-  return uncertain ? markCwdUnknownOps(ops, command, cwd) : ops;
+  // Only commands that can actually open a heredoc are affected: without a
+  // `<<` the ambiguous syntax above cannot move a body boundary, and marking
+  // an unrelated command would turn every `$'…'` into a manual approval.
+  return uncertain && command.includes('<<')
+    ? markCwdUnknownOps(ops, command, cwd)
+    : ops;
 }
 
 function hasAbsolutePathTokenForOperation(
