@@ -250,13 +250,22 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
   });
 
-  it.each([
-    'git commit -m "fix" # was: --amend',
-    'git commit -a -m "x" # not --amend',
-    'git commit -m x <<< --amend',
-    'git commit -m "note --amend"',
-  ])('asks conservatively for an amend-shaped argument: %s', (command) => {
-    expectNeedsApproval(command);
+  it.each(['git commit -m x <<< --amend', 'git commit -m "note --amend"'])(
+    'asks conservatively for an amend-shaped argument: %s',
+    (command) => {
+      expectNeedsApproval(command);
+    },
+  );
+
+  it('does not ask for amend-shaped text inside a comment', () => {
+    // A comment never runs: only a literal `git commit --amend` adjacency is
+    // still caught, by the regex on the raw command.
+    expect(amendNeedsApproval('git commit -m "fix" # was: --amend')).toBe(
+      false,
+    );
+    expect(amendNeedsApproval('git commit -a -m "x" # not --amend')).toBe(
+      false,
+    );
   });
 
   it('routes a next-line amend after a comment to approval', () => {
@@ -478,13 +487,48 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expect(amendNeedsApproval('git commit -m "\\$(git commit --\$x)"')).toBe(
       false,
     );
-    expect(amendNeedsApproval('git commit -m "\\`git commit --\$x\`"')).toBe(
+    expect(amendNeedsApproval('git commit -m "\\`git commit --\$x\\`"')).toBe(
       false,
     );
     // Nesting still reaches the inner command.
     expect(
       amendNeedsApproval('git commit -m "\$(echo \$(git commit --\$x))"'),
     ).toBe(true);
+  });
+
+  it('fails closed when a substitution body hides its own boundary', () => {
+    // Matching parens behind a comment or a heredoc needs a full shell parser.
+    // The body is reported unprovable and the command asks.
+    expect(
+      amendNeedsApproval('git commit -m "$(echo x # )\ngit commit --$x\n)"'),
+    ).toBe(true);
+    expect(
+      amendNeedsApproval(
+        'git commit -m "\$(cat <<\'EOF\'\n)\nEOF\ngit commit --\$x\n)"',
+      ),
+    ).toBe(true);
+  });
+
+  it('skips text that provably never runs', () => {
+    // A top-level comment and a quoted-delimiter heredoc body are inert data.
+    expect(amendNeedsApproval('git commit -m x # $(git commit --$x)')).toBe(
+      false,
+    );
+    expect(
+      amendNeedsApproval("git commit -m x <<'EOF'\n\$(git commit --\$x)\nEOF"),
+    ).toBe(false);
+    // An unquoted delimiter expands its body, so a substitution there runs;
+    // a plain body has nothing to run.
+    expect(amendNeedsApproval('cat <<EOF\n\$(git commit --\$x)\nEOF')).toBe(
+      true,
+    );
+    expect(amendNeedsApproval('cat <<EOF\nhello\nEOF')).toBe(false);
+  });
+
+  it('keeps a substitution that becomes a flag from being skipped', () => {
+    // The skeleton leaves a marker there, so the word scan still treats the
+    // argument as an unprovable expansion.
+    expect(amendNeedsApproval('git commit "$(echo --amend)"')).toBe(true);
   });
 
   it('consumes the next token only when m ends a short-option cluster', () => {

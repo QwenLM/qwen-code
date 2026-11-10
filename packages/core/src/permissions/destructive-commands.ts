@@ -189,26 +189,6 @@ export function amendNeedsApproval(command: string): boolean {
 
 const MAX_SUBSTITUTION_DEPTH = 8;
 
-function mentionsGitCommitAmend(command: string, depth = 0): boolean {
-  // A substitution runs before the command it sits in, wherever it appears:
-  // `-m "$(git commit --$x)"` amends even though the value is otherwise an
-  // argument. Scan the raw text with quote state so a literal
-  // `-m '$(git commit --x)'` is not mistaken for one.
-  if (depth < MAX_SUBSTITUTION_DEPTH) {
-    for (const nested of executedCommandSubstitutions(command)) {
-      if (mentionsGitCommitAmend(nested, depth + 1)) return true;
-    }
-  }
-  // A `$` only speaks about the simple command it sits in: `echo $HOME;
-  // git commit -m x` cannot turn the second command into an amend. Split at
-  // the shell's own boundaries first, then walk each segment with fresh state
-  // (R25-2).
-  for (const segment of splitCompoundCommandSegments(command)) {
-    if (mentionsGitCommitAmendInSegment(segment.command)) return true;
-  }
-  return false;
-}
-
 function mentionsGitCommitAmendInSegment(command: string): boolean {
   let seenGit = false;
   let inCommit = false;
@@ -315,69 +295,280 @@ function isGitCommitValueFlag(word: string | undefined): boolean {
   return /^-[A-Za-z]*m$/.test(word);
 }
 
+/** Marker left where an executed substitution was removed from the skeleton. */
+const SUBSTITUTION_MARKER = '$__qwen_executed_substitution__';
+
+interface ScannedSubstitutions {
+  /** Bodies of the substitutions that actually run, in source order. */
+  bodies: string[];
+  /**
+   * The command with executed substitutions replaced by a marker and with
+   * provably inert text (comments, quoted-delimiter heredoc bodies) removed.
+   * Word-level analysis runs on this, so a commented or literal `--amend`
+   * cannot be read as structure.
+   */
+  skeleton: string;
+  /**
+   * True when a boundary cannot be proven from the text (a `#` or `<<` inside
+   * a substitution body, an unquoted heredoc whose body expands, or an
+   * unterminated construct). Callers must fail closed on the command.
+   */
+  unprovable: boolean;
+}
+
+interface Edit {
+  start: number;
+  end: number;
+  replacement: string;
+}
+
+function mentionsGitCommitAmend(command: string, depth = 0): boolean {
+  if (depth >= MAX_SUBSTITUTION_DEPTH) {
+    for (const segment of splitCompoundCommandSegments(command)) {
+      if (mentionsGitCommitAmendInSegment(segment.command)) return true;
+    }
+    return false;
+  }
+  const scan = scanExecutedSubstitutions(command);
+  if (scan.unprovable && mentionsGitCommitWords(command)) return true;
+  // A substitution runs before the command it sits in, wherever it appears:
+  // `-m "$(git commit --$x)"` amends even though the value is otherwise an
+  // argument.
+  for (const nested of scan.bodies) {
+    if (mentionsGitCommitAmend(nested, depth + 1)) return true;
+  }
+  // A `$` only speaks about the simple command it sits in: `echo $HOME;
+  // git commit -m x` cannot turn the second command into an amend. Split at
+  // the shell's own boundaries first, then walk each segment with fresh state
+  // (R25-2).
+  for (const segment of splitCompoundCommandSegments(scan.skeleton)) {
+    if (mentionsGitCommitAmendInSegment(segment.command)) return true;
+  }
+  return false;
+}
+
 /**
- * Bodies of the `$(…)` and backtick substitutions that actually run, in source
- * order. Scanned on the raw text with quote state: a substitution inside single
- * quotes or escaped with a backslash is literal and is skipped, while one
- * inside double quotes runs. Arithmetic expansions (`$((…))`) run no command
- * and are skipped.
+ * Whether the text mentions both `git` and `commit`, the guard's own subject.
+ * Used only to bound a fail-closed verdict: an unprovable boundary in a
+ * command that cannot reach a commit is not an amend.
  */
-function executedCommandSubstitutions(text: string): string[] {
+function mentionsGitCommitWords(command: string): boolean {
+  return /\bgit(?:\.exe)?\b/i.test(command) && /commit/i.test(command);
+}
+
+/**
+ * Split a command into the text that is structure and the substitutions that
+ * run inside it. Only `$(…)` and backticks are collected — this is not a
+ * general shell parser, and anything it cannot prove is reported as
+ * `unprovable` instead of guessed.
+ */
+function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
   const bodies: string[] = [];
+  const edits: Edit[] = [];
+  const pending: Array<{ delimiter: string; quoted: boolean }> = [];
+  let unprovable = false;
   let single = false;
   let double = false;
-  for (let index = 0; index < text.length; index++) {
-    const char = text[index];
+  let index = 0;
+
+  while (index < text.length) {
+    const char = text[index]!;
     if (single) {
       if (char === "'") single = false;
+      index++;
       continue;
     }
     if (char === '\\') {
       // Outside quotes any character can be escaped; inside double quotes only
-      // `$`, `` ` ``, `"` and `\` are. Skipping the escaped character keeps
-      // `\$(…)` and `` \`…\` `` out of the result.
+      // `$`, `` ` ``, `"` and `\` are.
       if (!double || /[$`"\\]/.test(text[index + 1] ?? '')) index++;
+      index++;
       continue;
     }
     if (double) {
       if (char === '"') {
         double = false;
+        index++;
         continue;
       }
     } else if (char === "'") {
       single = true;
+      index++;
       continue;
     } else if (char === '"') {
       double = true;
+      index++;
       continue;
     }
+
+    if (char === '\n' && pending.length > 0) {
+      let position = index + 1;
+      let failed = false;
+      while (pending.length > 0) {
+        const heredoc = pending.shift()!;
+        const body = findHeredocBody(text, position, heredoc.delimiter);
+        if (!body) {
+          unprovable = true;
+          failed = true;
+          break;
+        }
+        const bodyText = text.slice(position, body.bodyEnd);
+        // An unquoted delimiter expands its body, so a substitution there runs.
+        if (!heredoc.quoted && /\$\(|`/.test(bodyText)) unprovable = true;
+        edits.push({ start: position, end: body.end, replacement: '' });
+        position = body.end;
+      }
+      if (failed) break;
+      index = position;
+      continue;
+    }
+
+    if (char === '#' && isCommentStart(text, index)) {
+      const end = text.indexOf('\n', index);
+      const stop = end === -1 ? text.length : end;
+      edits.push({ start: index, end: stop, replacement: '' });
+      index = stop;
+      continue;
+    }
+
+    if (char === '<' && text[index + 1] === '<') {
+      const opener = readHeredocOpener(text, index);
+      if (opener) {
+        pending.push({ delimiter: opener.delimiter, quoted: opener.quoted });
+        index = opener.end;
+        continue;
+      }
+    }
+
     if (char === '`') {
       const end = findBacktickEnd(text, index + 1);
-      if (end === -1) break;
+      if (end === -1) {
+        unprovable = true;
+        break;
+      }
       bodies.push(text.slice(index + 1, end));
-      index = end;
+      edits.push({
+        start: index,
+        end: end + 1,
+        replacement: SUBSTITUTION_MARKER,
+      });
+      index = end + 1;
       continue;
     }
-    if (char !== '$' || text[index + 1] !== '(') continue;
-    if (text[index + 2] === '(') continue;
-    const end = findCommandSubstitutionEnd(text, index + 2);
-    if (end === -1) break;
-    bodies.push(text.slice(index + 2, end));
-    index = end;
+
+    if (char === '$' && text[index + 1] === '(' && text[index + 2] !== '(') {
+      const result = findCommandSubstitutionEnd(text, index + 2);
+      if (result.unprovable || result.end === -1) {
+        unprovable = true;
+        break;
+      }
+      bodies.push(text.slice(index + 2, result.end));
+      edits.push({
+        start: index,
+        end: result.end + 1,
+        replacement: SUBSTITUTION_MARKER,
+      });
+      index = result.end + 1;
+      continue;
+    }
+    index++;
   }
-  return bodies;
+
+  return {
+    bodies,
+    skeleton: applyEdits(text, edits),
+    unprovable,
+  };
+}
+
+function applyEdits(text: string, edits: Edit[]): string {
+  const ordered = [...edits].sort((a, b) => a.start - b.start);
+  let skeleton = '';
+  let cursor = 0;
+  for (const edit of ordered) {
+    if (edit.start < cursor) continue;
+    skeleton += text.slice(cursor, edit.start) + edit.replacement;
+    cursor = edit.end;
+  }
+  return skeleton + text.slice(cursor);
+}
+
+/** True when the `#` at `index` starts a word, the only place bash comments. */
+function isCommentStart(text: string, index: number): boolean {
+  return index === 0 || /[\s;&|()]/.test(text[index - 1]!);
+}
+
+interface HeredocOpener {
+  delimiter: string;
+  quoted: boolean;
+  end: number;
+}
+
+function readHeredocOpener(text: string, start: number): HeredocOpener | null {
+  let index = start + 2;
+  if (text[index] === '<') return null; // here-string
+  if (text[index] === '-') index++;
+  while (text[index] === ' ' || text[index] === '\t') index++;
+  const first = text[index];
+  let quoted = false;
+  let delimiter = '';
+  if (first === "'" || first === '"') {
+    quoted = true;
+    const quote = first;
+    index++;
+    while (index < text.length && text[index] !== quote) {
+      delimiter += text[index];
+      index++;
+    }
+    if (index >= text.length) return null;
+    index++;
+  } else if (first === '\\') {
+    quoted = true;
+    delimiter = text[index + 1] ?? '';
+    index += 2;
+  } else {
+    while (index < text.length && !/[\s;&|<>)]/.test(text[index]!)) {
+      delimiter += text[index];
+      index++;
+    }
+  }
+  if (!delimiter) return null;
+  return { delimiter, quoted, end: index };
+}
+
+function findHeredocBody(
+  text: string,
+  start: number,
+  delimiter: string,
+): { bodyEnd: number; end: number } | null {
+  let position = start;
+  while (position <= text.length) {
+    const newline = text.indexOf('\n', position);
+    const lineEnd = newline === -1 ? text.length : newline;
+    if (text.slice(position, lineEnd).trim() === delimiter) {
+      return { bodyEnd: position, end: lineEnd };
+    }
+    if (newline === -1) return null;
+    position = newline + 1;
+  }
+  return null;
 }
 
 /**
  * Index of the `)` closing a `$(` whose body starts at `start`, honouring the
- * quote state inside the body so a `)` in `printf ')'` does not close it.
+ * quote state inside the body so a `)` in `printf ')'` does not close it. A
+ * `#` or `<<` inside the body makes the boundary unprovable: matching parens
+ * there needs a full shell parser, so the caller fails closed instead.
  */
-function findCommandSubstitutionEnd(text: string, start: number): number {
+function findCommandSubstitutionEnd(
+  text: string,
+  start: number,
+): { end: number; unprovable: boolean } {
   let depth = 1;
   let single = false;
   let double = false;
   for (let index = start; index < text.length; index++) {
-    const char = text[index];
+    const char = text[index]!;
     if (single) {
       if (char === "'") single = false;
       continue;
@@ -398,13 +589,19 @@ function findCommandSubstitutionEnd(text: string, start: number): number {
       double = true;
       continue;
     }
+    if (char === '#' && isCommentStart(text, index)) {
+      return { end: -1, unprovable: true };
+    }
+    if (char === '<' && text[index + 1] === '<') {
+      return { end: -1, unprovable: true };
+    }
     if (char === '(') depth++;
     else if (char === ')') {
       depth--;
-      if (depth === 0) return index;
+      if (depth === 0) return { end: index, unprovable: false };
     }
   }
-  return -1;
+  return { end: -1, unprovable: false };
 }
 
 /** Index of the backtick closing a substitution whose body starts at `start`. */
