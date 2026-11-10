@@ -268,7 +268,7 @@ describe('ci-build-cache CLI', () => {
       expect(calls).not.toContain('npm run build');
       // `stale` purges the changed workspace before rebuilding it and leaves
       // the untouched one alone. Widening builtPaths(dirs) to builtPaths()
-      // deletes every restored workspace's dist, and four shards then run
+      // deletes every restored workspace's dist, and two shards then run
       // against a tree missing the outputs the cache restored.
       expect(existsSync(join(fixture.repo, 'packages/a/dist/out.js'))).toBe(
         false,
