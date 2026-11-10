@@ -170,7 +170,15 @@ public final class ApiModels {
             @JsonProperty("session_delete") boolean sessionDelete,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
             @JsonProperty("context_compression") boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents,
+            boolean btw, boolean recap) {
+        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
+                boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
+                boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
+                Boolean foregroundShell, boolean contextCompression, Boolean childAgents) {
+            this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
+                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, contextCompression, childAgents, false, false);
+        }
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
                 boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
@@ -195,7 +203,16 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
+                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
+                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
+                Boolean modelChange, Boolean approvalModeChange, Boolean inputAttachments, Boolean rename,
+                boolean contextCompression, Boolean childAgents) {
+            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
+                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
+                    inputAttachments, rename, contextCompression, childAgents, false, false);
+        }
         @JsonProperty("diagnostics")
         public boolean diagnostics() {
             return tasks;
