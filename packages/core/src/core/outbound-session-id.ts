@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { retryContext } from '../utils/retryContext.js';
 import {
   applyDynamicHeaderValues,
   hasDynamicPlaceholder,
@@ -66,29 +67,32 @@ export function wrapFetchWithSessionId<TFetch>(
   customHeaders?: Record<string, string>,
 ): TFetch {
   const fetchLike = baseFetch as FetchLike;
-  // Decided once, at client construction: whether this provider has any
-  // `customHeaders` value carrying a runtime placeholder. When it does
-  // not — every provider configured today — the wrapper keeps its
-  // existing early return and costs exactly what it did before.
+  // Only providers with dynamic placeholders need to expand custom headers.
   const expandsHeaders = Object.values(customHeaders ?? {}).some(
     (value) => typeof value === 'string' && hasDynamicPlaceholder(value),
   );
   if (expandsHeaders) warnIfDynamicHeadersDisabled(customHeaders, config);
   const wrapped: FetchLike = async (input, init) => {
+    const singleAttempt = retryContext.getStore()?.singleAttempt;
+    const requestInit: RequestInit | undefined = singleAttempt
+      ? { ...init, redirect: 'error' }
+      : init;
     const sessionHeaders = buildSessionIdHeaders(config, input);
     const sessionId = sessionHeaders[SESSION_ID_HEADER];
-    if (!sessionId && !expandsHeaders) return fetchLike(input, init);
+    if (!sessionId && !expandsHeaders) return fetchLike(input, requestInit);
 
     const headers = new Headers(
       input instanceof Request ? input.headers : undefined,
     );
-    new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+    new Headers(requestInit?.headers).forEach((value, key) =>
+      headers.set(key, value),
+    );
     // Expand before the built-in header is written, so first-party
     // correlation still wins over anything the user configured — the
     // precedence documented for this wrapper (correlation > customHeaders).
     if (expandsHeaders) applyDynamicHeaderValues(headers, config);
     if (sessionId) headers.set(SESSION_ID_HEADER, sessionId);
-    return fetchLike(input, { ...init, headers });
+    return fetchLike(input, { ...requestInit, headers });
   };
 
   return wrapped as TFetch;

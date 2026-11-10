@@ -1271,6 +1271,456 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  // Holds every seal the client sends. answer(index) passes that seal on to
+  // the Store. With a status, optionally with its code, it refuses the seal
+  // without reaching the Store. With 'unreadable' the Store seals but its
+  // receipt names another writer generation, and with 'lost' the Store
+  // seals but the answer never reaches the client.
+  function holdSeals(server: FakeManagedSessionStore) {
+    const serve = server.fetch.getMockImplementation()!;
+    type Answer =
+      | number
+      | { status: number; code: string }
+      | 'unreadable'
+      | 'lost'
+      | undefined;
+    const held: Array<(answer?: Answer) => void> = [];
+    server.fetch.mockImplementation(async (input, init) => {
+      if (!requestUrl(input).endsWith('/writers:seal'))
+        return serve(input, init);
+      const status = await new Promise<Answer>((resolve) => {
+        held.push(resolve);
+      });
+      if (status === undefined) return serve(input, init);
+      if (status === 'unreadable') {
+        await serve(input, init);
+        return jsonResponse({
+          writerGeneration: 999,
+          state: 'SEALED',
+          replayed: false,
+        });
+      }
+      if (status === 'lost') {
+        await serve(input, init);
+        throw new TypeError('fetch failed');
+      }
+      const refusal =
+        typeof status === 'number'
+          ? {
+              status,
+              code:
+                status === 409
+                  ? 'managed_session_writer_conflict'
+                  : 'store_unavailable',
+            }
+          : status;
+      return jsonResponse(
+        {
+          error: { code: refusal.code, message: 'The seal was not applied.' },
+        },
+        refusal.status,
+      );
+    });
+    return {
+      held: () => held.length,
+      answer: (index: number, answer?: Answer) => held[index]?.(answer),
+      answerAll: () => held.forEach((answer) => answer()),
+    };
+  }
+
+  // A Hosted Session with a lifecycle closes without waiting for an
+  // activation renewal in flight, so a seal can be on its way while that
+  // renewal replaces a lapsed lease. The Store gives a sealed head a new
+  // writer generation on acquire, so an acquire that reaches it after the
+  // seal would reopen the Session behind the seal under a lease nobody
+  // renews. A seal that has already answered is safe: acquireWriter refuses
+  // a sealed client.
+  it('does not reacquire the writer while a seal that started during its wait is in flight', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({
+      holdAcquires: false,
+      refuseRenewal: true,
+    });
+    const seals = holdSeals(rig.server);
+    let closing: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(rig.observed.refusedRenewals).toBe(1);
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      closing = rig.authority.close();
+      rig.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(1);
+      expect(rig.server.state).toBe('ACTIVE');
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      seals.answer(0);
+      await closing;
+      await expect(renewal).rejects.toThrow(
+        'the HTTP Managed Session writer is already opened or sealed.',
+      );
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      expect(rig.server.state).toBe('SEALED');
+    } finally {
+      rig.release();
+      seals.answerAll();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reacquire the writer while a seal that started before it is in flight', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let closing: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      // The lease lapses before the scheduled renewal runs, and the seal
+      // is on its way when the activation renewal sees the lapse.
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      closing = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      expect(seals.held()).toBe(1);
+      expect(rig.server.state).toBe('ACTIVE');
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      seals.answer(0);
+      await closing;
+      await expect(renewal).rejects.toThrow(
+        'the HTTP Managed Session writer is already opened or sealed.',
+      );
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      expect(rig.server.state).toBe('SEALED');
+    } finally {
+      seals.answerAll();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for a seal that starts while it waits on an earlier one', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let firstClose: Promise<unknown> | undefined;
+    let secondClose: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      firstClose = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      secondClose = rig.authority.close();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(2);
+      // The Store refuses the first seal, which alone would let the
+      // reacquire go ahead; the second is still on its way.
+      seals.answer(0, {
+        status: 409,
+        code: 'workspace_lifecycle_claim_fenced',
+      });
+      await expect(firstClose).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      seals.answer(1);
+      await secondClose;
+      await expect(renewal).rejects.toThrow(
+        'the HTTP Managed Session writer is already opened or sealed.',
+      );
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      expect(rig.server.state).toBe('SEALED');
+    } finally {
+      seals.answerAll();
+      await firstClose?.catch(() => undefined);
+      await secondClose?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for every seal in flight, not only the last one to start', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let firstClose: Promise<unknown> | undefined;
+    let secondClose: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      firstClose = rig.authority.close();
+      secondClose = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(2);
+      // The later seal is refused first, while the earlier one is still on
+      // its way and then lands without an answer.
+      seals.answer(1, {
+        status: 409,
+        code: 'workspace_lifecycle_claim_fenced',
+      });
+      await expect(secondClose).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      seals.answer(0, 'lost');
+      await expect(firstClose).rejects.toThrow();
+      await expect(renewal).rejects.toBeInstanceOf(
+        ManagedSessionAppendUnsettledError,
+      );
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      expect(rig.server.state).toBe('SEALED');
+    } finally {
+      seals.answerAll();
+      await firstClose?.catch(() => undefined);
+      await secondClose?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reacquires the writer after a seal the Store refused', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let closing: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      closing = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(1);
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      // A refusal says this seal did not land, so the Session stays usable
+      // and the lapsed lease is replaced. (The fake Store does not fence the
+      // acquire that follows the way a lifecycle claim would.)
+      seals.answer(0, {
+        status: 409,
+        code: 'workspace_lifecycle_claim_fenced',
+      });
+      await expect(closing).rejects.toThrow();
+      await renewal;
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      expect(rig.authority.currentActivation!.renewalSeq).toBe(1);
+      expect(rig.authority.writerSealed).toBe(false);
+      expect(rig.server.state).toBe('ACTIVE');
+    } finally {
+      seals.answerAll();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([503, 500, 429, 'lost'] as const)(
+    'stays unsettled without reacquiring after a seal that failed without a refusal (%s)',
+    async (failure) => {
+      vi.useFakeTimers();
+      const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+      const seals = holdSeals(rig.server);
+      let closing: Promise<unknown> | undefined;
+      let renewal: Promise<unknown> | undefined;
+      try {
+        vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+        closing = rig.authority.close();
+        renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(seals.held()).toBe(1);
+        // Without a refusal it stays open whether the Store sealed the head,
+        // so an acquire could reopen the Session behind a seal that landed.
+        seals.answer(0, failure);
+        await expect(closing).rejects.toThrow();
+        await expect(renewal).rejects.toBeInstanceOf(
+          ManagedSessionAppendUnsettledError,
+        );
+        expect(rig.observed.acquiresAfterBoot).toBe(0);
+        // A later close seals the head with the same writer generation.
+        const retry = rig.authority.close();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(seals.held()).toBe(2);
+        seals.answer(1);
+        await retry;
+        expect(rig.server.state).toBe('SEALED');
+        expect(rig.observed.acquiresAfterBoot).toBe(0);
+      } finally {
+        seals.answerAll();
+        await closing?.catch(() => undefined);
+        await renewal?.catch(() => undefined);
+        await rig.stores.stopLocal();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('stays unsettled without reacquiring after a seal whose answer could not be read', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let closing: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      closing = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(1);
+      // The Store sealed the head, but the client cannot read that from the
+      // receipt; only a refusal from the Store says nothing was sealed.
+      seals.answer(0, 'unreadable');
+      await expect(closing).rejects.toThrow(
+        'seal receipt does not match the active writer.',
+      );
+      expect(rig.server.state).toBe('SEALED');
+      await expect(renewal).rejects.toBeInstanceOf(
+        ManagedSessionAppendUnsettledError,
+      );
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      expect(rig.server.state).toBe('SEALED');
+    } finally {
+      seals.answerAll();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reacquires the writer once a writer conflict answers a seal after one that failed without a refusal', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let closing: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      closing = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      seals.answer(0, 503);
+      await expect(closing).rejects.toThrow();
+      await expect(renewal).rejects.toBeInstanceOf(
+        ManagedSessionAppendUnsettledError,
+      );
+      // A writer conflict comes after the Store replays a seal that landed,
+      // so the head has left this writer generation, no seal of it can still
+      // decide the Session, and the lapsed lease can be replaced. (The Java Store answers one only once the head has
+      // moved past this generation; the fake Store answers what it is told.)
+      closing = rig.authority.close();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(2);
+      seals.answer(1, 409);
+      await expect(closing).rejects.toThrow();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await renewal;
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      expect(rig.authority.currentActivation!.renewalSeq).toBe(1);
+      expect(rig.server.state).toBe('ACTIVE');
+    } finally {
+      seals.answerAll();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('stays unsettled when a gate refuses the seal after one that failed without a refusal', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let closing: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      closing = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      seals.answer(0, 503);
+      await expect(closing).rejects.toThrow();
+      await expect(renewal).rejects.toBeInstanceOf(
+        ManagedSessionAppendUnsettledError,
+      );
+      // A lifecycle fence refuses before the Store would replay a seal that
+      // landed, so it says nothing about the first one.
+      closing = rig.authority.close();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(2);
+      seals.answer(1, {
+        status: 409,
+        code: 'workspace_lifecycle_claim_fenced',
+      });
+      await expect(closing).rejects.toThrow();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await expect(renewal).rejects.toBeInstanceOf(
+        ManagedSessionAppendUnsettledError,
+      );
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+    } finally {
+      seals.answerAll();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses to reacquire once a seal answered, even if an earlier seal fails afterwards', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const seals = holdSeals(rig.server);
+    let firstClose: Promise<unknown> | undefined;
+    let secondClose: Promise<unknown> | undefined;
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      firstClose = rig.authority.close();
+      secondClose = rig.authority.close();
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seals.held()).toBe(2);
+      seals.answer(1);
+      await secondClose;
+      // The earlier seal fails without a definite answer only after the
+      // client is sealed, which already settles the writer's end.
+      seals.answer(0, 503);
+      await expect(firstClose).rejects.toThrow();
+      await expect(renewal).rejects.toThrow(
+        'the HTTP Managed Session writer is already opened or sealed.',
+      );
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      expect(rig.server.state).toBe('SEALED');
+    } finally {
+      seals.answerAll();
+      await firstClose?.catch(() => undefined);
+      await secondClose?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   // reacquireWriter stops the renewal timer before it waits; when it keeps
   // the grant, only the renewal that refreshed it re-armed the timer. An
   // activation renewal that the lifecycle claim then fences must leave the
@@ -2319,7 +2769,7 @@ describe('HTTP Managed Session store', () => {
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
         expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '4',
+          '5',
         );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);

@@ -98,6 +98,7 @@ public class JdbcManagedUserMessageStore
                         tenant, session, "umsg_" + UUID.randomUUID(), sequence, actor, encode(input), context);
                 jdbc.update("UPDATE ma_user_message_queue SET next_sequence = next_sequence + 1 WHERE tenant_id = ? AND session_id = ?",
                         tenant, session);
+                SideQueryConversation.mainInputAccepted(jdbc, tenant, session);
             }
             case "edit", "withdraw" -> {
                 String input = "edit".equals(command.action()) ? encode(agents.userMessageInput(command.input())) : null;

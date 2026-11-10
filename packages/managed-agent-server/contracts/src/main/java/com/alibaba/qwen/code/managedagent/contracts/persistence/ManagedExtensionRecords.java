@@ -44,7 +44,7 @@ public final class ManagedExtensionRecords {
     public static final List<String> EVENT_KINDS = List.of("input.accepted",
             "wake.requested", "activation.changed", "model.attempt",
             "message.committed", "tool.intent", "action.changed",
-            "tool.receipt", "checkpoint.committed", "context.compacted",
+            "tool.receipt", "tool.measured", "checkpoint.committed", "context.compacted",
             "cancel.requested", "turn.settled", "config.bound",
             "lifecycle.changed", "domain.committed", "message.delta",
             "message.retracted", "operation.replayed", "hosted.batch.planned", "hosted.cleanup");
