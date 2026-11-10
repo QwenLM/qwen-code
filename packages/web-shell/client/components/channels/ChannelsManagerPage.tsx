@@ -15,12 +15,14 @@ import {
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
+  CheckCircle2Icon,
   EllipsisVerticalIcon,
   PencilIcon,
   PlusIcon,
   RadioTowerIcon,
   RefreshCwIcon,
   RotateCwIcon,
+  SendIcon,
   Trash2Icon,
 } from 'lucide-react';
 import type {
@@ -49,6 +51,13 @@ import {
 } from '../ui/alert-dialog';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
 import {
   Card,
   CardAction,
@@ -96,7 +105,7 @@ interface ChannelsManagerPageProps {
   initialFocusRef?: Ref<HTMLHeadingElement>;
 }
 
-type ChannelAction = 'start' | 'stop' | 'restart' | 'startup';
+type ChannelAction = 'start' | 'stop' | 'restart' | 'startup' | 'test-send';
 
 function actionErrorKey(workspaceCwd: string | undefined, name: string) {
   return `${workspaceCwd ?? ''}\0${name}`;
@@ -137,6 +146,8 @@ export function ChannelsManagerPage({
   const workspace = useWorkspace();
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
+  const supportsDelivery =
+    workspace.capabilities?.features.includes('channel_delivery') === true;
   const bearerConfigured = Boolean(workspace.token);
   const { report: statusReport, loading: statusLoading } = useStatusReport({
     autoLoad: supportsManagement && !bearerConfigured,
@@ -178,6 +189,8 @@ export function ChannelsManagerPage({
     descriptor: DaemonChannelTypeDescriptor;
     instance?: DaemonChannelInstanceSnapshot;
   }>();
+  const [methodChoices, setMethodChoices] =
+    useState<DaemonChannelTypeDescriptor[]>();
   const editorRef = useRef(editor);
   useEffect(() => {
     editorRef.current = editor;
@@ -200,6 +213,7 @@ export function ChannelsManagerPage({
     start,
     stop,
     restart,
+    notify,
     pairing,
   } = useChannels({
     autoLoad: supportsManagement,
@@ -225,6 +239,9 @@ export function ChannelsManagerPage({
     ? (busyByWorkspace[activeWorkspaceCwd] ?? null)
     : null;
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [testSuccesses, setTestSuccesses] = useState<Record<string, boolean>>(
+    {},
+  );
   const [deleteTarget, setDeleteTarget] = useState<{
     workspaceCwd?: string;
     instance: DaemonChannelInstanceSnapshot;
@@ -233,6 +250,7 @@ export function ChannelsManagerPage({
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
+    setMethodChoices(undefined);
     setDeleteTarget(undefined);
     setDeleteError(undefined);
     setDeleting(false);
@@ -259,6 +277,32 @@ export function ChannelsManagerPage({
     () => catalog.filter(isChannelPlatformAvailable),
     [catalog],
   );
+  const platformGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        type: string;
+        displayName: string;
+        methods: DaemonChannelTypeDescriptor[];
+      }
+    >();
+    for (const descriptor of availablePlatforms) {
+      const type =
+        descriptor.type === 'dingtalk-webhook' ? 'dingtalk' : descriptor.type;
+      const group = groups.get(type);
+      if (group) {
+        group.methods.push(descriptor);
+      } else {
+        groups.set(type, {
+          type,
+          displayName:
+            type === 'dingtalk' ? 'DingTalk' : descriptor.displayName,
+          methods: [descriptor],
+        });
+      }
+    }
+    return [...groups.values()];
+  }, [availablePlatforms]);
   const instances = useMemo(
     () =>
       Object.values(channels)
@@ -342,8 +386,12 @@ export function ChannelsManagerPage({
         delete next[errorKey];
         return next;
       });
+      setTestSuccesses((current) => ({ ...current, [errorKey]: false }));
       try {
         await operation();
+        if (action === 'test-send') {
+          setTestSuccesses((current) => ({ ...current, [errorKey]: true }));
+        }
       } catch (actionError) {
         setActionErrors((current) => ({
           ...current,
@@ -580,6 +628,15 @@ export function ChannelsManagerPage({
             <div className={styles.channelGrid}>
               {instances.map((channel) => {
                 const descriptor = descriptorFor(channel);
+                const defaultTarget = descriptor?.defaultDeliveryTarget;
+                const canTestSend =
+                  supportsDelivery &&
+                  defaultTarget !== undefined &&
+                  channel.runtime.state === 'connected';
+                const testSucceeded =
+                  testSuccesses[
+                    actionErrorKey(activeWorkspaceCwd, channel.name)
+                  ];
                 const runtimeError =
                   actionErrors[
                     actionErrorKey(activeWorkspaceCwd, channel.name)
@@ -613,7 +670,12 @@ export function ChannelsManagerPage({
                               className={styles.runtimeBadge}
                               data-runtime-state={channel.runtime.state}
                             >
-                              {t(STATUS_KEYS[channel.runtime.state])}
+                              {t(
+                                descriptor?.outboundOnly &&
+                                  channel.runtime.state === 'connected'
+                                  ? 'channels.status.readyToSend'
+                                  : STATUS_KEYS[channel.runtime.state],
+                              )}
                             </Badge>
                           </CardTitle>
                           <CardDescription className={styles.channelMeta}>
@@ -621,7 +683,13 @@ export function ChannelsManagerPage({
                             <span aria-hidden="true">·</span>
                             <span>
                               {t(
-                                STATUS_DESCRIPTION_KEYS[channel.runtime.state],
+                                descriptor?.outboundOnly
+                                  ? channel.runtime.state === 'connected'
+                                    ? 'channels.statusDescription.readyToSend'
+                                    : 'channels.statusDescription.outbound'
+                                  : STATUS_DESCRIPTION_KEYS[
+                                      channel.runtime.state
+                                    ],
                               )}
                             </span>
                           </CardDescription>
@@ -718,6 +786,50 @@ export function ChannelsManagerPage({
                         </Alert>
                       </CardContent>
                     ) : null}
+                    {canTestSend ? (
+                      <CardContent className="flex flex-col gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="w-fit"
+                          disabled={!canManage || busy !== null}
+                          onClick={() =>
+                            void runAction(channel, 'test-send', () =>
+                              notify({
+                                text: t('channels.test.message'),
+                                delivery: {
+                                  kind: 'channel',
+                                  target: {
+                                    channelName: channel.name,
+                                    type: defaultTarget.type,
+                                    id: defaultTarget.id,
+                                  },
+                                },
+                              }),
+                            )
+                          }
+                        >
+                          {busy?.name === channel.name &&
+                          busy.action === 'test-send' ? (
+                            <Spinner />
+                          ) : (
+                            <SendIcon />
+                          )}
+                          {t('channels.action.testSend')}
+                        </Button>
+                        <p className="text-xs text-muted-foreground">
+                          {t('channels.test.description')}
+                        </p>
+                        {testSucceeded ? (
+                          <Alert role="status">
+                            <CheckCircle2Icon />
+                            <AlertTitle>
+                              {t('channels.test.accepted')}
+                            </AlertTitle>
+                          </Alert>
+                        ) : null}
+                      </CardContent>
+                    ) : null}
                     <CardFooter className={styles.channelFooter}>
                       <label className={styles.startupControl}>
                         <span className={styles.startupCopy}>
@@ -767,7 +879,7 @@ export function ChannelsManagerPage({
               </p>
             </div>
             <div className={styles.platformGrid}>
-              {availablePlatforms.map((platform) => (
+              {platformGroups.map((platform) => (
                 <button
                   key={platform.type}
                   type="button"
@@ -777,12 +889,16 @@ export function ChannelsManagerPage({
                   aria-label={t('channels.platform.configureNamed', {
                     platform: platform.displayName,
                   })}
-                  onClick={() =>
-                    setEditor({
-                      workspaceCwd: activeWorkspaceCwd!,
-                      descriptor: platform,
-                    })
-                  }
+                  onClick={() => {
+                    if (platform.methods.length > 1) {
+                      setMethodChoices(platform.methods);
+                    } else {
+                      setEditor({
+                        workspaceCwd: activeWorkspaceCwd!,
+                        descriptor: platform.methods[0],
+                      });
+                    }
+                  }}
                 >
                   <span className={styles.platformMark} aria-hidden="true">
                     {PLATFORM_MARKS[platform.type] ??
@@ -806,6 +922,50 @@ export function ChannelsManagerPage({
           </section>
         ) : null}
       </div>
+
+      <Dialog
+        open={Boolean(methodChoices)}
+        onOpenChange={(open) => {
+          if (!open) setMethodChoices(undefined);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('channels.method.title')}</DialogTitle>
+            <DialogDescription>
+              {t('channels.method.description')}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            {methodChoices?.map((descriptor) => (
+              <Button
+                key={descriptor.type}
+                variant="outline"
+                className="h-auto flex-col items-start gap-1 whitespace-normal py-3 text-left"
+                onClick={() => {
+                  setEditor({ workspaceCwd: activeWorkspaceCwd!, descriptor });
+                  setMethodChoices(undefined);
+                }}
+              >
+                <span>
+                  {t(
+                    descriptor.outboundOnly
+                      ? 'channels.method.webhook'
+                      : 'channels.method.applicationBot',
+                  )}
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  {t(
+                    descriptor.outboundOnly
+                      ? 'channels.method.webhook.description'
+                      : 'channels.method.applicationBot.description',
+                  )}
+                </span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {editor ? (
         <ChannelEditorDialog

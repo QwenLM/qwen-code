@@ -230,6 +230,13 @@ export function createDaemonWorkspaceActions({
       return { catalog, snapshot };
     },
 
+    async notifyChannel(request, workspaceCwd) {
+      const client = requireClient(getClient, 'Send channel message failed');
+      const cwd = requireWorkspaceCwd(() => workspaceCwd ?? getWorkspaceCwd());
+      await client.requireCapability('channel_delivery');
+      return client.workspaceByCwd(cwd).notify(request);
+    },
+
     async listChannelObservedContacts(workspaceId) {
       requireClient(getClient, 'Load observed channel contacts failed');
       const path = workspaceId

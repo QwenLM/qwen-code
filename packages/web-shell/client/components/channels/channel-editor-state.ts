@@ -479,11 +479,14 @@ export function createChannelEditorDraft(
     name: instance?.name ?? '',
     values,
     secrets,
-    privatePolicy: hasDescriptorPolicy
-      ? ''
-      : ['disabled', 'allowlist', 'pairing', 'open'].includes(configuredPolicy)
-        ? (configuredPolicy as ChannelPrivatePolicy)
-        : '',
+    privatePolicy:
+      descriptor.outboundOnly || hasDescriptorPolicy
+        ? ''
+        : ['disabled', 'allowlist', 'pairing', 'open'].includes(
+              configuredPolicy,
+            )
+          ? (configuredPolicy as ChannelPrivatePolicy)
+          : '',
     // Show repository IDs in the canonical lower-case form the editor writes,
     // so re-saving an older mixed-case allowlist migrates it instead of
     // rewriting the same spelling back.
@@ -606,6 +609,7 @@ export function validateChannelEditorDraft(
     }
   }
   if (
+    !descriptor.outboundOnly &&
     !isRepositoryOnlyChannelType(descriptor.type) &&
     !draft.privatePolicy &&
     !hasDescriptorPrivatePolicy(descriptor)
@@ -1035,7 +1039,10 @@ export function buildChannelUpsertRequest(
     // then present the stale user list as an authoritative allowlist. Drop the
     // whole set on the next save; the effective list lives under `groups`.
     for (const key of PRIVATE_ONLY_FIELD_KEYS) delete config[key];
-  } else if (!hasDescriptorPrivatePolicy(descriptor)) {
+  } else if (
+    !descriptor.outboundOnly &&
+    !hasDescriptorPrivatePolicy(descriptor)
+  ) {
     config['privatePolicy'] = draft.privatePolicy;
   }
   if (hasDescriptorGroupPolicy(descriptor)) {

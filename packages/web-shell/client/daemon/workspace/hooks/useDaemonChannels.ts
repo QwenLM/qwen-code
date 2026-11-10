@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type {
+  DaemonChannelNotifyRequest,
   DaemonChannelStartupRequest,
   DaemonChannelUpsertRequest,
   DaemonRevisionRequest,
@@ -149,6 +150,15 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
       ),
     [actions, mutate, workspaceClient],
   );
+  const notify = useCallback(
+    (request: DaemonChannelNotifyRequest) => {
+      if (!workspaceCwd) {
+        throw new Error('Channel delivery requires a workspace.');
+      }
+      return actions.notifyChannel(request, workspaceCwd);
+    },
+    [actions, workspaceCwd],
+  );
   const current =
     resource.data?.workspaceCwd === workspaceCwd ? resource.data : undefined;
   const pairing = useMemo<DaemonChannelPairingActions>(
@@ -187,6 +197,7 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     start,
     stop,
     restart,
+    notify,
     pairing,
   };
 }

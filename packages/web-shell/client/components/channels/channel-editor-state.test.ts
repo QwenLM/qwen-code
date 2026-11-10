@@ -66,6 +66,65 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
+describe('outbound-only channel editing', () => {
+  const descriptor: DaemonChannelTypeDescriptor = {
+    type: 'dingtalk-webhook',
+    displayName: 'DingTalk Webhook',
+    manageable: true,
+    outboundOnly: true,
+    fields: [
+      {
+        key: 'webhookUrl',
+        label: 'Webhook URL',
+        kind: 'secret',
+        required: true,
+      },
+      { key: 'signingSecret', label: 'Signing secret', kind: 'secret' },
+    ],
+  };
+
+  it('validates and saves without inventing a receive policy', () => {
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'notices';
+    draft.secrets.webhookUrl = {
+      operation: 'replace',
+      value: '$DINGTALK_WEBHOOK_URL',
+    };
+    expect(draft.privatePolicy).toBe('');
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+    expect(buildChannelUpsertRequest(descriptor, draft, '1')).toEqual({
+      expectedRevision: '1',
+      config: { type: 'dingtalk-webhook' },
+      secrets: {
+        webhookUrl: { operation: 'replace', value: '$DINGTALK_WEBHOOK_URL' },
+        signingSecret: { operation: 'clear' },
+      },
+    });
+  });
+
+  it('preserves required saved secrets but rejects clearing the endpoint', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'notices',
+      config: { type: 'dingtalk-webhook' },
+      secrets: { webhookUrl: { present: true, source: 'environment' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      {},
+    );
+    expect(
+      buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+        ?.webhookUrl,
+    ).toEqual({ operation: 'preserve' });
+    draft.secrets.webhookUrl = { operation: 'clear' };
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      { webhookUrl: 'required' },
+    );
+  });
+});
+
 const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
   fields: [

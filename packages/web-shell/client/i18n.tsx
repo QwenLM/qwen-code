@@ -2139,6 +2139,13 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.configuredDestination': 'Configured destination',
+  'scheduledTasks.delivery.configuredHint':
+    'Messages are sent to the destination configured for this Channel.',
+  'scheduledTasks.delivery.useConfiguredDestination':
+    'Use configured destination',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    'This saved destination differs from the Channel’s configured destination.',
   'scheduledTasks.delivery.off': 'Delivery off',
   'scheduledTasks.delivery.hint':
     'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
@@ -4662,6 +4669,25 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
+  'channels.method.title': 'Choose a DingTalk connection',
+  'channels.method.description':
+    'Choose how this Channel connects to DingTalk.',
+  'channels.method.applicationBot': 'Application bot',
+  'channels.method.applicationBot.description':
+    'Receive messages and reply using an application bot.',
+  'channels.method.webhook': 'Webhook (send only)',
+  'channels.method.webhook.description':
+    'Send notifications to the group configured by a custom robot webhook.',
+  'channels.action.testSend': 'Send test message',
+  'channels.test.message': 'Test message from Qwen Code.',
+  'channels.test.description':
+    'Sends a real test message to the configured destination. The robot’s keyword rules still apply.',
+  'channels.test.accepted': 'Test message accepted by the platform API.',
+  'channels.status.readyToSend': 'Ready to send',
+  'channels.statusDescription.readyToSend':
+    'Ready locally. Remote credentials are checked when sending.',
+  'channels.statusDescription.outbound':
+    'Sends notifications to the configured destination.',
   'channels.platform.configureNamed': (v) =>
     `Configure ${v?.platform ?? 'Channel'}`,
   'channels.status.stopped': 'Stopped',
@@ -4749,6 +4775,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.sessionScope.option.single': 'One shared session',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
+  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook URL',
+  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
+    'The secret webhook address of your DingTalk custom robot.',
+  'channels.editor.field.dingtalkWebhook.signingSecret': 'Signing secret',
+  'channels.editor.field.dingtalkWebhook.signingSecret.description':
+    'Required if signature verification is enabled for the custom robot.',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -7145,6 +7177,11 @@ const ZH: Messages = {
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.configuredDestination': '已配置的目标',
+  'scheduledTasks.delivery.configuredHint': '消息会发送到此频道配置的目标。',
+  'scheduledTasks.delivery.useConfiguredDestination': '使用已配置的目标',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    '已保存的目标与此频道配置的目标不同。',
   'scheduledTasks.delivery.off': '不投递',
   'scheduledTasks.delivery.hint':
     '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
@@ -9466,6 +9503,23 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
+  'channels.method.title': '选择钉钉连接方式',
+  'channels.method.description': '选择此频道连接钉钉的方式。',
+  'channels.method.applicationBot': '应用机器人',
+  'channels.method.applicationBot.description':
+    '通过应用机器人接收消息并回复。',
+  'channels.method.webhook': 'Webhook（仅发送）',
+  'channels.method.webhook.description':
+    '通过自定义机器人 Webhook，向配置的群发送通知。',
+  'channels.action.testSend': '发送测试消息',
+  'channels.test.message': '来自 Qwen Code 的测试消息。',
+  'channels.test.description':
+    '向配置的目标发送真实测试消息，仍需满足机器人的关键词规则。',
+  'channels.test.accepted': '平台 API 已接受测试消息。',
+  'channels.status.readyToSend': '可发送',
+  'channels.statusDescription.readyToSend':
+    '本地已就绪，远程凭证会在发送时验证。',
+  'channels.statusDescription.outbound': '向配置的目标发送通知。',
   'channels.platform.configureNamed': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.status.stopped': '已停止',
   'channels.status.starting': '启动中',
@@ -9543,6 +9597,12 @@ const ZH: Messages = {
   'channels.editor.field.sessionScope.option.chat_thread': '按对话和话题',
   'channels.editor.field.sessionScope.option.single': '整个频道共享',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
+  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook 地址',
+  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
+    '钉钉自定义机器人的私密 Webhook 地址。',
+  'channels.editor.field.dingtalkWebhook.signingSecret': '加签密钥',
+  'channels.editor.field.dingtalkWebhook.signingSecret.description':
+    '自定义机器人启用加签验证时需填写。',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
   'channels.editor.field.wecom.botId': 'Bot ID',

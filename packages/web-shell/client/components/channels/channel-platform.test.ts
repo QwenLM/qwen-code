@@ -25,6 +25,7 @@ describe('Channel platform availability', () => {
     expect(
       [
         descriptor('dingtalk'),
+        descriptor('dingtalk-webhook'),
         descriptor('dws'),
         descriptor('wecom'),
         descriptor('wecom-callback'),
@@ -41,6 +42,7 @@ describe('Channel platform availability', () => {
         .map((item) => item.type),
     ).toEqual([
       'dingtalk',
+      'dingtalk-webhook',
       'dws',
       'wecom',
       'wecom-callback',
