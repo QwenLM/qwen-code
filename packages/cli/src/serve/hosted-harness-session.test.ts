@@ -41998,17 +41998,22 @@ describe('client files registration route', () => {
     const { peer, url } = await relayPeer();
     const { server, sessionId, clientId } = await sessionWithClient();
     try {
+      // The Java relay service test asserts its dispatch against this same
+      // fixture; only the live peer URL is substituted here.
+      const dispatch = JSON.parse(
+        await readFile(
+          new URL(
+            '../../../managed-agent-server/verification/src/test/resources/clientfiles/dispatch-register.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
       const registered = await headers(
         supertest(server).post(`/session/${sessionId}/client-files`),
       )
         .set('X-Qwen-Client-Id', clientId)
-        .send({
-          action: 'register',
-          serverId: 'local-files',
-          generation: 1,
-          url,
-          token: 'relay-token',
-        });
+        .send({ ...dispatch, url });
       expect(registered.status).toBe(200);
       expect(registered.body).toMatchObject({
         registered: true,
@@ -42050,6 +42055,30 @@ describe('client files registration route', () => {
         });
       expect(bad.status).toBe(400);
       expect(bad.body.code).toBe('invalid_client_files_registration');
+    } finally {
+      await headers(supertest(server).delete(`/session/${sessionId}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+    }
+  });
+
+  it('refuses a registration whose relay cannot be reached', async () => {
+    const { server, sessionId, clientId } = await sessionWithClient();
+    try {
+      const unreachable = await headers(
+        supertest(server).post(`/session/${sessionId}/client-files`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          action: 'register',
+          serverId: 'local-files',
+          generation: 1,
+          url: 'http://127.0.0.1:1/mcp',
+          token: 't',
+        });
+      expect(unreachable.status).toBe(503);
+      expect(unreachable.body.code).toBe('client_files_relay_unavailable');
     } finally {
       await headers(supertest(server).delete(`/session/${sessionId}`)).set(
         'X-Qwen-Client-Id',

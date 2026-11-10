@@ -16,6 +16,12 @@ interface Script {
   tools?: Array<{ name: string; description?: string; inputSchema?: object }>;
   resultText?: string;
   refuseInitialize?: boolean;
+  /** JSON-RPC error answered to tools/call, e.g. the relay offline error. */
+  callError?: { code: number; message: string };
+  /** HTTP status answered to tools/call, e.g. a revoked relay credential. */
+  callStatus?: number;
+  /** Answer tools/list with the relay offline error during registration. */
+  listError?: boolean;
 }
 
 /** A minimal in-process Streamable HTTP MCP peer standing in for the relay. */
@@ -50,6 +56,10 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
       };
+      const replyError = (error: { code: number; message: string }) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, error }));
+      };
       if (message.id === undefined) {
         res.writeHead(202);
         res.end();
@@ -75,6 +85,10 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
         return;
       }
       if (message.method === 'tools/list') {
+        if (script.listError) {
+          replyError({ code: -32000, message: 'client_files_offline' });
+          return;
+        }
         reply({
           tools: (script.tools ?? []).map((tool) => ({
             name: tool.name,
@@ -85,6 +99,21 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
         return;
       }
       if (message.method === 'tools/call') {
+        if (script.callStatus !== undefined) {
+          res.writeHead(script.callStatus, {
+            'Content-Type': 'application/json',
+          });
+          res.end(
+            JSON.stringify({
+              error: { code: 'client_files_credential_invalid' },
+            }),
+          );
+          return;
+        }
+        if (script.callError) {
+          replyError(script.callError);
+          return;
+        }
         reply({
           content: [{ type: 'text', text: script.resultText ?? 'ok' }],
         });
@@ -183,6 +212,57 @@ describe('HostedClientFilesSession', () => {
     });
     const tool = files.resolve(files.tools()[0].name)!;
     await expect(files.invoke(tool, {})).rejects.toThrow(/byte cap/);
+  });
+
+  it('surfaces the relay offline error as a call failure', async () => {
+    const url = await peer({
+      tools: [{ name: 'read_file' }],
+      // The exact shape the Java relay answers once the browser queue TTL
+      // expires (ClientFilesRelayService.offlineError).
+      callError: { code: -32000, message: 'client_files_offline' },
+    });
+    const files = session();
+    await files.register({
+      serverId: 'local-files',
+      generation: 1,
+      url,
+      token: 't',
+    });
+    const tool = files.resolve(files.tools()[0].name)!;
+    await expect(files.invoke(tool, {})).rejects.toThrow(
+      /client_files_offline/,
+    );
+  });
+
+  it('surfaces a relay credential refusal as a call failure', async () => {
+    const url = await peer({
+      tools: [{ name: 'read_file' }],
+      callStatus: 403,
+    });
+    const files = session();
+    await files.register({
+      serverId: 'local-files',
+      generation: 1,
+      url,
+      token: 't',
+    });
+    const tool = files.resolve(files.tools()[0].name)!;
+    await expect(files.invoke(tool, {})).rejects.toThrow();
+  });
+
+  it('a failed tools/list leaves no active client', async () => {
+    const url = await peer({ tools: [{ name: 'read_file' }], listError: true });
+    const files = session();
+    await expect(
+      files.register({
+        serverId: 'local-files',
+        generation: 1,
+        url,
+        token: 't',
+      }),
+    ).rejects.toThrow(/client_files_offline/);
+    expect(files.active).toBe(false);
+    expect(files.tools()).toEqual([]);
   });
 
   it('unregister drops the catalog and is idempotent', async () => {

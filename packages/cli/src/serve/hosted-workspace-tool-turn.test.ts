@@ -13889,3 +13889,191 @@ it('restores an approved personal memory action without a Runtime or a second ap
   expect(broker.warm).not.toHaveBeenCalled();
   expect(broker.acquire).not.toHaveBeenCalled();
 });
+
+describe('client files tool execution', () => {
+  const clientFilesToolName = 'mcp_0123456789abcdef0123456789abcdef';
+  const clientFilesCall = {
+    name: clientFilesToolName,
+    callId: 'cf-call-1',
+    args: { path: 'a.txt' },
+    isClientInitiated: false,
+    prompt_id: 'prompt',
+  };
+  const clientFilesParts: Part[] = [
+    {
+      functionCall: {
+        id: clientFilesCall.callId,
+        name: clientFilesCall.name,
+        args: clientFilesCall.args,
+      },
+    },
+  ];
+  const browserTool = { name: 'read_file', inputSchema: {} };
+
+  function clientFilesSession(
+    invoke: (tool: unknown, args: unknown) => Promise<unknown>,
+    resolve: (name: string) => typeof browserTool | undefined = (name) =>
+      name === clientFilesToolName ? browserTool : undefined,
+  ) {
+    return {
+      tools: () => [
+        {
+          name: clientFilesToolName,
+          description: 'MCP tool: "read_file"',
+          parametersJsonSchema: { type: 'object' },
+        },
+      ],
+      catalogs: () => [
+        {
+          serverId: 'local-files',
+          generation: 1,
+          tools: [browserTool],
+        },
+      ],
+      resolve,
+      invoke,
+    } as unknown as import('./hosted-client-files-session.js').HostedClientFilesSession;
+  }
+
+  function clientFilesTurn(
+    files: import('./hosted-client-files-session.js').HostedClientFilesSession,
+    mode: HostedApprovalMode = 'yolo',
+  ) {
+    return new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode, timeoutMs: 60_000 }, waiters },
+      { clientFiles: files },
+    );
+  }
+
+  it('executes a browser tool harness-locally and commits the durable result', async () => {
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'file content' }],
+    }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['output']).toBe(
+      'file content',
+    );
+    expect(invoke).toHaveBeenCalledWith(browserTool, { path: 'a.txt' });
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect((await session.sink.project()).map((record) => record.type)).toEqual(
+      ['assistant', 'tool_result'],
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('converts a relay call failure into a tool error without failing the Turn', async () => {
+    const invoke = vi.fn(async () => {
+      throw new Error('client_files_offline');
+    });
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'client_files_offline',
+    );
+    expect(await toolResultErrors()).toEqual([
+      expect.stringContaining('client_files_offline'),
+    ]);
+    await turn.consumeResults();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  });
+
+  it('reports a registration dropped between prepare and accept as a tool error', async () => {
+    const invoke = vi.fn();
+    // prepare resolves the tool once; the browser disconnects before accept
+    // resolves it again, which is the only way the dropped-registration arm
+    // is reachable (a call prepared without a tool never routes here).
+    let resolutions = 0;
+    turn = clientFilesTurn(
+      clientFilesSession(invoke, (name) => {
+        resolutions += 1;
+        return resolutions === 1 && name === clientFilesToolName
+          ? browserTool
+          : undefined;
+      }),
+    );
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'no longer active',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  });
+
+  it('converts an isError browser result into a tool error', async () => {
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'permission denied' }],
+      isError: true,
+    }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    // The browser's own error text wins over the generic fallback.
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'permission denied',
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it.each(['allow', 'deny'])(
+    'asks for %s approval before executing a browser tool in default mode',
+    async (optionId) => {
+      const invoke = vi.fn(async () => ({
+        content: [{ type: 'text', text: 'ok' }],
+      }));
+      turn = clientFilesTurn(clientFilesSession(invoke), 'default');
+      const running = turn.execute(
+        [clientFilesCall],
+        clientFilesParts,
+        'model',
+        new AbortController().signal,
+      );
+      const requestId = await requested();
+      expect(invoke).not.toHaveBeenCalled();
+      await resolveHostedAction(session, waiters, requestId, answer(optionId));
+      const responses = await running;
+      if (optionId === 'allow') {
+        expect(responses[0].functionResponse?.response?.['output']).toBe('ok');
+        expect(invoke).toHaveBeenCalledTimes(1);
+      } else {
+        expect(responses[0].functionResponse?.response?.['error']).toContain(
+          'denied',
+        );
+        expect(invoke).not.toHaveBeenCalled();
+      }
+      await turn.consumeResults();
+      await turn.finish();
+    },
+  );
+});

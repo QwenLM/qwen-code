@@ -29,7 +29,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -105,15 +104,16 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
-    void registerDispatchesTheRelayEndpointAndTokenToTheHarness() {
+    @SuppressWarnings("unchecked")
+    void registerDispatchesTheRelayEndpointAndTokenToTheHarness() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session);
-        verify(harness).clientFilesOperation(eq(tenant), eq(session), argThat(body ->
-                "register".equals(body.get("action"))
-                        && "local-files".equals(body.get("serverId"))
-                        && Long.valueOf(1L).equals(body.get("generation"))
-                        && registration.token().equals(body.get("token"))
-                        && ("http://127.0.0.1:4170/internal/managed-client-files/v1/sessions/"
-                                + session + "/mcp").equals(body.get("url"))));
+        // The CLI harness route test posts this same fixture, so a field
+        // rename on either side of the dispatch turns one suite red.
+        Map<String, Object> expected = new ObjectMapper().readValue(
+                getClass().getResourceAsStream("/clientfiles/dispatch-register.json"), Map.class);
+        expected.put("generation", ((Number) expected.get("generation")).longValue());
+        expected.put("token", registration.token());
+        verify(harness).clientFilesOperation(eq(tenant), eq(session), eq(expected));
     }
 
     @Test
