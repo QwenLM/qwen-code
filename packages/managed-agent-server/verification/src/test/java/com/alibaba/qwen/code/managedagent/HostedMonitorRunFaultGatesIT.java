@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -1252,7 +1253,7 @@ class HostedMonitorRunFaultGatesIT {
                         + " ma_resource WHERE session_scope_key = ? AND"
                         + " tenant_id = ? AND session_id = ? AND kind LIKE"
                         + " 'managed-tool-result-%'",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
                 tenant, sessionId)) {
             byId.put(row.get("resource_id").toString(), row);
         }
@@ -1265,7 +1266,7 @@ class HostedMonitorRunFaultGatesIT {
                         + " 'managed-tool-result-page') OR (kind ="
                         + " 'managed-tool-result-content' AND byte_length <"
                         + " 1024))",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
                 tenant, sessionId)) {
             String body = row.get("body").toString();
             // The producers' short tail segment is raw bytes, not JSON;

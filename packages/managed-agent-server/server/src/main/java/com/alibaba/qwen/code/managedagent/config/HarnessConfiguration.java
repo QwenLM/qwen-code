@@ -7,13 +7,14 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessPoolConnector;
 import com.alibaba.qwen.code.managedagent.harness.KubernetesHarnessDiscovery;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -39,11 +40,11 @@ public class HarnessConfiguration {
     public HarnessConnector hostedHarnessConnector(
             ManagedAgentProperties properties,
             AgentStateStore sessions,
-            WorkspaceExecutionStore workspaceExecution,
-            ManagedActionStore actions, ManagedAgentDefinitionStore definitions,
-            ManagedSessionStore resources, SshWorkspaceStore ssh, HarnessPlacementStore placements,
-            ManagedSessionSkills skills, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore extensionRecords) {
+            JdbcWorkspaceExecutionStore workspaceExecution,
+            JdbcManagedActionStore actions, JdbcManagedAgentDefinitionStore definitions,
+            JdbcManagedSessionStore resources, JdbcSshWorkspaceStore ssh, JdbcHarnessPlacementStore placements,
+            JdbcManagedSessionSkills skills, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
+            JdbcManagedExtensionRecordStore extensionRecords) {
         BrokerSecurity.checkHarnessTransport(properties, new java.util.ArrayList<>());
         var pool = properties.getHarness().getPool();
         if (pool.isEnabled()) {

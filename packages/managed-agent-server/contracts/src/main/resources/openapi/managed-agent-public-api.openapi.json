@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.104.0",
+    "version": "1.107.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
   },
   "servers": [
@@ -7527,6 +7527,79 @@
         "summary": "Read recent current Session Items and page toward older Items"
       }
     },
+    "/v1/agents/memory-stores": {
+      "post": {
+        "tags": ["Personal Memory"],
+        "operationId": "createPersonalMemoryStore",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Creates or returns the trusted actor's one personal Store. Requires memory enablement. The request cannot select an owner or tenant.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current authenticated user's personal memory resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryStore"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "get": {
+        "tags": ["Personal Memory"],
+        "operationId": "listPersonalMemoryStores",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists only the trusted actor's personal Store (zero or one).",
+        "responses": {
+          "200": {
+            "description": "Current authenticated user's personal memory resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryStoreList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/v1/agents/sessions/{sessionId}/context-usage": {
       "parameters": [
         {
@@ -8899,6 +8972,320 @@
           }
         }
       }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/skills/candidates": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "publicRuntimeSkillCandidates",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillCandidates"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/skills/snapshot": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "publicRuntimeSkillSnapshot",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedRuntimeSkillSnapshotRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/extensions/skills/imports": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "publicRuntimeSkillImports",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedRuntimeSkillImportRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/skills/candidates/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRuntimeSkillCandidates",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillCandidates"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellRuntimeSkillQuery"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/skills/snapshot": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRuntimeSkillSnapshot",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedRuntimeSkillSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellRuntimeSkillSnapshotRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/session-extensions/skills/imports": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellRuntimeSkillImports",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Requires an authorized Workspace operator and enabled Runtime Skill import. Uses the exact original READY Runtime owner; discovery and snapshot preparation never provision a Runtime or apply configuration. Published imports require a separate explicit Session apply.",
+        "responses": {
+          "200": {
+            "description": "Verified owner-scoped result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellRuntimeSkillImportRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -9501,6 +9888,12 @@
             },
             "required": [],
             "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
+          },
+          "memory_store_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
           }
         }
       },
@@ -9746,6 +10139,14 @@
                 "type": "null"
               }
             ]
+          },
+          "memory_store_id": {
+            "type": "string",
+            "description": "The personal MemoryStore selected at creation; absent when memory is disabled."
+          },
+          "owner_only": {
+            "type": "boolean",
+            "description": "When true, only the owning actor with existing Workspace grants may access this Session. Private children inherit visibility without inheriting the Store binding."
           }
         }
       },
@@ -10541,6 +10942,12 @@
             },
             "required": [],
             "description": "Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch."
+          },
+          "memoryStoreId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
           }
         }
       },
@@ -17961,6 +18368,9 @@
               },
               "canApply": {
                 "type": "boolean"
+              },
+              "runtimeSkillImportSupported": {
+                "type": "boolean"
               }
             },
             "required": ["supported", "canApply"]
@@ -18380,6 +18790,38 @@
           }
         },
         "required": ["workspaceId", "worktreeId", "idempotencyKey"]
+      },
+      "MemoryStore": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "created_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "description": "One personal MemoryStore per authenticated tenant and actor. Provider credentials and namespace are not exposed."
+      },
+      "MemoryStoreList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/MemoryStore"
+            }
+          }
+        }
       },
       "ManagedModelStatisticsBucket": {
         "type": "object",
@@ -19776,6 +20218,9 @@
                 "minimum": 0
               }
             }
+          },
+          "measurements": {
+            "$ref": "#/components/schemas/ManagedActivityMeasurementTotals"
           }
         }
       },
@@ -19984,6 +20429,9 @@
           },
           "taskRuntimeState": {
             "type": ["string", "null"]
+          },
+          "measurements": {
+            "$ref": "#/components/schemas/ManagedActivityMeasurement"
           }
         }
       },
@@ -20111,6 +20559,11 @@
                 "$ref": "#/components/schemas/ManagedActivityMetrics"
               }
             }
+          },
+          "measurementStartSequence": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
           }
         }
       },
@@ -20545,6 +20998,9 @@
                 },
                 "taskRuntimeState": {
                   "type": ["string", "null"]
+                },
+                "measurements": {
+                  "$ref": "#/components/schemas/ManagedActivityMeasurement"
                 }
               }
             }
@@ -20799,6 +21255,9 @@
                 },
                 "taskRuntimeState": {
                   "type": ["string", "null"]
+                },
+                "measurements": {
+                  "$ref": "#/components/schemas/ManagedActivityMeasurement"
                 }
               }
             }
@@ -21049,6 +21508,527 @@
           }
         },
         "required": ["sessionId", "idempotencyKey"]
+      },
+      "ManagedRuntimeSkillOwner": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "bindingId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,15}$"
+          }
+        },
+        "required": ["bindingId", "generation"]
+      },
+      "ManagedRuntimeSkillCandidate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "shadowed": {
+            "type": "boolean"
+          },
+          "compatible": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "path",
+          "digest",
+          "shadowed",
+          "compatible"
+        ]
+      },
+      "ManagedRuntimeSkillCandidates": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/ManagedRuntimeSkillCandidate"
+            }
+          }
+        },
+        "required": ["sessionId", "owner", "candidates"]
+      },
+      "ManagedRuntimeSkillSnapshotRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "path": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          }
+        },
+        "required": ["owner", "path", "digest", "target"]
+      },
+      "ManagedRuntimeSkillImportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preparationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 104857600
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "extensionId": {
+            "type": "string",
+            "pattern": "^ext_[a-f0-9-]{36}$"
+          }
+        },
+        "required": [
+          "owner",
+          "operationId",
+          "preparationId",
+          "sourceDigest",
+          "byteLength",
+          "target"
+        ]
+      },
+      "ManagedRuntimeSkillSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preparationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 104857600
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "inspection": {
+            "$ref": "#/components/schemas/ManagedExtensionPackageInspection"
+          }
+        },
+        "required": [
+          "sessionId",
+          "owner",
+          "operationId",
+          "preparationId",
+          "sourceDigest",
+          "byteLength",
+          "target",
+          "inspection"
+        ]
+      },
+      "WebShellRuntimeSkillQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "WebShellRuntimeSkillSnapshotRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "path": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          }
+        },
+        "required": ["sessionId", "owner", "path", "digest", "target"]
+      },
+      "WebShellRuntimeSkillImportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ManagedRuntimeSkillOwner"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preparationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 104857600
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          },
+          "extensionId": {
+            "type": "string",
+            "pattern": "^ext_[a-f0-9-]{36}$"
+          }
+        },
+        "required": [
+          "sessionId",
+          "idempotencyKey",
+          "owner",
+          "operationId",
+          "preparationId",
+          "sourceDigest",
+          "byteLength",
+          "target"
+        ]
+      },
+      "ManagedActivityMeasurement": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceSequence",
+          "availability",
+          "executionDurationMs",
+          "file"
+        ],
+        "properties": {
+          "sourceSequence": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "unsupported"]
+          },
+          "executionDurationMs": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "file": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation",
+                  "status",
+                  "modelLinesAdded",
+                  "modelLinesRemoved",
+                  "appliedLinesAdded",
+                  "appliedLinesRemoved"
+                ],
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "enum": ["read", "write", "edit"]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": ["measured", "unchanged", "unmeasured"]
+                  },
+                  "modelLinesAdded": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "modelLinesRemoved": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "appliedLinesAdded": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "appliedLinesRemoved": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedActivityMeasurementTotals": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "availability",
+          "recorded",
+          "unsupported",
+          "executionDurationMs",
+          "executionDurationSamples",
+          "fileSamples",
+          "modelDiffSamples",
+          "appliedDiffSamples",
+          "modelLinesAdded",
+          "modelLinesRemoved",
+          "appliedLinesAdded",
+          "appliedLinesRemoved",
+          "partial"
+        ],
+        "properties": {
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "recorded": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "unsupported": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "executionDurationMs": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "executionDurationSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "fileSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "modelDiffSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "appliedDiffSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "modelLinesAdded": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "modelLinesRemoved": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "appliedLinesAdded": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "appliedLinesRemoved": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "partial": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          }
+        }
       }
     }
   }

@@ -21,13 +21,13 @@ final class ToolPublicationCapacityStore {
     }
 
     void requireCapacity(String tenantKey, String scope, long allocation, long now) {
-        ManagedSessionStore.lockBounded(() -> jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'FENCED', expires_at = NULL,"
+        JdbcManagedSessionStore.lockBounded(() -> jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'FENCED', expires_at = NULL,"
                 + " capture_held_bytes = capture_used_bytes, producer_held_bytes ="
                 + " producer_used_bytes, admission_held_bytes = CASE WHEN producer_phase IN"
                 + " ('FINISHED', 'REFERENCED') THEN admission_held_bytes ELSE"
                 + " admission_used_bytes END WHERE tenant_key = ? AND state = 'OPEN' AND"
                 + " expires_at <= ?", ToolPublicationRetentionStore.boundedParameters(jdbc,
-                        ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS, tenantKey, now)));
+                        JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS, tenantKey, now)));
         var totals = jdbc.query(
                 "SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes +"
                 + " admission_held_bytes), 0) AS reserved,"
