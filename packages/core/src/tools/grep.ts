@@ -174,14 +174,18 @@ class GrepToolInvocation extends BaseToolInvocation<
       const permissionManager = this.config.getPermissionManager?.();
       if (permissionManager) {
         const deniedPaths = new Set<string>();
+        const evaluatedPaths = new Map<string, boolean>();
         for (const match of rawMatches) {
-          if (
-            await isPathDeniedByReadRule(
+          let denied = evaluatedPaths.get(match.absoluteFilePath);
+          if (denied === undefined) {
+            denied = await isPathDeniedByReadRule(
               permissionManager,
               match.absoluteFilePath,
               this.config.getTargetDir(),
-            )
-          ) {
+            );
+            evaluatedPaths.set(match.absoluteFilePath, denied);
+          }
+          if (denied) {
             deniedPaths.add(match.absoluteFilePath);
           }
         }

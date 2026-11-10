@@ -305,7 +305,13 @@ class GlobToolInvocation extends BaseToolInvocation<
         }
       }
 
-      if (!filteredEntries || filteredEntries.length === 0) {
+      if (filteredEntries.length === 0) {
+        if (hitCollectionLimit) {
+          return {
+            llmContent: `Results truncated after scanning ${allFilteredEntries.length} matching files; all collected entries were excluded by permission rules. Narrow the pattern or path.`,
+            returnDisplay: `Results truncated`,
+          };
+        }
         return {
           llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`,
           returnDisplay: `No files found`,

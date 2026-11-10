@@ -704,6 +704,22 @@ describe('GlobTool', () => {
       expect(result.returnDisplay).toContain('(truncated)');
     });
 
+    it('reports truncation when every collected entry is denied', async () => {
+      mockGlobStreamResults('denied', 10_005);
+      const tool = toolWith({
+        getPermissionManager: () => ({
+          hasRelevantRules: () => true,
+          evaluate: async () => 'deny',
+        }),
+      });
+
+      const result = await run({ pattern: '*.streamlimit' }, tool);
+
+      expect(result.llmContent).toContain('Results truncated after scanning');
+      expect(result.llmContent).toContain('excluded by permission rules');
+      expect(result.returnDisplay).toBe('Results truncated');
+    });
+
     it('should truncate results when more than 100 files are found', async () => {
       mockTruncationGlobResults('file', 150);
 
