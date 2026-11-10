@@ -19,6 +19,21 @@ context. Keep Qwen's own semantic theme tokens and shared Radix dialog primitive
 Do not copy unrelated commands, tabs, or the reference's backdrop blur: Web Shell
 avoids blur over long transcripts for performance.
 
+## Relationship to session overview
+
+The dialog replaces the existing sidebar search interaction; it is a transient
+find-and-open surface with transcript snippets. Session Overview remains the
+persistent workspace/status-filtered management view, including sorting,
+selection and archive/delete actions. Its table rows are not reused here because
+search results are navigation-only and need conversation snippets. The dialog
+reuses the existing Git-context and source-matching helpers and backend content
+search contract. Matching in Session Overview is unchanged.
+
+Typing in the dialog intentionally does not filter the background sidebar. This
+replaces the previous inline-filter behavior and keeps navigation stable when
+the dialog closes. Host-managed content retains its query callback inside the
+dialog.
+
 ## Implementation
 
 - Keep the existing search icon and brand stable. Open a portal-root-aware modal
