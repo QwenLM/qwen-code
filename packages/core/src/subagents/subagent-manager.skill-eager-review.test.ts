@@ -118,7 +118,7 @@ describe('nested agents retain their actual Skill availability', () => {
               observed.canInvokeSkill(declared),
               `invocation at depth ${depth}`,
             )
-            .toBe(directlyInvokable);
+            .toBe(reachable);
           expect
             .soft(
               resolveAgentDelegationSurface(context),

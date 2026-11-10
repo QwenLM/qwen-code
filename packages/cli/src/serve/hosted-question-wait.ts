@@ -107,7 +107,12 @@ export async function acquireHostedQuestionRuntime(
         await delay(
           Math.min(
             250,
-            expiresAt === undefined ? 250 : Math.max(0, expiresAt - Date.now()),
+            // A timer can fire up to 1 ms before the requested wall-clock
+            // delay; overshoot the deadline so the next check cannot land a
+            // millisecond short and issue an acquire past it.
+            expiresAt === undefined
+              ? 250
+              : Math.max(0, expiresAt - Date.now()) + 1,
           ),
           undefined,
           { signal, ref: false },
