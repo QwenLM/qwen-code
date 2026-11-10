@@ -35,7 +35,10 @@ Additive rather than replacing the singular fields: the resource is still
 lets a consumer migrate to `segments` at its own pace. The array is required
 and non-empty (`minItems: 1`, `maxItems: 64`), matching the record contract's
 1–64 segment plan; a delivery row always has its segments planned before the
-row is visible.
+row is visible. A resend whose minted id already names a stored delivery with
+a different first segment (id or ordinal) is rejected before any segment is
+planned, so a refused resend leaves no orphan segment rows; a replayed resend
+under a matching id converges instead of conflicting.
 
 The contract version bumps from 1.108.0 to 1.109.0. The Java record and the
 OpenAPI schema change together, enforced by the record-to-schema contract

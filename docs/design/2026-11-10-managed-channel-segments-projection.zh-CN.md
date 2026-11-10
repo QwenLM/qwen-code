@@ -12,7 +12,7 @@
 
 在 `PublicChannelDelivery` 上以增量方式暴露 `segments` 数组，保留既有单数字段。每个条目是一个 `PublicChannelDeliverySegment`，含 `segment_id`、`ordinal` 与可选的 `provider_receipt`。该数组是按 ordinal 有序的权威逐段视图；单一 `segment_id` 与 `ordinal` 继续命名第一个分段，`provider_receipt` 继续是交付的代表回执，因此既有消费者不被破坏。
 
-采用增量而非替换单数字段：资源仍是 `partial`，但保留单数字段避免破坏性形状变更，让消费者按自己的节奏迁移到 `segments`。数组必填且非空（`minItems: 1`、`maxItems: 64`），与记录契约的 1–64 分段计划一致；交付行可见前其分段必已规划。
+采用增量而非替换单数字段：资源仍是 `partial`，但保留单数字段避免破坏性形状变更，让消费者按自己的节奏迁移到 `segments`。数组必填且非空（`minItems: 1`、`maxItems: 64`），与记录契约的 1–64 分段计划一致；交付行可见前其分段必已规划。若 resend 铸出的 id 已对应一个首分段不同（id 或 ordinal）的存储交付，会在规划任何分段之前被拒绝，因此被拒的 resend 不留孤儿分段行；匹配 id 的重放 resend 则收敛而非冲突。
 
 契约版本从 1.108.0 升到 1.109.0。Java 记录与 OpenAPI 模式同步变更，由记录↔模式契约门强制；channel 路由门保持三条路由与模式为 `partial`。
 
