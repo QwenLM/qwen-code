@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
@@ -596,8 +597,8 @@ final class WorkspaceCsiApplicationInventory {
         String session = actual.request().getIsolationKey();
         String tenant = actual.request().getScope().getTenantId();
         Set<String> scopes = new LinkedHashSet<>();
-        scopes.add(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session));
-        scopes.add(ManagedToolResultStore.scope(tenant, session));
+        scopes.add(ManagedSessionStore.sessionScopeKey(tenant, session));
+        scopes.add(JdbcManagedToolResultStore.scope(tenant, session));
         scopes.add(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("csi-read", tenant, session));
         try {
             scopes.add(hash(JSON.writeValueAsBytes(List.of(tenant, actual.request().getScope().getWorkspaceId(), session))));
@@ -670,9 +671,9 @@ final class WorkspaceCsiApplicationInventory {
             for (String field : List.of("tenant_id", "workspace_id", "session_id", "session_scope_key")) {
                 requireEncoded(Objects.equals(manifest.text(field), part.text(field)));
             }
-            requireEncoded(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(part.text("tenant_id"), part.text("session_id"))
+            requireEncoded(ManagedSessionStore.sessionScopeKey(part.text("tenant_id"), part.text("session_id"))
                     .equals(part.text("session_scope_key"))
-                    && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(part.text("session_scope_key"), part.text("resource_id")).equals(part.text("resource_key"))
+                    && ManagedSessionStore.resourceKey(part.text("session_scope_key"), part.text("resource_id")).equals(part.text("resource_key"))
                     && Objects.equals(part.text("kind"), ref.path("kind").textValue())
                     && Objects.equals(part.number("schema_version"), ref.path("schemaVersion").longValue())
                     && Objects.equals(part.number("byte_length"), ref.path("byteLength").longValue())
@@ -1319,9 +1320,9 @@ final class WorkspaceCsiApplicationInventory {
         }
 
         static void resourceMetadata(Row row) {
-            requireEncoded(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
+            requireEncoded(ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
                     .equals(row.text("session_scope_key"))
-                    && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id")).equals(row.text("resource_key"))
+                    && ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id")).equals(row.text("resource_key"))
                     && Objects.equals(row.number("schema_version"), 1L)
                     && "MYSQL_INLINE".equals(row.text("storage_kind")) && row.text("object_key") == null
                     && row.text("object_version_id") == null && row.text("encryption_key_id") == null
@@ -1510,9 +1511,9 @@ final class WorkspaceCsiApplicationInventory {
             requireEncoded(Objects.equals(owner.text("tenant_id"), row.text("tenant_id"))
                     && Objects.equals(owner.text("workspace_id"), row.text("workspace_id"))
                     && Objects.equals(owner.text("session_id"), row.text("session_id"))
-                    && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
+                    && ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
                             .equals(row.text("session_scope_key"))
-                    && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id"))
+                    && ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id"))
                             .equals(row.text("resource_key"))
                     && Objects.equals(1L, row.number("schema_version"))
                     && row.cell("object_key").isNull() && row.cell("object_version_id").isNull()
@@ -1881,7 +1882,7 @@ final class WorkspaceCsiApplicationInventory {
             seed("runtime_session_id", intent.runtimeInstanceId());
             id("A", intent.reservation().registrationKey());
             id("F", intent.physicalKey());
-            id("J", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session));
+            id("J", ManagedSessionStore.sessionScopeKey(tenant, session));
             id("M", digest(tenant, session));
             try {
                 id("U", hash(JSON.writeValueAsBytes(List.of(tenant, workspace, session))));
@@ -2141,11 +2142,11 @@ final class WorkspaceCsiApplicationInventory {
                             "ma_session_record", "ma_session_journal_tx", "ma_channel_binding", "ma_schedule", "ma_schedule_occurrence" ->
                             otherSession(row.text("tenant_id"), row.text("workspace_id"), row.text("session_id"))
                                     && (row.cell("session_scope_key") == null || Objects.equals(row.text("session_scope_key"),
-                                            com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))));
+                                            ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))));
                     case "ma_resource" -> otherSession(row.text("tenant_id"), row.text("workspace_id"), row.text("session_id"))
-                            && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
+                            && ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
                                     .equals(row.text("session_scope_key"))
-                            && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id"))
+                            && ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id"))
                                     .equals(row.text("resource_key"));
                     case "ma_request_receipt" -> isNativeRead(row) ? otherNativeRead(row) : otherCreationReceipt(row);
                     case "ma_output_capture" -> otherCapture(row);
@@ -2391,7 +2392,7 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals(binding.number("runtime_generation"), row.number("target_revision"));
             }
             if (otherSession == null || !otherSession(otherTenant, row.text("workspace_id"), otherSession)
-                    || !com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(otherTenant, otherSession).equals(row.text("session_scope_key"))) {
+                    || !ManagedSessionStore.sessionScopeKey(otherTenant, otherSession).equals(row.text("session_scope_key"))) {
                 return false;
             }
             var kind = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(row.text("operation_kind"));
@@ -2436,7 +2437,7 @@ final class WorkspaceCsiApplicationInventory {
             references.put("provision", Set.of(intent.reservation().provisionRequestId()));
             references.put("execution", values("executions"));
             references.put("executionHash", values("executionHashes"));
-            references.put("scopedSession", Set.copyOf(List.of(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), ManagedToolResultStore.scope(tenant, session),
+            references.put("scopedSession", Set.copyOf(List.of(ManagedSessionStore.sessionScopeKey(tenant, session), JdbcManagedToolResultStore.scope(tenant, session),
                     com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("csi-read", tenant, session))));
             references.put("sessionKey", Set.of(ToolPublicationRetentionStore.hash(session)));
             references.put("resourceRead", values("reads"));
@@ -2873,7 +2874,7 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals((long) row.binary("record_bytes").length, row.number("byte_length"))
                         && hash(row.binary("record_bytes")).equals(row.text("record_digest")));
                 case "ma_resource" -> expect(table, row, rawNative(row)
-                        && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), row.text("resource_id")).equals(row.text("resource_key"))
+                        && ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey(tenant, session), row.text("resource_id")).equals(row.text("resource_key"))
                         && row.cell("deletion_operation_key").isNull()
                         && row.cell("scope_key").isNull() && row.cell("publication_id").isNull() && row.cell("capture_state").isNull()
                         && has("J", row.text("session_scope_key"))
@@ -2889,7 +2890,7 @@ final class WorkspaceCsiApplicationInventory {
                         && ("JOURNAL".equals(row.text("owner_kind")) && has("J", row.text("owner_key"))
                                 && Objects.equals(row.number("owner_revision"), row.number("journal_revision"))
                                 || "SESSION_RECORD".equals(row.text("owner_kind")) && row.cell("journal_revision").isNull())
-                        && com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), row.text("resource_id")).equals(row.text("resource_key")));
+                        && ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey(tenant, session), row.text("resource_id")).equals(row.text("resource_key")));
                 case "ma_tool_execution" -> expect(table, row, original.bindingId().equals(row.text("binding_id"))
                         && Objects.equals(original.generation(), row.number("runtime_generation"))
                         && session.equals(row.text("harness_session_id")) && session.equals(row.text("runtime_session_id"))

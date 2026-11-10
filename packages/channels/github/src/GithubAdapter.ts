@@ -1272,6 +1272,7 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
       typeof record.backpressure === 'boolean') &&
     (record.privateOnly === undefined ||
       typeof record.privateOnly === 'boolean') &&
+    isOptionalStringArray(record.authorExclude) &&
     (record.lostSessionId === undefined ||
       typeof record.lostSessionId === 'string')
   );
@@ -5470,7 +5471,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const parsed = JSON.parse(readFileSync(this.inboundTasksPath(), 'utf-8'));
       if (!Array.isArray(parsed) || !parsed.every(isInboundTaskRecord)) {
-        throw new Error('invalid GitHub inbound task state');
+        // Name the offender: one bad record blocks every healthy task in the
+        // file, so an operator repairing it by hand needs the index and id
+        // rather than bisecting the JSON by eye.
+        const badIndex = Array.isArray(parsed)
+          ? parsed.findIndex((item) => !isInboundTaskRecord(item))
+          : -1;
+        const badId =
+          badIndex === -1
+            ? undefined
+            : (parsed[badIndex] as { id?: unknown } | undefined)?.id;
+        throw new Error(
+          `invalid GitHub inbound task state${
+            badIndex === -1 ? '' : ` at record ${badIndex}`
+          }${typeof badId === 'string' ? ` (${badId})` : ''}`,
+        );
       }
       this.inboundTaskSnapshot = parsed;
       return parsed;

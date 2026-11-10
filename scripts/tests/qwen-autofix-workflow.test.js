@@ -1055,6 +1055,34 @@ describe('qwen-autofix workflow', () => {
       continued: false,
       markerPosted: false,
     });
+    // review-pr red (a timeout on THIS diff) with green-on-main must NOT
+    // trigger a base update: merging main only restarts the review and
+    // starves pending feedback (#16408). The scan falls through to the
+    // feedback gates instead.
+    expect(
+      run({
+        prChecks: [FAIL('review-pr')],
+        mainGreen: ['review-pr'],
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
+    });
+    // The exclusion is review-pr-only: a mixed red still updates for the
+    // OTHER check, so the gate keeps serving genuine stale-base reds.
+    expect(
+      run({
+        prChecks: [FAIL('review-pr'), FAIL('Test')],
+        mainGreen: ['review-pr', 'Test'],
+      }),
+    ).toEqual({
+      updated: true,
+      cas: true,
+      continued: true,
+      markerPosted: true,
+    });
     // MAIN_HEAD empty (initial gh api failure): the -n guard prevents any
     // update-branch call.
     expect(

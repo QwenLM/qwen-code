@@ -712,7 +712,7 @@ final class AgentTurnExecution {
         // its real result instead of replacing it with cancellation.
         java.util.Set<String> accepted;
         try {
-            accepted = WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
+            accepted = JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
                     tenantId, sessionId, false,
                     WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2);
         } catch (ManagedAgentException unverified) {
