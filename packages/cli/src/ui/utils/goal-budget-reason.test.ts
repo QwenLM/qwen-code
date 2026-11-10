@@ -73,18 +73,15 @@ describe('composeGoalBudgetReason', () => {
       },
     );
 
-    it.each([1, 2, 20])(
-      'turn budget %i matches goalTurnBudgetReason',
-      (n) => {
-        expect(
-          composeGoalBudgetReason(
-            { limitKind: 'turn_budget', turnBudget: n },
-            tEn,
-            'en',
-          ),
-        ).toBe(goalTurnBudgetReason(n));
-      },
-    );
+    it.each([1, 2, 20])('turn budget %i matches goalTurnBudgetReason', (n) => {
+      expect(
+        composeGoalBudgetReason(
+          { limitKind: 'turn_budget', turnBudget: n },
+          tEn,
+          'en',
+        ),
+      ).toBe(goalTurnBudgetReason(n));
+    });
 
     it.each([60_000, 900_000, 59_999, 1_000, 500])(
       'active-time budget %i ms matches goalActiveTimeBudgetReason',
