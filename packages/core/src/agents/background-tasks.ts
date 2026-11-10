@@ -35,8 +35,8 @@ import { runOutsideAgentContext } from './runtime/agent-context.js';
 import {
   AgentEventType,
   type AgentApprovalRequestEvent,
+  type AgentApprovalResolvedEvent,
   type AgentEventEmitter,
-  type AgentToolResultEvent,
 } from './runtime/agent-events.js';
 import type { AgentExternalInput } from './runtime/agent-types.js';
 import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
@@ -1433,9 +1433,9 @@ export class BackgroundTaskRegistry {
         });
       }
     };
-    const onResult = (event: AgentToolResultEvent) => {
-      // A result for a parked call means it settled elsewhere — clear the
-      // stale prompt (without responding again). Stamp the nested runtime
+    const onSettled = (event: AgentApprovalResolvedEvent) => {
+      // Scheduler resolution can precede the batch's tool results. Clear
+      // the stale prompt without responding again. Stamp the nested runtime
       // exactly as onWaiting does so one runtime's result cannot clear a
       // colliding callId parked by another runtime.
       this.clearPendingApproval(
@@ -1445,10 +1445,12 @@ export class BackgroundTaskRegistry {
       );
     };
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
-    emitter.on(AgentEventType.TOOL_RESULT, onResult);
+    emitter.on(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+    emitter.on(AgentEventType.TOOL_RESULT, onSettled);
     return () => {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
-      emitter.off(AgentEventType.TOOL_RESULT, onResult);
+      emitter.off(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+      emitter.off(AgentEventType.TOOL_RESULT, onSettled);
     };
   }
 
@@ -1456,10 +1458,11 @@ export class BackgroundTaskRegistry {
    * Record a FOREGROUND agent's inline approval prompts on its entry.
    * The prompt itself stays inline in the parent session; this only keeps
    * `inlineApprovals` in step with it: a `TOOL_WAITING_APPROVAL` adds the
-   * call (re-emissions for a call already listed are ignored). The prompt's
-   * owner removes it when the user answers ({@link clearInlineApproval});
-   * the call's `TOOL_RESULT` removes it too, and terminal transitions clear
-   * the list.
+   * call (re-emissions for a call already listed are ignored). Scheduler
+   * resolution removes it before the batch ends, including automatic or IDE
+   * decisions. The prompt's owner also removes it when the user answers
+   * ({@link clearInlineApproval}); `TOOL_RESULT` and terminal transitions
+   * provide fallback cleanup.
    * Returns an unsubscribe function the caller MUST invoke when the agent
    * terminates.
    */
@@ -1483,16 +1486,15 @@ export class BackgroundTaskRegistry {
       ];
       this.emitApprovalChange(entry);
     };
-    // The prompt's owner clears the record when the user answers
-    // (clearInlineApproval); the result also clears it, for a call that
-    // settled without the inline prompt, e.g. through an IDE diff tab.
-    const onResult = (event: AgentToolResultEvent) =>
+    const onSettled = (event: AgentApprovalResolvedEvent) =>
       this.clearInlineApproval(agentId, event.callId);
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
-    emitter.on(AgentEventType.TOOL_RESULT, onResult);
+    emitter.on(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+    emitter.on(AgentEventType.TOOL_RESULT, onSettled);
     return () => {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
-      emitter.off(AgentEventType.TOOL_RESULT, onResult);
+      emitter.off(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+      emitter.off(AgentEventType.TOOL_RESULT, onSettled);
     };
   }
 

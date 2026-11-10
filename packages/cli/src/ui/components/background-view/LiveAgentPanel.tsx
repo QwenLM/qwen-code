@@ -142,16 +142,16 @@ function toolCallLabel(call: { name: string; description?: string }): string {
 }
 
 /**
- * The call an agent is waiting on for approval, newest first: an inline
- * prompt of a foreground agent, or one a background agent parked. The
- * last activity is not necessarily that call — a parallel batch keeps
- * starting calls after the one that asked.
+ * The call an agent is waiting on for approval: the newest inline prompt
+ * of a foreground agent, or the oldest parked background approval, which
+ * the detail dialog presents first. The last activity is not necessarily
+ * that call — a parallel batch keeps starting calls after the one that asked.
  */
 function awaitingApproval(
   entry: AgentDialogEntry,
 ): { name: string; description?: string } | undefined {
   if (entry.status !== 'running') return undefined;
-  return entry.inlineApprovals?.at(-1) ?? entry.pendingApprovals?.at(-1);
+  return entry.inlineApprovals?.at(-1) ?? entry.pendingApprovals?.[0];
 }
 
 function activityLabel(entry: AgentDialogEntry): string {
@@ -551,6 +551,11 @@ const AgentRow: React.FC<{
             <Text color={theme.text.secondary}>{treePrefix}</Text>
           )}
           <Text color={color}>{`${glyph} `}</Text>
+          {waitingCall && (
+            <Text color={theme.status.warning}>
+              {`⚠ ${t('needs approval')} · `}
+            </Text>
+          )}
           {showType && (
             <>
               <Text bold>{safeSubagentType}</Text>
@@ -558,18 +563,8 @@ const AgentRow: React.FC<{
             </>
           )}
           <Text color={theme.text.secondary}>{label}</Text>
-          {waitingCall ? (
-            <>
-              <Text color={theme.text.secondary}>{' ('}</Text>
-              <Text color={theme.status.warning}>
-                {`⚠ ${t('needs approval')}`}
-              </Text>
-              <Text color={theme.text.secondary}>{`: ${activity})`}</Text>
-            </>
-          ) : (
-            activity && (
-              <Text color={theme.text.secondary}>{` (${activity})`}</Text>
-            )
+          {activity && (
+            <Text color={theme.text.secondary}>{` (${activity})`}</Text>
           )}
           {orphanNote && <Text color={theme.text.secondary}>{orphanNote}</Text>}
         </Text>

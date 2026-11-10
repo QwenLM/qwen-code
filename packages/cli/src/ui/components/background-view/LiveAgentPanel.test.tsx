@@ -181,7 +181,7 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('5s');
   });
 
-  it('shows the call awaiting approval instead of the latest activity', () => {
+  it('shows the newest inline approval instead of the latest activity', () => {
     // A parallel batch keeps starting calls after the one that asked, so
     // the latest activity is not the call the agent is waiting on.
     const { lastFrame } = renderPanel({
@@ -200,6 +200,12 @@ describe('<LiveAgentPanel />', () => {
           ],
           inlineApprovals: [
             {
+              callId: 'earlier',
+              name: 'grep_search',
+              description: "'earlier' in previous.txt",
+              at: 0,
+            },
+            {
               callId: 'c1',
               name: 'grep_search',
               description: "'general' in settings",
@@ -211,11 +217,46 @@ describe('<LiveAgentPanel />', () => {
       width: 160,
     });
     const frame = lastFrame() ?? '';
-    expect(frame).toContain("needs approval: Grep 'general' in settings");
+    expect(frame).toContain('needs approval');
+    expect(frame).toContain("Grep 'general' in settings");
+    expect(frame).not.toContain('previous.txt');
     expect(frame).not.toContain('plain.txt');
   });
 
-  it('shows a parked background approval the same way', () => {
+  it('keeps the approval status visible before long task text at 80 columns', () => {
+    const { lastFrame } = renderPanel({
+      entries: [
+        agentEntry({
+          agentId: 'a-narrow',
+          description:
+            'Check authorization and deployment docs for the new multi-workspace runtime',
+          subagentType: 'authorization-and-deployment-review-specialist',
+          startTime: -11_000,
+          stats: {
+            totalTokens: 5,
+            outputTokens: 5,
+            toolUses: 1,
+            durationMs: 11_000,
+          },
+          inlineApprovals: [
+            {
+              callId: 'c1',
+              name: 'grep_search',
+              description: 'settings',
+              at: 1,
+            },
+          ],
+        }),
+      ],
+      width: 80,
+    });
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('⚠ needs approval');
+    expect(frame).toContain('▶ 11s · 5 tokens');
+    expect(frame).not.toContain('multi-workspace runtime');
+  });
+
+  it('shows the oldest parked background approval presented by the dialog', () => {
     const { lastFrame } = renderPanel({
       entries: [
         agentEntry({
@@ -229,13 +270,21 @@ describe('<LiveAgentPanel />', () => {
               description: 'rm -rf tmp',
               at: 1,
             } as unknown as BackgroundApproval,
+            {
+              callId: 'c2',
+              name: 'grep_search',
+              description: 'later.txt',
+              at: 2,
+            } as unknown as BackgroundApproval,
           ],
         }),
       ],
       width: 160,
     });
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('needs approval: Shell rm -rf tmp');
+    expect(frame).toContain('needs approval');
+    expect(frame).toContain('Shell rm -rf tmp');
+    expect(frame).not.toContain('later.txt');
     expect(frame).not.toContain('**/*.ts');
   });
 

@@ -2198,6 +2198,29 @@ describe('BackgroundTaskRegistry', () => {
       expect(onChange).toHaveBeenCalledTimes(1);
     });
 
+    it('drops a scheduler-resolved prompt without waiting for tool results', () => {
+      const { emitter } = track('fg-inline-resolved');
+      for (const callId of ['c1', 'c2']) {
+        emitter.emit(
+          AgentEventType.TOOL_WAITING_APPROVAL,
+          makeWaitingEvent('fg', callId),
+        );
+      }
+
+      emitter.emit(AgentEventType.TOOL_APPROVAL_RESOLVED, {
+        subagentId: 'fg',
+        round: 1,
+        callId: 'c1',
+        timestamp: Date.now(),
+      });
+
+      expect(
+        registry
+          .get('fg-inline-resolved')!
+          .inlineApprovals!.map((a) => a.callId),
+      ).toEqual(['c2']);
+    });
+
     it('never records prompts on a background entry', () => {
       const { emitter } = track('bg-inline-1', true);
       emitter.emit(
@@ -2225,6 +2248,9 @@ describe('BackgroundTaskRegistry', () => {
     it('stops listening once cleaned up', () => {
       const { emitter, cleanup } = track('fg-inline-3');
       cleanup();
+      expect(
+        emitter.rawListeners(AgentEventType.TOOL_APPROVAL_RESOLVED),
+      ).toHaveLength(0);
       emitter.emit(
         AgentEventType.TOOL_WAITING_APPROVAL,
         makeWaitingEvent('fg', 'c1'),
@@ -2746,6 +2772,23 @@ describe('BackgroundTaskRegistry', () => {
       emitResult(nestedA, 'search-agent-aaa111', 'call_qwen_1', true);
 
       expectOnlyParked('bg-collide-clear', 'search-agent-bbb222');
+      expect(respondA).not.toHaveBeenCalled();
+      expect(respondB).not.toHaveBeenCalled();
+    });
+
+    it('clears only the resolved runtime before colliding tool results arrive', () => {
+      const { nestedA, respondA, respondB } = parkNestedCollision(
+        'bg-collide-resolved',
+      );
+
+      nestedA.emit(AgentEventType.TOOL_APPROVAL_RESOLVED, {
+        subagentId: 'search-agent-aaa111',
+        round: 1,
+        callId: 'call_qwen_1',
+        timestamp: Date.now(),
+      });
+
+      expectOnlyParked('bg-collide-resolved', 'search-agent-bbb222');
       expect(respondA).not.toHaveBeenCalled();
       expect(respondB).not.toHaveBeenCalled();
     });
