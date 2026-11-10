@@ -83,6 +83,9 @@ final class WorkspaceCsiApplicationInventory {
                     "tenant_id:VARBINARY,channel_id:VARBINARY,platform:VARCHAR,account_id:VARBINARY,"
                     + "account_generation:BIGINT,state:VARCHAR,actor_id:VARBINARY,workspace_id:VARBINARY,"
                     + "cwd_relative:VARCHAR,policy_json:LONGTEXT,gmt_create:BIGINT,gmt_modified:BIGINT"),
+            declaration("ma_channel_segment", "delivery_key,segment_id",
+                    "delivery_key:CHAR,tenant_id:VARBINARY,channel_id:VARBINARY,segment_id:VARBINARY,"
+                    + "segment_ordinal:BIGINT,provider_receipt_json:LONGTEXT,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_delivery", "delivery_key",
                     "delivery_key:CHAR,delivery_kind:VARCHAR,tenant_id:VARBINARY,channel_id:VARBINARY,"
                     + "delivery_id:VARBINARY,source_session_id:VARBINARY,target_session_id:VARBINARY,source_scope_key:CHAR,"
@@ -2056,7 +2059,8 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_schedule", "ma_schedule_occurrence" -> query(table, "tenant_id=T&session_id=sessions", "schedule_id=schedules");
                 case "ma_channel_binding" -> query(table, "tenant_id=T&session_id=sessions");
                 case "ma_operation", "ma_operation_work", "ma_request_receipt", "ma_delivery",
-                        "ma_artifact", "ma_runtime_binding", "ma_tool_execution", "ma_output_capture" ->
+                        "ma_channel_segment", "ma_artifact", "ma_runtime_binding", "ma_tool_execution",
+                        "ma_output_capture" ->
                         new Query("1 = 1", List.of());
                 default -> throw new IllegalStateException("Undeclared inventory table");
             };
