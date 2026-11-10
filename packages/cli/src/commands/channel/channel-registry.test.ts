@@ -21,6 +21,173 @@ function invalidPlugin(
 }
 
 describe('channel registry', () => {
+  it('publishes an outbound destination without injecting conversation controls', async () => {
+    const plugin: ChannelPlugin = {
+      channelType: 'valid-outbound-only',
+      displayName: 'Outbound only',
+      outboundOnly: true,
+      defaultDeliveryTarget: {
+        type: 'chat',
+        id: 'default',
+        label: 'Configured group',
+      },
+      management: {
+        fields: [
+          {
+            key: 'webhookUrl',
+            label: 'Webhook URL',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    };
+    registerPlugin(plugin);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === plugin.channelType,
+    );
+    expect(entry).toEqual({
+      type: plugin.channelType,
+      displayName: plugin.displayName,
+      manageable: true,
+      outboundOnly: true,
+      defaultDeliveryTarget: {
+        type: 'chat',
+        id: 'default',
+        label: 'Configured group',
+      },
+      fields: plugin.management?.fields,
+    });
+    expect(entry?.defaultDeliveryTarget).not.toBe(plugin.defaultDeliveryTarget);
+  });
+
+  it('keeps the legacy catalog shape when delivery metadata is omitted', async () => {
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'dingtalk',
+    );
+    expect(Object.keys(entry!).sort()).toEqual([
+      'displayName',
+      'fields',
+      'manageable',
+      'type',
+    ]);
+    expect(entry?.fields).toContainEqual(
+      expect.objectContaining({ key: 'privatePolicy' }),
+    );
+  });
+
+  it.each([
+    { name: 'length-boundary', id: 'x'.repeat(2048) },
+    { name: 'surrounding-whitespace', id: ' default ' },
+  ])('preserves a valid $name target ID', async ({ name, id }) => {
+    const plugin: ChannelPlugin = {
+      ...invalidPlugin(`valid-delivery-${name}`, []),
+      defaultDeliveryTarget: { type: 'chat', id },
+    };
+    registerPlugin(plugin);
+    expect(
+      (await supportedChannelCatalog()).find(
+        (candidate) => candidate.type === plugin.channelType,
+      ),
+    ).toMatchObject({
+      manageable: true,
+      defaultDeliveryTarget: { type: 'chat', id },
+    });
+  });
+
+  it.each([
+    { name: 'outbound-flag', metadata: { outboundOnly: 'true' } },
+    { name: 'null-target', metadata: { defaultDeliveryTarget: null } },
+    { name: 'array-target', metadata: { defaultDeliveryTarget: [] } },
+    {
+      name: 'target-type',
+      metadata: { defaultDeliveryTarget: { type: 'url', id: 'default' } },
+    },
+    {
+      name: 'target-id',
+      metadata: { defaultDeliveryTarget: { type: 'chat', id: '   ' } },
+    },
+    {
+      name: 'oversize-target-id',
+      metadata: {
+        defaultDeliveryTarget: { type: 'chat', id: 'x'.repeat(2049) },
+      },
+    },
+    {
+      name: 'target-label',
+      metadata: {
+        defaultDeliveryTarget: { type: 'chat', id: 'default', label: 3 },
+      },
+    },
+    {
+      name: 'target-credentials',
+      metadata: {
+        defaultDeliveryTarget: {
+          type: 'chat',
+          id: 'default',
+          webhookUrl: 'https://example.invalid/secret',
+        },
+      },
+    },
+  ])('does not publish invalid $name metadata', async ({ name, metadata }) => {
+    const plugin = {
+      ...invalidPlugin(`invalid-delivery-${name}`, []),
+      ...metadata,
+    } as unknown as ChannelPlugin;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      registerPlugin(plugin);
+      const registered = await getPlugin(plugin.channelType);
+      expect(registered?.createChannel).toBe(plugin.createChannel);
+      expect(registered?.management).toBeUndefined();
+      expect(registered?.outboundOnly).toBeUndefined();
+      expect(registered?.defaultDeliveryTarget).toBeUndefined();
+      expect(
+        (await supportedChannelCatalog()).find(
+          (candidate) => candidate.type === plugin.channelType,
+        ),
+      ).toEqual({
+        type: plugin.channelType,
+        displayName: plugin.displayName,
+        manageable: false,
+        fields: [],
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('strips delivery hints when other management metadata is invalid', async () => {
+    const plugin: ChannelPlugin = {
+      ...invalidPlugin('invalid-outbound-management', [
+        { key: 'token', label: 'Token', kind: 'unsupported' },
+      ]),
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      registerPlugin(plugin);
+      expect(
+        (await supportedChannelCatalog()).find(
+          (entry) => entry.type === plugin.channelType,
+        ),
+      ).toEqual({
+        type: plugin.channelType,
+        displayName: plugin.displayName,
+        manageable: false,
+        fields: [],
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('adds the shared output descriptor only when a plugin opts in', async () => {
     registerPlugin({
       channelType: 'valid-output-mode',
@@ -840,6 +1007,7 @@ describe('channel registry', () => {
       'telegram',
       'weixin',
       'dingtalk',
+      'dingtalk-webhook',
       'dws',
       'email',
       'wecom',
@@ -855,6 +1023,7 @@ describe('channel registry', () => {
         .map((entry) => entry.type),
     ).toEqual([
       'dingtalk',
+      'dingtalk-webhook',
       'dws',
       'email',
       'wecom',
@@ -872,7 +1041,7 @@ describe('channel registry', () => {
     ).toEqual(['dingtalk']);
     // The registry skips the shared `instructions` injection for any channel
     // that declares its own, so pin the render invariants the editor depends on
-    // for every manageable built-in: exactly one field, plus the multiline hint
+    // for every manageable inbound type: one field, plus the multiline hint
     // (without it the editor falls back to a single-line input that flattens
     // stored guidance on the first edit). The copy guarantee is scoped to the
     // injected descriptor, because a channel declaring its own `instructions`
@@ -881,7 +1050,9 @@ describe('channel registry', () => {
     // (ChannelEditorDialog.test.tsx): fieldDescription resolves
     // `${labelKey}.description` and falls back to this literal only when that
     // i18n key is missing.
-    for (const entry of builtinCatalog.filter((item) => item.manageable)) {
+    for (const entry of builtinCatalog.filter(
+      (item) => item.manageable && !item.outboundOnly,
+    )) {
       const instructions = entry.fields.filter(
         (field) => field.key === 'instructions',
       );
@@ -908,6 +1079,16 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    const webhook = catalog.find((entry) => entry.type === 'dingtalk-webhook');
+    expect(webhook).toMatchObject({
+      manageable: true,
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    });
+    expect(webhook?.fields.map((field) => field.key)).toEqual([
+      'webhookUrl',
+      'signingSecret',
+    ]);
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
       expect(fields).not.toContainEqual(

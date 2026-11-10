@@ -4,6 +4,10 @@ Channels let you interact with a Qwen Code agent from messaging platforms like T
 
 Code-hosting platforms (starting with [GitHub](./github)) and authenticated workspace accounts (starting with [DingTalk Workspace](./dws)) are also supported through channels. [Email](./email) connects a dedicated mailbox through IMAP and SMTP.
 
+For sending results without a conversational bot, [DingTalk Webhook Sending](./dingtalk-webhook)
+uses a custom robot's configured group destination. It shares the daemon's
+Channel delivery path and does not listen for incoming messages.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:

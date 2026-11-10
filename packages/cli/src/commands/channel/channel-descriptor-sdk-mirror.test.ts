@@ -131,6 +131,36 @@ describe('channel descriptor SDK mirror', () => {
       ),
     ).toBe(true);
     for (const entry of manageable) {
+      expect(Object.keys(entry)).toEqual(
+        expect.arrayContaining(['type', 'displayName', 'manageable', 'fields']),
+      );
+      expect(
+        Object.keys(entry).every((key) =>
+          [
+            'type',
+            'displayName',
+            'manageable',
+            'fields',
+            'outboundOnly',
+            'defaultDeliveryTarget',
+          ].includes(key),
+        ),
+      ).toBe(true);
+      if (entry.outboundOnly !== undefined) {
+        expect(typeof entry.outboundOnly).toBe('boolean');
+      }
+      if (entry.defaultDeliveryTarget !== undefined) {
+        expect(['user', 'chat']).toContain(entry.defaultDeliveryTarget.type);
+        expect(entry.defaultDeliveryTarget.id.trim()).not.toBe('');
+        expect(Object.keys(entry.defaultDeliveryTarget)).toEqual(
+          expect.arrayContaining(['type', 'id']),
+        );
+        expect(
+          Object.keys(entry.defaultDeliveryTarget).every((key) =>
+            ['type', 'id', 'label'].includes(key),
+          ),
+        ).toBe(true);
+      }
       for (const field of entry.fields) {
         assertDescriptorWireShape(field);
       }

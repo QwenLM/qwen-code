@@ -707,6 +707,16 @@ export interface ChannelPlugin {
   /** Opt in to shared task, response, and turn output grouping. */
   supportsOutputMode?: boolean;
 
+  /** Sends notifications without receiving messages or creating conversations. */
+  outboundOnly?: boolean;
+
+  /** Adapter-owned logical destination; endpoint credentials stay in config. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
+
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;
 
