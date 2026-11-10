@@ -587,10 +587,63 @@ describe('channel registry', () => {
         type,
         displayName: type,
         manageable: false,
+        supportsQrLogin: false,
         fields: [],
       });
     },
   );
+
+  it.each([
+    ['null', null],
+    ['a non-object', 'qr'],
+    ['an object without start', {}],
+    ['a non-function start', { start: 42 }],
+  ])(
+    'strips management when qrLogin is %s instead of throwing',
+    async (_label, qrLogin) => {
+      const type = `invalid-qr-login-${_label.replace(/[^a-z]+/g, '-')}`;
+      const plugin = {
+        channelType: type,
+        displayName: type,
+        management: { fields: [], qrLogin },
+        createChannel() {
+          throw new Error('not used');
+        },
+      } as unknown as ChannelPlugin;
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      registerPlugin(plugin);
+
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Channel management metadata must declare qrLogin.start as a function.',
+        ),
+      );
+      stderr.mockRestore();
+
+      const registered = await getPlugin(type);
+      expect(registered?.management).toBeUndefined();
+    },
+  );
+
+  it('keeps management when qrLogin declares a start function', async () => {
+    const plugin = {
+      channelType: 'valid-qr-login',
+      displayName: 'valid-qr-login',
+      management: { fields: [], qrLogin: { start: () => () => {} } },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+
+    registerPlugin(plugin);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-qr-login',
+    );
+    expect(entry?.manageable).toBe(true);
+    expect(entry?.supportsQrLogin).toBe(true);
+  });
 
   it('registers a plugin whose management descriptor lacks a fields array without management metadata', async () => {
     const plugin = {
@@ -624,6 +677,7 @@ describe('channel registry', () => {
       type: 'invalid-missing-fields-array',
       displayName: 'invalid-missing-fields-array',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -663,6 +717,7 @@ describe('channel registry', () => {
       type: 'invalid-validate-config',
       displayName: 'invalid-validate-config',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -702,6 +757,7 @@ describe('channel registry', () => {
       type: 'invalid-async-validate-config',
       displayName: 'invalid-async-validate-config',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -861,6 +917,7 @@ describe('channel registry', () => {
       'wecom',
       'wecom-callback',
       'feishu',
+      'qq',
       'github',
       'gitlab',
     ]);

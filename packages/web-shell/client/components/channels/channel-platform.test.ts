@@ -54,6 +54,7 @@ describe('Channel platform availability', () => {
       'github',
       'gitlab',
       'email',
+      'qq',
     ]);
   });
 
@@ -69,8 +70,9 @@ describe('Channel platform availability', () => {
     expect(isSupportedChannelType('email')).toBe(true);
     expect(isSupportedChannelType('telegram')).toBe(false);
     // The QQ plugin's channelType is 'qq'; 'qqbot' is only the loader name, so
-    // asserting it would guard a string no descriptor can carry.
-    expect(isSupportedChannelType('qq')).toBe(false);
+    // asserting that spelling would guard a string no descriptor can carry.
+    expect(isSupportedChannelType('qq')).toBe(true);
+    expect(isSupportedChannelType('qqbot')).toBe(false);
     expect(isSupportedChannelType(undefined)).toBe(false);
   });
 });

@@ -473,6 +473,8 @@ export type {
   DaemonChannelPairingRequest,
   DaemonChannelPairingSubject,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingApprovalRequest,
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
