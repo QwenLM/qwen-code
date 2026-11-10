@@ -893,6 +893,51 @@ describe('compactionInputSlimming', () => {
       );
     });
 
+    it('closes a quoted block the cut lands in when its closing tag comes later', () => {
+      // A file that quotes two balanced pairs of the tag. Neither sits at an
+      // end of the output the cut reaches, so the pair is found by reading the
+      // whole value (#15936 R7-1).
+      const original = `${'a'.repeat(3_950)}<system-reminder>${'b'.repeat(50)}</system-reminder>${'c'.repeat(1_000)}<system-reminder>${'d'.repeat(100)}</system-reminder>`;
+
+      const { slimmedHistory } = slimResult(
+        [toolResult('output', original)],
+        4_000,
+      );
+
+      const output = responseOf(slimmedHistory)['output'] as string;
+      const count = (tag: string) => output.split(tag).length - 1;
+      expect(count('</system-reminder>')).toBe(count('<system-reminder>'));
+      expect(output).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>',
+      );
+    });
+
+    it('closes a block quoted in the middle of a text part when the cut lands in it', () => {
+      const original = `${'p'.repeat(400)}<task-notification>${'n'.repeat(400)}</task-notification>${'q'.repeat(400)}`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</task-notification>',
+      );
+    });
+
+    it('closes every quoted block open at the cut, the inner one first', () => {
+      const original = `${'p'.repeat(300)}<task-notification>${'n'.repeat(100)}<system-reminder>${'r'.repeat(400)}</system-reminder>${'n'.repeat(100)}</task-notification>${'q'.repeat(50)}`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>\n</task-notification>',
+      );
+    });
+
     it('leaves a tool output whole when only its reminder’s closing tag runs past the cap', () => {
       const head = `${'o'.repeat(3_000)}\n\n<system-reminder>\n`;
       const original = `${head}${'s'.repeat(4_000 - head.length - 6)}\n</system-reminder>\n`;

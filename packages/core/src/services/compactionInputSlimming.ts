@@ -574,19 +574,63 @@ function envelopesAtEnds(value: string): EnvelopeSpan[] {
 }
 
 /**
+ * The closing tags of the blocks that are open at `cutAt`, the inner one
+ * first, read from the whole of `value`. Text that is not an envelope's body,
+ * such as a file a tool read, can quote a block anywhere, so this pairs every
+ * opening tag with its closing tag and keeps the pairs the cut falls between.
+ * An opening tag with no closing tag after it has no pair, so a tag quoted
+ * alone gets no close (#15936 R7-1).
+ */
+function closesOfBlocksOpenAt(value: string, cutAt: number): string[] {
+  return ENVELOPES.flatMap(({ open, close }) => {
+    const openAt: number[] = [];
+    const cutBlocks: Array<{ openAt: number; close: string }> = [];
+    let at = 0;
+    let nextOpen = value.indexOf(open);
+    let nextClose = value.indexOf(close);
+    while (nextClose !== -1) {
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        openAt.push(nextOpen);
+        at = nextOpen + open.length;
+        nextOpen = value.indexOf(open, at);
+        continue;
+      }
+      const pairedOpenAt = openAt.pop();
+      if (
+        pairedOpenAt !== undefined &&
+        pairedOpenAt + open.length <= cutAt &&
+        nextClose + close.length > cutAt
+      ) {
+        cutBlocks.push({ openAt: pairedOpenAt, close });
+      }
+      at = nextClose + close.length;
+      nextClose = value.indexOf(close, at);
+    }
+    return cutBlocks;
+  })
+    .sort((a, b) => b.openAt - a.openAt)
+    .map(({ close }) => close);
+}
+
+/**
  * Cuts text like other text, except where the cut lands in an envelope at its
  * start or its end: a cut inside the body closes the envelope again after the
  * marker, and a cut that would remove only the closing tag keeps the envelope
  * whole. An envelope can open a part without ending it, as the IDE context
  * does before the prompt, or end a tool result without opening it. A cut
- * before an envelope's body leaves nothing of it to close.
+ * before an envelope's body leaves nothing of it to close. A cut inside a
+ * block that sits at neither end, as one quoted in a tool's output does,
+ * closes that block after the marker too.
  */
 function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
   const span = envelopesAtEnds(value).find(
     ({ bodyAt, closeAt, close }) =>
       bodyAt <= maxTextChars && closeAt + close.length > maxTextChars,
   );
-  if (!span) return truncateTextForSlimming(value, maxTextChars);
+  if (!span) {
+    const cut = truncateTextForSlimming(value, maxTextChars);
+    return [cut, ...closesOfBlocksOpenAt(value, maxTextChars)].join('\n');
+  }
   if (span.closeAt > maxTextChars) {
     return `${truncateTextForSlimming(value, maxTextChars)}\n${span.close}`;
   }
