@@ -5,7 +5,11 @@
  */
 
 import { CLAUDE_CODE_EVENTS } from './claude-events.js';
-import { INVALIDATABLE_EVENTS, TERMINAL_ELEMENTS } from './render-tree.js';
+import {
+  INVALIDATABLE_EVENTS,
+  MOD_RENDER_SITES,
+  TERMINAL_ELEMENTS,
+} from './render-tree.js';
 import { MOD_MAX_DEPTH } from './types.js';
 
 // Executed only inside QuickJS. The factory's handles stay private to the host.
@@ -276,7 +280,15 @@ export const MOD_GUEST_FACTORY = String.raw`
       if (typeof register !== 'function') throw new Error('Mod must export register(on, options)');
       registering = true;
       try { await register(on, frozen(parse(options))); } finally { registering = false; }
-      return stringify(hooks.map(h => h.event));
+      // A render hook names the sites its matcher's component allows, so the
+      // host raises a site only where some hook may hear it.
+      const sites = ${JSON.stringify(MOD_RENDER_SITES)};
+      return stringify(hooks.map(h => ({
+        event: h.event,
+        sites: object(h.matcher) && hasOwn(h.matcher, 'component')
+          ? sites.filter(site => matches(h.matcher.component, site))
+          : null
+      })));
     },
     run: async json => {
       const run = parse(json);
