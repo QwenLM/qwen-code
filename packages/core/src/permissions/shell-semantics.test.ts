@@ -846,6 +846,16 @@ describe('extractShellOperationsAcrossCommand', () => {
       'cd {a,b && echo x > settings.json',
       [write('/repo/{a,b/settings.json')],
     ],
+    [
+      'keeps an unclosed brace as a literal pushd target',
+      'pushd {a,b && echo x > settings.json',
+      [write('/repo/{a,b/settings.json')],
+    ],
+    [
+      'marks a brace-expanded pushd target as cwd-unknown',
+      'pushd {a,b} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
     // Keep the guessed path, but mark it unsafe to trust as final.
     [
       'marks relative writes after dynamic `cd` targets as cwd-unknown',
