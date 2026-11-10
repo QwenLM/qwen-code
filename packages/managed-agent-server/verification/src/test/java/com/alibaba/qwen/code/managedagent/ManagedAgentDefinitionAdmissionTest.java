@@ -9,9 +9,9 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -75,9 +75,9 @@ class ManagedAgentDefinitionAdmissionTest {
     @Autowired
     private ManagedAgentStore store;
     @Autowired
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
     @Autowired
-    private ManagedAgentDefinitionStore definitions;
+    private JdbcManagedAgentDefinitionStore definitions;
     @Autowired
     @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
@@ -604,7 +604,7 @@ class ManagedAgentDefinitionAdmissionTest {
                                 + "\",\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
         var session = store.requireSession(tenant, receipt.get("id").asText());
-        var definitions = new com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore(jdbc, new RequestDigests());
+        var definitions = new JdbcManagedAgentDefinitionStore(jdbc, new RequestDigests());
         assertThat(definitions.pinnedContent(session).get("instructions"))
                 .isEqualTo("Review in Chinese.");
         var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);

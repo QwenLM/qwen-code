@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,7 @@ class ManagedExtensionRecordVerdictReconcileTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Autowired
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
 
     @Autowired
     @Qualifier("managedJdbcTemplate")
@@ -54,7 +55,7 @@ class ManagedExtensionRecordVerdictReconcileTest {
                         + " VALUES (?, ?, ?, 'workspace', ?, 'DOMAIN', 'child_run',"
                         + " 'run-1', 'h', 1, 'res-x', 'child_agent',"
                         + " 'running', 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, "child_run",
                         "run-1"), TENANT, sessionId);
         return sessionId;

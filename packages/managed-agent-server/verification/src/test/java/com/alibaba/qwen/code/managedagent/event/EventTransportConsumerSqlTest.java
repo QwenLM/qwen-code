@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer.MaterializeOutcome;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -73,7 +73,7 @@ public class EventTransportConsumerSqlTest {
         when(harness.activateForWake(anyString(), anyString()))
                 .thenReturn(true);
         activated = new ArrayList<>();
-        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         // Loads and batches run inline, so each delivery is settled when
         // consume returns.
         consumer = new EventTransportConsumer(
@@ -223,7 +223,7 @@ public class EventTransportConsumerSqlTest {
     @Test
     public void aDuplicateClaimIsRefusedOnTheFirstAndLaterUpdate() {
         String session = session("ACTIVE");
-        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
 
         assertThat(store.claimWake(TENANT, session, 4)).isTrue();
         assertThat(store.claimWake(TENANT, session, 4)).isFalse();
@@ -235,7 +235,7 @@ public class EventTransportConsumerSqlTest {
     @Test
     public void concurrentWakeClaimsHaveOneWinner() throws Exception {
         String session = session("ACTIVE");
-        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         var ready = new java.util.concurrent.CountDownLatch(8);
         var start = new java.util.concurrent.CountDownLatch(1);
         try (var workers = java.util.concurrent.Executors.newFixedThreadPool(8)) {
@@ -273,7 +273,7 @@ public class EventTransportConsumerSqlTest {
                     + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
                 TENANT, session);
         var before = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version, gmt_modified FROM ma_event_stream WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", TENANT, session);
-        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         assertThat(store.claimWake(TENANT, session, 50)).isTrue();
         assertThat(jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version, gmt_modified FROM ma_event_stream WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", TENANT, session))
                 .isEqualTo(before);
@@ -285,7 +285,7 @@ public class EventTransportConsumerSqlTest {
 
     @Test
     public void controlAndRetiredSessionsCannotSupplyPublicConsumerState() {
-        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         String control = session("ACTIVE");
         head(control, "ACTIVE", 1, 60);
         jdbc.update("UPDATE ma_session SET session_kind='CONTROL' WHERE tenant_id=? AND session_id=?",
@@ -303,7 +303,7 @@ public class EventTransportConsumerSqlTest {
 
     @Test
     public void anEnvelopeNamesTheBindingOrElseTheJournalsWorkspace() {
-        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         String bound = session("ACTIVE");
         head(bound, "ACTIVE", 1, 60, "workspace-journal");
         // The binding wins over a journal that names another workspace.
@@ -323,7 +323,7 @@ public class EventTransportConsumerSqlTest {
 
     @Test
     public void theHeldSetIsTheJournalsThisWriterHoldsUnderALiveLease() {
-        TransportConsumerStore store = new TransportConsumerStore(jdbc);
+        JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         String held = session("ACTIVE");
         head(held, "ACTIVE", 1, 60);
         String lapsed = session("ACTIVE");
