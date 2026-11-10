@@ -849,6 +849,18 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite('/repo/settings.json')],
     ],
     [
+      // Same continuation, one close earlier: bash prints `a}` and `b`.
+      'marks a brace group whose close directly precedes the comma',
+      'cd {a},b} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // An empty `{}` pair is skipped, so bash reads `a{},}` as two words.
+      'marks a comma separated after a skipped empty brace pair',
+      'cd a{},} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
       'marks a brace group whose separator precedes an inner group close',
       'cd {a{b,c},d} && echo x > settings.json',
       [uncertainWrite('/repo/settings.json')],
