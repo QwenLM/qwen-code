@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -18,7 +18,7 @@ import static org.mockito.Mockito.when;
 class ManagedHookCatalogServiceTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final ManagedAgentService sessions = mock(ManagedAgentService.class);
-    private final ManagedExtensionRecordStore records = mock(ManagedExtensionRecordStore.class);
+    private final JdbcManagedExtensionRecordStore records = mock(JdbcManagedExtensionRecordStore.class);
     private final ManagedHookCatalogService service = new ManagedHookCatalogService(sessions, records);
 
     @Test

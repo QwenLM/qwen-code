@@ -177,6 +177,31 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    sideQueries: {
+      context: (sessionId, options) =>
+        client.sideQueryContext(sessionId, options.signal),
+      create: (sessionId, request, options) =>
+        client.createSideQuery(
+          sessionId,
+          request,
+          options.idempotencyKey,
+          options.signal,
+        ),
+      list: (sessionId, options) =>
+        client.listSideQueries(
+          { sessionId, cursor: options.cursor, limit: options.limit },
+          options.signal,
+        ),
+      get: (sessionId, queryId, options) =>
+        client.getSideQuery(sessionId, queryId, options.signal),
+      stream: (sessionId, queryId, options) =>
+        client.streamSideQuery(
+          { sessionId, queryId, afterRevision: options.afterRevision },
+          options.signal,
+        ),
+      cancel: (sessionId, queryId, options) =>
+        client.cancelSideQuery(sessionId, queryId, options.signal),
+    },
     userMessages: {
       query: (sessionId, options) =>
         client.queryUserMessages(sessionId, options.signal),
@@ -318,6 +343,17 @@ export function createJavaManagedAgentProvider(
           workspaceId,
           metadata,
           source,
+          request.signal,
+        ),
+      runtimeSkillCandidates: (sessionId, request) =>
+        client.getRuntimeSkillCandidates(sessionId, request.signal),
+      runtimeSkillSnapshot: (sessionId, input, request) =>
+        client.snapshotRuntimeSkill(sessionId, input, request.signal),
+      importRuntimeSkill: (sessionId, input, request) =>
+        client.importRuntimeSkill(
+          sessionId,
+          input,
+          request.idempotencyKey,
           request.signal,
         ),
       lookupPackageOperation: (workspaceId, kind, key, request) =>
@@ -1157,6 +1193,8 @@ function toSessionSummary(
         ? { diagnostics: true }
         : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
+      ...(session.capabilities?.btw === true ? { btw: true } : {}),
+      ...(session.capabilities?.recap === true ? { recap: true } : {}),
       canSend:
         sessionActive &&
         !active &&

@@ -78,6 +78,7 @@ public class ManagedAgentProperties
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
+    private boolean sideQueriesEnabled;
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
     private List<String> definitionToolProfiles =
@@ -778,6 +779,7 @@ public class ManagedAgentProperties
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
         private boolean enabled;
         private boolean selfServiceEnabled;
+        private boolean runtimeSkillImportEnabled;
         private String artifactDirectory = "";
         private List<String> allowedActors = List.of();
 
@@ -886,6 +888,7 @@ public class ManagedAgentProperties
         private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
+        private boolean toolMeasurements;
         private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;

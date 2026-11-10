@@ -313,6 +313,10 @@
       "en": "Whether extension packages can be published and managed for Workspaces through the public extensions API. Management also needs `qwen.managed-agent.extensions.artifact-directory`, an actor in `qwen.managed-agent.extensions.allowed-actors` and Workspace OPERATOR access. With `qwen.managed-agent.runtime-broker.enabled`, startup refuses `qwen.managed-agent.managed-extensions.enabled` without it; otherwise extension execution simply stays off.",
       "zh": "是否允许通过公开扩展 API 为 Workspace 发布和管理扩展包。管理操作还需要设置 `qwen.managed-agent.extensions.artifact-directory`、actor 位于 `qwen.managed-agent.extensions.allowed-actors` 中，并具备 Workspace OPERATOR 权限。开启 `qwen.managed-agent.runtime-broker.enabled` 时，开启 `qwen.managed-agent.managed-extensions.enabled` 而未开启本项会在启动时拒绝；否则扩展执行只是保持关闭。"
     },
+    "qwen.managed-agent.extensions.runtime-skill-import-enabled": {
+      "en": "Whether eligible Sessions can explicitly discover and snapshot project Skills from their original ready execution Runtime. Requires `qwen.managed-agent.extensions.self-service-enabled` and the Hosted `managed-runtime-skill-import/1` capability. A changed or unavailable owner fails without fallback or provisioning. Disabling this does not remove published packages or watch/update source directories.",
+      "zh": "是否允许符合条件的 Session 从原始 ready 执行 Runtime 显式发现项目 Skill 并制作快照。需要开启 `qwen.managed-agent.extensions.self-service-enabled`，且 Hosted 支持 `managed-runtime-skill-import/1`。owner 变化或不可用时直接失败，不回退或申请新实例。关闭本项不会删除已发布包，也不会监视或自动更新来源目录。"
+    },
     "qwen.managed-agent.extensions.self-service-enabled": {
       "en": "Whether Skill/extension archive uploads and authored MCP configurations can be prepared and imported without a daemon. Requires extension management, its configured artifact directory, an allowed actor with Workspace OPERATOR access, and the Hosted `managed-package-preparation/1` capability. Disabling this entry point preserves published content and existing package apply/recovery.",
       "zh": "是否允许在没有 daemon 时准备和导入上传的 Skill/扩展归档及用户编写的 MCP 配置。需要启用扩展管理、配置归档目录、actor 位于 allowlist 且具备 Workspace OPERATOR 权限，并要求 Hosted 支持 `managed-package-preparation/1`。关闭此入口保留已发布内容及现有包应用/恢复能力。"
@@ -737,6 +741,10 @@
       "zh": "Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。",
       "type": "duration"
     },
+    "qwen.managed-agent.side-queries-enabled": {
+      "en": "Enables new actor-private BTW and recap generation for ACTIVE Sessions with explicit model_config, execution authority, the Session Store and a Harness advertising side-query/1. Defaults off. Disabling admission preserves authorized result reads and accepted work. Catalog/default-model Sessions are unsupported in this version.",
+      "zh": "为具备显式 model_config、执行权限、Session Store 以及声明 side-query/1 的 Harness 的 ACTIVE Session 开启新的 actor 私有 BTW 与 recap 生成。默认关闭。关闭新请求受理后仍保留已授权结果读取和已受理任务。此版本不支持模型目录或默认模型 Session。"
+    },
     "qwen.managed-agent.tool-publication.active-captures": {
       "en": "How many tool output captures one tenant may have open at the same time; a further reservation is refused until one finishes. Required when `qwen.managed-agent.tool-publication.enabled` is true; must be at least 1 (startup refusal).",
       "zh": "单个租户可同时处于打开状态的工具输出捕获数量；达到上限后新的预留会被拒绝，直到有捕获结束。`qwen.managed-agent.tool-publication.enabled` 为 true 时必填，且至少为 `1`（否则启动时拒绝）。"
@@ -849,6 +857,10 @@
       "en": "The database user the control plane connects as. Besides rights on the control plane's database, it needs `SELECT` on `performance_schema.user_variables_by_thread`, which the preflight `--check` verifies.",
       "zh": "控制面连接数据库所用的用户。除控制面数据库的权限外，还需要 `performance_schema.user_variables_by_thread` 的 `SELECT` 权限，预检 `--check` 会校验该权限。",
       "type": "string"
+    },
+    "qwen.managed-agent.runtime-broker.tool-measurements": {
+      "en": "Whether newly resolved ordinary Workspace bindings select the attested managed-workspace-execution/2 profile and Tool v4 numeric execution/file measurements. Defaults to false; existing bindings, extension/MCP owners, resident and CSI profiles retain their contracts. Deploy compatible Worker/Broker readers first. Measurement commits reuse existing activity evidence and require a storage-version-5 grant; no separate collector flag is introduced. See the [execution diagnostics design](../design/2026-11-07-managed-execution-diagnostics.md).",
+      "zh": "是否让新解析的普通 Workspace binding 选择经过 attestation 的 managed-workspace-execution/2 profile 和 Tool v4 数值执行/文件测量。默认 false；已有 binding、extension/MCP owner、resident 和 CSI profile 保留原契约。先部署兼容 Worker/Broker reader。测量提交复用现有 activity evidence，并要求 storage grant 支持 version 5；不引入独立 collector 开关。参见[执行诊断设计](../design/2026-11-07-managed-execution-diagnostics.zh-CN.md)。"
     }
   }
 }

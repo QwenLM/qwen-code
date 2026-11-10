@@ -3,9 +3,10 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
@@ -31,7 +32,7 @@ public class RuntimeBrokerConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent", name = {"session-store.enabled", "runtime-broker.enabled"}, havingValue = "true")
     public com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore workspaceCsiApplicationStore(
             @Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") org.springframework.transaction.PlatformTransactionManager manager,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore nativeStore,
+            JdbcManagedSessionStore nativeStore,
             RuntimeBindingRepository bindings, RuntimeSessionRepository sessions) {
         if (!(bindings instanceof JdbcRuntimeBindingRepository jdbcBindings)
                 || !(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)) {
@@ -89,7 +90,7 @@ public class RuntimeBrokerConfiguration {
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore,
+            JdbcWorkspaceExecutionStore workspaceExecutionStore,
             org.springframework.beans.factory.ObjectProvider<ToolPublicationStore> publications,
             org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationData,
             @Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc,

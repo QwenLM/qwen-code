@@ -3927,6 +3927,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const registerOptions = backgroundSlotReservation
             ? { slotReservation: backgroundSlotReservation }
             : {};
+          signal?.throwIfAborted();
           registry.register(
             {
               agentId: hookOpts.agentId,
@@ -3936,6 +3937,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // slot reservation above was taken against this same model.
               model: subagentModelId,
               isBackgrounded: true,
+              workspacePinned: Boolean(
+                worktreeIsolation || executionEnvironment,
+              ),
               status: 'running',
               startTime: Date.now(),
               abortController: bgAbortController,

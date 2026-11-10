@@ -32,12 +32,17 @@ import {
   type InteractiveCompletedToolCall,
   type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
+import { createNotStartedToolErrorResponse } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
 import { writeToolCheckpoint } from './tool-checkpoint.js';
+import {
+  sharedModelRound,
+  type SharedModelRoundResult,
+} from './shared-model-round.js';
 import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
@@ -98,6 +103,7 @@ import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/ima
 import type { OpenTuiInputSubmission } from './input-submission.js';
 
 const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
+const liveLogger = createDebugLogger('OPENTUI_LIVE');
 
 export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
   content: PartListUnion;
@@ -951,16 +957,28 @@ export async function* livePromptEvents(
       if (args) yield { type: 'tool-args', id: request.callId, args };
     }
     let streamFailed = false;
+    let sharedRound: ReturnType<typeof sharedModelRound> | undefined;
     if (!initialTool) {
+      let round: SharedModelRoundResult | undefined;
       options?.onPreparedRequest?.(prepared);
       dualOutput?.startAssistantMessage();
       try {
-        const stream = client.sendMessageStream(
-          nextPrompt,
-          abort,
-          promptId,
-          sendOptions,
-        );
+        // On the shared agent loop (`experimental.unifiedAgentLoop`),
+        // `runModelRound` sends the round and collects its calls.
+        sharedRound = config.isUnifiedAgentLoopEnabled?.()
+          ? sharedModelRound(
+              client,
+              { parts: nextPrompt, promptId, options: sendOptions },
+              abort,
+            )
+          : undefined;
+        if (sharedRound)
+          liveLogger.debug(
+            `model round on the shared agent loop (prompt ${promptId})`,
+          );
+        const stream =
+          sharedRound?.events ??
+          client.sendMessageStream(nextPrompt, abort, promptId, sendOptions);
         for await (const ev of stream) {
           options?.onStreamEvent?.(ev);
           if (!current() || abort.aborted) return;
@@ -976,17 +994,20 @@ export async function* livePromptEvents(
               /* ignore */
             }
           }
-          if (ev.type === 'retry' || ev.type === 'model_fallback') {
-            pending.length = 0;
-          }
-          if ((ev as { type?: string }).type === 'tool_call_request') {
-            pending.push((ev as { value: ToolCallRequestInfo }).value);
+          if (!sharedRound) {
+            if (ev.type === 'retry' || ev.type === 'model_fallback') {
+              pending.length = 0;
+            }
+            if ((ev as { type?: string }).type === 'tool_call_request') {
+              pending.push((ev as { value: ToolCallRequestInfo }).value);
+            }
           }
           for (const neutral of map(ev)) {
             if (neutral.type === 'error') streamFailed = true;
             yield neutral;
           }
         }
+        round = sharedRound?.result();
       } catch (error) {
         for (const event of acceptedSteerEvents.splice(0)) yield event;
         throw error;
@@ -994,10 +1015,40 @@ export async function* livePromptEvents(
         // Covers a synchronous call failure or an unsettled early exit. A
         // carrier already accepted/restored by core makes this a no-op.
         carrier?.restore();
-        if (current()) dualOutput?.finalizeAssistantMessage();
+        if (current()) {
+          dualOutput?.finalizeAssistantMessage();
+          if (round?.stop && round.calls.length > 0) {
+            liveLogger.debug('model round stopped before running tools', {
+              promptId,
+              reason: round.stop,
+              callIds: round.calls.map(({ callId }) => callId),
+            });
+            // Close this attempt's tool uses before yielding the cancelled cards.
+            const message = `Tool skipped because the model round stopped (${round.stop}).`;
+            for (const call of round.calls) {
+              dualOutput?.emitToolResult(
+                call,
+                createNotStartedToolErrorResponse(call, message),
+              );
+            }
+          }
+        }
       }
       for (const event of acceptedSteerEvents.splice(0)) yield event;
       if (!streamFailed) options?.onPreparedRequest?.(undefined);
+      if (round?.stop) {
+        // These calls already have visible cards, but will never be scheduled.
+        for (const { callId } of round.calls) {
+          yield {
+            type: 'tool-end',
+            id: callId,
+            success: false,
+            summary: 'cancelled',
+          };
+        }
+        return;
+      }
+      if (round) pending.push(...round.calls);
     }
     if (pending.length === 0 || abort.aborted) return;
 
