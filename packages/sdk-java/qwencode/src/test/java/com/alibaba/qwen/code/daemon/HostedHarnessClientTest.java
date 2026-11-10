@@ -95,6 +95,26 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void personalMemoryRequiresNegotiationAndSurvivesLoadCopies() {
+        var store = ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
+                .tenantId("tenant-a").workspaceId("workspace-a").writerId(BOOT_ID)
+                .writerToken("qwt1_" + "a".repeat(43)).leaseDuration(Duration.ofSeconds(45)).build();
+        var create = CreateHarnessSession.builder().harnessSessionId(SESSION_ID)
+                .managedSessionStore(store).memoryStoreId("memstore_personal").build();
+        var load = new LoadHarnessSession(SESSION_ID, store, false).withMemoryStoreId("memstore_personal");
+        assertEquals("memstore_personal", create.toJson().get("memoryStoreId"));
+        assertEquals("memstore_personal", load.withChildWorkspaces(true).withForegroundOnly(true)
+                .withStoppedMessages().forLifecycle(PROMPT_ID, 1).toJson().get("memoryStoreId"));
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(DaemonProtocolException.class, () -> client.createSession(create));
+            assertThrows(DaemonProtocolException.class, () -> client.loadSession(load));
+        }
+        assertThrows(IllegalArgumentException.class, () -> CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID).memoryStoreId("memstore_personal").build());
+        assertThrows(IllegalArgumentException.class, () -> load.withMemoryStoreId("../foreign"));
+    }
+
+    @Test
     void packagePreparationStreamsWithoutCreatingASessionAndKeepsTheBootFence() throws Exception {
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
                 "\"hostedHarness\":{\"features\":[\"managed-package-preparation/1\"],"));

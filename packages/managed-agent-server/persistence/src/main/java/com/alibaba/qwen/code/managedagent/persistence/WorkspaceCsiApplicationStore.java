@@ -52,14 +52,14 @@ public final class WorkspaceCsiApplicationStore {
             "baselineBase64", "baselineSha256", "preCutObservationBase64", "preCutObservationSha256", "workerObserveRequest");
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
-    private final ManagedSessionStore nativeStore;
+    private final JdbcManagedSessionStore nativeStore;
     private final JdbcRuntimeBindingRepository bindings;
     private final JdbcRuntimeSessionRepository sessions;
     private final RuntimeTransport transport;
     private final WorkspaceCsiApplicationHistory history;
 
     public WorkspaceCsiApplicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            ManagedSessionStore nativeStore, JdbcRuntimeBindingRepository bindings, JdbcRuntimeSessionRepository sessions,
+            JdbcManagedSessionStore nativeStore, JdbcRuntimeBindingRepository bindings, JdbcRuntimeSessionRepository sessions,
             RuntimeTransport transport) {
         require(jdbc != null && jdbc.getDataSource() != null && nativeStore != null && bindings != null && sessions != null
                 && bindings.usesDataSource(jdbc.getDataSource()) && sessions.usesDataSource(jdbc.getDataSource()) && transport != null);
@@ -333,7 +333,7 @@ public final class WorkspaceCsiApplicationStore {
         JsonNode value = WorkspaceCsiApplicationJson.object(frozenBytes, WorkspaceCsiApplicationInventory.MAX_BYTES);
         WorkspaceCsiApplicationJson.closed(value, ENVELOPE_FIELDS);
         byte[] body = WorkspaceCsiApplicationJson.base64(value.path("commitBodyBase64"), 128 * 1024);
-        var terminal = ManagedSessionStore.validateCsiTerminalBytes(body);
+        var terminal = JdbcManagedSessionStore.validateCsiTerminalBytes(body);
         require("qwen-csi-application-frozen/1".equals(value.path("format").textValue())
                 && retirement.equals(value.path("retirementId").textValue())
                 && binding.getBindingId().equals(value.path("bindingId").textValue())

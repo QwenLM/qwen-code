@@ -130,6 +130,18 @@ public final class ManagedExtensionsClient {
         return json("POST", session(sessionId) + "/operations/lookup", Map.of("idempotencyKey", header(key)), null);
     }
 
+    public Map<String, Object> runtimeSkillCandidates(String sessionId) {
+        return json("GET", session(sessionId) + "/skills/candidates", null, null);
+    }
+
+    public Map<String, Object> runtimeSkillSnapshot(String sessionId, Map<String, Object> request) {
+        return json("POST", session(sessionId) + "/skills/snapshot", request, null);
+    }
+
+    public Map<String, Object> importRuntimeSkill(String sessionId, Map<String, Object> request, String key) {
+        return json("POST", session(sessionId) + "/skills/imports", request, header(key));
+    }
+
     public Map<String, Object> settings(String workspaceId, String extensionId) {
         return json("GET", workspace(workspaceId) + "/" + segment(extensionId) + "/settings", null, null);
     }
@@ -196,7 +208,7 @@ public final class ManagedExtensionsClient {
         }
         String operation = method + " Managed extensions";
         try {
-            int limit = route.contains("/imports") || route.contains("/inspection")
+            int limit = route.contains("/imports") || route.contains("/inspection") || route.contains("/skills/")
                     ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES;
             HttpSupport.Response response = HttpSupport.consume(http.send(request.build(), HttpSupport.bodyHandler(limit)), operation);
             DaemonClient.requireStatus(response, 200, operation);

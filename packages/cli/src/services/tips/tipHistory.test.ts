@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it, expect } from 'vitest';
@@ -127,6 +127,21 @@ describe('TipHistory', () => {
     it('exposes sessionCount from data', () => {
       const history = createHistory(42);
       expect(history.sessionCount).toBe(42);
+    });
+  });
+
+  describe('btwUseCount', () => {
+    it('counts /btw uses and persists them', () => {
+      const filePath = tmpPath();
+      const history = new TipHistory({ sessionCount: 1, tips: {} }, filePath);
+      expect(history.btwUseCount).toBe(0);
+
+      history.recordBtwUse();
+
+      expect(history.btwUseCount).toBe(1);
+      expect(
+        JSON.parse(readFileSync(filePath, 'utf-8')) as { btwUseCount: number },
+      ).toMatchObject({ btwUseCount: 1 });
     });
   });
 });

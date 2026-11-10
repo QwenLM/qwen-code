@@ -8,6 +8,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiAppl
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -75,14 +77,14 @@ class WorkspaceCsiApplicationInventoryTest {
                 + " VALUES ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         session = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
         var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transaction = new TransactionTemplate(manager);
         var request = transaction.execute(status -> managed.requireCsiRequest(registration, session));
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
@@ -100,7 +102,7 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void liveInventoryFindsForeignCanonicalResourceReferencesWithoutTheirParentSession() throws Exception {
-        String resource = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope(), "original-resource");
+        String resource = ManagedSessionStore.resourceKey(sessionScope(), "original-resource");
         byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
                         + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
@@ -114,7 +116,7 @@ class WorkspaceCsiApplicationInventoryTest {
                         + " VALUES ('foreign','foreign-session','item','turn','message','completed','{}',1,1,1,1,'[]',?)", resource);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,artifact_refs_resource_key,gmt_modified)"
                         + " VALUES ('foreign','foreign-session','SESSION','',?,1)", resource);
-        String foreignScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
+        String foreignScope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,"
                         + "tenant_id,session_id,resource_id,gmt_create) VALUES (?,'MESSAGE',?,1,?,'foreign',"
                         + "'foreign-session','original-resource'," + ManagedSchemaTime.SQL_NOW + ")", foreignScope, "a".repeat(64), resource);
@@ -315,7 +317,7 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void sshWorkspaceOperationsDoNotBorrowThePassiveLocalReceiptClassification() throws Exception {
-        var ssh = new SshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
+        var ssh = new JdbcSshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
         for (String tenant : List.of("tenant", "foreign")) {
             var operation = ssh.begin(tenant, "actor", "ssh-data-only", "synthetic-node", "/ordinary", "SSH");
             var before = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_id = ?", operation.operationId());
@@ -336,7 +338,7 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("ma_request_receipt"));
     }
 
-    private ManagedWorkspaceRegistry.WorkspaceSummary createOtherWorkspace(String tenant) throws Exception {
+    private JdbcManagedWorkspaceRegistry.WorkspaceSummary createOtherWorkspace(String tenant) throws Exception {
         return otherWorkspaceStore(tenant, false).create(tenant, "actor", "Other Workspace", "other-workspace");
     }
 
@@ -352,7 +354,7 @@ class WorkspaceCsiApplicationInventoryTest {
             return new StorageIdentityReader.Identity(root.toString(), "ordinary-test-host", "device",
                     Files.readAttributes(root, BasicFileAttributes.class).fileKey().toString(), "2026-10-16T00:00:00.123456789Z");
         });
-        return new WorkspaceCreationStore(jdbc, manager, guard, new ManagedWorkspaceRegistry(jdbc),
+        return new WorkspaceCreationStore(jdbc, manager, guard, new JdbcManagedWorkspaceRegistry(jdbc),
                 properties, new ObjectMapper(), Clock.systemUTC());
     }
 
@@ -649,7 +651,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var key = fixture.path("expected").path("sessionKey");
         String nativeSession = key.path("sessionId").textValue();
         String nativeTenant = key.path("tenantId").textValue();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(nativeTenant, nativeSession);
+        String scope = ManagedSessionStore.sessionScopeKey(nativeTenant, nativeSession);
         Map<String, byte[]> bodies = new java.util.LinkedHashMap<>();
         for (var resource : fixture.path("originalResources")) {
             bodies.put(resource.path("ref").path("resourceId").textValue(),
@@ -682,7 +684,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 String id = resource.path("resourceId").textValue();
                 var resourceValues = nativeFixtureScope(catalogue, "ma_resource", key);
                 for (var field : Map.of("session_scope_key", scope, "resource_id", id,
-                        "resource_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id),
+                        "resource_key", ManagedSessionStore.resourceKey(scope, id),
                         "kind", resource.path("kind").textValue(), "schema_version", resource.path("schemaVersion").asText(),
                         "byte_length", resource.path("byteLength").asText(), "sha256", resource.path("digest").textValue(),
                         "storage_kind", "MYSQL_INLINE", "state", "REFERENCED").entrySet()) {
@@ -697,7 +699,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 refValues.put("owner_kind", "JOURNAL".getBytes(StandardCharsets.UTF_8));
                 refValues.put("owner_key", scope.getBytes(StandardCharsets.UTF_8));
                 refValues.put("owner_revision", Integer.toString(index + 1).getBytes(StandardCharsets.UTF_8));
-                refValues.put("resource_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id).getBytes(StandardCharsets.UTF_8));
+                refValues.put("resource_key", ManagedSessionStore.resourceKey(scope, id).getBytes(StandardCharsets.UTF_8));
                 refValues.put("journal_revision", Integer.toString(index + 1).getBytes(StandardCharsets.UTF_8));
                 rows.get("ma_resource_ref").add(WorkspaceCsiApplicationInventory.expectedRow(
                         "ma_resource_ref", refValues, WorkspaceCsiApplicationInventory.Membership.ORIGINAL));
@@ -725,7 +727,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var derived = nativeFixtureScope(catalogue, "ma_resource_ref", key);
         Map.of("session_scope_key", scope, "owner_kind", "SESSION_RECORD", "owner_key", projectionKey,
                 "owner_revision", latest.path("sequence").asText(), "resource_id", usageId,
-                "resource_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, usageId), "gmt_create", "1")
+                "resource_key", ManagedSessionStore.resourceKey(scope, usageId), "gmt_create", "1")
                 .forEach((field, value) -> derived.put(field, value.getBytes(StandardCharsets.UTF_8)));
         rows.get("ma_resource_ref").add(WorkspaceCsiApplicationInventory.expectedRow("ma_resource_ref", derived,
                 WorkspaceCsiApplicationInventory.Membership.ORIGINAL));
@@ -788,7 +790,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(810);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(826);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -803,11 +805,110 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void personalMemoryOnlyBlocksSessionsBoundToTheStore() throws Exception {
+        byte[] owner = ManagedWorkspaceRegistry.actorKey("tenant", "actor");
+        jdbc.update("INSERT INTO ma_memory_store (store_key,owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
+                        + " VALUES (?,?,?,?,?,?,1)", "a".repeat(64), "b".repeat(64), "tenant", "memory", owner, "namespace");
+        jdbc.update("INSERT INTO ma_memory_entry (entry_key,tenant_id,memory_store_id,memory_id,is_deleted,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,?,?,0,1,1)", "c".repeat(64), "tenant", "memory", "entry");
+        var unbound = inspect();
+        assertThat(unbound.table("ma_memory_store").rows()).isEmpty();
+        assertThat(unbound.table("ma_memory_entry").rows()).isEmpty();
+        assertThat(unbound.blockers()).noneMatch(blocker -> blocker.table().startsWith("ma_memory")
+                || blocker.table().equals("ma_session"));
+
+        jdbc.update("UPDATE ma_session SET memory_store_id=?,owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
+                "memory", owner, "tenant", session);
+        var bound = inspect();
+        assertThat(bound.table("ma_memory_store").rows()).hasSize(1);
+        assertThat(bound.table("ma_memory_entry").rows()).hasSize(1);
+        assertThat(bound.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+        assertThat(bound.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
+                || blocker.code().equals("query_unavailable"));
+    }
+
+    @Test
+    void otherSessionMemoryReceiptsDoNotBlockCsiRetirement() throws Exception {
+        for (String ownerTenant : List.of("tenant", "foreign")) {
+            String ownerSession = "memory-session-" + ownerTenant;
+            createOtherMemorySession(ownerTenant, ownerSession);
+            if ("foreign".equals(ownerTenant)) {
+                jdbc.update("UPDATE ma_session SET workspace_id=NULL,workspace_generation=NULL,workspace_storage_id=NULL,"
+                                + "cwd_relative=NULL,context_config_ref=NULL,context_revision=NULL,workspace_config_ref=NULL,workspace_policy_ref=NULL"
+                                + " WHERE tenant_id=? AND session_id=?", ownerTenant, ownerSession);
+            }
+            for (String state : List.of("DISPATCHED", "COMPLETED")) {
+                String receipt = insertMemoryReceipt(ownerTenant, ownerSession, state);
+                if ("COMPLETED".equals(state)) {
+                    jdbc.update("UPDATE ma_request_receipt SET result_json=? WHERE receipt_key=?", "{\"status\":\"unavailable\"}", receipt);
+                }
+            }
+        }
+        var found = inspect();
+        assertThat(found.blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt")
+                || blocker.table().equals("ma_memory_store"));
+        assertThat(found.table("ma_request_receipt").rows()).filteredOn(row -> "MEMORY".equals(row.text("namespace")))
+                .hasSize(4).allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
+        assertThat(found.table("ma_memory_store").rows()).hasSize(2)
+                .allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER);
+    }
+
+    @Test
+    void malformedAndUnownedMemoryReceiptsStillBlockCsiRetirement() throws Exception {
+        createOtherMemorySession("tenant", "memory-session");
+        String receipt = insertMemoryReceipt("tenant", "memory-session", "DISPATCHED");
+        var original = jdbc.queryForMap("SELECT * FROM ma_request_receipt WHERE receipt_key=?", receipt);
+        for (var mutation : Map.of("scope_id", "wrong", "scope_kind", "TENANT", "scope_key", "a".repeat(64),
+                "idempotency_digest", "b".repeat(64), "request_digest", "invalid", "session_id", session,
+                "operation", "unknown", "state", "COMPLETED", "result_json", "{}", "actor_id", "unexpected").entrySet()) {
+            jdbc.update("UPDATE ma_request_receipt SET " + mutation.getKey() + "=? WHERE receipt_key=?", mutation.getValue(), receipt);
+            assertWorkspaceReceiptBlocked(receipt);
+            jdbc.update("UPDATE ma_request_receipt SET " + mutation.getKey() + "=? WHERE receipt_key=?", original.get(mutation.getKey()), receipt);
+        }
+        jdbc.update("UPDATE ma_session SET memory_store_id=? WHERE tenant_id=? AND session_id=?", "missing", "tenant", "memory-session");
+        assertWorkspaceReceiptBlocked(receipt);
+        jdbc.update("UPDATE ma_session SET memory_store_id=? WHERE tenant_id=? AND session_id=?", "memory-session", "tenant", "memory-session");
+        jdbc.update("UPDATE ma_memory_store SET owner_actor_key=? WHERE tenant_id=? AND memory_store_id=?",
+                ManagedWorkspaceRegistry.actorKey("tenant", "other"), "tenant", "memory-session");
+        assertWorkspaceReceiptBlocked(receipt);
+        jdbc.update("UPDATE ma_memory_store SET owner_actor_key=? WHERE tenant_id=? AND memory_store_id=?",
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor"), "tenant", "memory-session");
+        assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+        assertWorkspaceReceiptBlocked(insertMemoryReceipt("tenant", session, "DISPATCHED"));
+        assertWorkspaceReceiptBlocked(insertMemoryReceipt("foreign", "missing-session", "DISPATCHED"));
+    }
+
+    private void createOtherMemorySession(String ownerTenant, String ownerSession) {
+        byte[] owner = ManagedWorkspaceRegistry.actorKey(ownerTenant, "actor");
+        jdbc.update("INSERT INTO ma_memory_store (store_key,owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
+                        + " VALUES (?,?,?,?,?,?,1)", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(ownerTenant, ownerSession),
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(ownerTenant, "actor"), ownerTenant, ownerSession, owner, ownerSession);
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,agent_revision,workspace_id,workspace_generation,"
+                        + "workspace_storage_id,cwd_relative,context_config_ref,context_revision,workspace_config_ref,workspace_policy_ref,"
+                        + "owner_actor_key,memory_store_id,owner_only,gmt_create,gmt_modified)"
+                        + " SELECT ?,?,agent_id,agent_revision,workspace_id,workspace_generation,workspace_storage_id,cwd_relative,"
+                        + "context_config_ref,context_revision,workspace_config_ref,workspace_policy_ref,?,?,1,1,1"
+                        + " FROM ma_session WHERE tenant_id=? AND session_id=?",
+                ownerTenant, ownerSession, owner, ownerSession, "tenant", session);
+    }
+
+    private String insertMemoryReceipt(String ownerTenant, String ownerSession, String state) {
+        var namespace = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.MEMORY;
+        var scope = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.SESSION;
+        String idempotency = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("input", state);
+        ManagedReceipts.insert(jdbc, namespace, ownerTenant, scope, ownerSession, idempotency,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("request"), "remember", null,
+                ownerSession, null, state, null, null, 1);
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.receiptKey(namespace, ownerTenant, scope, ownerSession, idempotency);
+    }
+
+    @Test
     void sessionWorktreeRowsBlockCsiRetirementInsteadOfBeingOmitted() throws Exception {
         jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
                 + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
                 + " VALUES ('tenant', ?, 'workspace', 'storage', ?, ?, ?, 'PREPARING', 1, '{}', 'worktree', 1, 1)",
-                session, "a".repeat(64), "b".repeat(32), com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                session, "a".repeat(64), "b".repeat(32), ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var snapshot = inspect();
         assertThat(snapshot.table("ma_session_worktree").rows()).hasSize(1);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_worktree"));
@@ -1025,11 +1126,11 @@ class WorkspaceCsiApplicationInventoryTest {
                 + " (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                 + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
                 + " VALUES (?, ?, 'tenant', 'workspace', ?, 'extra', 'native-fixture', 1, ?, ?, 'MYSQL_INLINE', ?,"
-                + " 'publish', 'PUBLISHED', " + ManagedSchemaTime.SQL_NOW + ")", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), session, bytes.length, sha(bytes), bytes);
+                + " 'publish', 'PUBLISHED', " + ManagedSchemaTime.SQL_NOW + ")", ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), session, bytes.length, sha(bytes), bytes);
         jdbc.update("INSERT INTO ma_resource_ref"
                 + " (owner_kind, owner_key, owner_revision, resource_key, session_scope_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, gmt_create)"
                 + " VALUES ('JOURNAL', ?, 99, ?, ?, 'foreign', 'workspace', ?, 99, 'missing', " + ManagedSchemaTime.SQL_NOW + ")",
-                sessionScope(), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), UUID.randomUUID().toString());
+                sessionScope(), ManagedSessionStore.resourceKey(sessionScope(), "extra"), sessionScope(), UUID.randomUUID().toString());
         var snapshot = inspect();
         assertThat(snapshot.table("ma_resource").rows()).hasSize(1);
         assertThat(snapshot.table("ma_resource_ref").rows()).hasSize(1);
@@ -1144,10 +1245,10 @@ class WorkspaceCsiApplicationInventoryTest {
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
                 + " state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'inventory-fixture', 1, ?, ?,"
                 + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session, resource.length, sha(resource), resource);
+                ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session, resource.length, sha(resource), resource);
         jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                 + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL', ?, 1, ?, ?, 'tenant', 'workspace', ?, 1, 'resource', " + ManagedSchemaTime.SQL_NOW + ")",
-                sessionScope(), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session);
+                sessionScope(), ManagedSessionStore.resourceKey(sessionScope(), "resource"), sessionScope(), session);
         for (String state : List.of("PREPARED", "DISPATCHING", "EXECUTING", "CANCEL_REQUESTED", "UNKNOWN", "ABANDONED", "SETTLED")) {
             insertExecution(state, state, binding.getBindingId(), session, brokerHash(session));
         }
@@ -1480,7 +1581,7 @@ class WorkspaceCsiApplicationInventoryTest {
 
     private static void bindAction(java.sql.PreparedStatement statement, String tenant, String session,
             String id, String payload) throws java.sql.SQLException {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         statement.setString(1, scope);
         statement.setString(2, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "ACTION", id));
         statement.setBytes(3, tenant.getBytes(StandardCharsets.UTF_8));
@@ -1731,15 +1832,15 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,"
                         + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,publish_command_id,state,gmt_create)"
                         + " VALUES (?,?,'tenant','workspace',?,?,?,1,?,?,'MYSQL_INLINE',?,'publish','REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope(), id), sessionScope(), session, id, kind, bytes.length, sha(bytes), bytes);
+                ManagedSessionStore.resourceKey(sessionScope(), id), sessionScope(), session, id, kind, bytes.length, sha(bytes), bytes);
     }
 
     private void foreignResource(String id, String kind, byte[] bytes) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
+        String scope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
                 + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create)"
                 + " VALUES (?, ?, 'foreign', 'other-workspace', 'foreign-session', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id), scope, id, kind, bytes.length, sha(bytes), bytes);
+                ManagedSessionStore.resourceKey(scope, id), scope, id, kind, bytes.length, sha(bytes), bytes);
     }
 
     @Test
@@ -1820,12 +1921,12 @@ class WorkspaceCsiApplicationInventoryTest {
                 ToolPublicationContract.bindingDigest(contract), "c".repeat(64));
         byte[] raw = ("{\"bindingId\":\"" + binding.getBindingId() + "\"}").getBytes(StandardCharsets.UTF_8);
         String contentId = "result-" + sha((scope + ":publication-1:content:output").getBytes(StandardCharsets.UTF_8)).substring(0, 32);
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
+        String resourceScope = ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, scope_key,"
                 + " publication_id, slot_key, resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state, capture_state, operation_id, gmt_create)"
                 + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'session-1', ?, 'publication-1', 'content:output', ?, 'managed-tool-result-content',"
                 + " 1, ?, ?, ?, 'MYSQL_INLINE', 'PUBLISHED', 'VERIFIED', 'publish', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(resourceScope, contentId), resourceScope, scope, contentId, raw.length, sha(raw), raw);
+                ManagedSessionStore.resourceKey(resourceScope, contentId), resourceScope, scope, contentId, raw.length, sha(raw), raw);
         assertThat(readReferences(expected).blockers()).isEmpty();
         assertThat(ToolPublicationContract.bindingDigest(contract)).isNotEqualTo(sha(bindingBytes));
         jdbc.update("UPDATE ma_output_capture SET binding_digest = ?", sha(bindingBytes));
@@ -1836,7 +1937,7 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(readReferences(expected).blockers()).isEmpty();
         String terminalId = "result-" + sha((scope + ":publication-1:terminal").getBytes(StandardCharsets.UTF_8)).substring(0, 32);
         jdbc.update("UPDATE ma_resource SET slot_key = 'terminal', kind = 'managed-tool-terminal', resource_id = ?, resource_key = ?, capture_object_key = ?",
-                terminalId, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(resourceScope, terminalId),
+                terminalId, ManagedSessionStore.resourceKey(resourceScope, terminalId),
                 "managed-tool-results/" + scope + "/publication-1/" + sha("terminal".getBytes(StandardCharsets.UTF_8)));
         assertThat(readReferences(expected).blockers()).anyMatch(blocker -> blocker.code().equals("unsupported_historical_payload"));
         jdbc.update("UPDATE ma_resource SET inline_bytes = ?, storage_kind = 'MYSQL_INLINE', capture_object_key = NULL", raw);
@@ -2033,9 +2134,9 @@ class WorkspaceCsiApplicationInventoryTest {
                             "runtimeSessionId", "foreign-session", "payloadJson", payload));
                     var values = new java.util.LinkedHashMap<String, byte[]>();
                     resource.columns().forEach(column -> values.put(column.name(), null));
-                    for (var entry : Map.of("session_scope_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("foreign", "foreign-session"),
+                    for (var entry : Map.of("session_scope_key", ManagedSessionStore.sessionScopeKey("foreign", "foreign-session"),
                             "tenant_id", "foreign", "workspace_id", "foreign-workspace", "session_id", "foreign-session",
-                            "resource_id", "local", "resource_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("foreign", "foreign-session"), "local"),
+                            "resource_id", "local", "resource_key", ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey("foreign", "foreign-session"), "local"),
                             "kind", "managed-tool-input", "schema_version", "1", "byte_length", Integer.toString(bytes.length),
                             "sha256", sha(bytes)).entrySet()) {
                         values.put(entry.getKey(), entry.getValue().getBytes(StandardCharsets.UTF_8));
@@ -2142,7 +2243,7 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     private String sessionScope() {
-        return com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session);
+        return ManagedSessionStore.sessionScopeKey("tenant", session);
     }
 
     private static String sha(byte[] bytes) {
