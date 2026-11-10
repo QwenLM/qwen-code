@@ -755,6 +755,28 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write(REPO_SETTINGS)],
     ],
     [
+      // R25-1 fail-closed: `$'…\'…'` keeps an ANSI-C quote state this lexer
+      // does not model, so the heredoc boundary is unproven. The write stays
+      // in the operations but is marked as resolved against an unknown cwd.
+      'marks the cwd unknown after an ANSI-C quote with an escaped quote',
+      "printf '%s' $'a\\'b' <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
+      // R25-1 fail-closed: `a\ #` has no word boundary before `#`, so bash
+      // keeps it in the word and still reads the `<<EOF` opener.
+      'marks the cwd unknown when an escaped space precedes a hash',
+      "echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
+      // R25-1 fail-closed: `$(…)#` closes a command substitution inside the
+      // word, so the hash is data and the heredoc opener still counts.
+      'marks the cwd unknown when a hash follows a command substitution close',
+      "echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      [uncertainWrite('/tmp/out.txt')],
+    ],
+    [
       'keeps multiline arithmetic from hiding a write',
       "n=$((1\n << 3))\necho '{}' > .qwen/settings.json",
       [write(REPO_SETTINGS)],

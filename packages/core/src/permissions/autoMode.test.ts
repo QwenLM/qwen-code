@@ -580,6 +580,26 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     expect(forcesReview('D=.qwen/settings.json; cp payload "$D"')).toBe(true);
   });
 
+  it('asks when the heredoc boundary is unproven (R25-1 fail-closed)', () => {
+    for (const command of [
+      "printf '%s' $'a\\'b' <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      "echo a\\ # <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+      "echo $(echo SUB)# note <<EOF\ncd /tmp\nEOF\necho hi > out.txt",
+    ]) {
+      expect(forcesReview(command)).toBe(true);
+    }
+  });
+
+  it('keeps proven heredocs on their real paths (no blanket escalation)', () => {
+    for (const command of [
+      'cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
+      'echo $((8<<2))\necho hi > out.txt',
+      '(true)# note <<EOF\necho hi > out.txt',
+    ]) {
+      expect(forcesReview(command)).toBe(false);
+    }
+  });
+
   it('does not force review for awk field references', () => {
     expect(forcesReview("awk '{print $1}' data.csv")).toBe(false);
   });

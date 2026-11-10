@@ -2563,7 +2563,18 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
   return ops;
 }
 
-function stripHeredocBodies(command: string): string {
+interface StrippedHeredocs {
+  text: string;
+  /**
+   * True when the lexer met a construct it cannot decide the way bash does
+   * (`$'…'` with an escaped quote, an escaped space before `#`, a `#` right
+   * after a command-substitution `)`). The heredoc boundaries are then
+   * unproven, so callers must not silently trust the extracted paths.
+   */
+  uncertain: boolean;
+}
+
+function stripHeredocBodies(command: string): StrippedHeredocs {
   const lines = command.split('\n');
   const kept: string[] = [];
   const pendingDelimiters: string[] = [];
@@ -2581,7 +2592,53 @@ function stripHeredocBodies(command: string): string {
     pendingDelimiters.push(...lexer.scan(line));
   }
 
-  return kept.join('\n');
+  return { text: kept.join('\n'), uncertain: lexer.hasUncertainty() };
+}
+
+/**
+ * True when a line ends with an unescaped `$` and a trailing backslash, so bash
+ * removes the backslash-newline and the next line's leading `$` continues the
+ * same word (`$$` = PID).
+ */
+function endsWithDollarContinuation(line: string): boolean {
+  const trailing = /\\+$/.exec(line)?.[0].length ?? 0;
+  if (trailing === 0 || trailing % 2 === 0) return false;
+  return line[line.length - trailing - 1] === '$';
+}
+
+/**
+ * True when the `$'` at `index` really opens an ANSI-C literal. An escaped
+ * dollar and the second dollar of `$$` (the PID) are followed by an ordinary
+ * quote instead.
+ */
+function isAnsiCQuoteStart(
+  line: string,
+  index: number,
+  dollarFromPreviousLine: boolean,
+): boolean {
+  if (index === 0 && dollarFromPreviousLine) return false;
+  let backslashes = 0;
+  for (let i = index - 1; i >= 0 && line[i] === '\\'; i--) backslashes++;
+  if (backslashes % 2 === 1) return false;
+  return !(line[index - 1] === '$' && backslashes === 0);
+}
+
+/**
+ * True when the ANSI-C literal starting after `$'` contains a backslash-escaped
+ * single quote before its terminator. That is the form where bash's `$'…'`
+ * state and this lexer's plain single-quote state diverge.
+ */
+function hasEscapedQuoteInAnsiC(line: string, start: number): boolean {
+  for (let index = start; index < line.length; index++) {
+    const char = line[index]!;
+    if (char === '\\') {
+      if (line[index + 1] === "'") return true;
+      index++;
+      continue;
+    }
+    if (char === "'") return false;
+  }
+  return false;
 }
 
 class HeredocLexer {
@@ -2590,8 +2647,22 @@ class HeredocLexer {
   private arithmeticDepth = 0;
   private legacyArithmetic = false;
   private parameterDepth = 0;
+  /** Sticky: set once a construct makes the heredoc boundaries unproven. */
+  private uncertain = false;
+  /**
+   * True when the previous line ended with an unescaped `$` and a
+   * backslash-newline, so a leading `$` on this line forms `$$` (the PID)
+   * rather than opening an ANSI-C literal.
+   */
+  private continuedDollar = false;
+
+  hasUncertainty(): boolean {
+    return this.uncertain;
+  }
 
   scan(line: string): string[] {
+    const dollarFromPreviousLine = this.continuedDollar;
+    this.continuedDollar = false;
     const delimiters: string[] = [];
     // Bash removes a backslash-newline before reading the next line, so
     // nothing stays escaped across the boundary (R25-1).
@@ -2613,6 +2684,17 @@ class HeredocLexer {
       if (this.quote === '"') {
         if (char === '"') this.quote = '';
         continue;
+      }
+      if (char === '$' && line[index + 1] === "'") {
+        // `$'…'` has its own escape rules: `\'` does not close the literal.
+        // This lexer keeps plain single-quote state, so the ambiguous form is
+        // reported instead of guessed (fail-closed).
+        if (
+          isAnsiCQuoteStart(line, index, dollarFromPreviousLine) &&
+          hasEscapedQuoteInAnsiC(line, index + 2)
+        ) {
+          this.uncertain = true;
+        }
       }
       if (char === '"' || char === "'") {
         this.quote = char;
@@ -2652,6 +2734,12 @@ class HeredocLexer {
         continue;
       }
       if (char === '#' && (index === 0 || /[\s;&|()]/.test(line[index - 1]!))) {
+        // bash opens a comment only at a word start. Two of the boundary
+        // characters above can belong to the previous word instead — an
+        // escaped space (`a\ #`) and a `)` that closes a `$(…)` inside the
+        // word (`$(echo x)#`). Those forms make this break wrong, so mark the
+        // analysis unproven rather than silently dropping the rest of the line.
+        if (this.commentBoundaryIsAmbiguous(line, index)) this.uncertain = true;
         break;
       }
       if (char !== '<' || line[index + 1] !== '<') continue;
@@ -2670,7 +2758,28 @@ class HeredocLexer {
       index = delimiter.end;
     }
     this.escaped = false;
+    this.continuedDollar = endsWithDollarContinuation(line);
     return delimiters;
+  }
+
+  /**
+   * True when the character before a `#` looks like a word boundary to this
+   * lexer but belongs to the previous word for bash, so treating the `#` as a
+   * comment would silently discard the rest of the line.
+   */
+  private commentBoundaryIsAmbiguous(line: string, index: number): boolean {
+    const previous = line[index - 1];
+    if (previous === ' ' || previous === '\t') {
+      let backslashes = 0;
+      for (let i = index - 2; i >= 0 && line[i] === '\\'; i--) backslashes++;
+      return backslashes % 2 === 1;
+    }
+    if (previous === ')') {
+      // `(true)#` closes a subshell, where `#` really is a comment; `$(…)#`
+      // closes a command substitution inside the word, where it is data.
+      return line.lastIndexOf('$(', index) !== -1;
+    }
+    return false;
   }
 
   private readDelimiter(
@@ -2709,7 +2818,8 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  const { text: heredocStripped, uncertain } = stripHeredocBodies(command);
+  const subCommands = splitCompoundCommandSegments(heredocStripped);
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
@@ -2771,7 +2881,11 @@ function walkCompoundCommand(
     }
   }
 
-  return ops;
+  // The heredoc boundaries are unproven, so the paths above were resolved
+  // against a cwd this analysis cannot vouch for. Reuse the existing
+  // `cwdUnknown` channel: consumers that enforce protected relative paths then
+  // escalate to "ask" instead of silently trusting a possibly wrong path.
+  return uncertain ? markCwdUnknownOps(ops, command, cwd) : ops;
 }
 
 function hasAbsolutePathTokenForOperation(
