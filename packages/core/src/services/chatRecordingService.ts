@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
@@ -312,7 +313,7 @@ export type ChatRecordProvenance =
   | 'mod_prompt';
 
 export type RecordToolResultOptions = {
-  subtype?: 'code_mode_tool_result';
+  subtype?: 'code_mode_tool_result' | 'tool_loop_end';
 } & (
   | {
       goalContext?: GoalTurnPermit;
@@ -461,6 +462,7 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'code_mode_tool_result'
+    | 'tool_loop_end'
     | 'realtime_message'
     | 'turn_result'
     | 'turn_attempt'
@@ -1907,6 +1909,9 @@ export class ChatRecordingService {
     legacyConversationFile?: string,
     updateActiveTail = true,
   ): Promise<void> {
+    const promptTime = userPromptTimestamp(record);
+    const changesPromptTime =
+      promptTime !== undefined || record.subtype === 'rewind';
     const pendingWrite = this.operationTail.then(async () => {
       if (this.writeFailure) throw this.writeFailure;
       const managedSink = this.managedSink;
@@ -1928,6 +1933,9 @@ export class ChatRecordingService {
         }
       } catch (error) {
         throw this.enterWriteFailure(error, record.sessionId);
+      }
+      if (changesPromptTime) {
+        this.notifyLastUserPromptRecorded(promptTime, record.sessionId);
       }
       if (managedSink) await this.anchorManagedMetadata(managedSink);
     });
@@ -2380,6 +2388,7 @@ export class ChatRecordingService {
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
+        this.notifyLastUserPromptRecorded(undefined, this.getSessionId());
         this.userDisplayTextsForTitle.length = 0;
         this.modPromptKeysForTitle.clear();
         for (const record of active) {
@@ -3961,6 +3970,30 @@ export class ChatRecordingService {
     if (messages.length > 0) {
       this.lastRecordUuid = messages[messages.length - 1].uuid;
       this.lastPersistedRecordUuid = this.lastRecordUuid;
+    }
+  }
+
+  private lastUserPromptRecordedCallback?: (
+    timestamp: string | undefined,
+    sessionId: string,
+  ) => void;
+
+  setLastUserPromptRecordedCallback(
+    callback:
+      | ((timestamp: string | undefined, sessionId: string) => void)
+      | undefined,
+  ): void {
+    this.lastUserPromptRecordedCallback = callback;
+  }
+
+  private notifyLastUserPromptRecorded(
+    timestamp: string | undefined,
+    sessionId: string,
+  ): void {
+    try {
+      this.lastUserPromptRecordedCallback?.(timestamp, sessionId);
+    } catch (error) {
+      debugLogger.debug('Last user prompt listener failed:', error);
     }
   }
 

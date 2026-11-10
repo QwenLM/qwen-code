@@ -120,7 +120,7 @@ public final class JdbcCsiActivationAdmission {
                 "SELECT capability_digest FROM ma_runtime_binding WHERE binding_id = ?")) {
             JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
             try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "capability_digest"))) {
+                if (!row.next() || !CsiFilesRetirementProfile.isCapabilityDigest(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "capability_digest"))) {
                     return;
                 }
             }
@@ -505,7 +505,7 @@ public final class JdbcCsiActivationAdmission {
                 require(head.next() && original.request().getIsolationKey().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(head, "harness_session_id"))
                         && original.request().getScope().getWorkspaceId().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(head, "workspace_id"))
                         && "ACTIVE".equals(head.getString("state")) && head.getLong("writer_generation") > 0
-                        && head.getInt("storage_version") == 1
+                        && CsiFilesRetirementProfile.supportsStorage(original.request().getScope(), head.getInt("storage_version"))
                         && head.getLong("compacted_through_revision") == 0
                         && "READY".equals(head.getString("recovery_status")));
                 require(ManagedSchemaTime.timestamp(head, "writer_lease_until") != null);

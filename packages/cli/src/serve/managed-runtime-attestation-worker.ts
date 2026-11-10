@@ -11,9 +11,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
-import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
-  OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
   registerManagedRuntimeAttestationRoute,
   type ManagedRuntimeAttestationIdentity,
@@ -25,7 +23,6 @@ import {
   type ManagedContextReady,
 } from './managed-context-envelope.js';
 import {
-  MANAGED_CONTEXT_WORKER_ROUTES,
   ManagedContextMount,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
@@ -38,28 +35,18 @@ import {
   managedRuntimeLedgerFromEnvironment,
 } from './managed-runtime-ledger.js';
 import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
-import {
-  MANAGED_EXTENSION_RETIRE_ROUTE,
-  MANAGED_EXTENSION_RUNTIME_ROUTE,
-  MANAGED_EXTENSION_UPLOAD_ROUTE,
-} from './managed-extension-runtime.js';
-import { MANAGED_EXTENSION_COMMAND_ROUTE } from './managed-extension-command-runtime.js';
-import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
-import {
-  ManagedShellPublisherRegistry,
-  MANAGED_SHELL_PUBLISHER_ROUTE,
-} from './managed-shell-publisher.js';
+import { isWorkspaceToolCapability } from './managed-workspace-activation.js';
+import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { resolveManagedRuntimeWorkerRoutePlan } from './managed-runtime-worker-routes.js';
 import { scrubAndReportInheritedLoaderEnv } from '../config/shared-env-keys.js';
-import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
 import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 import {
   parseManagedCsiBoot,
   type ManagedCsiBoot,
 } from './managed-csi-envelope.js';
 import { ManagedCsiMount } from './managed-csi-mount.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import { isCsiFilesCapability } from './managed-csi-file-profile.js';
 import {
   parseManagedCsiFileBoot,
   parseManagedCsiFileJson,
@@ -70,9 +57,6 @@ import {
   type ManagedCsiFileWorkerHandle,
 } from './managed-csi-file-worker.js';
 import {
-  MANAGED_CSI_ATTEST_ROUTE,
-  MANAGED_CSI_DRAIN_ROUTE,
-  MANAGED_CSI_ACK_ROUTE,
   registerManagedCsiAttestationRoute,
   registerManagedCsiDrainRoute,
   registerManagedCsiAckRoute,
@@ -173,7 +157,7 @@ function parseWorkerBoot(
     throw new Error(INVALID_BOOT_MESSAGE);
   }
   if (isExactBoot(parsed)) {
-    if (parsed.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+    if (isCsiFilesCapability(parsed.capabilityDigest))
       throw new Error(INVALID_BOOT_MESSAGE);
     return parsed;
   }
@@ -181,7 +165,7 @@ function parseWorkerBoot(
     // Boot v2 is UTF-8: bytes that are not are refused, never replaced.
     new TextDecoder('utf-8', { fatal: true }).decode(document);
     const boot = parseManagedContextBoot(parsed);
-    if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+    if (isCsiFilesCapability(boot.capabilityDigest))
       throw new Error(INVALID_BOOT_MESSAGE);
     return boot;
   } catch {
@@ -284,7 +268,7 @@ export async function startManagedRuntimeAttestationWorker(
   )
     throw new Error(INVALID_BOOT_MESSAGE);
   if (
-    boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST ||
+    isCsiFilesCapability(boot.capabilityDigest) ||
     (csiBoot !== undefined && !containerMode) ||
     (containerMode &&
       csiBoot === undefined &&
@@ -378,61 +362,19 @@ export async function startManagedRuntimeAttestationWorker(
   } catch (error) {
     return closeCsiMountAfterError(csiMount, error);
   }
+  const routePlan = resolveManagedRuntimeWorkerRoutePlan({
+    bootVersion: boot.version === 2 ? 2 : 1,
+    capabilityDigest: boot.capabilityDigest,
+    managedExtensions:
+      boot.version === 2 && boot.managedExtensions !== undefined,
+    csi: csiBoot !== undefined,
+    sshRoute: sshRuntime?.route,
+    capturePublisher: capturePublisher !== undefined,
+    remotePublishers: remotePublishers !== undefined,
+    publication: publication !== undefined,
+  });
   const server = createServer(
-    ownedManagedRuntimeRouteGate(
-      app,
-      boot.version === 2
-        ? capturePublisher ||
-          remotePublishers ||
-          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
-          boot.managedExtensions !== undefined
-          ? [
-              ...MANAGED_CONTEXT_WORKER_ROUTES,
-              ...(boot.managedExtensions
-                ? [
-                    MANAGED_EXTENSION_RUNTIME_ROUTE,
-                    MANAGED_EXTENSION_UPLOAD_ROUTE,
-                    MANAGED_EXTENSION_RETIRE_ROUTE,
-                    MANAGED_EXTENSION_COMMAND_ROUTE,
-                  ]
-                : []),
-              ...(csiBoot
-                ? [
-                    MANAGED_CSI_ATTEST_ROUTE,
-                    MANAGED_CSI_DRAIN_ROUTE,
-                    MANAGED_CSI_ACK_ROUTE,
-                  ]
-                : []),
-              ...MANAGED_TOOL_RESULT_ROUTES,
-              ...(sshRuntime ? [sshRuntime.route] : []),
-              ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
-              ...(!capturePublisher &&
-              !publication &&
-              (boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
-                boot.managedExtensions !== undefined)
-                ? [PUBLICATION_INSTALL_ROUTE]
-                : []),
-            ]
-          : [
-              ...MANAGED_CONTEXT_WORKER_ROUTES,
-              ...(boot.managedExtensions
-                ? [
-                    MANAGED_EXTENSION_RUNTIME_ROUTE,
-                    MANAGED_EXTENSION_UPLOAD_ROUTE,
-                    MANAGED_EXTENSION_RETIRE_ROUTE,
-                    MANAGED_EXTENSION_COMMAND_ROUTE,
-                  ]
-                : []),
-              ...(csiBoot
-                ? [
-                    MANAGED_CSI_ATTEST_ROUTE,
-                    MANAGED_CSI_DRAIN_ROUTE,
-                    MANAGED_CSI_ACK_ROUTE,
-                  ]
-                : []),
-            ]
-        : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
-    ),
+    ownedManagedRuntimeRouteGate(app, routePlan.routes),
   );
   server.maxHeadersCount = 32;
   server.headersTimeout = 5_000;
@@ -624,9 +566,7 @@ export async function readManagedRuntimeContainerBoot(
       parsed.version === 3
     ) {
       const boot = parseManagedCsiBoot(parsed);
-      if (
-        boot.context.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST
-      )
+      if (isCsiFilesCapability(boot.context.capabilityDigest))
         throw new Error(INVALID_BOOT_MESSAGE);
       return boot;
     }
@@ -691,7 +631,7 @@ export async function runManagedRuntimeAttestationWorker(
     undefined,
     contextBoot.version === 2 &&
       !('storage' in contextBoot) &&
-      (contextBoot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+      (isWorkspaceToolCapability(contextBoot.capabilityDigest) ||
         contextBoot.managedExtensions !== undefined)
       ? new ManagedShellPublisherRegistry()
       : undefined,
