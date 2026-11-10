@@ -5,12 +5,18 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { execSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
+  amendNeedsApproval,
   isDestructiveCommand,
   userMentionsDiscard,
   extractLastUserPrompt,
   registerSessionCommit,
   clearSessionCommits,
+  isAmendOfSessionCommit,
 } from './destructive-commands.js';
 import { modelText, userText } from '../test-utils/model-fixtures.js';
 
@@ -24,6 +30,17 @@ function expectBlocked(cmd: string, prompt: string, reasonPart?: string) {
   expect(result).not.toBeNull();
   expect(result!.blocked).toBe(true);
   if (reasonPart !== undefined) expect(result!.reason).toContain(reasonPart);
+}
+
+/**
+ * Asserts the guard routes the command to manual approval: the hard block is
+ * gone, and the AUTO-mode fallback asks the user.
+ */
+function expectNeedsApproval(cmd: string) {
+  expect(isDestructiveCommand(cmd, 'amend the commit')?.blocked ?? false).toBe(
+    false,
+  );
+  expect(amendNeedsApproval(cmd)).toBe(true);
 }
 
 function expectAllowed(commands: string[], prompt: string) {
@@ -182,8 +199,8 @@ describe('isDestructiveCommand — IaC patterns', () => {
 });
 
 describe('isDestructiveCommand — git commit --amend', () => {
-  it('blocks git commit --amend when no session commits registered', () => {
-    expectBlocked('git commit --amend --no-edit', 'amend the commit', 'amend');
+  it('routes git commit --amend to approval when no session commits are registered', () => {
+    expectNeedsApproval('git commit --amend --no-edit');
   });
 
   it.each([
@@ -194,8 +211,8 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'timeout 10 git commit --amend --no-edit',
     'if true; then git commit --amend --no-edit; fi',
     "eval 'git commit --amend --no-edit'",
-  ])('blocks amend through an execution wrapper: %s', (command) => {
-    expectBlocked(command, 'amend the commit', 'amend');
+  ])('routes amend through an execution wrapper to approval: %s', (command) => {
+    expectNeedsApproval(command);
   });
 
   // The recognizer misses these shapes, so the literal backstop must keep
@@ -207,20 +224,28 @@ describe('isDestructiveCommand — git commit --amend', () => {
     `node -e 'console.log("a report about git commit --amend behaviour")'`,
     "su -c 'git commit --amend --no-edit'",
     'git >| /dev/null commit --amend',
-  ])('backstop keeps unprovable amend text blocked: %s', (command) => {
-    expectBlocked(command, 'write a report', 'amend');
+  ])('routes unprovable amend text to approval: %s', (command) => {
+    expectNeedsApproval(command);
   });
 
   it.each([
     "echo 'git commit --amend'",
     "printf '%s\\n' 'git commit --amend'",
     "grep -n 'git commit --amend' CHANGELOG.md",
-    'git commit -m --amend',
     '# git commit --amend',
     'echo ok # a note about git commit --amend',
     "cat > notes.txt <<'EOF'\ngit commit --amend\nEOF",
-  ])('allows provably inert text that mentions amend: %s', (command) => {
-    expectAllowed([command], 'write a report');
+  ])(
+    'routes amend text the old prover called inert to approval: %s',
+    (command) => {
+      expectNeedsApproval(command);
+    },
+  );
+
+  // `--amend` here is the value of `-m`, not an operator: it never mentioned an
+  // amend invocation, so it stays allowed on both the old and the new guard.
+  it('keeps git commit -m --amend allowed', () => {
+    expectAllowed(['git commit -m --amend'], 'commit changes');
   });
 
   it('allows git commit (without --amend)', () => {
@@ -239,12 +264,8 @@ describe('isDestructiveCommand — git commit --amend', () => {
     },
   );
 
-  it('still blocks a next-line amend after a comment', () => {
-    expectBlocked(
-      "git status # it's fine\ngit commit --amend",
-      'commit changes',
-      'amend',
-    );
+  it('routes a next-line amend after a comment to approval', () => {
+    expectNeedsApproval("git status # it's fine\ngit commit --amend");
   });
 
   it.each([
@@ -257,8 +278,84 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "for echo in 'git commit --amend'; do $echo; done",
     "$(echo 'git commit --amend')",
     "./cat 'git commit --amend'",
-  ])('does not prove inertness for executed output: %s', (command) => {
-    expectBlocked(command, 'write a report', 'amend');
+  ])('routes executed-output shapes to approval: %s', (command) => {
+    expectNeedsApproval(command);
+  });
+
+  // R16-1: shapes a hand-scanned prover certified as inert while bash executed
+  // them. They all go to approval now; none of them may be allowed.
+  it.each([
+    `echo 'git commit --amend' 2>&1 | sh`,
+    `{ printf '%s\n' 'git commit --amend'; } | sh`,
+    `cat <<'EOF' 2>&1 | sh\ngit commit --amend\nEOF`,
+    `cat() { sh -c "$1"; }\ncat 'git commit --amend'`,
+    `echo 'git commit --amend' > /tmp/x.sh && bash /tmp/x.sh`,
+    `printf -v x 'git commit --amend'; sh -c "$x"`,
+    `./cat <<'EOF'\ngit commit --amend\nEOF`,
+  ])('routes an unproven amend mention to approval: %s', (command) => {
+    expectNeedsApproval(command);
+  });
+
+  it('requires approval even for a commit this session created', () => {
+    // R23-2: the cwd-based exemption is gone, so the registry no longer
+    // removes the approval even when it names the current HEAD. The process
+    // cwd is moved into the repository so a mutation that restored the old
+    // `!isAmendOfSessionCommit(process.cwd())` return would answer `false`
+    // here and fail the test.
+    const dir = mkdtempSync(join(tmpdir(), 'amend-session-'));
+    const originalCwd = process.cwd();
+    try {
+      execSync(
+        'git init -q && git -c user.email=a@b.c -c user.name=a commit -q --allow-empty -m one',
+        { cwd: dir, stdio: 'ignore' },
+      );
+      const head = execSync('git rev-parse HEAD', {
+        cwd: dir,
+        encoding: 'utf-8',
+      }).trim();
+      registerSessionCommit(head);
+      process.chdir(dir);
+      expect(isAmendOfSessionCommit(dir)).toBe(true);
+      expect(isDestructiveCommand('git commit --amend', 'amend')).toBeNull();
+      expect(amendNeedsApproval('git commit --amend')).toBe(true);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // R23-1: the guard is lexical now. Every spelling below reached the
+  // classifier unasked before; all of them must ask.
+  it.each([
+    'git commit -a --amend',
+    'git commit --no-edit --amend',
+    'git commit -m "x" --amend',
+    'git commit -C HEAD --amend',
+    'git commit \\\n --amend --no-edit',
+    'git commit "--amend"',
+    "git commit --'amend'",
+    "git commit $'--amend'",
+    'git commit --amen',
+    'git commit --am',
+    'git -C /elsewhere commit --amend',
+    "bash -c 'git commit --amend'",
+    'env --chdir=/elsewhere git commit --amend',
+    'sudo -D /elsewhere git commit --amend',
+    'env -C /elsewhere git commit --amend',
+    'git checkout HEAD~1 && git commit --amend',
+    'git switch some-branch && git commit --amend',
+    '/usr/bin/git commit --amend',
+  ])('routes the %s spelling to approval', (command) => {
+    expectNeedsApproval(command);
+  });
+
+  it.each([
+    'git status',
+    'git commit -m "a normal commit"',
+    'git log --grep=amend',
+    'git commit --all',
+  ])('leaves a non-amend command alone: %s', (command) => {
+    expect(amendNeedsApproval(command)).toBe(false);
   });
 });
 
@@ -271,8 +368,8 @@ describe('session commit tracking', () => {
   });
 
   it('isAmendOfSessionCommit returns false with no session commits', () => {
-    // isAmendOfSessionCommit is not exported; tested via isDestructiveCommand.
-    expectBlocked('git commit --amend', 'amend commit');
+    // isAmendOfSessionCommit is not exported; observed through the router.
+    expectNeedsApproval('git commit --amend');
   });
 });
 
