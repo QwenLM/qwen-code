@@ -36,7 +36,7 @@ export const MANAGED_SESSION_FORMAT_VERSION = 1;
 // created in between (H3 round-5 verification matrix), so the stamp
 // rises only when a change genuinely breaks an older reader mid-scan.
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
-export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/2';
+export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
 const MAX_ERROR_VALUE_LENGTH = 4096;
@@ -54,6 +54,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'tool.intent',
   'action.changed',
   'tool.receipt',
+  'tool.measured',
   'checkpoint.committed',
   'context.compacted',
   'cancel.requested',
@@ -1018,6 +1019,13 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         decisionRef: 'refOrNull',
       },
     },
+    'tool.measured': {
+      fields: {
+        executionCallId: 'id',
+        toolOutcomeRef: 'ref',
+        measurementsRef: 'ref',
+      },
+    },
     'tool.receipt': {
       fields: {
         executionCallId: 'id',
@@ -1118,6 +1126,7 @@ const EVENT_ACTORS: Readonly<
   'hosted.cleanup': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
+  'tool.measured': ['harness'],
   'checkpoint.committed': ['harness'],
   'context.compacted': ['harness'],
   'cancel.requested': ['trusted_entry'],
@@ -1143,6 +1152,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'hosted.cleanup': true,
   'action.changed': false,
   'tool.receipt': false,
+  'tool.measured': true,
   'checkpoint.committed': true,
   'context.compacted': true,
   'cancel.requested': false,
@@ -1485,6 +1495,7 @@ function assertPayloadRules(
     case 'tool.intent':
     case 'message.delta':
     case 'tool.receipt':
+    case 'tool.measured':
     case 'cancel.requested':
     case 'turn.settled':
       return;

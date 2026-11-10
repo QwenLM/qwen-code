@@ -557,42 +557,19 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, true);
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, true);
+    }
+
+    @Override
+    public ToolExecutionRecord attachMeasurements(
+            ToolExecutionRecord expected, Map<String, Object> metadata) {
+        return JdbcToolExecutionObservations.attachMeasurements(dataSource, expected, metadata);
     }
 
     @Override
     public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, false);
-    }
-
-    private ToolExecutionRecord resolve(ToolExecutionRecord expected,
-            Map<String, Object> resolutionResult, Instant resolutionTime,
-            boolean unknownOnly) {
-        if (expected == null) {
-            throw new IllegalArgumentException("expected is required");
-        }
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
-                    ToolExecutionRecord current =
-                            selectByExecutionId(connection, expected.getExecutionCallId(), true);
-                    if (current == null
-                            || !current.sameIdentity(expected)
-                            || current.getVersion() != expected.getVersion()
-                            || !current.needsReconciliation()
-                            || unknownOnly
-                                    && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
-                        return null;
-                    }
-                    ToolExecutionRecord resolved =
-                            current.resolveUnsettled(resolutionResult, resolutionTime)
-                                    .withVersion(current.getVersion() + 1);
-                    updateExecution(connection, resolved);
-                    return resolved;
-                });
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, false);
     }
 
     private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
@@ -1041,7 +1018,7 @@ public final class JdbcToolExecutionRepository
         return false;
     }
 
-    private static ToolExecutionRecord selectByExecutionId(
+    static ToolExecutionRecord selectByExecutionId(
             Connection connection, String executionCallId, boolean forUpdate)
             throws SQLException {
         String sql = "SELECT " + EXECUTION_COLUMNS
@@ -1078,7 +1055,7 @@ public final class JdbcToolExecutionRepository
         }
     }
 
-    private static void updateExecution(Connection connection,
+    static void updateExecution(Connection connection,
             ToolExecutionRecord record) throws SQLException {
         String sql = "UPDATE ma_tool_execution SET execution_state = ?, "
                 + "execution_status = ?, result_json = ?, "

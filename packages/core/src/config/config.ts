@@ -177,10 +177,6 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
-  AUTO_MEMORY_SKILL_NAME,
-  MainSessionAutoMemoryPolicy,
-} from '../skills/auto-memory-skill.js';
-import {
   authoredSkillName,
   skillRestrictionNames,
   type SkillLevel,
@@ -452,6 +448,7 @@ import {
 } from '../memory/metadata-migration.js';
 import {
   buildAutoMemoryIndexContext,
+  buildResidentAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
 } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -3131,18 +3128,8 @@ export class Config {
   private promptToolSnapshot: ReadonlySet<string> | undefined;
   private promptAgentReachable = false;
 
-  /**
-   * Stable managed-memory policy, separate from the changing catalog. Empty
-   * while the legacy main-session policy below is in effect.
-   */
+  /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
-  /**
-   * The legacy main-session policy, resolved per reading Config: whether it
-   * points at the bundled `auto-memory` reference depends on the reader's
-   * route to the Skill tool (#16291). Set only by a legacy refresh, cleared by
-   * every path that sets `autoMemoryPrompt` instead.
-   */
-  private mainSessionAutoMemoryPolicy: MainSessionAutoMemoryPolicy | undefined;
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -5645,7 +5632,6 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
@@ -5837,7 +5823,6 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
-        this.mainSessionAutoMemoryPolicy = undefined;
       } else {
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,
@@ -5845,19 +5830,16 @@ export class Config {
           userSection,
           teamSection,
         );
-        this.autoMemoryPrompt = '';
-        this.mainSessionAutoMemoryPolicy = new MainSessionAutoMemoryPolicy({
+        this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
-          indexContent: managedAutoMemoryIndex,
           userSection,
           teamSection,
-        });
+        );
         this.autoMemoryContext = catalog;
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
     }
     this.setMemoryFileCount(fileCount);
@@ -7288,13 +7270,30 @@ export class Config {
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
-  getFastModel(): string | undefined {
+  getFastModel({ requirePinnedEndpoint = false } = {}): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
+    const pinnedEndpoint = this.fastModel?.trim().split('\0')[1];
+    if (
+      requirePinnedEndpoint &&
+      pinnedEndpoint !== undefined &&
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          model.baseUrl === pinnedEndpoint &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
+      throw new Error(
+        'Fast model is no longer configured at the selected endpoint',
+      );
+    }
     if (
       !available.some(
         (model) =>
@@ -8302,7 +8301,6 @@ export class Config {
     // reassigns it, and the stale text keeps routing to search_memory while
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
-    this.mainSessionAutoMemoryPolicy = undefined;
     this.autoMemoryContext = '';
 
     let memoryRefreshError: unknown;
@@ -8764,18 +8762,6 @@ export class Config {
       skill.level === 'bundled' &&
       skill.name === 'generated-ui' &&
       !this.getBundledGeneratedUiStatus().enabled
-    ) {
-      return false;
-    }
-    // The auto-memory reference only serves the legacy managed auto-memory
-    // policy; without it, or under the structured protocol (`manage_memory`,
-    // no direct file access), the skill would be listed on every request for
-    // nothing.
-    if (
-      skill.level === 'bundled' &&
-      skill.name === AUTO_MEMORY_SKILL_NAME &&
-      (!this.getManagedAutoMemoryEnabled() ||
-        this.getMemoryRecallMode() !== 'legacy')
     ) {
       return false;
     }
@@ -9714,20 +9700,8 @@ export class Config {
     this.promptAgentReachable = reachable;
   }
 
-  /**
-   * Managed-memory policy for the system prompt, without legacy indexes.
-   *
-   * In legacy mode the main-session policy is resolved for the Config it is
-   * read through, so a subagent's derived Config with no route to the Skill
-   * tool gets the full policy rather than the session's pointer (#16291).
-   */
+  /** Managed-memory policy for the system prompt, without legacy indexes. */
   getAutoMemoryPrompt(): string {
-    if (
-      this.memoryRecallMode === 'legacy' &&
-      this.mainSessionAutoMemoryPolicy !== undefined
-    ) {
-      return this.mainSessionAutoMemoryPolicy.forConfig(this);
-    }
     return this.autoMemoryPrompt;
   }
 
