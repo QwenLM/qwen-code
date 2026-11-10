@@ -401,8 +401,18 @@ function describeUploadFailure(error: unknown, toolName: string): string {
       return `${toolName}: the platform does not support this file format (850019).`;
     case 40093001:
       return `${toolName}: the platform failed to store the file (40093001); it is safe to retry.`;
-    default:
-      return `${toolName}: the upload failed (HTTP ${error.status}${error.code === undefined ? '' : `, code ${error.code}`}: ${detail}).`;
+    default: {
+      // Structural failures (missing upload_id, short part coverage, no
+      // file_info) are thrown with a synthetic status 200 and no platform
+      // code; printing "HTTP 200" would read like a success and bury the
+      // actual cause, so the status is only named when it is a real error.
+      const labels = [
+        ...(error.status >= 400 ? [`HTTP ${error.status}`] : []),
+        ...(error.code === undefined ? [] : [`code ${error.code}`]),
+      ];
+      const prefix = labels.length > 0 ? `${labels.join(', ')}: ` : '';
+      return `${toolName}: the upload failed (${prefix}${detail}).`;
+    }
   }
 }
 
@@ -412,6 +422,12 @@ function describeMediaSendFailure(
   body: string,
   toolName: string,
 ): string {
+  // Rate limiting is a deliberate no-retry refusal: the anchored send bails
+  // instead of falling back to an active one, so the model has to be told to
+  // back off rather than read it as a generic rejection.
+  if (status === 429) {
+    return `${toolName}: the platform is rate-limiting this chat (429), so the media was not sent; do not retry immediately.`;
+  }
   const code = parseQQErrorCode(body);
   switch (code) {
     case 304080:

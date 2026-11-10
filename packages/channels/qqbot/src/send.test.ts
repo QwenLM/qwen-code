@@ -6018,6 +6018,28 @@ describe('sendQQMedia', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
+  it('does not present the synthetic 200 of a structural upload failure as an HTTP status', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    // api.ts throws structural failures (no upload_id, short part coverage, no
+    // file_info) with a synthetic status 200 and no platform code. Rendering
+    // that as "HTTP 200" reads like a success and hides the real cause.
+    mockUploadQQRichMedia.mockRejectedValue(
+      new QQRichMediaError(
+        'prepare',
+        200,
+        undefined,
+        'upload_prepare returned no upload_id, block_size or parts',
+      ),
+    );
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('upload_prepare returned no upload_id');
+    expect(result.message).not.toContain('HTTP 200');
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
   it('retries as an active message when the anchored send is rejected', async () => {
     const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
     mockSendQQMessage
@@ -6116,6 +6138,10 @@ describe('sendQQMedia', () => {
     // A retry would double the rate-limit pressure the 429 just reported.
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
     expect(seqOf(ch, 'msg-anchor')).toBe(0);
+    // Rate limiting is the deliberate no-retry refusal, so the model is told to
+    // back off rather than read a generic rejection it might retry.
+    expect(result.message).toContain('rate-limiting');
+    expect(result.message).not.toContain('rejected the file message');
   });
 
   it('does not retry as an active message when the chat forbids active messages', async () => {

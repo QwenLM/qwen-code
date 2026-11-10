@@ -143,12 +143,12 @@ link, no final-component symlink, non-empty, unchanged between the two
 - The format is decided by magic bytes read from the same open descriptor, not
   by the file name:
 
-  | kind    | accepted            | sniff                                                                               |
-  | ------- | ------------------- | ----------------------------------------------------------------------------------- |
-  | `image` | PNG, JPEG           | `89 50 4E 47`, `FF D8 FF`                                                           |
-  | `video` | MP4                 | `ftyp` box at offset 4                                                              |
-  | `voice` | SILK, MP3, WAV, OGG | `#!SILK_V3` / `\x02#!SILK_V3`, `ID3` or `FF Ex/Fx` frame sync, `RIFF….WAVE`, `OggS` |
-  | `file`  | anything            | none                                                                                |
+  | kind    | accepted            | sniff                                                                                                                             |
+  | ------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+  | `image` | PNG, JPEG           | `89 50 4E 47`, `FF D8 FF`                                                                                                         |
+  | `video` | MP4                 | `ftyp` box at offset 4                                                                                                            |
+  | `voice` | SILK, MP3, WAV, OGG | `#!SILK_V3` at offset 0 or 1 (a leading format byte, conventionally `\x02`), `ID3` or `FF Ex/Fx` frame sync, `RIFF….WAVE`, `OggS` |
+  | `file`  | anything            | none                                                                                                                              |
 
 - A rejected kind produces a model-visible message that names the accepted
   formats and points at `qq_send_file` as the fallback, e.g.
@@ -171,14 +171,18 @@ keeps its current name and value.
 - The upload's `file_name` field, and the name echoed in the tool result, are
   the **sanitized display name**, not a raw path component: the caller's
   `file_name` when it is supplied and non-blank, otherwise the resolved
-  basename, with every invisible, format, control, and blank-rendering code
-  point stripped (`\p{Cf}`, `\p{Cc}`, `\p{Zl}`, `\p{Zp}`, `\p{Cs}`, plus
-  U+115F, U+1160, U+3164, U+FFA0, U+2800). The result is truncated to 100 code
-  points; when nothing survives, the name falls back to the sanitized basename
-  and then to the fixed placeholder `file`. Two consequences are accepted
-  deliberately: a name made only of invisible characters is rendered as
-  `file` rather than as an unnamed card, and U+200D is `Cf`, so a ZWJ emoji
-  sequence loses its ligature (`👨‍👩‍👧` renders as three separate emoji).
+  basename, with every code point in these classes stripped: `\p{Cf}`,
+  `\p{Cc}`, `\p{Zl}`, `\p{Zp}`, `\p{Cs}`, plus U+115F, U+1160, U+3164,
+  U+FFA0 and U+2800. This is deliberately narrower than
+  `Default_Ignorable_Code_Point`, which also covers `Mn` code points — the
+  variation selectors (U+FE00–U+FE0F, U+E0100–U+E01EF), U+034F and
+  U+180B–U+180D — and stripping VS16 would change emoji presentation. The
+  result is truncated to 100 code points; when nothing survives, the name falls
+  back to the sanitized basename and then to the fixed placeholder `file`. Two
+  consequences are accepted deliberately: a name made only of invisible
+  characters is rendered as `file` rather than as an unnamed card, and U+200D
+  is `Cf`, so a ZWJ emoji sequence loses its ligature (`👨‍👩‍👧` renders as
+  three separate emoji).
 - Each description states the accepted formats, the size cap, and that the
   file must be inside the session workspace or the system temporary directory,
   mirroring the current `qq_send_file` description
@@ -190,7 +194,7 @@ keeps its current name and value.
 ### 4. Adapter — `packages/channels/qqbot/src/QQChannel.ts`
 
 - `sendQQFile` becomes `sendQQMedia(input & {kind})`. The route resolution,
-  reply anchor, `takeMsgSeq` / `beginMsgSeqSend` / `rollbackMsgSeq`, the `429`
+  reply anchor, `beginMsgSeqSend` / `endMsgSeqSend`, the `429`
   refusal, the `304080` re-upload rule, the active retry, and the `finally`
   bookkeeping are untouched. Three things become kind-dependent:
   1. `fileType: QQ_FILE_TYPE[kind]` passed to `uploadQQRichMedia`;
@@ -278,9 +282,11 @@ sees the same shape.
 - `file_info` has a TTL (`ttl`, `0` meaning no expiry); `304080` means the
   handle expired before the send, and the existing path re-uploads on the next
   attempt.
-- The platform only accepts a rich-media send as a passive reply to a recent
-  message, which is why the existing code always tries the reply anchor first
-  and falls back to one active send.
+- A rich-media send normally expects a passive reply to a recent message, so
+  the code tries the reply anchor first; when that reply window has closed it
+  falls back to one active send, which QQ accepts where the chat has active
+  messages enabled — and when a group admin has disabled them the tool reports
+  the refusal instead of dropping the media.
 - Official reference: <https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html>.
 
 ## Testing

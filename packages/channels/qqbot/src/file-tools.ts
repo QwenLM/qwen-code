@@ -108,26 +108,22 @@ const MEDIA_SPECS: OutboundMediaSpec[] = [
   {
     kind: 'file',
     noun: 'File',
-    description:
-      'Send a local file to the current QQ chat, where it arrives as a file card the user can download. Use it when the user asks for a document, archive, spreadsheet or any other generated artifact, or when a file cannot be sent as an image, video or voice message. The path must be absolute and inside the session workspace or the system temporary directory; the file must be non-empty and at most 20 MiB.',
+    description: `Send a local file to the current QQ chat, where it arrives as a file card the user can download. Use it when the user asks for a document, archive, spreadsheet or any other generated artifact, or when a file cannot be sent as an image, video or voice message. The path must be absolute and inside the session workspace or the system temporary directory; the file must be non-empty and at most ${QQ_OUTBOUND_FILE_MAX_BYTES / (1024 * 1024)} MiB.`,
   },
   {
     kind: 'image',
     noun: 'Image',
-    description:
-      'Send a local PNG or JPEG image to the current QQ chat, where it is rendered as an image. Use it when the user asks for a picture, chart, screenshot or photo. The path must be absolute and inside the session workspace or the system temporary directory; the file must be a non-empty PNG or JPEG of at most 20 MB. Use qq_send_file for an image in any other format, so it arrives as a downloadable file card.',
+    description: `Send a local PNG or JPEG image to the current QQ chat, where it is rendered as an image. Use it when the user asks for a picture, chart, screenshot or photo. The path must be absolute and inside the session workspace or the system temporary directory; the file must be a non-empty PNG or JPEG of at most ${QQ_OUTBOUND_IMAGE_MAX_BYTES / 1_000_000} MB. Use qq_send_file for an image in any other format, so it arrives as a downloadable file card.`,
   },
   {
     kind: 'video',
     noun: 'Video',
-    description:
-      'Send a local MP4 video to the current QQ chat, where it is rendered as a playable video. The path must be absolute and inside the session workspace or the system temporary directory; the file must be a non-empty MP4 of at most 30 MB. Use qq_send_file for a video in any other format, so it arrives as a downloadable file card.',
+    description: `Send a local MP4 video to the current QQ chat, where it is rendered as a playable video. The path must be absolute and inside the session workspace or the system temporary directory; the file must be a non-empty MP4 of at most ${QQ_OUTBOUND_VIDEO_MAX_BYTES / 1_000_000} MB. Use qq_send_file for a video in any other format, so it arrives as a downloadable file card.`,
   },
   {
     kind: 'voice',
     noun: 'Voice',
-    description:
-      'Send a local voice message to the current QQ chat, where it is rendered as a voice bar. The path must be absolute and inside the session workspace or the system temporary directory; the file must be a non-empty SILK, MP3, WAV or OGG recording of at most 20 MB. Use qq_send_file for audio in any other format, so it arrives as a downloadable file card.',
+    description: `Send a local voice message to the current QQ chat, where it is rendered as a voice bar. The path must be absolute and inside the session workspace or the system temporary directory; the file must be a non-empty SILK, MP3, WAV or OGG recording of at most ${QQ_OUTBOUND_VOICE_MAX_BYTES / 1_000_000} MB. Use qq_send_file for audio in any other format, so it arrives as a downloadable file card.`,
   },
 ];
 

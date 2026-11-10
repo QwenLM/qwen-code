@@ -71,12 +71,12 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 - 按 kind 选择字节上限：`image` 20 MB、`video` 30 MB、`voice` 20 MB、`file` 20 MiB（不变）。三个新上限是平台软限制的十进制值，而不是二进制 MiB：超过软限制一个字节的上传会被降级为文件卡，因此若用 20 MiB（20.97 MB）作上限，就会放过一种平台随后渲染为文件卡的大小。现有文件上限保持 20 MiB，因为它早于本次改动，且远低于 200 MB 的文件软限制。
 - 格式由从同一已打开描述符读出的 magic bytes 决定，而非文件名：
 
-  | kind    | 接受                | 探测                                                                            |
-  | ------- | ------------------- | ------------------------------------------------------------------------------- |
-  | `image` | PNG、JPEG           | `89 50 4E 47`、`FF D8 FF`                                                       |
-  | `video` | MP4                 | 偏移 4 处的 `ftyp` box                                                          |
-  | `voice` | SILK、MP3、WAV、OGG | `#!SILK_V3` / `\x02#!SILK_V3`、`ID3` 或 `FF Ex/Fx` 帧同步、`RIFF….WAVE`、`OggS` |
-  | `file`  | 任意                | 无                                                                              |
+  | kind    | 接受                | 探测                                                                                                          |
+  | ------- | ------------------- | ------------------------------------------------------------------------------------------------------------- |
+  | `image` | PNG、JPEG           | `89 50 4E 47`、`FF D8 FF`                                                                                     |
+  | `video` | MP4                 | 偏移 4 处的 `ftyp` box                                                                                        |
+  | `voice` | SILK、MP3、WAV、OGG | 偏移 0 或 1 处的 `#!SILK_V3`（前置格式字节，惯例为 `\x02`）、`ID3` 或 `FF Ex/Fx` 帧同步、`RIFF….WAVE`、`OggS` |
+  | `file`  | 任意                | 无                                                                                                            |
 
 - 被拒绝的类型产生模型可见的消息，说明接受的格式并指向 `qq_send_file` 作为兜底，例如
   `qq_send_image: only PNG and JPEG are sent as images; use qq_send_file to send this file as a file card.`
@@ -88,13 +88,13 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 
 - `QQFileToolDeps.sendFile` 改为 `sendMedia({ sessionId, chatId, kind, fileName, bytes })`，其中 `kind` 是同一个四值联合类型。
 - `buildFileTools` 返回四个定义。三个新工具只有 `path` 属性；`file_name` 仍为 `qq_send_file` 独占，因为图片、视频、语音消息不展示名称。
-- 上传的 `file_name` 字段与工具结果里回显的名称都是**净化后的显示名**，而不是原始路径组件：调用方提供了非空白 `file_name` 时用它，否则用解析后的 basename，并剥离所有不可见、格式、控制与空白渲染码点（`\p{Cf}`、`\p{Cc}`、`\p{Zl}`、`\p{Zp}`、`\p{Cs}`，外加 U+115F、U+1160、U+3164、U+FFA0、U+2800）。结果按码点截断到 100；若一个字符都不剩，则回退到净化后的 basename，再回退到固定占位名 `file`。有两项后果是刻意接受的：整名不可见时渲染为 `file` 而不是"无名文件卡"；U+200D 属于 `Cf`，因此 ZWJ emoji 序列会失去连字（`👨‍👩‍👧` 渲染成三个独立 emoji）。
+- 上传的 `file_name` 字段与工具结果里回显的名称都是**净化后的显示名**，而不是原始路径组件：调用方提供了非空白 `file_name` 时用它，否则用解析后的 basename，并剥离下列字符类中的全部码点：`\p{Cf}`、`\p{Cc}`、`\p{Zl}`、`\p{Zp}`、`\p{Cs}`，外加 U+115F、U+1160、U+3164、U+FFA0、U+2800。该集合刻意窄于 `Default_Ignorable_Code_Point`——后者还覆盖 `Mn` 码点（变体选择符 U+FE00–U+FE0F、U+E0100–U+E01EF，U+034F，U+180B–U+180D），而剥离 VS16 会改变 emoji 呈现。结果按码点截断到 100；若一个字符都不剩，则回退到净化后的 basename，再回退到固定占位名 `file`。有两项后果是刻意接受的：整名不可见时渲染为 `file` 而不是"无名文件卡"；U+200D 属于 `Cf`，因此 ZWJ emoji 序列会失去连字（`👨‍👩‍👧` 渲染成三个独立 emoji）。
 - 每个描述都说明接受的格式、大小上限，以及文件必须位于会话工作区或系统临时目录内，与当前 `qq_send_file` 的描述（`file-tools.ts:61-82`）一致。
 - 各 handler 共用一段实现：解析会话、按 kind 读取并校验、推导显示名、调用 `sendMedia`、失败时记录日志、成功时返回 `Image sent (<name>).` / `Video sent (<name>).` / `Voice sent (<name>).`。
 
 ### 4. 适配器 —— `packages/channels/qqbot/src/QQChannel.ts`
 
-- `sendQQFile` 改为 `sendQQMedia(input & {kind})`。路由解析、回复锚点、`takeMsgSeq` / `beginMsgSeqSend` / `rollbackMsgSeq`、`429` 拒绝、`304080` 重新上传规则、主动重试以及 `finally` 记账均不改动。有三处随 kind 变化：
+- `sendQQFile` 改为 `sendQQMedia(input & {kind})`。路由解析、回复锚点、`beginMsgSeqSend` / `endMsgSeqSend`、`429` 拒绝、`304080` 重新上传规则、主动重试以及 `finally` 记账均不改动。有三处随 kind 变化：
   1. 传给 `uploadQQRichMedia` 的 `fileType: QQ_FILE_TYPE[kind]`；
   2. 所有日志与失败消息中使用的工具名（通过 `toolName` 参数传入 `describeUploadFailure` 与 `describeMediaSendFailure`）；
   3. 上传的大小/格式校验，现在发生在调用之前的工具层，因此适配器自身的限制不变。
@@ -123,7 +123,7 @@ QQ Bot 通道目前只能发送一种富媒体：文件。`qq_send_file` 工具�
 - `file_type`：`1` 图片（`png`/`jpg`，软限 20 MB，硬限 200 MB）、`2` 视频（`mp4`，软限 30 MB，硬限 200 MB）、`3` 语音（`silk`，软限 20 MB，硬限 200 MB）、`4` 文件（任意格式，软限 200 MB，硬限 200 MB）。超过软限制时平台降级为文件卡；超过硬限制时报错。
 - 上传端点按场景隔离：单聊用 `/v2/users/{user_openid}/…`，群聊用 `/v2/groups/{group_openid}/…`，包括预上传与分片完成端点。现有的 `QQRichMediaScope` 选择已处理这一点。
 - `file_info` 有 TTL（`ttl`，`0` 表示不过期）；`304080` 表示句柄在发送前过期，现有路径会在下次尝试时重新上传。
-- 平台只接受富媒体消息作为对近期消息的被动回复，因此现有代码总是先尝试回复锚点，再回退为一次主动发送。
+- 富媒体消息通常要求作为对近期消息的被动回复，因此代码先尝试回复锚点；回复窗口关闭时回退为一次主动发送——在允许主动消息的会话里 QQ 会接受，若群管理员关闭了主动消息，工具会报告拒绝而不是丢弃媒体。
 - 官方参考：<https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html>。
 
 ## 测试
