@@ -1232,7 +1232,11 @@ async function resolveGhPrCreateDirectory(
     // the create (or inside a subshell) wrongly shadow an earlier cd.
     const shadowed = new Set<string>();
 
-    const visit = (node: ShellSyntaxNode, dir: string): string => {
+    const visit = (
+      node: ShellSyntaxNode,
+      dir: string,
+      guaranteed = true,
+    ): string => {
       if (found !== undefined || opaque) return dir;
       switch (node.type) {
         case 'program':
@@ -1253,7 +1257,9 @@ async function resolveGhPrCreateDirectory(
           // `cd w && gh pr create || gh pr view` still attributes in `w`.
           let current = dir;
           let separator: string | undefined;
-          for (const child of node.children) {
+          const children = node.children;
+          for (let i = 0; i < children.length; i++) {
+            const child = children[i]!;
             if (!child.isNamed) {
               separator = child.text;
               continue;
@@ -1278,7 +1284,24 @@ async function resolveGhPrCreateDirectory(
               opaque = true;
               return current;
             }
-            current = visit(child, current);
+            // A statement behind `&&` / `||` may be skipped (its execution
+            // depends on the previous result, which we do not evaluate), and a
+            // statement terminated by `&` runs in a background subshell. None
+            // is guaranteed to run in THIS shell, so side-effects that REMOVE a
+            // conservative protection (lifting a function shadow via
+            // `unset -f`) must not apply to them.
+            let backgrounded = false;
+            for (let j = i + 1; j < children.length; j++) {
+              const next = children[j]!;
+              if (next.isNamed) break;
+              if (next.text === '&') {
+                backgrounded = true;
+                break;
+              }
+            }
+            const conditional =
+              separator === '&&' || separator === '||' || backgrounded;
+            current = visit(child, current, guaranteed && !conditional);
             separator = undefined;
           }
           return current;
@@ -1289,7 +1312,9 @@ async function resolveGhPrCreateDirectory(
           // `shopt -s lastpipe` the last element runs in THIS shell instead.
           const pipelineInCurrentShell = lastpipeEnabled;
           const inheritedShadowed = new Set(shadowed);
-          for (const child of node.namedChildren) visit(child, dir);
+          // Pipeline elements run in subshells: an `unset -f` there cannot lift
+          // a shadow in this shell, so never treat it as guaranteed.
+          for (const child of node.namedChildren) visit(child, dir, false);
           if (!pipelineInCurrentShell) {
             // Function definitions and shopt inside ordinary pipeline
             // elements die with their subshell and cannot affect outer cd.
@@ -1304,7 +1329,7 @@ async function resolveGhPrCreateDirectory(
           let current = dir;
           for (const child of node.namedChildren) {
             if (child.type.endsWith('_redirect')) continue;
-            current = visit(child, current);
+            current = visit(child, current, guaranteed);
           }
           return current;
         }
@@ -1317,8 +1342,14 @@ async function resolveGhPrCreateDirectory(
           return dir;
         }
         case 'unset_command': {
-          // `unset -f cd` restores the builtin, lifting the shadow. Only literal
-          // function names can be removed; an expanded name stays conservative.
+          // `unset -f cd` restores the builtin, lifting the shadow — but only
+          // when the unset is GUARANTEED to execute. Behind `&&` / `||` / `&`
+          // (e.g. `false && unset -f cd`) it may be skipped, so the shadow must
+          // be kept; lifting it would treat a later no-op function call as the
+          // real builtin and query a directory the create never ran in. Only
+          // literal function names can be removed; an expanded name stays
+          // conservative.
+          if (!guaranteed) return dir;
           const hasFunctionFlag = node.namedChildren.some(
             (c) => c.type === 'word' && c.text === '-f',
           );

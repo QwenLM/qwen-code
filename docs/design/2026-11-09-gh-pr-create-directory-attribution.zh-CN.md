@@ -264,6 +264,14 @@ const attributionDir =
 
 bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修改）。上文事实错误的 `findGitRoot` 返回 null 前提已在此更正；其余 deferred 条目（如 `git clone` / `gh repo clone` 建仓、`expand_aliases`、`cd -L/-P/--` 选项钉子、`command gh pr create` 过度保守、空字符串仓库 spec、以及更多文档措辞对齐）作为已记录的局限如实承认，而非悄悄丢弃，以免每轮重复推导同一簇兄弟发现。
 
+### 第八轮评审（2026-11-10，复评 `c48214a576`）
+
+复评确认第七轮全部修复（12 条保留见证通过），并报出第七轮 `unset -f` 处理的一条新 P2：即便 `unset` 被跳过（`cd() { :; }; false && unset -f cd; cd <worktree> && gh pr create`），visitor 仍解除函数阴影，于是其后的空操作函数调用被当成真正的内建，两条腿都去问 create 从未运行过的目录。
+
+**修复（执行证明，与第二轮同根因）。** `visit` 现在传入 `guaranteed` 标志：位于 `&&` / `||` 之后（执行取决于前一条结果，而我们不求值）或以 `&` 结尾（后台子 shell）的语句，不保证在本 shell 执行。`unset_command` 分支仅在 `guaranteed` 时解除阴影；否则保留阴影，使其后的 `cd` 保守地判 `opaque`。管道元素一律不保证（跑在子 shell）；重定向语句继承该标志。添加阴影（函数定义）仍无条件，因为「过度 opaque」是安全方向；而解除阴影只有在 `unset` 可证执行时才安全。
+
+第八轮验证：**498 passed**（484 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AI（去 `guaranteed` 闸门）杀掉三条被跳过/后台化 unset 用例，无条件 unset 对照绿；从字节级备份还原（最终 `shell.ts` SHA-256 `72bbeac2f0cf7f503171225a42daf224df3b9840a4ec8ef8cb9dd1ca3199a181`）。
+
 ## 验收标准
 
 - 两条事故命令形状都绑定到其 worktree 分支所解析出的 PR。

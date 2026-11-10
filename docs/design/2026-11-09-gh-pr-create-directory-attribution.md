@@ -623,6 +623,32 @@ above is corrected here; the remaining deferred entries (e.g. `git clone` /
 doc-wording reconciliations) are acknowledged as recorded limitations rather
 than silently dropped, to avoid re-deriving the same sibling cluster each round.
 
+### Review round 8 (2026-11-10, re-review of `c48214a576`)
+
+The re-review confirmed all round-7 fixes (12 retained witnesses pass) and
+reported one new P2 in the round-7 `unset -f` handling: the visitor lifted the
+function shadow even when the `unset` was skipped (`cd() { :; }; false && unset
+-f cd; cd <worktree> && gh pr create`), so the later no-op function call was
+treated as the real builtin and both legs queried a directory the create never
+ran in.
+
+**Fix (execution-proof, same root cause as round 2).** `visit` now threads a
+`guaranteed` flag: a statement behind `&&` / `||` (execution depends on the
+previous result, which is not evaluated) or terminated by `&` (background
+subshell) is not guaranteed to run in this shell. The `unset_command` arm lifts
+a shadow only when `guaranteed`; otherwise the shadow is kept, so a later `cd`
+stays conservatively `opaque`. Pipeline elements are never guaranteed (they run
+in subshells); redirected statements inherit the flag. Adding a shadow
+(function definition) remains unconditional because over-`opaque` is the safe
+direction, while removing one is only safe when the `unset` provably executes.
+
+Round-8 verification: **498 passed** (484 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witness AI (drop the
+`guaranteed` gate) reds the three skipped/backgrounded-unset cases while the
+unconditional-unset control stays green; restored from a byte-level backup
+(final `shell.ts` SHA-256
+`72bbeac2f0cf7f503171225a42daf224df3b9840a4ec8ef8cb9dd1ca3199a181`).
+
 ## Acceptance criteria
 
 - Both incident command shapes bind the PR their worktree branch resolves to.

@@ -1400,6 +1400,23 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
+      it.each([
+        'cd() { :; }; false && unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; true || unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; unset -f cd & cd /test/dir/nested && gh pr create --fill',
+      ])(
+        'keeps the function shadow when the unset may be skipped: %s',
+        async (command) => {
+          // A skipped (`false &&` / `true ||`) or backgrounded (`&`) `unset -f cd`
+          // leaves the no-op function installed, so the later cd does NOT move the
+          // shell; lifting the shadow unconditionally would query a directory the
+          // create never ran in. Keep the shadow and fall back conservatively.
+          mockCreatedPr(77);
+          const result = await runShell(command, PR_77);
+          expectOpaqueFallback(result);
+        },
+      );
+
       it('binds from launch without a notice when only a subshell cds', async () => {
         // R3-8: a subshell's cd cannot leak to this shell, so the create
         // provably runs at launch and binds there — no false "fell back" notice.
