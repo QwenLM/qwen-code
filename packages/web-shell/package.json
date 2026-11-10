@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.26.9",
+  "version": "0.27.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -38,6 +38,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json && npm run generate:notices",
+    "build:managed-host": "vite build --config vite.lib.config.ts --mode managed-host",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
@@ -62,9 +63,9 @@
     "@codemirror/merge": "^6.12.2",
     "@codemirror/state": "^6.5.0",
     "@codemirror/view": "^6.35.0",
-    "@datafe-open/markdown-chart": "^0.1.12",
-    "@datafe-open/markdown-chart-echarts": "^0.1.12",
-    "@datafe-open/markdown-chart-react": "^0.1.12",
+    "@datafe-open/markdown-chart": "^0.4.1",
+    "@datafe-open/markdown-chart-echarts": "^0.4.1",
+    "@datafe-open/markdown-chart-react": "^0.4.1",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@noble/hashes": "1.8.0",
     "@tanstack/react-table": "^8.21.3",
@@ -111,6 +112,7 @@
     "@pierre/trees": "1.0.0-beta.6",
     "@playwright/test": "1.61.1",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@qwen-code/channel-email": "file:../channels/email",
     "@qwen-code/channel-github": "file:../channels/github",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",

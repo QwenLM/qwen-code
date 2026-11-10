@@ -805,8 +805,10 @@ export { finalizeToolResponses } from './tools/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export { parse, stringify } from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
+export * from './agents/btw-session.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
+export * from './utils/output-language-table.js';
 
 // ============================================================================
 // OAuth & Authentication

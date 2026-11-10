@@ -116,8 +116,7 @@ describe('complete macOS test groups', () => {
 // The extended ceilings below, except the test lane's, are scoped to the
 // self-hosted pool: `runs-on` falls back to ubuntu-latest when
 // MAINTAINER_ECS_RUNNER_DISABLED=true (and, for the association-gated lanes,
-// for fork PRs from untrusted authors — lint_and_static reads lint_runner,
-// which routes every PR to the pool), so those hosted paths keep the
+// for untrusted fork PRs with the disposable pool disabled), so hosted paths keep the
 // pre-contention ceiling. The ARM64 fleet renders
 // `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
 // cannot key on the x64 fleet's name. Evaluate the real timeout expression for
@@ -310,18 +309,18 @@ const runnerOn = (job, runner) => {
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The unsharded suite outgrew 60 minutes on hosted runners: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
-  // Each shard runs an eighth of it, beside one build of the tree.
+  // Each shard runs half of it, beside one build of the tree.
   for (const runner of [ECS_RUNNER, HOSTED_RUNNER, '']) {
     expect(timeoutMinutesOn('test_build', runner)).toBe(45);
     expect(timeoutMinutesOn('test', runner)).toBe(60);
   }
   expect(ci.jobs.test.strategy['fail-fast']).toBe(false);
-  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2]);
 });
 
 it('skips every build-consuming shard step when test_build failed', () => {
   // `!cancelled()` is true when a needed job fails, so without this term a
-  // failed build still starts all eight shards: each pays a full install and
+  // failed build still starts both shards: each pays a full install and
   // then dies at the missing artifact, and every shard reports artifact
   // plumbing as its failing step instead of the build that broke. The steps
   // are gated, not the job or the matrix: `test_ubuntu` compares
@@ -391,8 +390,12 @@ it('reports the required Linux check only when the build and every shard pass', 
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
   expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
-  // On the shards' runners, not a hosted one that can queue it for minutes.
-  expect(gate['runs-on']).toBe(ci.jobs.test['runs-on']);
+  // The gate follows the shards' fleet (the sibling aggregates' shape):
+  // pinning a REQUIRED context to the manually sized disposable pool
+  // parked it in an empty-runner queue for 110 minutes.
+  expect(gate['runs-on']).toBe(
+    '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+  );
   expect(condOf('test_ubuntu')).toBe(condOf('test'));
   expect(gate.steps[0].run).toBe(
     'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
@@ -403,6 +406,12 @@ it('reports the required Linux check only when the build and every shard pass', 
   );
   expect(run.env.UNIT_TEST_SHARD).toBe(
     `\${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length}`,
+  );
+  // The per-shard job names publish the same denominator to the check list,
+  // the developer docs and the autofix evidence lane. Derive it from the
+  // matrix so a retune cannot widen the matrix while the name stays behind.
+  expect(ci.jobs.test.name).toBe(
+    `Linux unit tests (shard \${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length})`,
   );
 });
 
@@ -422,13 +431,13 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   expect(archive).not.toContain('git ls-files');
 
   // Four coupled literals tie the producer to the consumers. Renaming any one
-  // fails all eight shards at unpack after a full build, on the required
+  // fails both shards at unpack after a full build, on the required
   // check, so the name has to be pinned in one place.
   const name = built.get('Upload the built tree').with.name;
   expect(name).toBeTruthy();
   expect(shard.get('Download the built tree').with.name).toBe(name);
   expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
-  // Both attempts have to outlast the slow tail, not the median: eight shards
+  // Both attempts have to outlast the slow tail, not the median: two shards
   // fetch this same artifact at once, the slowest completed one on main took
   // just under five minutes, and one exceeded the old five-minute cap on two
   // runs in a row, skipping the unpack entirely.
@@ -550,15 +559,18 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
-  // Each of the four shards runs a quarter of the smoke at the hosted
+  // Each of the two shards runs half of the smoke at the hosted
   // worker count; the transcript gate runs once, on the first shard.
   expect(smoke.run).toMatch(
-    / -- --shard=\$\{\{ matrix\.shard \}\}\/4 --workers=2$/,
+    / -- --shard=\$\{\{ matrix\.shard \}\}\/2 --workers=2$/,
   );
-  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([
-    1, 2, 3, 4,
-  ]);
+  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([1, 2]);
   expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
+  // Same denominator contract as the unit lane: the per-shard name must
+  // track the matrix, not sit behind it on the next retune.
+  expect(ci.jobs.web_shell_e2e_smoke.name).toBe(
+    `web-shell E2E Smoke (shard \${{ matrix.shard }}/${ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard.length})`,
+  );
   const result = ci.jobs.web_shell_e2e_smoke_result;
   expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
   expect(result.needs).toEqual([
@@ -593,11 +605,12 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
   expect(transcript.if).toBe('${{ matrix.shard == 1 }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
-  // 60-minute job for transcript/smoke tests and artifact upload, while the
-  // install step itself stays bounded.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  // 75-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded. Two shards run half the suite each,
+  // so the cap carries the headroom the four-way split had at 60.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(75);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(75);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(75);
   const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
   );
@@ -862,15 +875,11 @@ describe('post-merge push lane', () => {
     ).toContain('classify_pr');
   });
 
-  it('keeps test on the association-gated output', () => {
-    // Nothing else reads test's runs-on: switching it to lint_runner would
-    // hand every untrusted fork the pool while the timeout pins above stayed
-    // green — timeoutMinutesOn derives each lane's output from its own
-    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
-    // expression, not an equality with lint_and_static — the two are meant
-    // to differ.
+  it('keeps test on the opt-in disposable output', () => {
+    // The classifier defaults this output to ubuntu_runner, but selects the
+    // disposable pool for untrusted forks only when explicitly enabled.
     expect(String(ci.jobs.test['runs-on'])).toBe(
-      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+      '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || \'["ubuntu-latest"]\') }}',
     );
   });
 
@@ -1970,7 +1979,11 @@ describe('platform lanes — a failing nightly is visible', () => {
     const cond = String(failureIssue.jobs.analyze.if);
     expect(cond).toContain("workflow_run.event == 'schedule'");
     expect(cond).toContain("workflow_run.head_branch == 'main'");
-    expect(cond).toContain("workflow_run.conclusion == 'failure'");
+    // The gate admits failure and timeout-backed cancelled runs (#16272); the
+    // live step discriminates a real timeout from a concurrency supersede.
+    expect(cond).toContain(
+      'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion)',
+    );
   });
 });
 

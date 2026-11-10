@@ -39,13 +39,10 @@ public class ManagedActionService {
     private static final int MAX_CURSOR_LENGTH = 512;
     private static final Pattern CURSOR_TIMESTAMP = Pattern.compile("0|[1-9][0-9]{0,18}");
     private static final Pattern CURSOR_SESSION = Pattern.compile("[0-9a-f-]{36}");
-    private static final Pattern CURSOR_ACTION = Pattern.compile("tool_approval_[0-9a-f]{32}");
-    private static final Pattern ACTION_CURSOR =
-            Pattern.compile("(0|[1-9][0-9]{0,18}):tool_approval_[0-9a-f]{32}");
     private static final Pattern UPPERCASE_LETTER = Pattern.compile("([A-Z])");
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-                    "todo_write",
+                    "todo_write", "context_search", "context_remember", "context_get", "context_forget",
                     "agent", "send_message", "team_create", "task_create",
                     "task_update", "workflow", "request_shutdown", "exit_plan_mode",
                     "team_plan_approval");
@@ -134,7 +131,8 @@ public class ManagedActionService {
                 }
                 String[] parts = decoded.substring(scope.length()).split(":", -1);
                 if (parts.length != 3 || !CURSOR_TIMESTAMP.matcher(parts[0]).matches()
-                        || !CURSOR_SESSION.matcher(parts[1]).matches() || !CURSOR_ACTION.matcher(parts[2]).matches()) {
+                        || !CURSOR_SESSION.matcher(parts[1]).matches()
+                        || !ManagedActionStore.ACTION_ID.matcher(parts[2]).matches()) {
                     throw new IllegalArgumentException();
                 }
                 before = Long.parseLong(parts[0]);
@@ -306,10 +304,11 @@ public class ManagedActionService {
                 }
                 String decoded =
                         new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
-                if (!ACTION_CURSOR.matcher(decoded).matches()) {
+                String[] parts = decoded.split(":", 2);
+                if (parts.length != 2 || !CURSOR_TIMESTAMP.matcher(parts[0]).matches()
+                        || !ManagedActionStore.ACTION_ID.matcher(parts[1]).matches()) {
                     throw new IllegalArgumentException();
                 }
-                String[] parts = decoded.split(":", 2);
                 before = Long.parseLong(parts[0]);
                 beforeId = parts[1];
             } catch (IllegalArgumentException error) {
@@ -413,7 +412,7 @@ public class ManagedActionService {
                     return null;
                 }
                 text = wrapper.path("payloadJson").asText();
-                JsonNode payload = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(text);
+                JsonNode payload = ManagedExtensionRecordStore.parse(text);
                 if (payload == null
                         || payload.size() != 2
                         || !tool.equals(payload.path("toolName").asText())

@@ -101,8 +101,8 @@ env:
   # re-runs every suite after `npm ci`, and a push to main always classifies
   # `full` (classify_pr computes a profile only for pull_request), so what
   # the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -143,11 +143,8 @@ jobs:
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
-      # Lint & Static's own routing: every pull request reaches the fleet,
-      # including untrusted forks (maintainer decision 2026-10-31 — the lane
-      # executes PR code on the shared pool and that risk is accepted). The
-      # association gate in ubuntu_runner still governs every other Linux
-      # lane; do not "simplify" the two outputs into one.
+      pr_test_runner: '${{ steps.pick_runner.outputs.pr_test_runner }}'
+      # Untrusted forks route to the disposable ARM64 pool; see pick_runner.
       lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
@@ -196,11 +193,8 @@ jobs:
       # Keep push routing aligned with the classifier above so a hosted queue
       # does not delay the downstream ECS jobs.
       #
-      # lint_runner is the one deliberate divergence: Lint & Static routes
-      # EVERY pull request to the fleet, untrusted forks included (maintainer
-      # decision 2026-10-31, risk accepted — see the classify_pr outputs
-      # comment). The kill-switch and LINUX_RUNNER_FLEET=hosted still force
-      # hosted, and non-PR events inherit ubuntu_runner unchanged.
+      # Untrusted fork build, test, lint and no-AK integration jobs use the
+      # disposable ARM64 pool without depending on repository variables.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
@@ -242,12 +236,13 @@ jobs:
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
-          # Lint & Static routes every pull request to the fleet (maintainer
-          # decision 2026-10-31); non-PR events inherit ubuntu_runner unchanged.
+          pr_test_runner="${ubuntu_runner}"
           lint_runner="${ubuntu_runner}"
-          if [[ "${EVENT_NAME}" == "pull_request" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" ]]; then
-            lint_runner="${fleet_runner}"
+          if [[ "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
+            pr_test_runner='["self-hosted", "ecs-qwen-ephemeral"]'
+            lint_runner="${pr_test_runner}"
           fi
+          echo "pr_test_runner=${pr_test_runner}" >> "${GITHUB_OUTPUT}"
           echo "lint_runner=${lint_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected lint runner: ${lint_runner}"
 
@@ -420,10 +415,10 @@ jobs:
   # also starts from the newest cached build and rebuilds only the
   # workspaces whose inputs changed (scripts/ci-build-cache.mjs).
   test_build:
-    name: 'Build unit-test tree (ubuntu-latest, Node 22.x)'
+    name: 'Build unit-test tree (Linux, Node 22.x)'
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     permissions:
       contents: 'read'
@@ -873,7 +868,7 @@ jobs:
   # The required `Test (ubuntu-latest, Node 22.x)` check is `test_ubuntu`,
   # which passes only when the build and every shard below pass.
   test:
-    name: 'Linux unit tests (shard ${{ matrix.shard }}/8)'
+    name: 'Linux unit tests (shard ${{ matrix.shard }}/2)'
     needs: ['classify_pr', 'test_build']
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
@@ -890,15 +885,19 @@ jobs:
     # have. So a push run is lint, static analysis and unit tests —
     # lint/static in `lint_and_static`, unit tests here.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    # Every Vitest run takes one eighth of its suite's files (`--shard`): the
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || ''["ubuntu-latest"]'') }}'
+    # Every Vitest run takes one half of its suite's files (`--shard`): the
     # unsharded lane ran 45-59 minutes, almost all of it the CLI and core
-    # suites one after the other. A shard keeps the old ceiling's headroom
-    # for a contended ECS host; the test step's own cap bounds a genuine hang.
+    # suites one after the other. Two shards cut the per-job infra failure
+    # points (install, artifact download, coverage upload) to a quarter of the
+    # earlier eight-way split while the slowest leg stays bounded by single
+    # test files (Session.test.ts ~506 s, App.test.tsx ~377 s) that no shard
+    # count can split. A shard keeps the old ceiling's headroom for a
+    # contended ECS host; the test step's own cap bounds a genuine hang.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2]
     timeout-minutes: 60
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
@@ -1199,14 +1198,14 @@ jobs:
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
-      # Eight shards pull this same artifact at once, so the cap has to clear
-      # the slow tail rather than the median: on main four shards finished
-      # inside a minute, three needed between 2m40s and just under five
-      # minutes, and one exceeded the old five-minute cap on two consecutive
-      # runs, which skipped the unpack and failed the required check. Fifteen
-      # minutes leaves that measured tail about three times the headroom; if
-      # main still expires, the fix is fewer concurrent fetches, not a bigger
-      # cap.
+      # Two shards now pull this same artifact at once, down from eight, so
+      # the cap has to clear the slow tail rather than the median. Under that
+      # earlier eight-way split four shards finished inside a minute, three
+      # needed between 2m40s and just under five minutes, and one exceeded the
+      # old five-minute cap on two consecutive runs, which skipped the unpack
+      # and failed the required check. Fifteen minutes leaves that measured
+      # tail about three times the headroom; cutting the concurrent fetches
+      # to two only shortens the tail further.
       - name: 'Download the built tree'
         id: 'download_tree'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -1334,11 +1333,14 @@ jobs:
         # processes, which reads as a timeout rather than a failure.
         #
         # The cap has to clear the slowest honest shard, not the healthy one:
-        # the same 1/8 slice measures ~7 minutes on an idle host and ~36 on a
-        # contended one, and a failing run adds its retries on top. 45 leaves
-        # room for that while still firing before this job's 60-minute cap,
-        # which this step enters around minute 10 — a step timeout keeps the
-        # diagnostic steps below alive, a job timeout does not.
+        # under the earlier eight-way split a 1/8 slice measured ~7 minutes on
+        # an idle host and ~36 on a contended one (#10490). A 1/2 slice does
+        # more file work but the slowest leg is still bounded by single test
+        # files, and cutting the shard count to two cuts the burst concurrency
+        # that produced the contended tail. 45 leaves room for retries while
+        # still firing before this job's 60-minute cap, which this step enters
+        # around minute 10 — a step timeout keeps the diagnostic steps below
+        # alive, a job timeout does not.
         timeout-minutes: 45
         env:
           NO_COLOR: true
@@ -1386,7 +1388,7 @@ jobs:
           # This shard's slice of every Vitest run. A small suite has fewer
           # files than shards, hence --passWithNoTests beside it. The
           # standalone regression is no Vitest run; the first shard runs it.
-          UNIT_TEST_SHARD: '${{ matrix.shard }}/8'
+          UNIT_TEST_SHARD: '${{ matrix.shard }}/2'
           QWEN_CI_SKIP_STANDALONE_RUNTIMES: "${{ matrix.shard != 1 && '1' || '' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
@@ -1525,8 +1527,10 @@ jobs:
     name: 'Test (ubuntu-latest, Node 22.x)'
     needs: ['classify_pr', 'test_build', 'test']
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    # The shards' runners: a hosted runner queued this one-line check for
-    # 9 minutes after the last shard finished.
+    # Follows the shards' fleet (the sibling aggregates' shape): a REQUIRED
+    # context pinned to the manually sized disposable pool queued 110
+    # minutes with no runner (job 128729488158); timeout-minutes does not
+    # cover queue time and the kill-switch cannot reach fork runs.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
@@ -1559,12 +1563,7 @@ jobs:
     # same release-sync convention: stay running on skip_ci PRs so a required
     # context still reports, with the per-step guards making it a no-op pass.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    # Reads lint_runner, NOT ubuntu_runner: this lane routes every pull
-    # request to the fleet, untrusted forks included (maintainer decision
-    # 2026-10-31 — the lane executes PR code and the shared-pool risk is
-    # accepted). test and the integration lanes keep the association-gated
-    # ubuntu_runner. The kill-switch and hosted-fleet overrides still apply,
-    # inside pick_runner.
+    # Shares the external-PR disposable-pool routing with test and integration_no_ak.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     # Pool-scoped like test's, not a bare constant: this lane was beheaded twice
     # running honestly on cold-cache hk3-pool runners — at 30 minutes flat
@@ -2185,7 +2184,7 @@ jobs:
   # The `web-shell E2E Smoke (ubuntu-latest, Node 22.x)` check is
   # `web_shell_e2e_smoke_result`, which passes only when every shard passes.
   web_shell_e2e_smoke:
-    name: 'web-shell E2E Smoke (shard ${{ matrix.shard }}/4)'
+    name: 'web-shell E2E Smoke (shard ${{ matrix.shard }}/2)'
     # Gate on the classifier's own profile output instead of the copy `test`
     # re-derives: it is the same value (the classifier already forces an
     # unknown one to `full`), and dropping the `test` edge lets this
@@ -2221,14 +2220,17 @@ jobs:
     # host. The smoke step pins the hosted worker count.
     runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # The unsharded smoke ran 44-46 minutes, about 33 of them in the 208
-    # smoke tests at two workers; each shard runs a quarter of them.
+    # smoke tests at two workers; each shard runs half of them.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
-    # the smoke tests and artifact cleanup after installation.
-    timeout-minutes: 60
+    # the smoke tests and artifact cleanup after installation. Two shards run
+    # half the suite each (~23-24 min observed per shard) rather than a
+    # quarter, so the cap rises from 60 to 75 to keep the headroom the
+    # four-way split had for a slow install or download tail.
+    timeout-minutes: 75
     permissions:
       contents: 'read'
     steps:
@@ -2519,7 +2521,7 @@ jobs:
         # Two workers is the hosted default (half of 4 vCPUs). Unpinned, a pool
         # job would start browsers for half the host's cores while the host
         # runs its other jobs.
-        run: 'npm run test:e2e:smoke --workspace=packages/web-shell -- --shard=${{ matrix.shard }}/4 --workers=2'
+        run: 'npm run test:e2e:smoke --workspace=packages/web-shell -- --shard=${{ matrix.shard }}/2 --workers=2'
 
       - name: 'Upload web-shell Playwright artifacts'
         if: '${{ always() }}'
@@ -2958,13 +2960,13 @@ jobs:
   # so adding it is a no-op for existing PR/push runs. Reuses the exact
   # `test:integration:cli:sandbox:none` script from `release.yml`.
   integration_no_ak:
-    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/3)'
+    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/2)'
     # Since #16133 test_build uploads the tree this gate tests. Installing
     # with `prepare` here rebuilt and rebundled it from scratch — about ten
     # minutes, the longest single step on the required path — and the ~50
     # files then ran one at a time (one fork on the pool, below), seventeen
     # more minutes. The shards unpack the shared tree and split the files
-    # three ways; integration_no_ak_result keeps the required check name.
+    # two ways; integration_no_ak_result keeps the required check name.
     needs:
       - 'classify_pr'
       - 'test_build'
@@ -2982,19 +2984,13 @@ jobs:
     # A draft pull request skips it (and the browser smoke): it cannot merge,
     # and `ready_for_review` starts the full run that gates the merge.
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
-    # Reads lint_runner, NOT ubuntu_runner: like lint_and_static, this lane
-    # executes PR code on the pool for every pull request — accepted under the
-    # same 2026-10-31 decision, and it carries NO secrets by construction
-    # (every model key is emptied at the integration step; the job's only
-    # token is the read-only checkout grant). The lane publishes a run-unique
-    # HOME from its first step (lint's shape) and empties every model key at
-    # the gate, so the pool exposure is the class already accepted for lint.
-    # test and integration_cli keep the association-gated ubuntu_runner.
+    # Shares lint's hosted/disposable routing for untrusted forks. Model keys
+    # are empty; the job receives only the read-only checkout token.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
     # Same self-hosted scoping as lint_and_static (60/30 like its 90/45):
@@ -3278,7 +3274,7 @@ jobs:
           if [ "${{ matrix.shard }}" = 1 ]; then
             npm run typecheck:integration
           fi
-          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/3
+          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) so it
       # does not accumulate in RUNNER_TEMP on this persistent pool.

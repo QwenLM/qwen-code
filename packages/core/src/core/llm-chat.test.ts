@@ -30,6 +30,9 @@ import type {
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import { FinishReason } from './genai-compat.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import {
   LlmChat,
@@ -53,7 +56,10 @@ import {
   ResponsesStreamState,
 } from './openaiResponsesContentGenerator/responses-converter.js';
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
-import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import {
+  getToolCallFingerprint,
+  normalizeModelToolCallIds,
+} from './toolCallIdUtils.js';
 import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
@@ -80,7 +86,12 @@ import {
 } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
+import {
+  CompressionStatus,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
+  type ChatCompressionInfo,
+} from './turn.js';
 import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
@@ -1030,6 +1041,46 @@ describe('LlmChat', async () => {
       expect(streamMock()).toHaveBeenCalledOnce();
     });
 
+    it.each([0, 64 * 1024])(
+      'copies the prepared conversation only with a positive snapshot budget (%s)',
+      async (maxSnapshotBytes) => {
+        streamMock().mockResolvedValue(
+          streamOf(stopResponse([{ text: 'done' }])),
+        );
+        const clone = vi.spyOn(globalThis, 'structuredClone');
+        const stringify = vi.spyOn(JSON, 'stringify');
+        let copiedDuringCapture = -1;
+        let serializedDuringCapture = -1;
+        const callback = Object.assign(
+          async () => {
+            copiedDuringCapture = clone.mock.calls.length;
+            serializedDuringCapture = stringify.mock.calls.filter(
+              ([value]) =>
+                value &&
+                typeof value === 'object' &&
+                'providerPin' in value &&
+                'request' in value &&
+                'history' in value,
+            ).length;
+          },
+          { maxSnapshotBytes },
+        );
+        const response = await chat.sendMessageStream(
+          'test-model',
+          { message: 'observation only' },
+          'prompt',
+          undefined,
+          { onPreparedRequest: callback },
+        );
+        clone.mockClear();
+        stringify.mockClear();
+        await drain(response);
+        expect(copiedDuringCapture).toBe(maxSnapshotBytes > 0 ? 1 : 0);
+        expect(serializedDuringCapture).toBe(maxSnapshotBytes > 0 ? 1 : 0);
+        expect(streamMock()).toHaveBeenCalledOnce();
+      },
+    );
+
     it('does not send, retry or fall back after a failed durability barrier', async () => {
       const dispatched = vi.fn();
       const callback = vi
@@ -1462,6 +1513,21 @@ describe('LlmChat', async () => {
     /** `send` for any message shape, a bare Part included. */
     const sendAny = (message: Message, promptId: string, target = chat) =>
       target.sendMessageStream('test-model', { message }, promptId);
+
+    it('reports signed-out subscription before processing the request', async () => {
+      mockConfig.getCurrentAuthType = vi
+        .fn()
+        .mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      mockConfig.getContentGeneratorConfig = vi.fn().mockReturnValue(undefined);
+      vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
+        false,
+      );
+
+      await expect(sendAny('hello', 'signed-out')).rejects.toThrow(
+        SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE,
+      );
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
 
     /** A user prompt followed by the model's (unanswered) call. */
     const afterCall = (
@@ -6953,6 +7019,145 @@ describe('LlmChat', async () => {
       );
     });
 
+    it.each(['marked', 'legacy'])(
+      'excludes %s loop-stopped calls until the provider id is handled',
+      (format) => {
+        const stoppedResponse = (id: string): Part => ({
+          ...fnResponse('read_file', { error: TOOL_LOOP_SKIPPED_MESSAGE }, id),
+          ...(format === 'marked'
+            ? { partMetadata: { [TOOL_LOOP_SKIPPED_METADATA]: true } }
+            : {}),
+        });
+        const stoppedHistory = [
+          content('model', readCall('handled', 'handled.ts')),
+          content(
+            'user',
+            fnResponse(
+              'read_file',
+              { error: TOOL_LOOP_SKIPPED_MESSAGE },
+              'handled',
+            ),
+          ),
+          content(
+            'model',
+            readCall('fresh', 'fresh.ts'),
+            readCall('loop-end', 'handled.ts'),
+          ),
+          content('user', stoppedResponse('fresh')),
+          content('user', stoppedResponse('loop-end')),
+        ];
+        const endIds = format === 'legacy' ? ['loop-end'] : [];
+        chat.setHistory(stoppedHistory, endIds);
+        expect(chat.getHistoryFunctionResponseIds()).toContain('fresh');
+        expect([...chat.getHistoryToolCallFingerprints().keys()]).toEqual([
+          'handled',
+        ]);
+
+        const [retried] = normalizeModelToolCallIds(
+          [readCall('fresh', 'retry.ts')],
+          new Set(['fresh']),
+          new Set(),
+        );
+        const id = retried.functionCall!.id!;
+        const history = [
+          ...stoppedHistory,
+          content('model', redactStructuredOutputArgsForRecording(retried)!),
+          content('user', fnResponse('read_file', { output: 'retried' }, id)),
+        ];
+        chat.setHistory(JSON.parse(JSON.stringify(history)), endIds);
+        const fingerprints = chat.getHistoryToolCallFingerprints();
+        const fingerprint = getToolCallFingerprint('read_file', {
+          file_path: 'retry.ts',
+        });
+        expect(fingerprints.get('fresh')).toBe(fingerprint);
+        expect(fingerprints.get(id)).toBe(fingerprint);
+        expect(fingerprints.has('loop-end')).toBe(false);
+        expect(chat.getHistoryToolCallFingerprints(new Set([id]))).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
+        expect(
+          chat.getHistoryToolCallFingerprints(new Set(['fresh', 'loop-end'])),
+        ).toEqual(new Map());
+
+        chat.setHistory(JSON.parse(JSON.stringify(history.slice(-2))));
+        expect(chat.getHistoryToolCallFingerprints()).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
+      },
+    );
+
+    it('chooses a retained provider alias before filtering to retry results', () => {
+      const rawId = 'reused';
+      const usedIds = new Set([rawId]);
+      const pair = (file: string, response: Record<string, unknown>) => {
+        const [call] = normalizeModelToolCallIds(
+          [readCall(rawId, file)],
+          usedIds,
+          new Set(),
+        );
+        return [
+          content('model', call),
+          content(
+            'user',
+            fnResponse('read_file', response, call.functionCall!.id),
+          ),
+        ];
+      };
+      const firstResult = pair('first.ts', { output: 'first' });
+      const secondResult = pair('second.ts', { output: 'second' });
+      const firstId = firstResult[0].parts![0].functionCall!.id!;
+      const secondId = secondResult[0].parts![0].functionCall!.id!;
+      const history = [...firstResult, ...secondResult];
+      const firstFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'first.ts',
+      });
+      const secondFingerprint = getToolCallFingerprint('read_file', {
+        file_path: 'second.ts',
+      });
+
+      chat.setHistory(history);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        firstFingerprint,
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([secondId]))).toEqual(
+        new Map([[secondId, secondFingerprint]]),
+      );
+
+      chat.setHistory([
+        ...history,
+        content('model', readCall(rawId, 'original.ts')),
+        content('user', fnResponse('read_file', { output: 'original' }, rawId)),
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        getToolCallFingerprint('read_file', { file_path: 'original.ts' }),
+      );
+      expect(chat.getHistoryToolCallFingerprints(new Set([firstId]))).toEqual(
+        new Map([[firstId, firstFingerprint]]),
+      );
+
+      chat.setHistory([
+        firstResult[0],
+        content(
+          'user',
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            firstId,
+          ),
+        ),
+        ...secondResult,
+      ]);
+      expect(chat.getHistoryToolCallFingerprints().get(rawId)).toBe(
+        secondFingerprint,
+      );
+    });
+
     it('keeps the first answered call for an id reused across turns and skips orphan response ids', () => {
       // The fingerprint is the replay oracle: a reused id keeps naming the
       // call first executed under it; an orphan functionResponse adds nothing.
@@ -9695,6 +9900,52 @@ describe('LlmChat', async () => {
         expectRecordedText(record, 'Analysis: the file contains the bug.');
         // Record and history must agree even though the send was abandoned.
         expect(historyText).toBe(recordedText(record));
+      });
+
+      it('preserves finishMessage on the deferred tool-result finish chunk', async () => {
+        vi.useFakeTimers();
+        chat.setHistory([
+          userText('read the file'),
+          content(
+            'model',
+            fnCall('read_file', { path: '/tmp/x' }, 'call_refusal'),
+          ),
+        ]);
+        mockStreamsOnce(
+          streamOf(textChunk('Request refused.'), {
+            candidates: [
+              {
+                finishReason: FinishReason.SAFETY,
+                finishMessage:
+                  'Response refused due to cyber-related safety policy.',
+              },
+            ],
+          } as GenerateContentResponse),
+        );
+
+        const events = await collectStreamWithFakeTimers(
+          await sendToolResult(
+            'call_refusal',
+            'prompt-deferred-finish-message',
+          ),
+          10_000,
+        );
+        const finish = events
+          .filter((event) => event.type === StreamEventType.CHUNK)
+          .map(
+            (event) =>
+              (event as { value: GenerateContentResponse }).value
+                .candidates?.[0],
+          )
+          .find((candidate) => candidate?.finishReason);
+
+        expect(finish).toEqual(
+          expect.objectContaining({
+            finishReason: FinishReason.SAFETY,
+            finishMessage:
+              'Response refused due to cyber-related safety policy.',
+          }),
+        );
       });
 
       /**

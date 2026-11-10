@@ -402,6 +402,38 @@ The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
 not maintain a separate public-to-Harness Session mapping.
 
+## Personal memory (opt-in)
+
+Personal memory is disabled by default. Enable it only after qualifying a
+dedicated Mem0 service with cross-service sharing disabled. Configure the
+control plane with `qwen.managed-agent.memory.enabled=true`,
+`qwen.managed-agent.memory.endpoint` and `qwen.managed-agent.memory.api-key`.
+Session Store must also be enabled, and the Hosted Harness must advertise
+`session-memory/1`. The endpoint and service key stay in the control plane;
+do not put them in Harness, sandbox or MCP configuration.
+
+An authenticated actor calls `POST /v1/agents/memory-stores` with an empty body
+or `{}` to create or retrieve their single personal Store. `GET` on the same
+route returns zero or one Store. Add the returned `id` as `memory_store_id` to
+the public Session creation request, or `memoryStoreId` to the WebShell request.
+Omitting the field leaves memory disabled. The binding cannot change after
+creation and participates in creation idempotency. The same user can explicitly
+reuse their Store across authorized Workspaces.
+
+Bound Sessions recall relevant memories for new user inputs and expose
+`context_search`, `context_remember`, `context_get` and `context_forget` through
+the existing tool UI. Remembering and forgetting require explicit user intent
+and follow tool approval and Plan Mode. An uncertain write returns `unknown`;
+it is never automatically resubmitted or reported as successful.
+
+These Sessions and their children are visible only to the owner, in addition to
+the existing Workspace grants. Children do not inherit Store access. Workspace
+file sharing remains unchanged. Deleting a memory affects future retrieval,
+while prior Session history follows the existing retention policy. Existing
+development databases must be recreated after this V1 schema baseline change.
+See the [personal memory design](../../docs/design/2026-11-07-managed-user-memory.md)
+for isolation and recovery requirements.
+
 ## Public Session lifecycle
 
 Close, archive and delete are durable `ma_operation` execution units. Each answers
@@ -1044,6 +1076,10 @@ parameter limits, quotas and outbound network restrictions must be enforced by
 the caller or deployment. Each Session retains an immutable credential snapshot,
 so replacing a provider key requires a new Session. See the
 [deployment boundary](../../docs/design/managed-session-model-config.md#multi-tenant-deployment-boundary).
+
+Managed BTW and recap generation is opt-in through `qwen.managed-agent.side-queries-enabled=true` (default `false`). Deploy matching Server, Java SDK, Harness and WebShell builds; the Session Store and `side-query/1` are required. Only ACTIVE Sessions with explicit `model_config` and the caller's execution authority can generate. Catalog/default-model Sessions remain unavailable. Cold Sessions do not attach to a Harness Session, acquire a writer, change placement or create a Runtime for these requests.
+
+WebShell provides `/btw <question>`, a private history panel and `/recap`. BTW retains the current actor's latest 20 successful pairs. Automatic recap defaults off; after at least five minutes away it waits for main/queue idle, needs three successful user turns initially and two new turns after a successful recap, and rechecks content and main-input boundaries before display. Queries have a five-minute deadline, one provider attempt and four physical execution slots per Harness. Stop affects only the side query. Disabling admission preserves authorized result reads and accepted work. The V1 baseline includes `ma_side_query`; recreate development catalogs. CSI application-image export with retained side-query data fails closed in this version. See the [design](../../docs/design/2026-11-09-managed-btw-recap.md) and [implementation evidence](../../docs/plans/2026-11-09-managed-btw-recap.md).
 
 Idle Workspace Sessions support manual context compression when the Harness advertises `context-compression/1`. Send `POST /v1/agents/sessions/{sessionId}/compress` with `Idempotency-Key` and `{ "expected_compaction_revision": 0 }`, using the Session's current `compaction_revision`; WebShell uses `/api/agent/web-shell/v1/sessions/compress` and camelCase fields. The public `context_compression` capability advertises deployment support; the WebShell `contextCompression` capability also reflects the current caller grant and execution facts. A Workspace OPERATOR or OWNER can admit the durable `context_compression` operation; the existing operation query returns `pending`, `running`, `recovery_blocked`, `completed` or `failed`, and a completed outcome is `compressed` or `noop`. Same-key retries resolve the original operation before mutable capability, revision and busy checks. Compression refuses active or queued Turns, approvals, unsettled Hooks and conflicting context work. It does not create a user Turn or change approval, Plan or Workspace context revisions. After compression, context usage stays unknown until the next main-model observation. Deploy matching Server/Broker, Harness and WebShell builds using the current V1 baseline; stop new compression admission and settle accepted operations before rollback. Existing retained journals establish their compaction revision on first read; if that evidence is unavailable, the capability is false and the revision is omitted.
 
@@ -1712,6 +1748,18 @@ and [Chinese design](../../docs/design/2026-10-24-managed-extension-packages.zh-
 Local focused tests, macOS developer receipts and the existing Linux static-extension
 gate below establish different boundaries. Complete package Linux/SSH cleanup,
 fault injection and real-provider qualification remain separate acceptance gates.
+
+## Managed-only Skill and MCP installation
+
+Set `qwen.managed-agent.extensions.self-service-enabled=true` to allow authorized Workspace operators in the extension deployment allowlist to upload ZIP/tar.gz Skill or extension archives and author ordinary stdio, Streamable HTTP and SSE MCP connections without a local daemon. The Hosted Harness must advertise `managed-package-preparation/1`; pool preparation uses an accepting capable member without creating Session placement. Both the uploader and Session query expose permission and apply eligibility, and the server rechecks them.
+
+Review normalized resources and non-secret configuration before confirming installation. Workspace service credentials are stored through encrypted extension settings; commands, arguments and resource files are not executed during preparation. Publishing a revision does not change an existing Session. Explicit apply pins the chosen package/settings revision only in an eligible idle Session and preserves unrelated extensions, independent MCP connections and base Hooks. Recovery of old content creates a new configuration revision. An unknown apply outcome keeps the original operation/owner barrier and must be queried or continued before another selection is submitted.
+
+Runtime project Skill snapshots and personal HTTP MCP OAuth are separate dependent deliveries. This installation protocol remains version 1 and adds no personal credential tables or bindings. See the complete [English design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.md) and [Chinese design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.zh-CN.md). Disabling self-service keeps already published and installed content available. Local focused checks and prior whole-branch CI do not establish real MySQL, browser-to-Runtime or process-fault acceptance of a split head.
+
+### Import project Skills from the current Runtime
+
+After first-stage self-service is available, enable `qwen.managed-agent.extensions.runtime-skill-import-enabled` only with the Hosted `managed-runtime-skill-import/1` capability. Use **Import from current Workspace** to discover `.qwen/skills` and `.agents/skills` in the Session's original ready Runtime. Snapshot and archive reads retain the observed owner/generation and filesystem boundary; a changed source or owner fails without fallback or provisioning. Review and explicitly apply the immutable snapshot through the existing installation chain. Re-import publishes a new revision and does not watch or automatically update existing Sessions. See the [English design](../../docs/design/2026-11-08-managed-runtime-skill-import.md) and [Chinese design](../../docs/design/2026-11-08-managed-runtime-skill-import.zh-CN.md). Personal OAuth is a separate delivery and is not required.
 
 ## Linux extension process acceptance
 

@@ -5,6 +5,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { getManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import { MANAGED_MODEL_STATISTICS_KINDS } from '@qwen-code/qwen-code-core/managed-runtime/managed-model-statistics.js';
 import type { Content } from '@google/genai';
 import { llmPreparedProviderPin } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import {
@@ -263,7 +265,9 @@ export class HostedContextCompression {
       if (this.options.busy())
         throw new HostedCompressionRefusal('session_context_busy');
       const record: HistoryMaintenance = {
-        schemaVersion: 1,
+        ...(getManagedSessionDiagnostics(this.options.session.authority)
+          ? { schemaVersion: 2 as const, modelStatsRef: null }
+          : { schemaVersion: 1 as const }),
         kind: 'context_compression',
         operationId: intent.operationId,
         expectedCompactionRevision: intent.expectedCompactionRevision,
@@ -372,6 +376,7 @@ export class HostedContextCompression {
       true,
       {
         toolInvocationGuard: () => ({ allowed: false }),
+        lspDisabled: true,
         ...(sessionModelConfig
           ? { modelConfiguration: sessionModelConfig }
           : {}),
@@ -445,6 +450,38 @@ export class HostedContextCompression {
     },
   ): Promise<void> {
     const session = this.options.session;
+    const diagnostics = getManagedSessionDiagnostics(session.authority);
+    const commit = () => this.commitOwned(record, compaction);
+    return diagnostics ? diagnostics.serialCommit(commit) : commit();
+  }
+
+  private async commitOwned(
+    record: HistoryMaintenance,
+    compaction?: {
+      summaryRef: ManagedSessionDurableRef;
+      compactionId: string;
+      fromSequence: number;
+      toSequence: number;
+      replacedMessageIds: string[];
+    },
+  ): Promise<void> {
+    const session = this.options.session;
+    const diagnostics = getManagedSessionDiagnostics(session.authority);
+    if (
+      record.schemaVersion === 2 &&
+      record.modelStatsRef === null &&
+      (record.phase === 'candidate' ||
+        record.phase === 'settled' ||
+        record.run.state === 'recovery_blocked') &&
+      diagnostics
+    ) {
+      record = {
+        ...record,
+        modelStatsRef: await diagnostics.publish(
+          MANAGED_MODEL_STATISTICS_KINDS.snapshot,
+        ),
+      };
+    }
     const revision =
       session.authority.extensionRecord(
         'history_maintenance',
@@ -463,6 +500,15 @@ export class HostedContextCompression {
   }
 
   private async execute(initial: HistoryMaintenance): Promise<void> {
+    const diagnostics =
+      initial.schemaVersion === 2
+        ? getManagedSessionDiagnostics(this.options.session.authority)
+        : undefined;
+    const run = () => this.executeOwned(initial);
+    return diagnostics ? diagnostics.run('compression', run) : run();
+  }
+
+  private async executeOwned(initial: HistoryMaintenance): Promise<void> {
     let current = initial;
     let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
     const signal = new AbortController().signal;
@@ -520,6 +566,7 @@ export class HostedContextCompression {
             } satisfies PersistedCandidate);
             current = { ...current, phase: 'candidate', candidateRef };
             await this.commit(current);
+            current = this.record(current.operationId)!;
           },
         });
         if (
