@@ -1450,8 +1450,7 @@ describe('CoreToolScheduler', () => {
           ),
           getAutoModeDenialState: () => autoModeDenialState,
           setAutoModeDenialState,
-          getAutoModeSettings: () =>
-            options?.classifyAllShell ? { classifyAllShell: true } : {},
+          getAutoModeSettings: () => ({}),
           getWorkspaceContext: () => ({
             isPathWithinWorkspace: () => false,
           }),
