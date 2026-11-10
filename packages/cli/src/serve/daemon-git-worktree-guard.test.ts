@@ -682,6 +682,33 @@ describe('createDaemonToolGuard', () => {
     });
   });
 
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      () =>
+        `cat <<$'EOF'\nbody\nEOF\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () =>
+        `cat <<$"EOF"\nbody\nEOF\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () =>
+        `((\nmask = 1 << 2\n))\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () => `echo $((\n1 << 2\n))\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () =>
+        `(( mask = 1 \\\n<< 2 ))\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () => `echo $[\n1 << 2\n]\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+    ])(
+    'keeps commands after dollar-prefixed delimiters and multiline arithmetic visible %#',
+    async (build) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+    },
+  );
+
   // Measured false positives from the old leftmost-match regex: a decoy
   // `<<WORD` inside a quoted string must not latch when the line's real
   // heredoc is quoted, and documentation or grep text about heredocs is not

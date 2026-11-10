@@ -2311,6 +2311,8 @@ interface HeredocScanState {
   backtick: boolean;
   ansiC: boolean;
   substitution: number;
+  arithmeticDepth: number;
+  legacyArithmetic: boolean;
   readonly quoteStack: Array<[boolean, boolean]>;
   readonly backtickQuoteStack: Array<[boolean, boolean]>;
 }
@@ -2322,13 +2324,19 @@ function createHeredocScanState(): HeredocScanState {
     backtick: false,
     ansiC: false,
     substitution: 0,
+    arithmeticDepth: 0,
+    legacyArithmetic: false,
     quoteStack: [],
     backtickQuoteStack: [],
   };
 }
 
-function skipParenthesizedArithmetic(line: string, start: number): number {
-  let depth = 0;
+function skipParenthesizedArithmetic(
+  line: string,
+  start: number,
+  state: HeredocScanState,
+): number {
+  let depth = state.arithmeticDepth;
   let cursor = line[start] === '$' ? start + 1 : start;
   while (cursor < line.length) {
     const inner = line[cursor]!;
@@ -2343,11 +2351,16 @@ function skipParenthesizedArithmetic(line: string, start: number): number {
     }
     cursor++;
   }
+  state.arithmeticDepth = depth;
   return cursor;
 }
 
-function skipLegacyArithmetic(line: string, start: number): number {
-  let cursor = start + 2;
+function skipLegacyArithmetic(
+  line: string,
+  start: number,
+  state: HeredocScanState,
+): number {
+  let cursor = state.legacyArithmetic ? start : start + 2;
   while (cursor < line.length) {
     if (line[cursor] === '\\') {
       cursor += 2;
@@ -2356,6 +2369,7 @@ function skipLegacyArithmetic(line: string, start: number): number {
     if (line[cursor] === ']') break;
     cursor++;
   }
+  state.legacyArithmetic = cursor >= line.length;
   return cursor;
 }
 
@@ -2376,6 +2390,11 @@ function parseHeredocDelimiter(
     const character = line[cursor]!;
     if (!single && !double) {
       if (' \t\r;&|<>()'.includes(character)) break;
+      if (character === '$' && ["'", '"'].includes(line[cursor + 1] ?? '')) {
+        // Quote removal also removes the dollar from $'…' and $"…".
+        cursor++;
+        continue;
+      }
       if (character === '\\') {
         quoted = true;
         cursor++;
@@ -2443,6 +2462,16 @@ function findHeredocMarker(
   for (let index = 0; index < line.length; index++) {
     const character = line[index]!;
     const next = line[index + 1];
+    if (state.arithmeticDepth > 0) {
+      index = skipParenthesizedArithmetic(line, index, state);
+      wordStart = false;
+      continue;
+    }
+    if (state.legacyArithmetic) {
+      index = skipLegacyArithmetic(line, index, state);
+      wordStart = false;
+      continue;
+    }
     if (state.ansiC) {
       if (character === '\\' && index + 1 < line.length) index++;
       else if (character === "'") state.ansiC = false;
@@ -2476,18 +2505,18 @@ function findHeredocMarker(
       continue;
     }
     if (!state.single && !state.double && character === '$' && next === '[') {
-      index = skipLegacyArithmetic(line, index);
+      index = skipLegacyArithmetic(line, index, state);
       wordStart = false;
       continue;
     }
     if (!state.single && !state.double && character === '(' && next === '(') {
-      index = skipParenthesizedArithmetic(line, index);
+      index = skipParenthesizedArithmetic(line, index, state);
       wordStart = false;
       continue;
     }
     if (!state.single && character === '$' && next === '(') {
       if (line[index + 2] === '(') {
-        index = skipParenthesizedArithmetic(line, index);
+        index = skipParenthesizedArithmetic(line, index, state);
         wordStart = false;
         continue;
       }
