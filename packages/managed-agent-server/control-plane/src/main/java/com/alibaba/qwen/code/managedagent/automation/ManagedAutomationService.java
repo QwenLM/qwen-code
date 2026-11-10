@@ -372,15 +372,12 @@ public class ManagedAutomationService {
                 }
                 // A definitive route refusal settles the decision as
                 // skipped under the claim: the first attempt is told so.
-                if (AutomationLedgerStore.OUTCOME_SKIPPED.equals(
-                        ledger.findOccurrence(tenantId, automationId,
-                                occurrenceKey).orElse(occurrence).outcome())) {
-                    String reason = ledger.findOccurrence(tenantId,
-                            automationId, occurrenceKey).orElse(occurrence)
-                            .reason();
+                var settled = ledger.findOccurrence(tenantId, automationId,
+                        occurrenceKey).orElse(occurrence);
+                if (AutomationLedgerStore.OUTCOME_SKIPPED.equals(settled.outcome())) {
                     throw new ManagedAgentException(409,
                             "automation_run_skipped",
-                            "The manual run was skipped: " + reason + ".");
+                            "The manual run was skipped: " + settled.reason() + ".");
                 }
             }
         } finally {

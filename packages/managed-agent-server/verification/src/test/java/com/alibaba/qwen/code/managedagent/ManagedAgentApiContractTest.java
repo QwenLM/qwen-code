@@ -273,6 +273,8 @@ class ManagedAgentApiContractTest {
                             List.of("PublicChannelRoute")),
                     entry(ApiModels.PublicChannelDelivery.class,
                             List.of("PublicChannelDelivery")),
+                    entry(ApiModels.PublicChannelDeliverySegment.class,
+                            List.of("PublicChannelDeliverySegment")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -2863,6 +2865,10 @@ class ManagedAgentApiContractTest {
                 channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000));
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "planned", "sending", null);
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "sending", "delivered", "<m1@example.com>");
+        var segmentRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);
+        segmentRepository.plan(channelTenant, "mail-1", "delivery-1",
+                List.of(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-1:0", 0, null)));
+        segmentRepository.receipt(channelTenant, "mail-1", "delivery-1", 0, "<m1@example.com>");
         JsonNode channels = json(exchange(drift, "listAgentChannels", 200,
                 get("/v1/agent-channels").header(TENANT, channelTenant)
                         .principal(reader).param("limit", "10"), null));
@@ -2904,6 +2910,11 @@ class ManagedAgentApiContractTest {
                         "delivery-1").header(TENANT, channelTenant)
                         .principal(reader), null));
         assertThat(delivery.path("provider_receipt").asText())
+                .isEqualTo("<m1@example.com>");
+        assertThat(delivery.path("segments")).hasSize(1);
+        assertThat(delivery.path("segments").get(0).path("segment_id").asText())
+                .isEqualTo("delivery-1:0");
+        assertThat(delivery.path("segments").get(0).path("provider_receipt").asText())
                 .isEqualTo("<m1@example.com>");
         exchange(drift, "getAgentChannelDelivery", 404,
                 get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
