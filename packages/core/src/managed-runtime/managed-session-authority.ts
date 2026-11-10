@@ -940,20 +940,62 @@ export class LocalManagedSessionAuthority {
     return out;
   }
 
-  /** Persists the accepted input and the wake intent in one transaction. */
+  /**
+   * Persists the accepted input and the wake intent in one transaction.
+   * With a `replacement`, the replaced input's turn settles `cancelled`
+   * (model-free) in the SAME transaction that commits the new input — the
+   * self-paced loop wakeup's single-unfired invariant: a re-arm must never
+   * leave two unfired inputs pending, even across a crash between the
+   * settle and the arm. The caller publishes the turn-result body
+   * (`resultRef`) and owns the guard that the replaced turn never started;
+   * the fixed `turn:<turnId>` event id here refuses a turn that already
+   * settled.
+   */
   submitInput(
     command: ManagedSessionCommand,
     input: ManagedSessionInputRequest,
+    replacement?: {
+      readonly turnId: string;
+      readonly stopReason: string;
+      readonly resultRef: ManagedSessionDurableRef;
+    },
   ): Promise<ManagedSessionCommitReceipt> {
-    return this.runSerial(() =>
+    return this.runSerial(() => {
       // Read inside the lock: the committed sequence moves as other
       // transactions commit.
-      this.commit(
+      const occurredAt = this.now();
+      if (replacement === undefined) {
+        return this.commit(
+          command,
+          inputEvents(command, input, this.committed + 1, occurredAt),
+          INPUT_ACTORS,
+        );
+      }
+      const settle = {
+        v: MANAGED_SESSION_FORMAT_VERSION,
+        sequence: this.committed + 1,
+        eventId: `turn:${replacement.turnId}`,
+        sessionKey: command.sessionKey,
+        kind: 'turn.settled',
+        occurredAt,
+        payload: {
+          turnId: replacement.turnId,
+          outcome: 'cancelled',
+          stopReason: replacement.stopReason,
+          resultRef: replacement.resultRef,
+          usageRef: null,
+          pendingOwnersRef: null,
+        },
+      };
+      return this.commit(
         command,
-        inputEvents(command, input, this.committed + 1, this.now()),
-        INPUT_ACTORS,
-      ),
-    );
+        [
+          settle,
+          ...inputEvents(command, input, this.committed + 2, occurredAt),
+        ],
+        [{ class: 'authority' }, ...INPUT_ACTORS],
+      );
+    });
   }
 
   /**
