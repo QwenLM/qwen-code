@@ -11,9 +11,10 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -27,21 +28,31 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.math.BigInteger;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 @SpringBootTest(properties = {
@@ -53,9 +64,9 @@ import static org.mockito.Mockito.when;
 class ManagedApprovalChangeTest {
     @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
-    @Autowired private ManagedWorkspaceRegistry registry;
+    @Autowired private JdbcManagedWorkspaceRegistry registry;
     @Autowired private PlatformTransactionManager manager;
-    @Autowired private ManagedAgentDefinitionStore definitions;
+    @Autowired private JdbcManagedAgentDefinitionStore definitions;
     private String tenant;
     private String session;
     private ManagedAgentStore store;
@@ -113,7 +124,7 @@ class ManagedApprovalChangeTest {
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
                 + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).liveSupported()).isTrue();
         assertThat(change("actor", "live-change", "yolo", 0).approvalRevision()).isEqualTo(1);
@@ -483,10 +494,10 @@ class ManagedApprovalChangeTest {
         var created = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
                 definition.agentId(), null, null, null, input, new WorkspaceSelection("ws", ".")));
         session = created.sessionId();
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,is_plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         var submitted = transaction().execute(status -> service.submitTurn(tenant, "actor", "legacy-submit", session, input));
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,is_plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         change("actor", "new-policy", "yolo", 0);
         assertThat(transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
@@ -508,7 +519,7 @@ class ManagedApprovalChangeTest {
         var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "legacy", "legacy-digest",
                 session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
-        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, plan_enabled=NULL, status='COMPLETED'"
+        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, is_plan_enabled=NULL, status='COMPLETED'"
                 + " WHERE tenant_id=? AND turn_id=?", tenant, admitted.turnId());
         assertThat(store.findTurnApprovalSelection(tenant, session, turn.promptId()))
                 .isNull();
@@ -579,26 +590,121 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void concurrentChangesCannotBothWinTheSameRevision(boolean custom) throws Exception {
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void concurrentChangesCommitOnlyOnceFromAnEarlierSnapshot(boolean custom, boolean sameKey) throws Exception {
         if (custom) {
             session = customSession("hosted-workspace-shell/1", "default");
         }
-        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch snapshots = new CountDownLatch(2);
+        AtomicInteger replays = new AtomicInteger();
         try (var executor = Executors.newFixedThreadPool(2)) {
             Callable<String> call = () -> {
-                start.await();
                 try {
-                    return Long.toString(change("actor", UUID.randomUUID().toString(), "yolo", 0).approvalRevision());
+                    return transaction().execute(status -> {
+                        assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                                Long.class, tenant, session)).isZero();
+                        snapshots.countDown();
+                        try {
+                            assertThat(snapshots.await(10, TimeUnit.SECONDS)).isTrue();
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                        var result = change("actor", sameKey ? "same-key" : UUID.randomUUID().toString(), "yolo", 0);
+                        if (result.replayed()) {
+                            replays.incrementAndGet();
+                        }
+                        return Long.toString(result.approvalRevision());
+                    });
                 } catch (ManagedAgentException conflict) {
                     return conflict.getCode();
                 }
             };
             var first = executor.submit(call);
             var second = executor.submit(call);
-            start.countDown();
-            assertThat(List.of(first.get(), second.get())).containsExactlyInAnyOrder("1", "approval_selection_conflict");
+            assertThat(List.of(first.get(20, TimeUnit.SECONDS), second.get(20, TimeUnit.SECONDS)))
+                    .containsExactlyInAnyOrder("1", sameKey ? "1" : "approval_selection_conflict");
         }
+        assertThat(replays.get()).isEqualTo(sameKey ? 1 : 0);
+        assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
+                Long.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=? AND session_id=? AND operation='SET_APPROVAL'",
+                Integer.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id=? AND session_id=? AND event_type='session.approval.changed'",
+                Integer.class, tenant, session)).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentChangesToDifferentSessionsDoNotGapLockMissingReceipts() throws Exception {
+        String other = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "other-session",
+                "qwen-code", null, null, null, List.of(), new WorkspaceSelection("ws", "."))).sessionId();
+        var targets = List.of(session, other);
+        var bounds = new ArrayList<String>();
+        bounds.add("0".repeat(64));
+        bounds.addAll(jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt ORDER BY receipt_key", String.class));
+        bounds.add("f".repeat(64));
+        BigInteger width = BigInteger.ZERO;
+        int gap = 1;
+        for (int i = 1; i < bounds.size(); i++) {
+            var candidate = new BigInteger(bounds.get(i), 16).subtract(new BigInteger(bounds.get(i - 1), 16));
+            if (candidate.compareTo(width) > 0) {
+                width = candidate;
+                gap = i;
+            }
+        }
+        String lower = bounds.get(gap - 1);
+        String upper = bounds.get(gap);
+        var keys = new ArrayList<String>();
+        for (String target : targets) {
+            String scope = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("SET_APPROVAL", target, "actor");
+            keys.add(IntStream.range(0, bounds.size() * 100).mapToObj(i -> "parallel-receipt-" + i).filter(key -> {
+                String hash = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.receiptKey(
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND,
+                        tenant, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR, scope, key);
+                return hash.compareTo(lower) > 0 && hash.compareTo(upper) < 0;
+            }).findFirst().orElseThrow());
+        }
+        CountDownLatch ready = new CountDownLatch(2);
+        var arrived = ConcurrentHashMap.<Long>newKeySet();
+        Runnable synchronize = () -> {
+            if (arrived.add(Thread.currentThread().threadId())) {
+                ready.countDown();
+                try {
+                    assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+        };
+        var observed = spy(jdbc);
+        doAnswer(call -> {
+            List<?> rows = (List<?>) call.callRealMethod();
+            if (call.getArgument(0, String.class).contains("FROM ma_request_receipt WHERE receipt_key") && rows.isEmpty()) {
+                synchronize.run();
+            }
+            return rows;
+        }).when(observed).query(anyString(), org.mockito.ArgumentMatchers.<RowMapper<Object>>any(), any(Object[].class));
+        doAnswer(call -> {
+            if (call.getArgument(0, String.class).startsWith("INSERT INTO ma_request_receipt")) {
+                synchronize.run();
+            }
+            return call.callRealMethod();
+        }).when(observed).update(anyString(), any(Object[].class));
+        VerificationFixtures.setAgentStoreField(store, "jdbc", observed);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var futures = IntStream.range(0, 2).mapToObj(i -> executor.submit(() -> transaction().execute(status ->
+                    service.changeWebShellSessionApproval(tenant, "actor", targets.get(i), keys.get(i), "yolo", 0)))).toList();
+            for (var future : futures) {
+                assertThat(future.get(20, TimeUnit.SECONDS).approvalRevision()).isEqualTo(1);
+            }
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=? AND operation='SET_APPROVAL' AND state='COMPLETED'",
+                Integer.class, tenant)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id=? AND operation='SET_APPROVAL' AND state='PENDING'",
+                Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id=? AND event_type='session.approval.changed'",
+                Integer.class, tenant)).isEqualTo(2);
     }
 
     @ParameterizedTest
@@ -618,7 +724,7 @@ class ManagedApprovalChangeTest {
             jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
                     + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
                     + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                    ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
@@ -752,7 +858,7 @@ class ManagedApprovalChangeTest {
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).approvalMode()).isEqualTo("auto");
     }
 
-    private ManagedAgentDefinitionStore.DefinitionRevision define(String profile, String mode) throws Exception {
+    private JdbcManagedAgentDefinitionStore.DefinitionRevision define(String profile, String mode) throws Exception {
         String agent = "agent_" + UUID.randomUUID().toString().replace("-", "");
         var content = Map.of("model", Map.of(), "instructions", "Review the project",
                 "tools", List.of(Map.of("type", "hosted_profile", "profile", profile)),

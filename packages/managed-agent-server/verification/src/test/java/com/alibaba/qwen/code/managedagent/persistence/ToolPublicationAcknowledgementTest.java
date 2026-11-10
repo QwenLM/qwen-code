@@ -62,7 +62,7 @@ class ToolPublicationAcknowledgementTest {
     private static final String PRODUCER_TOKEN = Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]);
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
-    private ManagedSessionStore sessions;
+    private JdbcManagedSessionStore sessions;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository runtimeSessions;
     private JdbcToolExecutionRepository executions;
@@ -111,7 +111,7 @@ class ToolPublicationAcknowledgementTest {
             public void validateConfiguration() { }
         };
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
-                new ManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
         runtimeSessions = new JdbcRuntimeSessionRepository(source);
@@ -230,7 +230,7 @@ class ToolPublicationAcknowledgementTest {
     void lateAuthorityChangesRefuse(String damage) {
         var bundle = admissions.verifyOriginalAcknowledgement(execution);
         switch (damage) {
-            case "quarantine" -> jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE");
+            case "quarantine" -> jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE");
             case "object" -> jdbc.update("UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE slot_key = X'6d616e69666573743a31'");
             case "seal" -> jdbc.update("UPDATE ma_output_capture SET seal_manifest_sha256 = ?", "f".repeat(64));
             case "reference" -> jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND journal_revision = ?", revision);

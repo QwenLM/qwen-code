@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -26,7 +27,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                         && exists(
                                 connection,
                                 "SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ?"
-                                    + " AND csi_guard = TRUE LIMIT 1 FOR UPDATE",
+                                    + " AND is_csi_guard = TRUE LIMIT 1 FOR UPDATE",
                                 identity(request.getScope().getTenantId()),
                                 identity(request.getIsolationKey()))
                 || exists(
@@ -178,7 +179,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                             + " BINARY(2048)) = CAST('child_run' AS BINARY(2048)) AND"
                             + " CAST(record_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND"
                             + " settled_at IS NOT NULL LIMIT 1",
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parent),
+                        ManagedSessionStore.sessionScopeKey(tenantId, parent),
                         ManagedExtensionProjection.recordKey(parent, "child_run", run),
                         tenantId,
                         parent,

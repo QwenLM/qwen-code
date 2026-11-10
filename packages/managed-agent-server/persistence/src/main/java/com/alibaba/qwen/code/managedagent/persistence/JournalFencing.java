@@ -4,6 +4,8 @@ import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
@@ -66,12 +68,12 @@ final class JournalFencing {
         if (authority == null) {
             return;
         }
-        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+        lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
-        WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+        JdbcWorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
     }
 
     static ManagedAgentException guardContended() {
@@ -145,15 +147,47 @@ final class JournalFencing {
         return false;
     }
 
-    void requirePhysicalSessionOpen(String tenantId, String workspaceId, String sessionId) {
+    void lockPlacementBounded(String tenantId) {
         // Placement is the tenant-wide row migration admission shares; on
         // these per-turn paths it stays bounded with the shared named-failure
         // mapping, so a held row answers tenant_guard_contended instead of
         // out-waiting the caller (#13800).
-        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+        lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
+    }
+
+    // The fence check: locking reads of the storage's alias and directory
+    // rows. Every caller takes them after its Session row and before the
+    // head row, the order Turn admission, Session commands and journal
+    // commits use without the tenant guard; taking them before the Session
+    // row would close a cycle with those lanes on the same Session.
+    void requireSessionStorageOpen(String tenantId, String workspaceId, String sessionId) {
         WorkspaceMigrationAdmission.requirePhysicalOpen(jdbc, tenantId,
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
+    }
+
+    void requireSessionStorageOpenForRead(String tenantId, String workspaceId, String sessionId) {
+        WorkspaceMigrationAdmission.requirePhysicalOpenForRead(jdbc, tenantId,
+                WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
+    }
+
+    // Locks the Session root by primary key (a record lock, never a gap) as
+    // the transaction's first statement and answers its CSI pin, which never
+    // changes once the row exists, for lockCsiContinuation to reuse instead
+    // of locking the root a second time. Outside a transaction the lock would
+    // be released at once, so nothing is taken and null is answered;
+    // lockCsiContinuation then keeps its standalone check.
+    Boolean lockSessionFirst(String tenantId, String sessionId) {
+        return transactional() ? ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId) : null;
+    }
+
+    private boolean transactional() {
+        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
+            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
+                    .isConnectionTransactional(target, jdbc.getDataSource());
+        });
+        return Boolean.TRUE.equals(transactional);
     }
 
     // An ordinary write against a v2-claimed Session must fail with the
@@ -170,8 +204,8 @@ final class JournalFencing {
     void requireNoLifecycleClaim(String tenantId, String sessionId) {
         if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key = ?"
                 + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ?"
-                + " AND lifecycle_protocol_version = 2", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId).isEmpty()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+                + " AND lifecycle_protocol_version = 2", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId).isEmpty()) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
     }
 
@@ -214,9 +248,9 @@ final class JournalFencing {
         credentials.require(tenantId, workspaceId, sessionId, writerToken);
     }
 
-    HarnessPlacementStore.Placement requirePlacement(String tenant, String workspace,
+    JdbcHarnessPlacementStore.Placement requirePlacement(String tenant, String workspace,
             String session, String token, String writer, boolean newWork) {
-        return HarnessPlacementStore.requireCurrent(jdbc, credentials, tenant, workspace, session, token, writer, newWork);
+        return JdbcHarnessPlacementStore.requireCurrent(jdbc, credentials, tenant, workspace, session, token, writer, newWork);
     }
 
     static ManagedAgentException nativeReadConflict() {
@@ -282,12 +316,7 @@ final class JournalFencing {
     JournalStoreRows.HeadRow requireHeadAfterCsiCheck(String tenantId, String sessionId) {
         // A null continuation proves nothing in standalone mode. Only the CSI check
         // on this DataSource's transaction connection has retained the root lock.
-        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
-            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
-            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
-                    .isConnectionTransactional(target, jdbc.getDataSource());
-        });
-        return Boolean.TRUE.equals(transactional)
+        return transactional()
                 ? storeRows.requireHeadWithRootLocked(tenantId, sessionId)
                 : storeRows.requireHeadForUpdate(tenantId, sessionId);
     }
@@ -298,6 +327,12 @@ final class JournalFencing {
     }
 
     CsiContinuation lockCsiContinuation(String tenantId, String sessionId) {
+        return lockCsiContinuation(tenantId, sessionId, null);
+    }
+
+    // rootPin: the pin lockSessionFirst read under its root lock, or null
+    // when this transaction has not locked the root yet.
+    CsiContinuation lockCsiContinuation(String tenantId, String sessionId, Boolean rootPin) {
         Boolean pinned = jdbc.execute(
                 (org.springframework.jdbc.core.ConnectionCallback<Boolean>)
                         connection -> {
@@ -308,9 +343,9 @@ final class JournalFencing {
                                     .isConnectionTransactional(target, jdbc.getDataSource())) {
                                 var privatePins =
                                         jdbc.query(
-                                                "SELECT csi_guard FROM ma_session WHERE tenant_id ="
-                                                    + " ? AND session_id = ? AND csi_guard = TRUE",
-                                                (row, index) -> row.getBoolean("csi_guard"),
+                                                "SELECT is_csi_guard FROM ma_session WHERE tenant_id ="
+                                                    + " ? AND session_id = ? AND is_csi_guard = TRUE",
+                                                (row, index) -> row.getBoolean("is_csi_guard"),
                                                 tenantId,
                                                 sessionId);
                                 if (!privatePins.isEmpty()) {
@@ -325,7 +360,7 @@ final class JournalFencing {
                             // range locks: taking them on every writer path
                             // would couple per-turn traffic of unrelated
                             // Sessions again (#13800). The root is locked
-                            // first, by primary key once it exists, so its pin
+                            // first, by unique business key once it exists, so its pin
                             // is read as committed now even under an older
                             // REPEATABLE READ snapshot, no gap is taken that
                             // another tenant's first writer inserts into, and
@@ -336,7 +371,9 @@ final class JournalFencing {
                             // inserted, and roots are never deleted, so an
                             // unpinned root can only have legacy markers,
                             // which no snapshot here is older than.
-                            return ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId)
+                            boolean rootPinned = rootPin != null ? rootPin
+                                    : ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
+                            return rootPinned
                                     || JdbcCsiFilesRetirementGuard.hasCsiRuntimeMarker(
                                             target, tenantId, sessionId);
                         });
@@ -351,7 +388,7 @@ final class JournalFencing {
         // deadlock. Either side may be rolled back: this side's waits are
         // named by lockBounded, the other side's root wait by
         // namedRootDeadlock (#13800 R1-1).
-        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+        lockBounded(() -> JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));

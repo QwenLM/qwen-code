@@ -3,8 +3,8 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Command;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Message;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Snapshot;
@@ -53,7 +53,7 @@ class ManagedUserMessageStoreTest {
     @Autowired
     private ManagedAgentStore store;
 
-    private ManagedUserMessageStore messages;
+    private JdbcManagedUserMessageStore messages;
     private String session;
 
     @BeforeEach
@@ -64,7 +64,7 @@ class ManagedUserMessageStoreTest {
         when(queueAgents.supportsUserMessageQueue()).thenReturn(true);
         when(queueAgents.userMessageInput(anyList()))
                 .thenAnswer(call -> agents.userMessageInput(call.getArgument(0)));
-        messages = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedUserMessageStore(jdbc, json, digests, queueAgents));
+        messages = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcManagedUserMessageStore(jdbc, json, digests, queueAgents));
     }
 
     @Test
@@ -80,7 +80,7 @@ class ManagedUserMessageStoreTest {
         when(queueAgents.supportsUserMessageQueue()).thenReturn(true);
         when(queueAgents.userMessageInput(anyList())).thenAnswer(call -> agents.userMessageInput(call.getArgument(0)));
         var traced = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
-                new ManagedUserMessageStore(tracedJdbc, json, digests, queueAgents));
+                new JdbcManagedUserMessageStore(tracedJdbc, json, digests, queueAgents));
         var transaction = new org.springframework.transaction.support.TransactionTemplate(
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(trace));
         trace.clear();
@@ -124,6 +124,29 @@ class ManagedUserMessageStoreTest {
         var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:" + first.id(),
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR);
         assertThat(admission.turnId()).isNotBlank();
+    }
+
+    @Test
+    void startsTheNextQueuedTurnWhileTheTenantPlacementGuardIsHeld() throws Exception {
+        Message first = command("guarded", submit("guarded")).messages().getFirst();
+        try (var holder = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            holder.setAutoCommit(false);
+            com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, TENANT);
+            try {
+                messages.startNext(TENANT, session, (tenant, actor, key, target, input) -> {
+                    var admission = store.insertTurnCommand(tenant, "queue-test", key, "digest", target,
+                            first.input(), "sha256:" + "0".repeat(64), actor);
+                    return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
+                            target, admission.turnId(), "ACCEPTED", false);
+                });
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(query().messages()).singleElement().satisfies(message -> {
+            assertThat(message.state()).isEqualTo("claimed");
+            assertThat(message.turnId()).isNotBlank();
+        });
     }
 
     @Test
@@ -312,7 +335,7 @@ class ManagedUserMessageStoreTest {
         var record = json.valueToTree(Map.of("managedSession", Map.of(
                 "kind", "message.committed", "sequence", sequence,
                 "payload", Map.of("role", "user", "messageId", identity))));
-        ManagedUserMessageStore.capture(jdbc, TENANT, session, List.of(record));
+        JdbcManagedUserMessageStore.capture(jdbc, TENANT, session, List.of(record));
     }
 
     private void assertCode(String code, org.assertj.core.api.ThrowableAssert.ThrowingCallable action) {

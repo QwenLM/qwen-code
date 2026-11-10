@@ -59,6 +59,7 @@ import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/ch
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
@@ -922,8 +923,12 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band above the prompt.
-    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt']);
+    // OpenTUI offers the band above the prompt, raises prompt.submit and
+    // runs the prompts the Mods submit.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt'], {
+      prompts: true,
+      runsPrompts: true,
+    });
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -1749,6 +1754,127 @@ describe('livePromptEvents', () => {
       submittedPrompt: '@file.txt raw composer text',
     });
     expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it("rides the Mods' prompt context on the first send only", async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'ctx-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    await drain(
+      livePromptEvents(config, 'payload', undefined, {
+        submittedPrompt: 'payload',
+        promptContext: ['Mod context'],
+      }),
+    );
+    const [first, second] = sendMessageStream.mock.calls.map(
+      (call) => (call as unknown[])[3],
+    );
+    expect(first).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: 'payload',
+      promptContext: ['Mod context'],
+    });
+    expect(second).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it.each([false, true])(
+    "sends a Mod's prompt as the Mod's, reading no @path in it (asUser %s)",
+    async (asUser) => {
+      const sendMessageStream = oneToolBatchStream({
+        callId: 'mod-tool',
+        name: 'test_tool',
+        args: {},
+      });
+      const config = createFakeConfig(sendMessageStream);
+      const calls = new Map<string, ReturnType<typeof vi.fn>>();
+      const dualOutput = new Proxy(
+        {},
+        {
+          get: (_target, key: string) => {
+            if (key === 'isConnected') return true;
+            if (!calls.has(key)) calls.set(key, vi.fn());
+            return calls.get(key);
+          },
+        },
+      ) as Record<string, ReturnType<typeof vi.fn>>;
+      const modPrompt = {
+        plugin: 'followup-mod',
+        text: 'Summarize @src/a.ts',
+        ...(asUser && { asUser: true as const }),
+      };
+      await drain(
+        livePromptEvents(config, 'framed @src/a.ts', undefined, {
+          submittedPrompt: modPrompt.text,
+          modPrompt,
+          dualOutput: dualOutput as unknown as DualOutputBridge,
+        }),
+      );
+      expect(atMocks.calls).toEqual([]);
+      const [first, second] = sendMessageStream.mock.calls.map(
+        (call) => call as unknown[],
+      );
+      expect(first[0]).toBe('framed @src/a.ts');
+      expect(first[3]).toEqual({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'Summarize @src/a.ts',
+        submittedByMod: 'followup-mod',
+        ...(asUser && { submittedAsUser: true }),
+        memoryRecallQuery: 'Summarize @src/a.ts',
+      });
+      expect(second[3]).toEqual({ type: SendMessageType.ToolResult });
+      // The sidecar sees the Mod's text, not the frame, and who sent it.
+      expect(dualOutput['emitUserMessage']).toHaveBeenCalledTimes(1);
+      expect(dualOutput['emitUserMessage']).toHaveBeenCalledWith([
+        { text: 'Summarize @src/a.ts' },
+      ]);
+      expect(dualOutput['emitSystemMessage']).toHaveBeenCalledWith(
+        'mod_prompt',
+        {
+          mod: 'followup-mod',
+        },
+      );
+    },
+  );
+
+  it("tells the sidecar a retried Mod's prompt is the Mod's, not the frame", async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'mod-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const calls = new Map<string, ReturnType<typeof vi.fn>>();
+    const dualOutput = new Proxy(
+      {},
+      {
+        get: (_target, key: string) => {
+          if (key === 'isConnected') return true;
+          if (!calls.has(key)) calls.set(key, vi.fn());
+          return calls.get(key);
+        },
+      },
+    ) as Record<string, ReturnType<typeof vi.fn>>;
+    const modPrompt = { plugin: 'followup-mod', text: 'Summarize it' };
+    await drain(
+      livePromptEvents(config, 'unused', undefined, {
+        submittedPrompt: modPrompt.text,
+        modPrompt,
+        dualOutput: dualOutput as unknown as DualOutputBridge,
+        retry: {
+          content: 'framed: Summarize it',
+          inlineModelOverride: false,
+        },
+      }),
+    );
+    expect(dualOutput['emitUserMessage']).toHaveBeenCalledExactlyOnceWith([
+      { text: 'Summarize it' },
+    ]);
+    expect(dualOutput['emitSystemMessage']).toHaveBeenCalledWith('mod_prompt', {
+      mod: 'followup-mod',
+    });
   });
 
   it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {

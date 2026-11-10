@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -36,12 +37,12 @@ public final class ToolPublicationAdmissionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
-    private final ManagedSessionStore sessions;
+    private final JdbcManagedSessionStore sessions;
     private final ToolPublicationDataStore data;
     private final DataSource transactionSource;
 
     public ToolPublicationAdmissionStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            ManagedSessionStore sessions, ToolPublicationDataStore data) {
+            JdbcManagedSessionStore sessions, ToolPublicationDataStore data) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(Objects.requireNonNull(manager));
         this.sessions = Objects.requireNonNull(sessions);
@@ -129,11 +130,11 @@ public final class ToolPublicationAdmissionStore {
         String suffix = locked ? " FOR UPDATE" : "";
         var publication = jdbc.query("SELECT scope_key, publication_id, tenant_id, workspace_id, session_id, producer_phase,"
                 + " admission_resource_id, receipt_sequence, receipt_revision,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope(key), id).getFirst();
         require(scope(key).equals(publication.get("scope_key")) && id.equals(publication.get("publication_id"))
                 && "REFERENCED".equals(publication.get("producer_phase"))
-                && ((Number) publication.get("quarantined")).intValue() == 0
+                && ((Number) publication.get("is_quarantined")).intValue() == 0
                 && text(key, "tenantId").equals(publication.get("tenant_id"))
                 && text(key, "workspaceId").equals(publication.get("workspace_id"))
                 && text(key, "sessionId").equals(publication.get("session_id"))
@@ -215,7 +216,7 @@ public final class ToolPublicationAdmissionStore {
         var resources = result.putArray("resources");
         for (JsonNode ref : List.of(outcomeRef, manifest)) {
             String resourceId = text(ref, "resourceId");
-            String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
+            String sessionScope = ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
             var resource = jdbc.query("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                     + " byte_length, sha256, storage_kind, inline_bytes, object_key, object_version_id, encryption_key_id,"
                     + " publish_command_id, state FROM ma_resource"
@@ -337,7 +338,9 @@ public final class ToolPublicationAdmissionStore {
                 && ("FINISHED".equals(candidate.get("producer_phase"))
                 || "REFERENCED".equals(candidate.get("producer_phase"))),
                 "Admission root is not verified");
-        data.lockStagedPlacement(key, publicationId);
+        // A lifecycle-authority commit takes placement in checkLifecycleWriter,
+        // so its lane keeps placement first (design 2026-11-04-managed-publication-placement).
+        data.lockStagedPlacement(key, publicationId, authority != null);
         String resourceId = (String) candidate.get("resource_id");
         byte[] admissionBytes = data.readResource(key, publicationId, resourceId);
         JsonNode outcome = ToolPublicationContract.readJson(admissionBytes);
@@ -367,14 +370,23 @@ public final class ToolPublicationAdmissionStore {
                     "Original manifest resource conflicts");
         }
         return transactions.execute(status -> {
-            data.lockPublicationPlacement(key, publicationId);
+            boolean placement = data.lockPublicationPlacement(key, publicationId, authority != null);
             sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
-            data.lockOriginalSettledResult(key, publicationId, finished);
-            lockTenant(key);
+            boolean csi = data.lockOriginalSettledResult(key, publicationId, finished);
+            // An ordinary receipt without lifecycle authority skips the tenant
+            // publication guard: the journal commit below takes none, and the
+            // lane locks root, head, publication row, as collection does. A CSI
+            // original or a lifecycle-authority commit (which takes the guard
+            // in checkLifecycleWriter) keeps it where it was (design
+            // 2026-11-04-managed-publication-tenant-guards, C2).
+            boolean guard = csi || authority != null;
+            if (guard) {
+                lockTenant(key);
+            }
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken);
+                    text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken, placement, guard);
             Map<String, Object> publication = jdbc.query("SELECT producer_phase, binding_json, binding_digest,"
-                    + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, admission_resource_id,"
+                    + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
                     + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
                     + " AND workspace_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
@@ -382,7 +394,7 @@ public final class ToolPublicationAdmissionStore {
             ToolPublicationStore.requireLockedBinding(publication, finished.path("binding"));
             require(resourceId.equals(publication.get("admission_resource_id"))
                     && candidate.get("terminal_resource_id").equals(publication.get("terminal_resource_id"))
-                    && ((Number) publication.get("quarantined")).intValue() == 0,
+                    && ((Number) publication.get("is_quarantined")).intValue() == 0,
                     "Admission root changed");
             var object = jdbc.query("SELECT capture_state AS state, sha256, byte_length, capture_object_key AS object_key"
                     + " FROM ma_resource WHERE scope_key = ? AND publication_id = ?"
@@ -410,7 +422,7 @@ public final class ToolPublicationAdmissionStore {
             }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
                     writerToken, request, authority);
-            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'REFERENCED', admission_held_bytes = admission_used_bytes, receipt_sequence = ?, receipt_revision = ?, is_accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
                     request.lastSequence(), receipt.journalRevision(),
                     "committed".equals(outcome.path("decision").asText())
                             && "complete".equals(outcome.path("envelope").path("capture").path("captureStatus").asText()),
@@ -435,6 +447,9 @@ public final class ToolPublicationAdmissionStore {
                         && resource.bytesBase64() == null),
                 "Receipt does not reference its original admission resource");
         byte[] records = Base64.getDecoder().decode(request.recordBytesBase64());
+        // A cleanup commit takes placement in JournalCommit, after this lane's
+        // Session root when the lane skips placement; a receipt never carries one.
+        require(!HostedCleanupReferences.containsCleanup(records), "Receipt cannot carry hosted cleanup");
         JsonNode receiptEvent = null;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = ToolPublicationContract.readJson(line.getBytes(StandardCharsets.UTF_8));
@@ -476,7 +491,7 @@ public final class ToolPublicationAdmissionStore {
 
     private void referenceCapturedResource(JsonNode key, CommitTransactionRequest request,
             JsonNode ref, byte[] bytes, String objectKey, String kind) {
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
+        String scopeKey = ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
         String resourceId = text(ref, "resourceId");
         var rows = jdbc.query("SELECT state, kind, byte_length, sha256, capture_state, publish_command_id"
                         + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
@@ -543,8 +558,8 @@ public final class ToolPublicationAdmissionStore {
         // named-failure mapping (#13800). For a CSI-pinned Session,
         // lockCsiOriginal above already took the same row with the same
         // bound, and this re-lock returns at once.
-        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
-                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                text(key, "tenantId"), JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private static String scope(JsonNode key) {

@@ -64,6 +64,7 @@ public class ManagedAgentProperties
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
@@ -97,6 +98,19 @@ public class ManagedAgentProperties
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     @Getter(AccessLevel.NONE)
     private Environment environment;
+
+    @Getter
+    @Setter
+    public static class Memory {
+        private boolean enabled;
+        private String endpoint;
+        private String apiKey;
+    }
+
+    @Override
+    public boolean isMemoryEnabled() {
+        return memory.isEnabled();
+    }
 
     public boolean admitsPublicChildAgents() {
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
@@ -763,6 +777,8 @@ public class ManagedAgentProperties
     public static class Extensions
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
         private boolean enabled;
+        private boolean selfServiceEnabled;
+        private boolean runtimeSkillImportEnabled;
         private String artifactDirectory = "";
         private List<String> allowedActors = List.of();
 
@@ -871,6 +887,7 @@ public class ManagedAgentProperties
         private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
+        private boolean toolMeasurements;
         private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
@@ -975,7 +992,7 @@ public class ManagedAgentProperties
     @Setter
     public static class Automation
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Automation {
-        private boolean enabled;
+        private boolean enabled = true;
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration scanDelay = Duration.ofSeconds(10);
         @DurationUnit(ChronoUnit.MILLIS)

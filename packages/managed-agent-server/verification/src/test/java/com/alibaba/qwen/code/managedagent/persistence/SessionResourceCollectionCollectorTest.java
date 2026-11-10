@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -84,7 +85,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(collector.runOnce()).isTrue();
         assertThat(rows()).singleElement().satisfies(row -> assertThat(row.get("inline_bytes")).isNull());
         assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(bytes.length);
-        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE"
+        assertThat(jdbc.queryForObject("SELECT is_resource_gc_completed FROM ma_session WHERE"
                 + " tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
     }
 
@@ -101,7 +102,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThatThrownBy(collector::runOnce).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("journal collection is incomplete");
         assertThat(jdbc.queryForObject(
-                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ?"
                                         + " AND session_id = ?",
                 Boolean.class, tenant, session)).isFalse();
         assertThat(jdbc.queryForObject(
@@ -118,7 +119,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 tenant, session);
         assertThat(collector.runOnce()).isTrue();
         assertThat(jdbc.queryForObject(
-                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ?"
                                         + " AND session_id = ?",
                 Boolean.class, tenant, session)).isTrue();
         assertThat(jdbc.queryForObject(
@@ -132,7 +133,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     private void initSession() {
-        resScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        resScope = ManagedSessionStore.sessionScopeKey(tenant, session);
         token = "a".repeat(32);
     }
 
@@ -203,7 +204,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     private void tombstone(String id, String operation, long time) {
         jdbc.update(
                 "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, retirement_operation_id, retirement_generation, retired_at, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, ?, ?, ?)", tenant, id, ManagedSchemaKeys.key(tenant),
-                ManagedSchemaKeys.key(id), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, id), operation, time, time, time);
+                ManagedSchemaKeys.key(id), ManagedSessionStore.sessionScopeKey(tenant, id), operation, time, time, time);
     }
 
     private SessionResourceCollectionCollector collector(boolean enabled, Duration grace) {
@@ -217,7 +218,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         var row = jdbc.queryForMap(
                         "SELECT *, claim_until AS claim_until_epoch FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
         var progress = row.get("result_json") == null ? new ObjectMapper().createObjectNode()
-                : ManagedToolResultStore.parse((String) row.get("result_json"));
+                : JdbcManagedToolResultStore.parse((String) row.get("result_json"));
         row.put("collected_bytes", progress.path("collectedBytes").asLong());
         row.put("gc_cursor", progress.path("cursor").asText(""));
         row.put("collected_at", row.get("completed_at"));
@@ -287,7 +288,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         head(session);
         publish("segment", CONTENT, new byte[64]);
         retire();
-        jdbc.update("UPDATE ma_session SET recovery_protected = TRUE"
+        jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         var collector = collector(true, Duration.ZERO);
         assertThat(collector.runOnce()).isFalse();
@@ -664,7 +665,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         publish("segment", CONTENT, new byte[64]);
         var lease = retention.read(key);
         String other = "session-b";
-        String otherScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, other);
+        String otherScope = ManagedSessionStore.sessionScopeKey(tenant, other);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, ?, 'workspace-1', ?, 'segment', ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'segment', 'PUBLISHED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(otherScope, "segment"), otherScope, tenant, other, CONTENT, 64, ToolPublicationContract.sha256(new byte[64]),
                 new byte[64]);
@@ -911,7 +912,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         head(session);
         publish("segment-000", CONTENT, new byte[64]);
         String other = "session-2";
-        String otherScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, other);
+        String otherScope = ManagedSessionStore.sessionScopeKey(tenant, other);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, ?, 'workspace-1', ?, 'segment-000', ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'segment-000', 'PUBLISHED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(otherScope, "segment-000"), otherScope, tenant, other, CONTENT, 64, ToolPublicationContract.sha256(new byte[64]),
                 new byte[64]);
@@ -964,7 +965,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         long now = ToolPublicationRetentionStore.now(jdbc);
         tombstone(later, "purge-later", now - 1000);
         assertThat(collector.runOnce()).isFalse();
-        String laterScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, later);
+        String laterScope = ManagedSessionStore.sessionScopeKey(tenant, later);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
                                         + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", Long.class, laterScope)).isZero();
@@ -1177,7 +1178,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         }
     }
 
-    private void publishThroughStore(ManagedSessionStore sessions, long generation, String resourceId,
+    private void publishThroughStore(JdbcManagedSessionStore sessions, long generation, String resourceId,
             String kind, byte[] bytes) {
         sessions.publishToolResult(tenant, session, token,
                 new ManagedSessionStoreModels.PublishToolResultRequest("workspace-1", "writer", generation,
@@ -1289,7 +1290,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(countLedgers()).isEqualTo(1);
 
         String later = "session-later";
-        String laterScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, later);
+        String laterScope = ManagedSessionStore.sessionScopeKey(tenant, later);
         retireSession(later, "purge-later");
         // Inside the 60-second window the same instance does not re-scan.
         nanos.addAndGet(Duration.ofSeconds(30).toNanos());
@@ -1301,7 +1302,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(ledgerCount(laterScope)).isEqualTo(1);
 
         String third = "session-third";
-        String thirdScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, third);
+        String thirdScope = ManagedSessionStore.sessionScopeKey(tenant, third);
         retireSession(third, "purge-third");
         // A backward host-clock step (NTP, VM resume) reads as "within the window", not as a
         // permanent stall: scanning resumes as soon as the monotonic clock catches up.
@@ -1370,9 +1371,9 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         byte[] bytes = mediaBytes(original);
         assertThat(mediaBytes(other)).isEqualTo(bytes);
         assertThat(original.path("outcomeRef")).isEqualTo(other.path("outcomeRef"));
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(resScope, "media-outcome"))
-                .isNotEqualTo(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, "media-other"), "media-outcome"));
+        assertThat(ManagedSessionStore.resourceKey(resScope, "media-outcome"))
+                .isNotEqualTo(ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey(tenant, "media-other"), "media-outcome"));
         assertThat(MEDIA_JSON.readTree(bytes).path("functionResponse").path("parts").get(0)
                 .path("inlineData").path("data").asText()).isEqualTo("AQID");
         byte[] history = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).readResource(tenant, "workspace-1", session,
@@ -1466,8 +1467,8 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         commitNativeMedia("media-other");
         long expectedBytes = jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE"
                 + " session_scope_key = ?", Long.class, resScope) - mediaBytes(original).length;
-        String otherScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, "media-other");
-        String resource = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(resScope, "media-outcome");
+        String otherScope = ManagedSessionStore.sessionScopeKey(tenant, "media-other");
+        String resource = ManagedSessionStore.resourceKey(resScope, "media-outcome");
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
                         + " resource_id, gmt_create) VALUES (?, 'RECOVERY', ?, 1, ?, ?,"
@@ -1614,7 +1615,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             configuration.put("releaseState", state);
             commitMcp(journal, "connection-" + state, "mcp_configuration", configuration, List.of());
         }
-        var reopened = new ManagedExtensionRecordStore(jdbc);
+        var reopened = new JdbcManagedExtensionRecordStore(jdbc);
         assertThat(reopened.listRecords(tenant, session, "mcp_configuration"))
                 .extracting(JsonNode::toString).containsExactly(configuration.toString());
         assertThat(reopened.listRecords(tenant, session, "mcp_operation"))

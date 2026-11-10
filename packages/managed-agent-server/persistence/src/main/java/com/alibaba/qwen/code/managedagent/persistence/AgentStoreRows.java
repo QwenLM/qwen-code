@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -63,7 +64,7 @@ final class AgentStoreRows {
                         readInput(result.getString("input_json")),
                         result.getString("payload_digest"),
                         result.getString("status"),
-                        result.getBoolean("submission_attempted"),
+                        result.getBoolean("is_submission_attempted"),
                         result.getString("harness_event_epoch"),
                         nullableLong(result, "harness_last_event_id"),
                         result.getString("dispatch_owner"),
@@ -122,7 +123,7 @@ final class AgentStoreRows {
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
                 result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
-                result.getString("model_config_digest"));
+                result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"));
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
@@ -144,7 +145,7 @@ final class AgentStoreRows {
     static String sessionOperationKey(String tenantId, String sessionId, OperationKind kind, String operationId) {
         return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), operationId);
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), operationId);
     }
 
     long lifecycleDatabaseTime() {
@@ -208,7 +209,7 @@ final class AgentStoreRows {
                             + " ? AND ma_session.session_id = ? FOR UPDATE",
                     (rows, rowNumber) -> {
                         if (legacyMutation) {
-                            ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("csi_guard"));
+                            ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("is_csi_guard"));
                         }
                         // H2 can retain pre-wait outer-join values after locking the Session.
                         // Read its stream only after acquiring that lock.
@@ -299,7 +300,7 @@ final class AgentStoreRows {
         String configRef = result.getString("workspace_config_ref");
         String policyRef = result.getString("workspace_policy_ref");
         String contextConfigRef = result.getString("context_config_ref");
-        if (!ManagedWorkspaceRegistry.descriptorRef(configRef, policyRef)
+        if (!JdbcManagedWorkspaceRegistry.descriptorRef(configRef, policyRef)
                 .equals(contextConfigRef)) {
             throw new IllegalStateException(
                     "Persisted Workspace configuration descriptor changed for session "

@@ -204,6 +204,10 @@ class MockConfig {
     return this.trusted;
   }
 
+  isExplicitlyTrustedFolder(): boolean {
+    return this.trusted;
+  }
+
   setTrusted(trusted: boolean): void {
     this.trusted = trusted;
   }

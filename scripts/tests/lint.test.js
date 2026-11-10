@@ -256,6 +256,195 @@ describe('linter directories', () => {
     },
     15_000,
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'resumes a truncated archive download instead of restarting it',
+    async () => {
+      const { getCachedArchiveInstaller } = await import('../lint.js');
+      const root = mkdtempSync(path.join(tmpdir(), 'linter-resume-'));
+
+      try {
+        const binDir = path.join(root, 'bin');
+        const cacheArchive = path.join(root, 'cache', 'tool.tar');
+        const localArchive = path.join(root, 'job', 'tool.tar');
+        const executable = path.join(root, 'job', 'tool');
+        const fixture = path.join(root, 'official.tar');
+        const curlLog = path.join(root, 'curl.log');
+        const curlAttemptFile = path.join(root, 'curl-attempt');
+        mkdirSync(binDir, { recursive: true });
+        mkdirSync(path.dirname(localArchive), { recursive: true });
+        writeFileSync(fixture, 'official archive');
+        writeFileSync(
+          path.join(binDir, 'curl'),
+          `#!/bin/sh\nattempt=$(cat "${curlAttemptFile}" 2>/dev/null || echo 0)\nattempt=$((attempt + 1))\necho "$attempt" > "${curlAttemptFile}"\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$attempt" -eq 1 ]; then\n  printf "offic" > "$out"\n  exit 28\nfi\nprintf "ial archive" >> "$out"\n`,
+        );
+        writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'curl'), 0o755);
+        chmodSync(path.join(binDir, 'sleep'), 0o755);
+
+        const installer = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256: createHash('sha256')
+            .update(readFileSync(fixture))
+            .digest('hex'),
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: `cp "${localArchive}" "${executable}" && chmod +x "${executable}"`,
+          executable,
+        });
+
+        execSync(installer, {
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH}`,
+            CURL_LOG: curlLog,
+          },
+        });
+
+        expect(readFileSync(executable, 'utf8')).toBe('official archive');
+        const attempts = readFileSync(curlLog, 'utf8').trim().split('\n');
+        expect(attempts).toHaveLength(2);
+        expect(attempts[0]).toContain('--continue-at -');
+        expect(attempts[1]).toContain('--continue-at -');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  // curl resolves `--continue-at -` against a missing file to offset 0 and
+  // sends no Range header, so the resume flag cannot corrupt attempt 1 on its
+  // own. What needs pinning is the 33/36 branch: a mirror that answers a
+  // ranged request with 200 makes curl exit 33 and leave the partial
+  // byte-identical, so without the rm -f every attempt re-sends the same
+  // offset and the budget is spent without ever recovering. Deleting that
+  // rm -f left the suite green before this test existed.
+  it.skipIf(process.platform === 'win32')(
+    'drops the partial archive when a mirror answers a ranged request with 200',
+    async () => {
+      const { getCachedArchiveInstaller } = await import('../lint.js');
+      const root = mkdtempSync(path.join(tmpdir(), 'linter-range-refusal-'));
+
+      try {
+        const binDir = path.join(root, 'bin');
+        const cacheArchive = path.join(root, 'cache', 'tool.tar');
+        const localArchive = path.join(root, 'job', 'tool.tar');
+        const executable = path.join(root, 'job', 'tool');
+        const fixture = path.join(root, 'official.tar');
+        const attemptFile = path.join(root, 'attempt');
+        mkdirSync(binDir, { recursive: true });
+        mkdirSync(path.dirname(localArchive), { recursive: true });
+        writeFileSync(fixture, 'official archive');
+        // Attempt 1 dies mid-transfer (28) leaving a partial behind. Later
+        // attempts hit a mirror that answers the ranged request with 200, so
+        // curl exits 33 and leaves those bytes untouched; only the 33/36
+        // branch's rm -f gets back to a full-body download. Measured against
+        // real curl: exit 33, output file byte-identical.
+        writeFileSync(
+          path.join(binDir, 'curl'),
+          `#!/bin/sh\nattempt=$(cat "${attemptFile}" 2>/dev/null || echo 0)\nattempt=$((attempt + 1))\necho "$attempt" > "${attemptFile}"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$attempt" -eq 1 ]; then\n  printf "offic" > "$out"\n  exit 28\nfi\nif [ -e "$out" ]; then\n  exit 33\nfi\nprintf "official archive" > "$out"\n`,
+        );
+        writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'curl'), 0o755);
+        chmodSync(path.join(binDir, 'sleep'), 0o755);
+
+        const installer = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256: createHash('sha256')
+            .update(readFileSync(fixture))
+            .digest('hex'),
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: `cp "${localArchive}" "${executable}" && chmod +x "${executable}"`,
+          executable,
+        });
+
+        execSync(installer, {
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH}`,
+          },
+        });
+
+        expect(readFileSync(executable, 'utf8')).toBe('official archive');
+        expect(readFileSync(attemptFile, 'utf8').trim()).toBe('3');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  // Raising the attempt cap from 3 to 99 also left the suite green, so the
+  // loop's only exit was unpinned: a permanent failure would retry until the
+  // CI step timed out instead of failing with curl's own status.
+  it.skipIf(process.platform === 'win32')(
+    'stops after the attempt cap and exits with the last curl status',
+    async () => {
+      const { getCachedArchiveInstaller } = await import('../lint.js');
+      const root = mkdtempSync(path.join(tmpdir(), 'linter-attempt-cap-'));
+
+      try {
+        const binDir = path.join(root, 'bin');
+        const cacheArchive = path.join(root, 'cache', 'tool.tar');
+        const localArchive = path.join(root, 'job', 'tool.tar');
+        const executable = path.join(root, 'job', 'tool');
+        const curlLog = path.join(root, 'curl.log');
+        mkdirSync(binDir, { recursive: true });
+        mkdirSync(path.dirname(localArchive), { recursive: true });
+        writeFileSync(
+          path.join(binDir, 'curl'),
+          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nexit 7\n',
+        );
+        writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'curl'), 0o755);
+        chmodSync(path.join(binDir, 'sleep'), 0o755);
+
+        const installer = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256: 'a'.repeat(64),
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: 'true',
+          executable,
+        });
+
+        let status;
+        let stderr = '';
+        try {
+          execSync(installer, {
+            env: {
+              ...process.env,
+              PATH: `${binDir}:${process.env.PATH}`,
+              CURL_LOG: curlLog,
+            },
+            stdio: ['ignore', 'ignore', 'pipe'],
+          });
+        } catch (error) {
+          status = error.status;
+          stderr = String(error.stderr);
+        }
+
+        expect(status).toBe(7);
+        expect(readFileSync(curlLog, 'utf8').trim().split('\n')).toHaveLength(
+          3,
+        );
+        // The cap exits before the retry line, so without this terminal line a
+        // degraded (continue-on-error) run ends on "retrying in 10s..." naming
+        // neither the archive nor the exhausted budget.
+        const terminal = stderr.trim().split('\n').pop();
+        expect(terminal).toContain('failed after 3 attempts (curl exit 7)');
+        expect(terminal).toContain('https://example.invalid/tool.tar');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
 });
 
 // #12647 (2026-09-24, runner ecs-qwen-hk4-19): `git ls-files` died with
@@ -290,7 +479,9 @@ describe('git-sourced lint lanes', () => {
       repo = path.join(root, 'repo');
       mkdirSync(repo);
       for (const [name, content] of Object.entries(files)) {
-        writeFileSync(path.join(repo, name), content);
+        const file = path.join(repo, name);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, content);
       }
       execSync('git init -q && git add -A', { cwd: repo });
     }
@@ -512,6 +703,41 @@ describe('git-sourced lint lanes', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'enrols the sourced apt-mirror probe in the shellcheck lane via its shebang',
+    async (ctx) => {
+      // Drive the lane's own candidate selection (name regex + real file(1)
+      // mime filter) with only shellcheck stubbed, so a change to the lane's
+      // filter that drops the probe is caught here (#16278 R2-1). The fixture
+      // sits at the probe's real dot-directory path: `^([^.]+)` cannot match a
+      // leading dot, so only the `.*\.(sh|zsh|bash)` arm can select it —
+      // at the repo root that arm could be deleted without reddening this
+      // case. Removing the probe's shebang still makes file(1) report
+      // text/plain and reddens it too.
+      const linters = await getLintersOrSkip(ctx);
+      const probeSrc = readFileSync(
+        '.github/scripts/apt-mirror-probe.sh',
+        'utf8',
+      );
+      const probePath = '.github/scripts/apt-mirror-probe.sh';
+      const { root, repo, bin } = setup({ [probePath]: probeSrc });
+      try {
+        const shellcheckLog = path.join(root, 'shellcheck.log');
+        stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+        const result = runLane(linters.shellcheck.run, { repo, bin });
+        expect(result.status).toBe(0);
+        // Exact argv: pins the lane options and the awk colon-strip, and
+        // proves this file (not a root-level namesake) reached shellcheck.
+        expect(readFileSync(shellcheckLog, 'utf8').trim()).toBe(
+          '--check-sourced --enable=all --exclude=SC2002,SC2129,SC2310' +
+            ` --severity=style --format=gcc --color=never ${probePath}`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('appends the pip --user bin dir after the inherited PATH', async () => {
     const { getLinterPath } = await import('../lint.js');

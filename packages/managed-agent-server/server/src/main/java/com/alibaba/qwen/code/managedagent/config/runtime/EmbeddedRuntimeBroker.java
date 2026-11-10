@@ -2,13 +2,13 @@ package com.alibaba.qwen.code.managedagent.config.runtime;
 
 import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeRecoveryCoordinator;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
@@ -44,7 +44,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 
@@ -55,20 +54,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
-    private final AgentStateStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
     private final boolean resident;
     private final com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator coordinator;
-    private static final Set<String> LIFECYCLE_FENCED = Set.of("CLOSING",
-            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
-    private final SshWorkspaceService ssh;
     private final RuntimeProvisioner primaryProvisioner;
     private final RuntimeBindingRepository extensionBindings;
     private final HttpRuntimeTransport extensionTransport;
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
@@ -76,34 +71,34 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this(store, properties, bindingRepository, sessionRepository, executionRepository, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore) {
+            JdbcWorkspaceExecutionStore workspaceExecutionStore) {
         this(store, properties, bindingRepository, sessionRepository,
                 executionRepository, workspaceExecutionStore, null, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore,
+            JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData) {
         this(store, properties, bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications, publicationData, null, null, null, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store,
+    public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore,
+            JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData,
             SshWorkspaceService ssh) {
@@ -111,9 +106,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, null, null, null, ssh);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager) {
@@ -121,9 +116,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, jdbc, manager, null, null);
     }
 
-    public EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh) {
@@ -131,9 +126,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, jdbc, manager, null, ssh);
     }
 
-    EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager,
@@ -142,15 +137,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 workspaceExecutionStore, publications, publicationData, jdbc, manager, residentProvisioner, null);
     }
 
-    private EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+    private EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager,
             RuntimeProvisioner residentProvisioner, SshWorkspaceService ssh) {
-        this.store = store;
-        this.ssh = ssh;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());

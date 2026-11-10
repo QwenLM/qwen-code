@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -59,7 +60,7 @@ class ResidentWorkspacesTest {
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository runtimeSessions;
     private JdbcToolExecutionRepository executions;
-    private WorkspaceExecutionStore authority;
+    private JdbcWorkspaceExecutionStore authority;
     private final ResidentWorkspace mapping = mapping("workspace", "storage");
     private final ContextBinding context = new ContextBinding("tenant", "workspace", 1, "storage", ".",
             WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
@@ -75,9 +76,9 @@ class ResidentWorkspacesTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setResidentWorkspaces(List.of(mapping));
-        authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager, null, properties));
+        authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager, null, properties));
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), mock(CommittedEventPublisher.class),
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         residents = new ResidentWorkspaces(List.of(mapping));
         storage = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
         storage.register(mapping.registration());
@@ -88,7 +89,7 @@ class ResidentWorkspacesTest {
                 + " config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'resident', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES ('tenant', 'workspace', ?, 'OWNER')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
+                + " VALUES ('tenant', 'workspace', ?, 'OWNER')", ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
     }
 
     @Test
@@ -162,7 +163,7 @@ class ResidentWorkspacesTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setResidentWorkspaces(List.of(mapping));
         var peer = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(peerJdbc, new ObjectMapper(), Clock.systemUTC(),
-                mock(CommittedEventPublisher.class), new ManagedWorkspaceRegistry(peerJdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                mock(CommittedEventPublisher.class), new JdbcManagedWorkspaceRegistry(peerJdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var peerTransaction = new TransactionTemplate(new DataSourceTransactionManager(source));
         start.await(10, java.util.concurrent.TimeUnit.SECONDS);
         return peerTransaction.execute(status -> peer.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
@@ -233,6 +234,34 @@ class ResidentWorkspacesTest {
         bindings.completeSessionRelease(runtimeSessions, releasing);
         assertThatThrownBy(() -> authority.assertHeld(context, record)).isInstanceOf(RuntimeBrokerException.class);
         assertThat(storage.inspect(mapping.registration())).isEqualTo(before);
+    }
+
+    @Test
+    void residentClaimAndReleaseDoNotWaitForTheTenantPlacementGuard() throws Exception {
+        var session = create("guarded").sessionId();
+        var original = ready(residents.request(context));
+        var record = active(original, session);
+        withTenantGuard(() -> authority.claim(context, record));
+        withTenantGuard(() -> authority.assertHeld(context, record));
+        var second = active(original, session);
+        withTenantGuard(() -> assertThatThrownBy(() -> authority.claim(context, second)).isInstanceOf(RuntimeBrokerException.class));
+        runtimeSessions.compareAndSet(second, second.withState(RuntimeSessionRecord.State.RELEASED, Instant.now()));
+        var releasing = bindings.beginSessionRelease(runtimeSessions, executions, record);
+        withTenantGuard(() -> authority.release(context, releasing));
+        bindings.completeSessionRelease(runtimeSessions, releasing);
+        assertThatThrownBy(() -> authority.assertHeld(context, record)).isInstanceOf(RuntimeBrokerException.class);
+    }
+
+    private void withTenantGuard(Runnable action) throws Exception {
+        try (var holder = jdbc.getDataSource().getConnection()) {
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant");
+            try {
+                action.run();
+            } finally {
+                holder.rollback();
+            }
+        }
     }
 
     @Test

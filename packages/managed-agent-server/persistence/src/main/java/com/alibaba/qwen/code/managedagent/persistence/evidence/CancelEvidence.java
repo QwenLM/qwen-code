@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -46,7 +47,7 @@ public class CancelEvidence implements AcceptanceEvidence {
                         + " AND o.target_kind = 'TURN' AND o.state = 'RECOVERY_BLOCKED'"
                         + " AND o.delivery_state = 'BLOCKED' AND o.claim_owner IS NULL",
                 (row, index) -> new Target(row.getString(1), row.getString(2), row.getString(3)),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
+                ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
                 parked.tenantId(), parked.sessionId(), parked.operationId());
         if (targets.isEmpty()) {
             return Optional.empty();

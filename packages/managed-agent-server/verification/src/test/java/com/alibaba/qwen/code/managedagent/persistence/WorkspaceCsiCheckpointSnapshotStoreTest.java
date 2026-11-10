@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -182,7 +183,8 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         "UPDATE ma_tool_execution SET reference_json = REPLACE(reference_json, 'payloadDigest', 'wrongDigest')",
         "UPDATE ma_tool_execution SET reference_json = '{}'",
         "UPDATE ma_runtime_session SET binding_id = 'different'",
-        "UPDATE ma_output_capture SET quarantined = TRUE",
+        "UPDATE ma_runtime_session SET is_rewind_pending = TRUE",
+        "UPDATE ma_output_capture SET is_quarantined = TRUE",
         "UPDATE ma_output_capture SET producer_phase = 'FINISHED'",
         "UPDATE ma_output_capture SET binding_digest = 'bad'",
         "UPDATE ma_output_capture SET receipt_revision = 2",
@@ -388,8 +390,8 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
 
     private void resource(String id, String kind, JsonNode body) {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "harness");
-        String resource = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id);
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
+        String resource = ManagedSessionStore.resourceKey(scope, id);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 resource, scope, id, kind, bytes.length, hash(bytes), bytes);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, journal_revision, resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, 'tenant', 'workspace', 'harness', 1, ?, " + ManagedSchemaTime.SQL_NOW + ")", scope, scope, resource, id);
@@ -397,8 +399,8 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
 
     private void publicationObject(String scope, String slot, String id, String kind, JsonNode body) {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "harness");
-        String resource = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope, id);
+        String sessionScope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
+        String resource = ManagedSessionStore.resourceKey(sessionScope, id);
         if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE resource_key = ?", Integer.class, resource) == 0) {
             resource(id, kind, body);
             jdbc.update("DELETE FROM ma_resource_ref WHERE resource_key = ?", resource);

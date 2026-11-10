@@ -14,9 +14,12 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedToolDetailsStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolDetailsStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -88,14 +91,14 @@ class ManagedArtifactApiIntegrationTest {
         }
         sessions = new ManagedAgentService(fixture.sessions(), new RequestDigests(),
                 mock(HarnessCoordinator.class), mock(HarnessConnector.class),
-                new ManagedWorkspaceRegistry(fixture.jdbc()), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(fixture.jdbc()), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext();
         context.registerBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class,
                 fixture::properties);
-        context.registerBean(com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader.class,
+        context.registerBean(ToolPublicationArtifactReader.class,
                 fixture::reader);
-        context.registerBean(com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore.class,
-                () -> mock(com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore.class));
+        context.registerBean(JdbcManagedActionStore.class,
+                () -> mock(JdbcManagedActionStore.class));
         context.registerBean("managedAgentClock", java.time.Clock.class, () -> java.time.Clock.systemUTC());
         context.registerBean(ManagedAgentService.class, () -> sessions);
         context.refresh();
@@ -111,7 +114,7 @@ class ManagedArtifactApiIntegrationTest {
         var service = new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
                 policy, fixture.properties());
         var details = new ManagedToolDetailsService(sessions,
-                new ManagedToolDetailsStore(fixture.jdbc(), new ManagedExtensionRecordStore(fixture.jdbc()), JSON));
+                new JdbcManagedToolDetailsStore(fixture.jdbc(), new JdbcManagedExtensionRecordStore(fixture.jdbc()), JSON));
         mvc = MockMvcBuilders.standaloneSetup(new ManagedArtifactController(service), new ManagedToolDetailsController(details))
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver())
                 .setControllerAdvice(new ApiExceptionHandler())
@@ -468,7 +471,7 @@ class ManagedArtifactApiIntegrationTest {
 
     private JsonNode detailsResource(String id, String kind, byte[] bytes) {
         String digest = org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
         fixture.jdbc().update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
@@ -674,13 +677,13 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(jsonPath("$.access.can_read_content").value(false));
         mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.data").isEmpty());
-        assertThat(fixture.jdbc().queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class))
+        assertThat(fixture.jdbc().queryForObject("SELECT is_quarantined FROM ma_output_capture", Boolean.class))
                 .isTrue();
     }
 
     @Test
     void deletionAndQuarantineHideContentWithoutChangingExecutionFacts() throws Exception {
-        fixture.jdbc().update("UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id = X'7075622d31'");
+        fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
         mvc.perform(asReader(get(ROOT + "/artifacts/" + stdout.path("id").asText())))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.artifact.availability").value("unavailable"))
                 .andExpect(jsonPath("$.access.can_read_content").value(false));

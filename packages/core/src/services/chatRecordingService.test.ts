@@ -329,6 +329,73 @@ describe('ChatRecordingService', () => {
     await expect(target.recordSessionModel(payload)).resolves.toBe(true);
   }
 
+  describe('persisted last user prompt notifications', () => {
+    it('publishes the recorded timestamp only after a successful human write', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      const held = holdNext(vi.mocked(jsonl.writeLine));
+      user('question');
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalled());
+      expect(notify).not.toHaveBeenCalled();
+      held.resolve!();
+      await svc.flush();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        writes().find((record) => record.type === 'user')!.timestamp,
+        'test-session-id',
+      );
+    });
+
+    it('does not advance metadata when a human write fails', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      user('not persisted');
+      await expect(svc.flush()).rejects.toThrow('disk full');
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('ignores assistant and cron activity but includes human mid-turn input', async () => {
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      reply('assistant output');
+      svc.recordCronPrompt([{ text: 'automatic prompt' }]);
+      await svc.flush();
+      expect(notify).not.toHaveBeenCalled();
+      svc.recordMidTurnUserMessage([{ text: 'follow up' }], 'follow up');
+      await svc.flush();
+      const midTurn = writes().find(
+        (record) => record.subtype === 'mid_turn_user_message',
+      )!;
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        midTurn.timestamp,
+        'test-session-id',
+      );
+    });
+
+    it('requests cold recovery after a persisted rewind', async () => {
+      user('first');
+      reply('first answer');
+      user('second');
+      await svc.flush();
+      const notify = vi.fn();
+      svc.setLastUserPromptRecordedCallback(notify);
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      await svc.flush();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        undefined,
+        'test-session-id',
+      );
+    });
+
+    it('keeps a successful write successful when an observer throws', async () => {
+      svc.setLastUserPromptRecordedCallback(() => {
+        throw new Error('observer');
+      });
+      user('persisted');
+      await expect(svc.flush()).resolves.toBeUndefined();
+    });
+  });
+
   describe('background execution recording ownership', () => {
     const turn: BackgroundNotificationTurn = {
       turnId: 'automatic-turn',
@@ -435,6 +502,44 @@ describe('ChatRecordingService', () => {
       );
       return { record: await flushed(), attachmentReferences };
     }
+
+    it("records a Mod's prompt as the Mod's, not the person's", async () => {
+      svc.recordUserMessage(
+        [{ text: 'framed' }],
+        undefined,
+        { displayText: 'Run the linter', hookContext: '', mod: 'lint' },
+        'prompt-1',
+      );
+      const record = await flushed();
+      expect(record.provenance).toBe('mod_prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+      // A title drawn from the conversation knows the message to leave out.
+      expect([...svc.getModPromptKeysForTitle()]).toEqual(['framed']);
+    });
+
+    it('keeps the newest Mod prompts as title keys, and none sent as the person', async () => {
+      const mod = (text: string, asUser?: true) =>
+        svc.recordUserMessage([{ text }], undefined, {
+          displayText: text,
+          hookContext: '',
+          mod: 'lint',
+          ...(asUser && { asUser }),
+        });
+      for (let index = 0; index < 20; index++) mod(`k${index}`);
+      // Submitted again, k0 is the newest and outlives the next one in.
+      mod('k0');
+      mod('k20');
+      expect(svc.getModPromptKeysForTitle().has('k0')).toBe(true);
+      expect(svc.getModPromptKeysForTitle().has('k1')).toBe(false);
+      // Unframed, its text is what the person might type themselves.
+      mod('Continue', true);
+      expect(svc.getModPromptKeysForTitle().has('Continue')).toBe(false);
+      await svc.flush();
+    });
 
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
@@ -1525,6 +1630,21 @@ describe('ChatRecordingService', () => {
 
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
+
+    it("keeps a Mod's prompt out of the title, in its turn's place", async () => {
+      displayed('A');
+      user('framed', undefined, {
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+      displayed('B');
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null, 'B']);
+      svc.rewindRecording(2, { truncatedCount: 1 });
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null]);
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+    });
 
     it('drops display projections from rewound user turns', async () => {
       displayed('A');

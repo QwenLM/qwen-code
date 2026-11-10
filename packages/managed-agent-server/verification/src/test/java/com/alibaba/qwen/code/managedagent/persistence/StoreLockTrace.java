@@ -53,7 +53,7 @@ public final class StoreLockTrace extends DelegatingDataSource {
             return table(sql, "ma_session")
                     && (sql.startsWith("insert into ma_session ")
                             || sql.startsWith("update ma_session ")
-                            || sql.contains("for update") && !sql.contains("csi_guard = true"));
+                            || sql.contains("for update") && !sql.contains("is_csi_guard = true"));
         }
 
         boolean turn() {
@@ -94,6 +94,31 @@ public final class StoreLockTrace extends DelegatingDataSource {
 
     public void assertSessionBeforeTurn(String tenant, String session) {
         assertOrder(events(), tenant, session, false);
+    }
+
+    public void assertPlacementBeforeSession(String tenant, String session) {
+        Set<String> placements = new HashSet<>();
+        int roots = 0;
+        for (Event event : events()) {
+            String transaction = event.connection() + ":" + event.transaction();
+            if (event.phase() == Phase.COMMIT || event.phase() == Phase.ROLLBACK || event.phase() == Phase.CLOSE) {
+                placements.removeIf(key -> key.startsWith(event.connection() + ":"));
+            }
+            if (event.phase() != Phase.SUCCEEDED || event.autoCommit()) {
+                continue;
+            }
+            if (event.sql().startsWith("select tenant_id from ma_tenant_guard ")
+                    && event.sql().contains("guard_domain = 'runtime_placement' for update")
+                    && com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys.valueKey(tenant).equals(event.arguments().get(1))) {
+                placements.add(transaction);
+            }
+            if (event.scope(tenant, session) && event.root()) {
+                roots++;
+                assertThat(placements).as("placement precedes the Session root in the same transaction")
+                        .contains(transaction);
+            }
+        }
+        assertThat(roots).as("scenario actually locked its Session root").isPositive();
     }
 
     void assertRootBeforeHead(String tenant, String session) {

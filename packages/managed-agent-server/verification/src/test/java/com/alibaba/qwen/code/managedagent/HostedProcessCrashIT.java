@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -407,6 +409,7 @@ class HostedProcessCrashIT {
             }
             startSpring();
             if (List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
+                WorkspaceTestStorage.prepareNativeRoot(root.resolve("workspace"));
                 var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
                 storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
                 storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
@@ -673,7 +676,7 @@ class HostedProcessCrashIT {
                         .containsEntry("runtime_session_id", execution.get("runtime_session_id"))
                         .containsEntry("binding_id", execution.get("binding_id"))
                         .containsEntry("runtime_generation", execution.get("runtime_generation"))
-                        .containsEntry("session_state", "READY").containsEntry("execution_exclusive", false);
+                        .containsEntry("session_state", "READY").containsEntry("is_rewind_pending", false);
                 assertThat(((Number) member.get("runtime_generation")).longValue()).isEqualTo(1);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding b"
                         + " JOIN ma_runtime_session rs ON rs.binding_id=b.binding_id AND rs.runtime_generation=b.runtime_generation"
@@ -682,7 +685,7 @@ class HostedProcessCrashIT {
                         + " WHERE rs.scope_key=? AND rs.runtime_session_id=? AND b.scope_key=rs.scope_key"
                         + " AND b.tenant_id=rs.tenant_id AND b.workspace_id=rs.workspace_id AND b.workspace_generation=rs.workspace_generation"
                         + " AND b.canonical_cwd=rs.canonical_cwd AND b.capability_digest=rs.capability_digest AND b.isolation_class=rs.isolation_class"
-                        + " AND b.provisioner_kind='local-process' AND b.binding_state='READY' AND b.drain_requested=FALSE"
+                        + " AND b.provisioner_kind='local-process' AND b.binding_state='READY' AND b.is_drain_requested=FALSE"
                         + " AND s.workspace_id=b.workspace_id AND s.workspace_generation=b.workspace_generation AND s.workspace_storage_id=b.storage_id"
                         + " AND st.physical_key=rs.execution_storage_key AND st.registration_state='REGISTERED' AND st.storage_kind='LOCAL'"
                         + " AND st.registration_revision>0 AND s.workspace_config_ref=? AND s.workspace_policy_ref=? AND s.context_config_ref=?",
@@ -768,7 +771,7 @@ class HostedProcessCrashIT {
             // the raw tenant+session form scans the lane's accumulated ma_resource rows.
             byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                     + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                    byte[].class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), checkpointId, tenant, session);
+                    byte[].class, ManagedSessionStore.sessionScopeKey(tenant, session), checkpointId, tenant, session);
             JsonNode saved = JSON.readTree(checkpoint);
             assertThat(saved.path("continuation").path("phase").asText()).isEqualTo(prepared ? "before_model" : "await_runtime");
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("input.accepted")
@@ -779,7 +782,7 @@ class HostedProcessCrashIT {
                     && event.path("payload").path("role").asText().equals("tool_result"))).isEmpty();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_scope_key = ?"
                     + " AND kind = 'managed-tool-outcome' AND tenant_id = ? AND session_id = ?",
-                    Integer.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session))
+                    Integer.class, ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session))
                     .isZero();
             JsonNode target = report.path("target");
             if (fault.equals("harness-result")) {

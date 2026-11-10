@@ -25,6 +25,7 @@ import {
   type RestoreToolResponseBinding,
 } from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import { t } from '../../i18n/index.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import {
   InteractiveModToolScheduler,
@@ -32,6 +33,7 @@ import {
   type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
@@ -170,6 +172,14 @@ export interface LivePromptOptions {
   submittedPrompt?: string;
   humanInput?: HumanPromptInput;
   workflowModeEligible?: boolean;
+  /** Context the Mods' `prompt.submit` hooks added; rides the first send. */
+  promptContext?: readonly string[];
+  /**
+   * The prompt a Mod submitted with `$.prompt.submit` that this turn runs.
+   * No `@path` in it is read, the transcript records it as the Mod's, and
+   * the sidecar sees its text rather than the frame the model reads.
+   */
+  modPrompt?: ModQueuedPrompt;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -680,7 +690,10 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize(['AbovePrompt']);
+      await getInteractiveModSession(config)?.initialize(['AbovePrompt'], {
+        prompts: true,
+        runsPrompts: true,
+      });
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
@@ -769,6 +782,7 @@ export async function* livePromptEvents(
         return parseAndFormatApiError(
           error,
           config.getContentGeneratorConfig()?.authType,
+          t,
         );
       } catch {
         return error instanceof Error ? error.message : String(error);
@@ -794,6 +808,7 @@ export async function* livePromptEvents(
   if (
     !options?.toolCall &&
     !options?.retry &&
+    !options?.modPrompt &&
     options?.submittedPrompt !== undefined &&
     isAtCommand(typedText)
   ) {
@@ -824,7 +839,14 @@ export async function* livePromptEvents(
     }
   }
   if (!current() || abort.aborted) return;
-  if (!options?.toolCall || options.retry)
+  if (options?.modPrompt) {
+    // As in a headless run: the Mod's text, then which Mod submitted it; a
+    // retry of it (Ctrl+Y) reads the same, not as the frame the person typed.
+    dualOutput?.emitUserMessage([{ text: options.modPrompt.text }]);
+    dualOutput?.emitSystemMessage('mod_prompt', {
+      mod: options.modPrompt.plugin,
+    });
+  } else if (!options?.toolCall || options.retry)
     dualOutput?.emitUserMessage(normalizeParts(nextPrompt));
   // Core settles this carrier at its request-local history push. Neither a
   // stream event nor a normal empty stream proves that this input was pushed.
@@ -878,6 +900,19 @@ export async function* livePromptEvents(
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(!options?.retry && options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
+            : {}),
+          ...(!options?.retry && options?.promptContext?.length
+            ? { promptContext: options.promptContext }
+            : {}),
+          ...(!options?.retry && options?.modPrompt
+            ? {
+                submittedByMod: options.modPrompt.plugin,
+                ...(options.modPrompt.asUser && {
+                  submittedAsUser: true as const,
+                }),
+                // Recall looks for what the Mod asked, not the frame.
+                memoryRecallQuery: options.modPrompt.text,
+              }
             : {}),
         }
       : {

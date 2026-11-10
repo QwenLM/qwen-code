@@ -1227,9 +1227,21 @@ describe('package scripts', () => {
     // 'off' must omit the flag rather than pass --retry=0, which would
     // outrank a workspace's own config-level retry (sdk-typescript).
     expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
-    expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
-    // The step hands the flag to the lane script, which passes it to all
-    // three of its Vitest runs: the CLI and core suites in the main lane, and
+    expect(step).toContain(
+      'retry_arg=(--shard="${UNIT_TEST_SHARD}" --passWithNoTests)',
+    );
+    expect(step).toContain('retry_arg+=(--retry="${VITEST_RETRY}")');
+    // The standalone runtime regression is the one suite that must run on
+    // exactly one shard. The lane script's own test injects the variable into
+    // its stub env, so it proves the script obeys it and nothing else proves
+    // CI sets it: flipping this to a constant, inverting it, or dropping it
+    // while resolving a conflict runs the regression on one wrong shard or
+    // nowhere, and the only CI coverage of that suite goes with it.
+    expect(step).toContain(
+      "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 1 && '1' || '' }}\"",
+    );
+    // The step hands the shard and the retry to the lane script, which
+    // passes them to all three of its Vitest runs: the CLI and core suites in the main lane, and
     // the other workspaces and scripts/tests in the side lane.
     expect(step).toContain(
       '.github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
@@ -1405,6 +1417,7 @@ describe('package scripts', () => {
             sideLog = '',
             killed = false,
             nested = false,
+            skipStandalone = '',
           } = {},
         ) => {
           const calls = path.join(dir, `${name}.calls`);
@@ -1424,6 +1437,9 @@ describe('package scripts', () => {
               // In CI this suite runs inside the side lane, whose own log
               // ci.yml names here: never write to it.
               SIDE_LANE_LOG: sideLog,
+              // ci.yml sets it on every shard but the first, this suite's
+              // own run included: the passing case needs it unset.
+              QWEN_CI_SKIP_STANDALONE_RUNTIMES: skipStandalone,
               LANES: lanes,
               STUB_CALLS: calls,
               STUB_WORKSPACES: pkgGet,
@@ -1464,6 +1480,13 @@ describe('package scripts', () => {
         const order = (calls, line) => calls.indexOf(line);
         expect(order(passing.calls, sideWorkspaces)).toBeLessThan(
           order(passing.calls, standalone),
+        );
+
+        // Every shard but one leaves the standalone regression out.
+        const otherShard = run('other-shard', { skipStandalone: '1' });
+        expect(otherShard.rc).toBe('0');
+        expect([...otherShard.calls].sort()).toEqual(
+          [mainSuites, sideWorkspaces, scriptsUnit].sort(),
         );
         expect(order(passing.calls, standalone)).toBeLessThan(
           order(passing.calls, scriptsUnit),
@@ -1741,11 +1764,18 @@ describe('package scripts', () => {
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
     // #10490's run 3 was cancelled at ~60 minutes, leaving behind
     // orphaned test processes; a stall reads as a timeout, not a failure.
-    const step = getWorkflowStep(
-      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
-      'Run tests and generate reports',
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
     );
-    expect(step).toContain('timeout-minutes: 110');
+    const step = getWorkflowStep(job, 'Run tests and generate reports');
+    expect(step).toContain('timeout-minutes: 45');
+    // The step cap is the one that must fire: it fails the step and leaves
+    // the job alive for the diagnostic steps below it, while a job timeout
+    // cancels the job and skips them.
+    const stepCap = Number(step.match(/timeout-minutes: (\d+)/)?.[1]);
+    const jobCap = Number(job.match(/\n {4}timeout-minutes: (\d+)/)?.[1]);
+    expect(stepCap).toBeLessThan(jobCap);
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {

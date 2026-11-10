@@ -332,7 +332,20 @@ reclaim anything. If the database check fails, capacity remains skipped.
 MySQL is the supported database family; full integration CI uses MySQL 8.4.
 MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
 Existing dialect handling remains in place; this change does not reject
-connections that previously worked or introduce a catalog migration.
+MariaDB solely by product name or introduce a catalog migration.
+
+MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in each
+application connection's session `sql_mode`. Schema admission and validation
+reject non-strict connections before schema writes. The embedded default Managed
+pool adds `STRICT_TRANS_TABLES` when creating every physical connection,
+preserving the other session modes. A non-strict global default is accepted.
+Strict mode prevents ordinary writes to unsigned counters from silently clamping
+negative values to zero; `IGNORE` writes can downgrade these errors to warnings.
+Standalone, maintenance and custom DataSource callers must configure every
+application connection to retain strict mode throughout operation; a startup
+check does not police later administrative or connection-mode changes. The
+application does not change the server's global SQL mode. MariaDB CHECK
+enforcement still requires both global and session settings to be enabled.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
@@ -388,6 +401,38 @@ examples below use the same `default` tenant.
 The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
 not maintain a separate public-to-Harness Session mapping.
+
+## Personal memory (opt-in)
+
+Personal memory is disabled by default. Enable it only after qualifying a
+dedicated Mem0 service with cross-service sharing disabled. Configure the
+control plane with `qwen.managed-agent.memory.enabled=true`,
+`qwen.managed-agent.memory.endpoint` and `qwen.managed-agent.memory.api-key`.
+Session Store must also be enabled, and the Hosted Harness must advertise
+`session-memory/1`. The endpoint and service key stay in the control plane;
+do not put them in Harness, sandbox or MCP configuration.
+
+An authenticated actor calls `POST /v1/agents/memory-stores` with an empty body
+or `{}` to create or retrieve their single personal Store. `GET` on the same
+route returns zero or one Store. Add the returned `id` as `memory_store_id` to
+the public Session creation request, or `memoryStoreId` to the WebShell request.
+Omitting the field leaves memory disabled. The binding cannot change after
+creation and participates in creation idempotency. The same user can explicitly
+reuse their Store across authorized Workspaces.
+
+Bound Sessions recall relevant memories for new user inputs and expose
+`context_search`, `context_remember`, `context_get` and `context_forget` through
+the existing tool UI. Remembering and forgetting require explicit user intent
+and follow tool approval and Plan Mode. An uncertain write returns `unknown`;
+it is never automatically resubmitted or reported as successful.
+
+These Sessions and their children are visible only to the owner, in addition to
+the existing Workspace grants. Children do not inherit Store access. Workspace
+file sharing remains unchanged. Deleting a memory affects future retrieval,
+while prior Session history follows the existing retention policy. Existing
+development databases must be recreated after this V1 schema baseline change.
+See the [personal memory design](../../docs/design/2026-11-07-managed-user-memory.md)
+for isolation and recovery requirements.
 
 ## Public Session lifecycle
 
@@ -860,7 +905,7 @@ Stopping a parent Turn durably stops new launches and requests cancellation for 
 ### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
-Workspace Turn supplied with public Session creation: Read/Write/Edit under
+Workspace Turn supplied with public Session creation: Read/Write/Edit and `glob` under
 `hosted-workspace-files/1`, or file tools plus mandatory-approval foreground Shell
 under `hosted-workspace-shell/1` when the Shell opt-in above is enabled. The
 WebShell creation adapter uses the same admission. This requires the Hosted
@@ -934,11 +979,48 @@ The initial approval mode is pinned at Session creation and must be confirmed by
 Harness on creation and load. Built-in Workspace Sessions can select a different
 policy for later Turns while retaining the original definition.
 
+### Structured user questions
+
+Root Sessions using `hosted-workspace-files/1`, `/2`, `/3`, or
+`hosted-workspace-shell/1` expose `ask_user_question`, including public Plan
+mode. The tool asks one to four required questions, each offering two to four
+choices and a custom-text answer. Single-choice questions accept one option or
+custom text; multiple-choice questions also allow both together. The tool must
+be the only call in its batch. MCP/Hook Sessions, child Sessions,
+foreground-only workers and resident CSI profiles do not expose it.
+
+The question appears as a pending Action with `kind: question`. WebShell keeps
+the answer draft visible until delivery is confirmed; refreshing retrieves the
+same pending Action. Public responses use `kind: question`, `answers` with
+`question_id`, optional `option_ids` and optional `text`, plus the Action's
+`input_revision` and `policy_revision`. WebShell uses their camelCase names.
+Use the returned question and option IDs, not their labels, and the existing
+Action response endpoints and idempotency key. Response authorization is the
+same as permission Actions, including the Shell owner restriction.
+
+Questions always wait for a human answer, including Full Access and live
+approval-policy changes. The existing approval timeout, cancellation and
+expiry rules apply. Invalid or conflicting answers cannot replace the durable
+decision; an equivalent retry returns the original result. The original
+question and answer survive service/Harness restart and resume the same tool
+call. Answer text is limited to 8192 UTF-16 code units per question and the
+canonical answer array to 32 KiB; the complete tool input is limited to 16 KiB.
+
+Deploy compatible Java server, Java SDK, Harness and WebShell artifacts
+together. Drain and fence older writers before reopening execution; older
+binaries cannot interpret the new question options/decisions and must not
+resume Sessions with pending questions. No database schema change is required.
+See the [question design](../../docs/design/2026-11-06-managed-user-questions.md)
+([简体中文](../../docs/design/2026-11-06-managed-user-questions.zh-CN.md)) for
+the continuation contract and acceptance scope.
+
+### Approval policy selection
+
 For new Workspace-bound WebShell Sessions, the shared composer queries `POST /api/agent/web-shell/v1/session-options/query` with `agentId` using the authenticated tenant actor. The response contains the effective `approvalMode` and `availableApprovalModes`; Workspace discovery advertises `approvalModeSelection` for this contract. Built-in Sessions allow `default`, `auto-edit`, and `yolo` (Full Access). Shell Full Access additionally requires the Harness feature `approval-selection/1`; without it Shell offers only `default` and `auto-edit`. The Shell deployment opt-in and its deployment default remain unchanged. Hosted execution does not support classifier `auto` or `plan`. An AgentDefinition exposes only its compiled policy, which a creation request cannot override.
 
 The WebShell create request may include `approvalMode` only with a Workspace binding. Omission preserves the existing default and request digest; explicit selection is persisted in the Session and joins its idempotency digest. Retrying the same key reads the original pin even if deployment defaults, the AgentDefinition, or a later Session selection changed. Workspace-bound and definition-pinned Session summaries expose the current `approvalMode`, immutable `initialApprovalMode`, and `approvalRevision`. Legacy unbound built-in Sessions omit this metadata because their execution policy is supplied by the deployment. The public REST create contract is unchanged.
 
-The only ordinary Shell profile is `hosted-workspace-shell/1`, including native `glob` alongside Read/Write/Edit, Shell and Monitor. The unshipped `/2` Shell profile was removed; development Sessions using it must be recreated. See the [consolidation design](../../docs/design/2026-10-23-managed-shell-profile.md) ([简体中文](../../docs/design/2026-10-23-managed-shell-profile.zh-CN.md)).
+The ordinary file profile `hosted-workspace-files/1` includes native `glob`. The only ordinary Shell profile is `hosted-workspace-shell/1`, including `glob` and durable Session `todo_write` alongside Read/Write/Edit, Shell and Monitor. Plan mode excludes todo writes. Normal Hosted `read_file` exposes PDF `pages`; resident/CSI keeps its restricted read/write/edit contract without `pages`. Creation and load use the current tool declarations, with no fallback for outdated saved tool schemas. Deploy matching control-plane, Harness and Runtime artifacts together; an older Runtime capability identity does not prove support for the tools now included in these profiles. See the [basic tool alignment design](../../docs/design/2026-11-06-managed-basic-tools.md) ([简体中文](../../docs/design/2026-11-06-managed-basic-tools.zh-CN.md)). The unshipped `/2` Shell profile was removed; development Sessions using it must be recreated. See the [consolidation design](../../docs/design/2026-10-23-managed-shell-profile.md) ([简体中文](../../docs/design/2026-10-23-managed-shell-profile.zh-CN.md)).
 
 Eligible Workspace Sessions can change their execution approval policy. With the Harness feature `live-approval-selection/1`, a selection affects subsequent permission checks in the current Turn, and ordinary pending tools are durably allowed when the selected mode permits them. Already dispatched tools and explicit Hook or Plan-exit approvals retain their existing decisions. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-files/3` or `hosted-workspace-shell/1` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. Without live support, the Session must be idle, with no pending approval or retained Runtime. Context/lifecycle and recovery barriers always apply; Plan changes remain idle-only. The options response advertises live behavior with `liveSupported`. Upgrade the control plane and Harness together in a maintenance window, fencing old Java writers before reopening execution; new Harness tool Turns refuse a missing live-policy endpoint. See the [live approval design](../../docs/design/2026-10-20-managed-live-approval.md) ([简体中文](../../docs/design/2026-10-20-managed-live-approval.zh-CN.md)). Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection; `hosted-workspace-files/3` does. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
 
@@ -1663,6 +1745,18 @@ Local focused tests, macOS developer receipts and the existing Linux static-exte
 gate below establish different boundaries. Complete package Linux/SSH cleanup,
 fault injection and real-provider qualification remain separate acceptance gates.
 
+## Managed-only Skill and MCP installation
+
+Set `qwen.managed-agent.extensions.self-service-enabled=true` to allow authorized Workspace operators in the extension deployment allowlist to upload ZIP/tar.gz Skill or extension archives and author ordinary stdio, Streamable HTTP and SSE MCP connections without a local daemon. The Hosted Harness must advertise `managed-package-preparation/1`; pool preparation uses an accepting capable member without creating Session placement. Both the uploader and Session query expose permission and apply eligibility, and the server rechecks them.
+
+Review normalized resources and non-secret configuration before confirming installation. Workspace service credentials are stored through encrypted extension settings; commands, arguments and resource files are not executed during preparation. Publishing a revision does not change an existing Session. Explicit apply pins the chosen package/settings revision only in an eligible idle Session and preserves unrelated extensions, independent MCP connections and base Hooks. Recovery of old content creates a new configuration revision. An unknown apply outcome keeps the original operation/owner barrier and must be queried or continued before another selection is submitted.
+
+Runtime project Skill snapshots and personal HTTP MCP OAuth are separate dependent deliveries. This installation protocol remains version 1 and adds no personal credential tables or bindings. See the complete [English design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.md) and [Chinese design](../../docs/design/2026-11-07-managed-skills-mcp-self-service.zh-CN.md). Disabling self-service keeps already published and installed content available. Local focused checks and prior whole-branch CI do not establish real MySQL, browser-to-Runtime or process-fault acceptance of a split head.
+
+### Import project Skills from the current Runtime
+
+After first-stage self-service is available, enable `qwen.managed-agent.extensions.runtime-skill-import-enabled` only with the Hosted `managed-runtime-skill-import/1` capability. Use **Import from current Workspace** to discover `.qwen/skills` and `.agents/skills` in the Session's original ready Runtime. Snapshot and archive reads retain the observed owner/generation and filesystem boundary; a changed source or owner fails without fallback or provisioning. Review and explicitly apply the immutable snapshot through the existing installation chain. Re-import publishes a new revision and does not watch or automatically update existing Sessions. See the [English design](../../docs/design/2026-11-08-managed-runtime-skill-import.md) and [Chinese design](../../docs/design/2026-11-08-managed-runtime-skill-import.zh-CN.md). Personal OAuth is a separate delivery and is not required.
+
 ## Linux extension process acceptance
 
 `HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.
@@ -1933,7 +2027,7 @@ each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
 
-Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Past execution overlap does not disable file undo. Undo requires other current memberships to release, then briefly excludes new acquisitions; existing file-level history checks still apply. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)).
+Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Undo can run alongside other Sessions and uploads, subject to the existing file-level history checks. An active or unconfirmed undo blocks only its originating Runtime Session's execution, repeated undo and mount handback; neighboring Sessions can continue. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)) and the updated [rewind semantics](../../docs/design/2026-11-05-managed-rewind-concurrency.md) ([简体中文](../../docs/design/2026-11-05-managed-rewind-concurrency.zh-CN.md)).
 
 The baseline stores ordinary execution memberships per Runtime Session. Use matching Server/Broker builds with a fresh catalog. CSI reservation and physical-maintenance ownership retain their existing roles. Development catalogs using singleton holders require their original deployment to finish or recover and release those holders; they cannot be reused by this build.
 

@@ -145,6 +145,18 @@ const failoverArms = [
     ],
   ],
   [
+    'Run rewritten-command Hook recovery E2E',
+    'test:e2e:managed-harness-restart-approval-command-rewrite',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'command-rewrite',
+    ],
+  ],
+  [
     'Run after-earlier-tools crash E2E',
     'test:e2e:managed-harness-restart-approval-after-earlier-tools',
     [
@@ -255,11 +267,23 @@ describe('Hosted real-process gates', () => {
       (step) => step.name === 'Install Dependencies',
     );
     expect(install.run).toContain('corepack pnpm install --frozen-lockfile');
-    expect(install.env?.QWEN_SKIP_PREPARE).toBeUndefined();
-    expect(pkg.scripts.prepare).toBe('node scripts/prepare.js');
-    const prepare = read('scripts/prepare.js');
-    expect(prepare).toContain("run('npm', ['run', 'build'])");
-    expect(prepare).toContain("run('npm', ['run', 'bundle'])");
+    // The packaged CLI comes from test_build's tree, built and bundled once
+    // for every lane, not from `prepare` during this job's install.
+    expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    expect(job.needs).toContain('test_build');
+    const download = job.steps.find(
+      (step) => step.name === 'Download the built tree',
+    );
+    expect(download.with.name).toBe('unit-test-tree');
+    expect(
+      job.steps.find((step) => step.name === 'Unpack the built tree').run,
+    ).toContain('unit-test-tree.tgz');
+    expect(
+      ci.jobs.test_build.steps.find((step) => step.name === 'Build').run,
+    ).toBe('node scripts/ci-build-cache.mjs build .qwen-build-cache');
+    const buildCache = read('scripts/ci-build-cache.mjs');
+    expect(buildCache).toContain("run('npm run build')");
+    expect(buildCache).toContain("run('npm run bundle')");
     const run = job.steps.find(
       (step) => step.name === 'Run required no-AK integration gate',
     );
@@ -646,6 +670,37 @@ describe('Hosted real-process gates', () => {
     expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
   });
 
+  it('delegates and enters the rewritten-command arm cgroup before its real stack starts', () => {
+    const job = java.jobs['hosted-failover-e2e'];
+    const delegate = job.steps.find(
+      (step) =>
+        step.name ===
+        'Delegate a cgroup v2 root for rewritten-command recovery',
+    );
+    const arm = job.steps.find(
+      (step) => step.name === 'Run rewritten-command Hook recovery E2E',
+    );
+    expect(delegate, 'the rewritten-command cgroup delegation').toBeDefined();
+    expect(arm, 'the rewritten-command arm').toBeDefined();
+    expect(job.steps.indexOf(delegate)).toBeLessThan(job.steps.indexOf(arm));
+    expect(delegate.if).toBe(arm.if);
+    expect(arm.env.QWEN_E2E_EXTENSION_CGROUP_ROOT).toBe(
+      '/sys/fs/cgroup/a3-command-rewrite',
+    );
+    expect(delegate.run).toContain(
+      'mkdir -p /sys/fs/cgroup/a3-command-rewrite',
+    );
+    expect(delegate.run).toContain(
+      'test -f /sys/fs/cgroup/a3-command-rewrite/cgroup.kill',
+    );
+    expect(delegate.run).toContain(
+      '/sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.procs',
+    );
+    expect(arm.run).toContain(
+      'echo $$ | sudo tee /sys/fs/cgroup/a3-command-rewrite/cgroup.procs',
+    );
+  });
+
   it('sweeps every Hook cgroup subtree a Hosted IT allocates', () => {
     const owners = hostedTestClasses().filter(({ file }) =>
       read(file).includes('QWEN_MANAGED_HOOK_CGROUP_ROOT'),
@@ -661,16 +716,16 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (204 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (205 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     // The MySQL job's ceiling carries 33 minutes of setup allowance, above
     // the 13-minute floor: a Verify that timed out used to skip admission,
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
-    ['hosted-harness-mysql', 294, 327, 33],
-    // Twenty-seven failover arms at 10 each; the allowance is ~13 minutes of
-    // setup plus 2.
-    ['hosted-failover-e2e', 270, 285, 15],
+    ['hosted-harness-mysql', 295, 328, 33],
+    // Twenty-eight failover arms at 10 each plus the capped rewritten-command
+    // cgroup delegation at 10; the allowance is ~13 minutes of setup plus 2.
+    ['hosted-failover-e2e', 290, 305, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling, allowance) => {
@@ -931,12 +986,14 @@ describe('Hosted real-process gates', () => {
       // minutes; the FG12d two-server release cell adds 32 s (2x its
       // measured 16.2 s), moving the fork to 11536 and the step to 203
       // minutes; the FG12d detach-unknown cell adds 55 s (2x its measured
-      // 27.4 s), moving the fork to 11591 and the step to 204 minutes until
+      // 27.4 s), moving the fork to 11591 and the step to 204 minutes; the
+      // FG12d stopped-worker close cell adds 67 s (2x its measured 33.1 s),
+      // moving the fork to 11658 and the step to 205 minutes until
       // CI measures it: the relational check above tolerates anything up to
       // step*60, so the value is pinned literally here — an unnoticed raise
       // has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11591);
+        expect(forkSeconds).toBe(11658);
       }
     },
   );

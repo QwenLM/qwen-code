@@ -176,12 +176,12 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
         // Wired as in production, so the receipt commits below reach the capture guard.
-        var toolResults = new ManagedToolResultStore(jdbc, manager,
+        var toolResults = new JdbcManagedToolResultStore(jdbc, manager,
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON,
-                        java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
+                        java.time.Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties,
                         new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
-                new ManagedExtensionRecordStore(jdbc), null, null, null, null, toolResults, null,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null, null, null, toolResults, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
         var endpoint = new AtomicReference<URI>();
         var actualClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
@@ -285,7 +285,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                         + " WHERE EXISTS (SELECT 1 FROM ma_session_journal_tx t WHERE t.operation = 'recordToolResult'"
                                         + " AND t.command_id = e.execution_call_id) ORDER BY e.execution_call_id LIMIT 1", String.class);
                                 for (String mutation : List.of("execution_state = 'UNKNOWN', result_json = NULL, execution_status = NULL, settled_at = NULL",
-                                        "cancel_requested = TRUE", "native_authorization_json = NULL",
+                                        "is_cancel_requested = TRUE", "native_authorization_json = NULL",
                                         "execution_status = 'error', result_json = '{\"executionStatus\":\"error\",\"responseParts\":[],\"error\":{\"message\":\"changed\"}}'")) {
                                     transaction.executeWithoutResult(status -> {
                                         jdbc.update("UPDATE ma_tool_execution SET " + mutation + " WHERE execution_call_id = ?", execution);
@@ -441,6 +441,10 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isZero();
                 assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))
                         .isEqualTo(coldRecovery ? 3 : 1);
+                assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(4);
+                var diagnostics = new JdbcManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
+                assertThat(diagnostics.statistics()).isNotNull();
+                assertThat(diagnostics.statisticsSequence()).isPositive();
                 if (coldRecovery) {
                     assertThat(result.path("coldRecovery").asBoolean()).isTrue();
                     assertThat(result.path("coldRefusalChecks").asInt()).isEqualTo(9);
@@ -450,7 +454,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     assertThat(result.path("retirement").path("stage").asText()).isEqualTo("DRAINED");
                     assertThat(result.path("retirement").path("progressVersion").asInt()).isEqualTo(4);
                     assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head", String.class)).isEqualTo("SEALED");
-                    assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isFalse();
+                    assertThat(jdbc.queryForObject("SELECT is_wake_scan_pending FROM ma_session_head", Boolean.class)).isFalse();
                     assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding", String.class)).isEqualTo("DRAINING");
                     assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("DRAINING");
                     assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session", String.class)).isEqualTo("RELEASED");
@@ -476,7 +480,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(39);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(41);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");
@@ -584,7 +588,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             return Map.of("holderId", holderId);
         }
 
-        private ManagedSessionStoreModels.WriterGrant acquire(ManagedSessionStore journal, String token,
+        private ManagedSessionStoreModels.WriterGrant acquire(JdbcManagedSessionStore journal, String token,
                 String session, ManagedSessionStoreModels.AcquireWriterRequest request) {
             var transaction = new TransactionTemplate(manager);
             transaction.setTimeout(10);

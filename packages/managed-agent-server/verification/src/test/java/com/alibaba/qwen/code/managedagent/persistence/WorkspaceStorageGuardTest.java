@@ -329,12 +329,12 @@ class WorkspaceStorageGuardTest {
         var session = new SessionRecord("tenant", sessionId, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 binding, "default", "hosted-workspace-files/1");
-        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager, guard)));
+        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager, guard)));
         doNothing().when(execution).authorizeActionResponse(session);
         doNothing().when(execution).authorizePassiveAttachment(session);
         var sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant", sessionId)).thenReturn(session);
-        var actions = mock(ManagedActionStore.class);
+        var actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode("tenant", sessionId)).thenReturn("default");
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
@@ -380,7 +380,7 @@ class WorkspaceStorageGuardTest {
         guard.register("tenant", "storage", UUID.randomUUID().toString());
         // The action-response authority is derived from the real grant rows,
         // not injected.
-        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager, guard)));
+        var execution = spy(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager, guard)));
         var bound = new ContextBinding("tenant", "workspace", 1, "storage", "child",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         String sessionId = UUID.randomUUID().toString();
@@ -405,7 +405,7 @@ class WorkspaceStorageGuardTest {
                 bound, "default", "hosted-workspace-files/1");
         var sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant", sessionId)).thenReturn(session);
-        var actions = mock(ManagedActionStore.class);
+        var actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode("tenant", sessionId)).thenReturn("default");
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
@@ -637,16 +637,20 @@ class WorkspaceStorageGuardTest {
                 + " binding_id, runtime_generation, session_state, record_version, last_active_at, execution_storage_key)"
                 + " VALUES (?, 'retained', 'tenant', 'workspace', '1', '/workspace', 'digest', 'session', 'session',"
                 + " 'bootstrap', 'binding', 1, 'RELEASED', 0, 1, ?)", "a".repeat(64), key);
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 1 WHERE storage_key = ?", key);
         assertThat(guard.inspect("tenant", "storage")).contains("holder=true");
         assertUnavailable(() -> guard.register("tenant", "storage", registration));
         String operation = UUID.randomUUID().toString();
         assertUnavailable(() -> guard.fence("tenant", "storage", 1, operation));
         jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", "retained");
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 0 WHERE storage_key = ?", key);
         guard.fence("tenant", "storage", 1, operation);
         jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?", key, "retained");
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 1 WHERE storage_key = ?", key);
         assertUnavailable(() -> guard.recoveryRegistration("tenant", "storage", 1, operation));
         assertUnavailable(() -> guard.restoreOriginal("tenant", "storage", 1, operation));
         jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", "retained");
+        jdbc.update("UPDATE ma_storage_owner SET member_count = 0 WHERE storage_key = ?", key);
         guard.restoreOriginal("tenant", "storage", 1, operation);
         jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?", key, "retained");
         guard.restoreOriginal("tenant", "storage", 1, operation);

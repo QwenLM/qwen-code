@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -77,7 +78,7 @@ public interface SessionLifecycleStore {
 
     /** The given Sessions whose execution facts hold, in one read. */
     public Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
-            java.util.Collection<String> sessionIds);
+            Collection<String> sessionIds);
 
     public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
@@ -300,6 +301,16 @@ public interface SessionLifecycleStore {
     public boolean completeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed);
+
+    /**
+     * Binds the Harness boot id of a Session that has no Turn to hang
+     * {@link TurnExecutionStore#bindHarness} on — the automation verbs'
+     * create of a never-attached Session. Fills the column only when it is
+     * still empty, so a Turn that concurrently bound another generation keeps
+     * its own binding.
+     */
+    public void bindSessionHarness(String tenantId, String sessionId,
+            String harnessBootId);
 
     /**
      * Terminates a claimed operation whose retry budget is spent, recording

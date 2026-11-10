@@ -272,6 +272,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
       'anthropic',
       this.cliConfig.getProxy(),
     );
+    const sessionFetch = buildSessionAwareFetch(
+      runtimeOptions.fetch,
+      this.cliConfig,
+      this.contentGeneratorConfig.customHeaders,
+    );
+    // SDK 0.36 ignores fetchOptions, so bind the dispatcher at the fetch boundary.
+    const fetchWithDispatcher: typeof globalThis.fetch = (input, init) =>
+      sessionFetch(input, { ...init, ...runtimeOptions.fetchOptions });
     // IdeaLab-style Anthropic proxies expect `Authorization: Bearer <token>`
     // instead of the SDK-default `x-api-key` header. Use the SDK's
     // `authToken` parameter (sends `Authorization: Bearer` natively) only
@@ -299,11 +307,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
-      fetch: buildSessionAwareFetch(
-        runtimeOptions.fetch,
-        this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
-      ) as unknown as AnthropicFetch,
+      fetch: fetchWithDispatcher as unknown as AnthropicFetch,
     });
 
     this.converter = new AnthropicContentConverter(
@@ -1410,6 +1414,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let completionTokens = 0;
     let completionTokensReported = false;
     let finishReason: string | undefined;
+    let finishMessage: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
     const deferredToolCalls: GenerateContentResponse[] = [];
@@ -1616,6 +1621,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
         }
         case 'message_delta': {
           const stopReasonValue = event.delta.stop_reason;
+          finishMessage ??=
+            this.converter.mapAnthropicStopDetailsToFinishMessage(
+              (event.delta as { stop_details?: unknown }).stop_details,
+            );
           if (stopReasonValue) {
             finishReason = stopReasonValue;
             const hasOpenToolCall = [...blocks.values()].some(
@@ -1715,6 +1724,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1744,6 +1754,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1891,6 +1902,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     model?: string,
     finishReason?: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
+    finishMessage?: string,
   ): GenerateContentResponse {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
@@ -1912,6 +1924,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         index: 0,
         safetyRatings: [],
         ...(mappedFinishReason ? { finishReason: mappedFinishReason } : {}),
+        ...(finishMessage ? { finishMessage } : {}),
       },
     ];
 

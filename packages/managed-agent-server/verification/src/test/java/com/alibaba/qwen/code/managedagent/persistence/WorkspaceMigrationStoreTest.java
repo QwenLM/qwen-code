@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -355,7 +356,7 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
         ManagedReceipts.insertCommand(jdbc, "tenant", "RENAME_SESSION", "rename", "digest", "session", null, "FAILED", null, 1);
@@ -370,6 +371,36 @@ class WorkspaceMigrationStoreTest {
         assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_operation WHERE operation_kind = 'RENAME'", String.class)).isEqualTo(state);
     }
 
+    // Turn admission orders on the storage's fence row, not the tenant guard, so
+    // the idle check must see a Turn committed after the caller's snapshot was
+    // taken but before the migration locked that row.
+    @Test
+    void theIdleCheckSeesATurnCommittedAfterTheTransactionSnapshot() {
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
+                + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
+                + " context_revision, workspace_config_ref, workspace_policy_ref)"
+                + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        var outer = new org.springframework.transaction.support.TransactionTemplate(manager);
+        outer.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        assertThatThrownBy(() -> outer.executeWithoutResult(status -> {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn", Long.class)).isZero();
+            try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+                connection.setAutoCommit(true);
+                new JdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true))
+                        .update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest,"
+                                + " status, is_submission_attempted, gmt_create, gmt_modified, version)"
+                                + " VALUES ('tenant', 'session', 'turn-1', 'prompt-1', '[]', 'd', 'ACCEPTED', FALSE, 1, 1, 1)");
+            } catch (java.sql.SQLException error) {
+                throw new IllegalStateException(error);
+            }
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn", Long.class)).isZero();
+            store(true);
+        })).hasMessageContaining("migration_work_unsettled");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
+    }
+
     // A title a later title superseded, or one proven never delivered, has
     // settled and holds nothing: superseded rows used to hold the storage for
     // good, since nothing ever completes them.
@@ -382,7 +413,7 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
@@ -406,7 +437,7 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"

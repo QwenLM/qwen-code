@@ -90,7 +90,7 @@ qwen:
     artifacts:
       read-revalidation-interval: '5s'
     automation:
-      enabled: '${QWEN_MANAGED_AGENT_AUTOMATION_ENABLED:false}'
+      enabled: '${QWEN_MANAGED_AGENT_AUTOMATION_ENABLED:true}'
       scan-delay: '${QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY:10s}'
       lease: '${QWEN_MANAGED_AGENT_AUTOMATION_LEASE:60s}'
       late-tolerance: '${QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE:5m}'
@@ -135,6 +135,7 @@ qwen:
       token: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN:}'
       provisioner: '${QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER:local-process}'
       v3-result-window: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW:30m}'
+      tool-measurements: '${QWEN_MANAGED_AGENT_RUNTIME_TOOL_MEASUREMENTS:false}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
       workspace-creation-root: '${QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT:}'
       local-directory-import-enabled: '${QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED:false}'

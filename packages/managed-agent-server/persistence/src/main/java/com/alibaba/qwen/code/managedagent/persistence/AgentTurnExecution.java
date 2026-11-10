@@ -54,7 +54,7 @@ final class AgentTurnExecution {
         // Harness park enters only the coordinator's read-only observation
         // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -68,7 +68,7 @@ final class AgentTurnExecution {
         return jdbc.query(
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING') AND error_code = '"
                         + AgentStateStore.RUNTIME_RECOVERY_BLOCKED
-                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
+                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -146,7 +146,7 @@ final class AgentTurnExecution {
         return jdbc.update("UPDATE ma_turn SET error_code = ?, error_message = ?,"
                         + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ?"
                         + " AND session_id = ? AND turn_id = ? AND dispatch_owner = ?"
-                        + " AND dispatch_lease_until >= ? AND submission_attempted = TRUE"
+                        + " AND dispatch_lease_until >= ? AND is_submission_attempted = TRUE"
                         + " AND status IN ('ACCEPTED', 'RUNNING')",
                 AgentStateStore.RUNTIME_RECOVERY_BLOCKED, diagnostic, now,
                 tenantId, sessionId, turnId, owner, now) == 1;
@@ -274,7 +274,7 @@ final class AgentTurnExecution {
         storeRows.requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
-                        + " submission_attempted = TRUE, gmt_modified = ?,"
+                        + " is_submission_attempted = TRUE, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -298,11 +298,11 @@ final class AgentTurnExecution {
         storeRows.requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
-                        + " submission_attempted = FALSE, gmt_modified = ?,"
+                        + " is_submission_attempted = FALSE, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
-                        + " >= ? AND submission_attempted = TRUE AND"
+                        + " >= ? AND is_submission_attempted = TRUE AND"
                         + " harness_event_epoch IS NULL AND status IN"
                         + " ('ACCEPTED','RUNNING','CANCELLING')",
                 now, tenantId, sessionId, turnId, owner, now);
@@ -712,7 +712,7 @@ final class AgentTurnExecution {
         // its real result instead of replacing it with cancellation.
         java.util.Set<String> accepted;
         try {
-            accepted = WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
+            accepted = JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
                     tenantId, sessionId, false,
                     WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2);
         } catch (ManagedAgentException unverified) {
@@ -744,7 +744,7 @@ final class AgentTurnExecution {
                         + " version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until >= ?"
-                        + " AND submission_attempted = FALSE",
+                        + " AND is_submission_attempted = FALSE",
                 now, now, tenantId, sessionId, turnId, owner, now);
         if (updated != 1) {
             return;
@@ -768,12 +768,12 @@ final class AgentTurnExecution {
         long now = clock.millis();
         String message = "The Session worktree could not be prepared.";
         List<String> turns = jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
-                + " AND status = 'ACCEPTED' AND submission_attempted = FALSE FOR UPDATE", String.class, tenantId, sessionId);
+                + " AND status = 'ACCEPTED' AND is_submission_attempted = FALSE FOR UPDATE", String.class, tenantId, sessionId);
         for (String turnId : turns) {
             jdbc.update("UPDATE ma_turn SET status = 'FAILED', error_code = ?, error_message = ?, completed_at = ?,"
                     + " gmt_modified = ?, dispatch_owner = NULL, dispatch_lease_until = NULL, version = version + 1"
                     + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ? AND status = 'ACCEPTED'"
-                    + " AND submission_attempted = FALSE", code, message, now, now, tenantId, sessionId, turnId);
+                    + " AND is_submission_attempted = FALSE", code, message, now, now, tenantId, sessionId, turnId);
             eventJournal.appendEvent(tenantId, sessionId, turnId, "turn.failed", Map.of("code", code, "message", message), true, null, now);
             sessionCommands.settleTurnCommands(tenantId, sessionId, turnId, now);
         }
