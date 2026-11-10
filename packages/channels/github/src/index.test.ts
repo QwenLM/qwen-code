@@ -53,6 +53,27 @@ describe('github plugin validateConfig', () => {
     );
   });
 
+  it('rejects a non-boolean requireBoundWatch and its missing dependency', () => {
+    expect(
+      validate({ deliverToBoundSessions: true, requireBoundWatch: 'yes' }),
+    ).toContain('requireBoundWatch must be a boolean');
+    expect(validate({ requireBoundWatch: true })).toContain(
+      'requireBoundWatch for channel github requires deliverToBoundSessions',
+    );
+    expect(
+      validate({ deliverToBoundSessions: true, requireBoundWatch: true }),
+    ).toBeUndefined();
+  });
+
+  it('describes requireBoundWatch as an opt-in boolean defaulting off', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'requireBoundWatch',
+    );
+    expect(field?.kind).toBe('boolean');
+    expect(field?.default).toBe('false');
+    expect(field?.description).toContain('watch');
+  });
+
   it('requires deliverToBoundSessions for the watch budget reserve', () => {
     expect(validate({ prWatchBudgetReserve: 300 })).toContain(
       'prWatchBudgetReserve',

@@ -227,6 +227,14 @@ export interface PrBindingEntry {
    * Absent means untyped; the adapter groups untyped followers separately.
    */
   role?: PrBindingRole;
+  /**
+   * Whether the session holds an active watch on THIS PR (an `/autofix-pr`
+   * watch or a `/verify-pr --watch` standing trigger), derived by the daemon
+   * at scan time. Absent means unknown — watch detection failed or the
+   * daemon predates the field — and consumers must treat unknown as
+   * eligible: the watch gate is a noise filter, not a security boundary.
+   */
+  watching?: boolean;
 }
 
 /**

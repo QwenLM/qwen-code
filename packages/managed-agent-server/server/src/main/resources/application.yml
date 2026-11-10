@@ -43,6 +43,7 @@ qwen:
       cache-directory: '${QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY:}'
       cgroup-root: '${QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT:}'
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
+    side-queries-enabled: '${QWEN_MANAGED_AGENT_SIDE_QUERIES_ENABLED:false}'
     definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
     definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'

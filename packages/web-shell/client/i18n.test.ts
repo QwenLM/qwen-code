@@ -19,6 +19,34 @@ const FOLLOWUP_SETTING_KEYS = [
   'settings.description.ui.enableFollowupSuggestions',
 ] as const;
 
+// The panel's localization cases compare rendered text against the same
+// translator lookup the component performs, so a missing zh entry falls back
+// to EN on both sides and they stay green. Parity has to be asserted here,
+// key by key, including the strings no panel case renders.
+const WEIXIN_LOGIN_KEYS = [
+  'title',
+  'description',
+  'loggedIn',
+  'loggedOut',
+  'login',
+  'relogin',
+  'logout',
+  'refresh',
+  'waiting',
+  'preparing',
+  'scanned',
+  'ready',
+  'expired',
+  'error',
+  'credentialsError',
+  'unsupported',
+  'restartHint',
+  'userId',
+  'savedAt',
+  'qrAlt',
+  'openUrl',
+].map((suffix) => `channels.weixin.${suffix}`);
+
 const BROWSER_NOTIFICATION_KEYS = [
   'label',
   'description',
@@ -122,6 +150,19 @@ describe('web-shell i18n catalog', () => {
     expect(en(key, { minInclusive: 0, max: 5000 })).toBe(
       'Enter a number at least 0 and at most 5000.',
     );
+  });
+
+  it('keeps every WeChat login translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of WEIXIN_LOGIN_KEYS) {
+      const vars = { id: 'wx-user-1', time: '2026-11-09 10:00' };
+      expect(en(key, vars)).not.toBe(key);
+      expect(zh(key, vars)).not.toBe(key);
+      // zh against en, not zh against the key: the translator falls back to
+      // EN per key, so a deleted zh entry would otherwise pass both checks.
+      expect(zh(key, vars)).not.toBe(en(key, vars));
+    }
   });
 
   it('keeps every browser notification translation in both locales', () => {
