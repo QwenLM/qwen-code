@@ -1570,6 +1570,48 @@ describe('resumeHistoryUtils', () => {
       expect(tool?.description).toBe('a.ts');
       expect(tool?.args).toEqual({ file_path: 'a.ts', old_string: 'x' });
     });
+
+    it('carries the tool markdown opt-out onto the display object', () => {
+      const plainTextTool = {
+        name: 'lsp',
+        displayName: 'LSP',
+        description: 'Run an LSP query',
+        isOutputMarkdown: false,
+        build: vi.fn().mockReturnValue({ getDescription: () => 'symbols' }),
+      } as unknown as AnyDeclarativeTool;
+
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'lsp',
+                    args: { query: 'symbols' },
+                  },
+                } as unknown as Part,
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ lsp: plainTextTool }),
+        10,
+      );
+      const tool = (
+        items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined
+      )?.tools[0];
+
+      // ToolMessage defaults the flag to true, so a resumed result must say
+      // otherwise or raw LSP text gets markdown-parsed.
+      expect(tool?.renderOutputAsMarkdown).toBe(false);
+    });
   });
 
   it('does not render an unpaired sibling as successful when only selected A has a real result', () => {
