@@ -3666,18 +3666,21 @@ jobs:
             echo "::warning::No date to deepen to; the round sees the merge commit and its two parents only."
           elif ! timeout -k 10 140 git fetch --no-tags --quiet --shallow-since="$since" origin "$base" "$head"; then
             echo "::warning::Could not deepen the checkout to ${since}; the round sees the merge commit and its two parents only."
+            since=''
           fi
           # The previous round's verified head: the first OID after
-          # "verified head" in the bot's own report. Deepening brings it
-          # when it is an ancestor; otherwise, after a force-push or a
-          # deepen that fell short, it arrives alone, without its parents.
+          # "verified head" in the bot's own report, skipping a line that
+          # names the round before ("Previous verified head (P)"). Deepening
+          # brings it when it is an ancestor; otherwise, after a force-push
+          # or a deepen that fell short, it arrives alone, without parents.
           # `sed`, not `head`: under pipefail, grep's SIGPIPE would drop
           # the OID found. `-k`: SIGKILL if a fetch outlives its SIGTERM.
-          prev="$(grep -io 'verified head.*' "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null |
-            grep -oE '\b[0-9a-f]{40}\b' | sed -n 1p)" || prev=''
+          # shellcheck disable=SC2016 # the backticks are Markdown's
+          prev="$(grep -iv '^[^`]*previous[^`]*verified head' "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null |
+            grep -io 'verified head.*' | grep -oE '\b[0-9a-f]{40}\b' | sed -n 1p)" || prev=''
           if [ -n "$prev" ] && ! git cat-file -e "${prev}^{commit}" 2>/dev/null; then
             timeout -k 5 25 git fetch --no-tags --quiet --depth=1 origin "${prev}:refs/verify/previous" ||
-              echo "::warning::Could not fetch the previous verified head ${prev}."
+              { echo "::warning::Could not fetch the previous verified head ${prev}."; prev=''; }
           elif [ -z "$prev" ] && [ -s "$RUNNER_TEMP/verify-context/previous-report.md" ]; then
             # A first round has no report; a follow-up whose report names
             # no head re-runs everything, and should say why.
@@ -3686,7 +3689,8 @@ jobs:
           mb="$(git merge-base "$base" "$head" 2>/dev/null)" || mb=''
           [ -n "$mb" ] ||
             echo "::warning::No merge base is local; the round cannot classify a merge or list what the base added."
-          # Also in the step summary, where a degraded round can be counted.
+          # Also in the step summary, where a degraded round can be counted:
+          # what the step reached, not what it asked for.
           summary="history from ${since:-nowhere}: $(git rev-list --count "$head" --not "$base") PR commits, merge base ${mb:-not reachable}, previous head ${prev:-none}"
           echo "$summary"
           { echo "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; } 2>/dev/null || true

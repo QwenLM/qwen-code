@@ -2150,6 +2150,9 @@ describe('qwen-triage verify workflow', () => {
             'number=7999',
           ]),
         );
+        // `-F` types the number; `-f` would send a string, and `Int!`
+        // rejects it.
+        expect(ok.calls[0][ok.calls[0].indexOf('number=7999') - 1]).toBe('-F');
         const query = ok.calls[0].find((a) => a.startsWith('query='));
         // The stub serves both pages whatever it is asked; `--paginate`
         // follows only a query that selects this.
@@ -2436,6 +2439,26 @@ describe('qwen-triage verify workflow', () => {
         );
         expect(run(bullets, day(38))).toContain(`previous head ${gone}`);
         expect(git(bullets, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        // The same bullets the other way round: the `(P)` line names the
+        // round before, and is skipped.
+        const reversed = checkout('reversed');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `**Verdict: \`findings\`** — see below.\n\n- **Previous verified head (P):** \`${pr2}\`\n- **Verified head:** \`${gone}\` (\`git rev-parse HEAD^2\`)\n`,
+        );
+        expect(run(reversed, day(38))).toContain(`previous head ${gone}`);
+        // What the skill tells the round to write is what the step reads:
+        // the report template's verdict line, with a head filled in.
+        const template = verifySkill.match(
+          /^\s*(.*\*\*Verdict: <word>\*\*.*`<40-hex head OID>`.*)$/m,
+        )?.[1];
+        expect(template).toBeTruthy();
+        const templated = checkout('templated');
+        writeFileSync(
+          join(context, 'previous-report.md'),
+          `${template.replace('<40-hex head OID>', gone)}\n`,
+        );
+        expect(run(templated, day(38))).toContain(`previous head ${gone}`);
 
         // Older than the floor: deepened to the floor, with a warning.
         const floored = checkout('floored');
@@ -2477,6 +2500,10 @@ describe('qwen-triage verify workflow', () => {
           'Could not fetch the previous verified head',
         );
         expect(prCommits(offline)).toEqual([pr3]);
+        // The summary records what the step reached, not what it asked for.
+        expect(summaryOf(offline)).toBe(
+          'history from nowhere: 1 PR commits, merge base not reachable, previous head none\n',
+        );
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
