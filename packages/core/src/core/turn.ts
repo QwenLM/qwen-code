@@ -359,6 +359,10 @@ export function createDuplicateProviderToolCallResponse(
   return createNotStartedToolErrorResponse(request, message);
 }
 
+export const TOOL_LOOP_SKIPPED_METADATA = 'toolLoopSkipped';
+export const TOOL_LOOP_SKIPPED_MESSAGE =
+  'Tool skipped because the model repeated a tool-call id.';
+
 export function createNotStartedToolErrorResponse(
   request: ToolCallRequestInfo,
   message: string,

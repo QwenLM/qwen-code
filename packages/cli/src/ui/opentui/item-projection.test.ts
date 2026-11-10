@@ -1147,13 +1147,24 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       { type: 'gemini_thought', text: 'g' },
       { type: 'gemini_thought_content', text: 'g' },
       { type: 'help', timestamp: new Date() },
-      { type: 'notification', text: 'n' },
       { type: 'tool_use_summary', text: 't' },
       { type: 'diff_stats', text: 'd' },
     ] as unknown as HistoryItemWithoutId[];
     for (const item of noOps) {
       expect(projectItemToStreamEvent(item, ctx)).toBeNull();
     }
+  });
+
+  it('draws a notice as an info row, as ink does', () => {
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'notification',
+          text: 'Mod followup-mod: List the TODOs',
+        },
+        ctx,
+      ),
+    ).toEqual({ type: 'info', text: 'Mod followup-mod: List the TODOs' });
   });
 
   it('carries the user_shell command row structurally (U-33)', () => {

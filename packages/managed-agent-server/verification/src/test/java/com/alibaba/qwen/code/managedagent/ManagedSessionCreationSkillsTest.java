@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -49,7 +49,7 @@ class ManagedSessionCreationSkillsTest {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedAgentStore store;
-    @Autowired private ManagedSessionSkills snapshots;
+    @Autowired private JdbcManagedSessionSkills snapshots;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
     @Qualifier("managedAgentTransactionManager")
@@ -284,7 +284,9 @@ class ManagedSessionCreationSkillsTest {
         jdbc.update("UPDATE ma_request_receipt SET result_json = REPLACE(result_json, 'ORIGINAL_INSTRUCTIONS', 'TAMPERED')"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         assertThatThrownBy(() -> snapshots.effective(store.requireSession(tenant, session)))
-                .hasMessageContaining("snapshot is invalid");
+                .hasMessageContaining("snapshot is invalid")
+                .extracting(error -> ((com.alibaba.qwen.code.managedagent.exception.ManagedAgentException) error).getCode())
+                .isEqualTo("session_skills_conflict");
     }
 
     @Test

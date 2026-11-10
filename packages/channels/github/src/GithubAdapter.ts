@@ -27,6 +27,7 @@ import type {
 } from '@qwen-code/channel-base';
 import {
   boundActionTemplateEntries,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
   BoundSessionGoneError,
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
@@ -35,6 +36,7 @@ import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   lowercaseGroupAllowedUsers,
+  MAX_POLL_INTERVAL_MS,
   PollingChannelBase,
   PR_BINDING_ROLES,
   renderBoundActionTemplate,
@@ -59,7 +61,10 @@ interface GithubConfig extends ChannelConfig, RepoFilterConfigFields {
   deliverToBoundSessions?: boolean;
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
+  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
+  requireBoundWatch?: boolean;
+  prCommentWatch?: unknown;
 }
 
 const GH_AUTH_TIMEOUT_MS = 10_000;
@@ -289,6 +294,20 @@ interface GithubComment {
   created_at?: string | null;
   updated_at?: string | null;
   user?: { login?: string } | null;
+}
+
+/** An inline pull-request review comment (pulls.listReviewComments). */
+interface GithubReviewComment {
+  id: number;
+  node_id?: string;
+  body?: string;
+  created_at?: string | null;
+  user?: { login?: string } | null;
+  path?: string;
+  line?: number | null;
+  original_line?: number | null;
+  side?: string | null;
+  html_url?: string;
 }
 
 interface GithubIssueEvent {
@@ -545,6 +564,19 @@ export const DEFAULT_PR_WATCH_LIMIT = 30;
 export const MAX_PR_WATCH_LIMIT = 500;
 
 /**
+ * Requests held back for the interactive notification lane. When the last
+ * known REST budget is at or below this, the watch pass is skipped for the
+ * poll so a human mention is not starved by background PR polling. ~4% of a
+ * 5,000/hour classic-PAT budget: enough for several polls of mention traffic
+ * while barely trimming a healthy watch. Operators on other scales (GitHub
+ * Enterprise, finer-grained tokens) set prWatchBudgetReserve explicitly.
+ */
+export const DEFAULT_PR_WATCH_BUDGET_RESERVE = 200;
+
+/** Hard ceiling for the configurable watch budget reserve. */
+export const MAX_PR_WATCH_BUDGET_RESERVE = 5000;
+
+/**
  * After a head change, checks register asynchronously (queued or self-hosted
  * runners can take minutes). Within this window an empty CI aggregate
  * ('none') is treated as unsettled and re-checked every poll.
@@ -572,6 +604,25 @@ const CI_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
  * pending still settles within one period of the real transition.
  */
 const CI_PENDING_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Bound PR comment watch re-check period. Comments are fetched when the PR's
+ * updated_at advances OR this interval elapses, so a settled PR still hears
+ * new comments without one listComments + one listReviewComments per poll per
+ * bound PR. Above the 60s poll interval to bound the fan-out at the watch cap.
+ */
+const COMMENT_RECHECK_INTERVAL_MS = 2 * 60 * 1000;
+
+/**
+ * Pass-wide budget on watched comments, shared by every watched PR in a single
+ * watch pass (not a per-PR cap): commentSince survives a restart, so after a
+ * long outage every comment in the gap would otherwise become eligible at once,
+ * each as its own durable task and prompt — a per-PR cap would still claim up to
+ * this many × watched-PR tasks in one poll. A PR that finds the budget spent
+ * keeps its cursor and resumes next pass; a capped PR resumes before its last
+ * processed comment so the tail drains over subsequent passes, never dropped.
+ */
+const MAX_WATCH_COMMENTS_PER_PASS = 20;
 
 /**
  * Backpressure horizon for bound-session delivery: queue-full and
@@ -649,6 +700,8 @@ interface PrWatchEntry {
   ci?: CiAggregate;
   mergeableState?: string;
   prState?: string;
+  /** Last observed PR title, so comment-watch prompts can render %title%. */
+  title?: string;
   /**
    * Last observed PR updated_at. An advance re-checks a settled head, but
    * it is NOT a reliable re-run signal: GitHub does not bump updated_at on
@@ -693,6 +746,17 @@ interface PrWatchEntry {
    * Reset when the head changes.
    */
   ciFiredSha?: string;
+  /**
+   * Bound PR comment watch cursor. `commentBaseline` is the first-observation
+   * cutoff (no backlog delivery): only comments created strictly after it are
+   * eligible. `commentSince` is the listComments/listReviewComments `since`
+   * watermark advanced to each fetch's start. `commentLastFetchAt` drives the
+   * periodic re-check so a settled PR still hears new comments even when
+   * updated_at does not advance.
+   */
+  commentBaseline?: string;
+  commentSince?: string;
+  commentLastFetchAt?: number;
 }
 
 interface PendingWatchEvent {
@@ -746,11 +810,15 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     stringOrUndef(entry.ci) &&
     stringOrUndef(entry.mergeableState) &&
     stringOrUndef(entry.prState) &&
+    stringOrUndef(entry.title) &&
     stringOrUndef(entry.prUpdatedAt) &&
     numberOrUndef(entry.headObservedAt) &&
     numberOrUndef(entry.lastCiFetchAt) &&
     numberOrUndef(entry.seq) &&
     stringOrUndef(entry.ciFiredSha) &&
+    stringOrUndef(entry.commentBaseline) &&
+    stringOrUndef(entry.commentSince) &&
+    numberOrUndef(entry.commentLastFetchAt) &&
     (entry.pending === undefined ||
       (Array.isArray(entry.pending) && entry.pending.every(isPending))) &&
     (entry.fired === undefined ||
@@ -763,7 +831,10 @@ interface BoundSessionConfigFields {
   deliverToBoundSessions?: unknown;
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
+  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
+  requireBoundWatch?: unknown;
+  prCommentWatch?: unknown;
 }
 
 /**
@@ -848,6 +919,51 @@ export function validateBoundSessionConfig(
     config.deliverToBoundSessions !== true
   ) {
     return `prWatchLimit for channel ${channelName} requires deliverToBoundSessions: true.`;
+  }
+  if (
+    config.requireBoundWatch !== undefined &&
+    typeof config.requireBoundWatch !== 'boolean'
+  ) {
+    return `[Channel:${channelName}] requireBoundWatch must be a boolean.`;
+  }
+  if (
+    config.requireBoundWatch === true &&
+    config.deliverToBoundSessions !== true
+  ) {
+    return `requireBoundWatch for channel ${channelName} requires deliverToBoundSessions: true.`;
+  }
+  if (
+    config.prCommentWatch !== undefined &&
+    typeof config.prCommentWatch !== 'boolean'
+  ) {
+    return `[Channel:${channelName}] prCommentWatch must be a boolean.`;
+  }
+  // No deliverToBoundSessions dependency: prCommentWatch is default-on, so the
+  // editor emits it even for channels without bound delivery. It is inert there
+  // (the watch is gated on deliverToBoundSessions at runtime), not an error.
+  if (
+    config.prWatchBudgetReserve !== undefined &&
+    config.deliverToBoundSessions !== true
+  ) {
+    return `prWatchBudgetReserve for channel ${channelName} requires deliverToBoundSessions: true.`;
+  }
+  // The descriptor now declares minimum: 0, so the editor refuses a negative
+  // the operator types. This check still guards everything else: a hand-edited
+  // settings.json or a daemon API call, and a stored negative the editor
+  // re-sends unchanged under its descriptor-level tolerance. The getter would
+  // silently fall back to the default for a negative, letting a saved value
+  // mean something other than it says.
+  // Positive fractions stay legal: the getter rounds them UP, which is the
+  // documented behaviour, not a silent fallback.
+  if (config.prWatchBudgetReserve !== undefined) {
+    const reserve = config.prWatchBudgetReserve;
+    if (
+      typeof reserve !== 'number' ||
+      !Number.isFinite(reserve) ||
+      reserve < 0
+    ) {
+      return `prWatchBudgetReserve for channel ${channelName} must be a non-negative number.`;
+    }
   }
   try {
     normalizePrWatchEvents(config, channelName);
@@ -1018,6 +1134,14 @@ interface InboundTaskRecord {
    */
   privateOnly?: boolean;
   /**
+   * Sessions that authored this same-account comment and must never receive
+   * it (comment-watch authorship exclusion). Persisted so the delivery-time
+   * Gone fallback skips them too: the fallback re-resolves over the followers
+   * and would otherwise hand the comment back to its author when the primary
+   * target is Gone. Absent outside the comment watch.
+   */
+  authorExclude?: string[];
+  /**
    * The bound session this event was routed to and lost, kept after the
    * delivery is cleared so every later row — the re-entered deferrals and the
    * dead-letter at the horizon — can still name it. Attribution only: the
@@ -1164,6 +1288,7 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
       typeof record.backpressure === 'boolean') &&
     (record.privateOnly === undefined ||
       typeof record.privateOnly === 'boolean') &&
+    isOptionalStringArray(record.authorExclude) &&
     (record.lostSessionId === undefined ||
       typeof record.lostSessionId === 'string')
   );
@@ -1192,23 +1317,86 @@ function isNoReplySentinel(text: string): boolean {
 /** GitHub's wording for a secondary (abuse) rate limit. */
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
 
+/**
+ * Cap on cached conditional responses, sized from the fan-out it has to
+ * serve: up to MAX_PR_WATCH_LIMIT open PRs, a terminal-drain slice on top,
+ * and the notifications pages. A cap below the sweep does not degrade
+ * proportionally — each miss evicts the entry the sweep is about to read, so
+ * every read of every later pass misses and the saving is exactly zero for
+ * the high-fan-out deployments this is meant to help. Derived from the watch
+ * limit so the two cannot drift apart.
+ *
+ * A moved notifications `since` cursor still mints new keys, so the map is
+ * bounded and evicts least-recently-used first; an evicted URL simply pays
+ * for one full 200 again.
+ */
+export const CONDITIONAL_CACHE_MAX_ENTRIES = MAX_PR_WATCH_LIMIT * 2;
+
+/**
+ * Bodies above this size are not cached, so a pathologically large page
+ * cannot pin memory. Sized against the entry cap above to keep the retention
+ * bound in the same order as a smaller cache of larger bodies. A declined URL
+ * stays unconditional — the behavior from before conditional requests
+ * existed — and a page this large is one whose contents are churning, where a
+ * 304 was unlikely anyway.
+ */
+const CONDITIONAL_CACHE_MAX_BODY_BYTES = 256 * 1024;
+
+/**
+ * Total retained body bytes. The entry and per-body caps only bound the
+ * product loosely — a thousand maximum-size bodies would be a quarter of a
+ * gigabyte — so the cache is also bounded directly. Real responses are one to
+ * two orders of magnitude below the per-body cap, so this binds only the
+ * pathological case and never evicts a working set.
+ */
+export const CONDITIONAL_CACHE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+interface ConditionalCacheEntry {
+  etag: string;
+  body: string;
+  link: string | undefined;
+  bytes: number;
+}
+
+/**
+ * The two polling reads worth making conditional: the PR state watch and the
+ * notifications list. Matching on the pathname suffix keeps this working
+ * under an enterprise baseUrl prefix, and anchors the end so thread reads
+ * (`/notifications/threads/<id>`) and issue comments stay out of scope.
+ */
+function isConditionalPollUrl(url: string): boolean {
+  const { pathname } = new URL(url);
+  return (
+    /\/repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(pathname) ||
+    /\/notifications$/.test(pathname)
+  );
+}
+
 type GithubRequestError = {
   status?: number;
   message?: unknown;
   response?: { headers?: Record<string, string | number> };
 };
 
-/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
-function rateLimitRemaining(err: unknown): number | undefined {
-  const value = (err as GithubRequestError).response?.headers?.[
-    'x-ratelimit-remaining'
-  ];
+/**
+ * A rate-limit header value (remaining count or reset epoch) as a
+ * non-negative integer; absent or malformed is undefined. GitHub sends
+ * these as decimal strings; a number is accepted for tests and proxies.
+ */
+function parseRateLimitCount(value: unknown): number | undefined {
   if (typeof value === 'number') {
     return Number.isInteger(value) && value >= 0 ? value : undefined;
   }
   return typeof value === 'string' && /^\d+$/.test(value)
     ? Number(value)
     : undefined;
+}
+
+/** `x-ratelimit-remaining` as a count; absent or malformed is undefined. */
+function rateLimitRemaining(err: unknown): number | undefined {
+  return parseRateLimitCount(
+    (err as GithubRequestError).response?.headers?.['x-ratelimit-remaining'],
+  );
 }
 
 /**
@@ -1369,6 +1557,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private reasonFilter: Set<string> | null = null;
   private repoFilter: RepoFilter | null = null;
   private deliverToBoundSessions = false;
+  private requireBoundWatch = false;
+  /**
+   * Bound PR comment watch: poll conversation + inline review comments and
+   * deliver each to every bound session that did not post it. Default-on
+   * with deliverToBoundSessions; `prCommentWatch: false` disables it.
+   */
+  private prCommentWatchEnabled = true;
   private prWatchEvents = new Set<PrWatchEventType>();
   /**
    * Operator instruction templates keyed by the closed bound-action
@@ -1443,6 +1638,48 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   // a hint before the dead-letter alert hours later (doudouOUC).
   private partialSnapshotStreak = 0;
   /**
+   * Snapshot generation, bumped on every successful binding refresh. The
+   * gate grace is scoped to a generation, not to a drain call: pollOnce can
+   * drain the same PR twice against one snapshot, and a per-call grace would
+   * be spent by the second drain before any newer snapshot exists.
+   */
+  private bindingsGeneration = 0;
+  /**
+   * Comment/watch keys the gate has deferred, mapped to the snapshot
+   * generation at the deferral. A watch installed after the bindings
+   * snapshot was fetched surfaces on the next refresh; the first gate-only
+   * exclusion holds the event (cursor unmoved / pending kept), and it stays
+   * held until a NEWER generation still finds it gated — then it is consumed
+   * like any other no-target event. In-memory: a restart resets the grace,
+   * which is harmless. Keys are removed when the event delivers or is
+   * consumed.
+   */
+  private gateDeferredOnce = new Map<string, number>();
+
+  /**
+   * Whether a gate-excluded event should keep being held. Defers on first
+   * sight and while the snapshot generation is unchanged; once a newer
+   * generation has landed and the event is still gated, the grace is spent
+   * (returns false and clears the key) so the caller consumes it.
+   */
+  private gateGraceShouldHold(key: string): boolean {
+    const deferredAt = this.gateDeferredOnce.get(key);
+    if (deferredAt === undefined) {
+      this.gateDeferredOnce.set(key, this.bindingsGeneration);
+      return true;
+    }
+    if (deferredAt === this.bindingsGeneration) {
+      return true;
+    }
+    this.gateDeferredOnce.delete(key);
+    return false;
+  }
+
+  /** Clear any grace for an event that delivered (or is being consumed). */
+  private gateGraceClear(key: string): void {
+    this.gateDeferredOnce.delete(key);
+  }
+  /**
    * True while the most recent pending-watch reconciliation FAILED (e.g.
    * the watch file is unreadable). Generic recovery must then leave watch
    * tasks alone: delivering and removing an accepted watch task without
@@ -1463,6 +1700,53 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     | 'read_error'
     | 'pending'
     | undefined;
+  /**
+   * Last REST budget seen on a SUCCESSFUL response, recorded by the request
+   * hook regardless of the call's return shape. Undefined until the first
+   * response carries the header. Gates the watch pass so background polling
+   * cannot starve the interactive notification lane.
+   */
+  private lastRateLimitRemaining: number | undefined;
+  /**
+   * Reset time (epoch ms) of the window lastRateLimitRemaining belongs to.
+   * Once passed, the reading is stale and must not gate the watch: a low
+   * count from a window that has already reset would otherwise starve the
+   * watch until the next successful response overwrites it.
+   */
+  private lastRateLimitResetAt: number | undefined;
+  /**
+   * Whether the watch pass is currently skipped for low budget. Edge-triggered
+   * journaling (the watchReconcileBlockedCause pattern): a permanent low-budget
+   * condition journalled once on the edge, not every poll, so it cannot rotate
+   * the useful rows out of the timeline. Cleared on the recovery edge.
+   */
+  private watchBudgetLow = false;
+  /**
+   * A `watch_budget_low` row has been journaled and its episode has not been
+   * closed by a recovery row yet. Tracked apart from watchBudgetLow because
+   * the two answer different questions: the skip latch is released when the
+   * watch stops being eligible (so a later starvation journals a fresh skip),
+   * but the episode stays open until the BUDGET recovers — otherwise a budget
+   * that recovers during an ineligible window would never get its recovery
+   * row. In-memory by design: a restart mid-episode leaves no recovery row,
+   * which the user guide states.
+   */
+  private watchBudgetEpisodeOpen = false;
+  /**
+   * ETag cache for the two polling reads, keyed by full request URL so a
+   * moved notifications `since` cursor is a distinct entry rather than a
+   * false hit. Connection-scoped: cleared on disconnect so a reconnect never
+   * serves a body cached under a previous credential.
+   */
+  private readonly conditionalCache = new Map<string, ConditionalCacheEntry>();
+  /** Running total of cached body bytes, maintained by the two helpers below. */
+  private conditionalCacheBytes = 0;
+  /**
+   * Floor (ms) from the notifications endpoint's `X-Poll-Interval`. GitHub
+   * asks polling clients not to poll faster than this; pollInterval raises
+   * the whole loop to it, which also slows the watch pass.
+   */
+  private notificationsPollFloorMs = 0;
   /**
    * Consecutive binding-refresh failures since the last success. While no
    * snapshot has ever succeeded, the cold-start gate defers the comment lane,
@@ -1670,6 +1954,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.prWatchEvents = normalizePrWatchEvents(cfg, this.name);
     this.boundSessionActions = normalizeBoundSessionActions(cfg, this.name);
     this.deliverToBoundSessions = cfg.deliverToBoundSessions === true;
+    this.requireBoundWatch = cfg.requireBoundWatch === true;
+    this.prCommentWatchEnabled = cfg.prCommentWatch !== false;
     if (this.deliverToBoundSessions) {
       this.loadBoundDeliveredRing();
     }
@@ -1678,6 +1964,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] warning: deliverToBoundSessions requires a daemon-managed channel; ignoring (standalone mode).\n`,
       );
       this.deliverToBoundSessions = false;
+      this.requireBoundWatch = false;
       this.prWatchEvents = new Set();
       this.boundSessionActions = new Map();
     }
@@ -1704,9 +1991,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.octokit = new Octokit({
       auth,
       baseUrl,
-      ...(this.proxy
-        ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
-        : {}),
+      request: {
+        ...(this.proxy ? { agent: new HttpsProxyAgent(this.proxy) } : {}),
+        fetch: this.conditionalFetch,
+      },
+    });
+    // One choke point for the success-path budget: the wrap sees the response
+    // headers on every request, including each page of a paginate call,
+    // independent of what fn() returns (array vs {data,headers}). It records
+    // the last known remaining budget so the watch gate can protect the
+    // notification lane before a request is ever rejected.
+    this.octokit.hook.wrap('request', async (request, options) => {
+      const response = await request(options);
+      this.recordRateLimitBudget(response.headers);
+      // Only the notifications endpoint sends this header, in seconds. It
+      // survives a 304, so an idle channel keeps honouring it.
+      const pollSeconds = parseRateLimitCount(
+        response.headers['x-poll-interval'],
+      );
+      if (pollSeconds !== undefined) {
+        this.notificationsPollFloorMs = pollSeconds * 1000;
+      }
+      return response;
     });
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
@@ -1802,8 +2108,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.pendingFinalDeliveryRetry = retry;
   }
 
+  /**
+   * GitHub asks polling clients not to poll the notifications endpoint
+   * faster than its `X-Poll-Interval`. The base class exposes one interval
+   * for the whole poll and the watch pass runs before the notifications lane,
+   * so honouring the floor also slows the watch. At the default 60s poll the
+   * header is also 60 and nothing changes; only a faster configured poll is
+   * raised, which is exactly what GitHub is asking for.
+   *
+   * The ceiling is re-applied because the header is server-controlled and
+   * super's clamp only covers the configured value: Node rounds a timeout
+   * above its 32-bit range down to 1ms, so an unbounded floor would turn the
+   * poll loop into a hot loop that burns the quota this is meant to save.
+   */
+  protected override get pollInterval(): number {
+    return Math.min(
+      Math.max(super.pollInterval, this.notificationsPollFloorMs),
+      MAX_POLL_INTERVAL_MS,
+    );
+  }
+
   disconnect(): void {
     this.stopPollLoop();
+    this.conditionalCache.clear();
+    this.conditionalCacheBytes = 0;
+    this.notificationsPollFloorMs = 0;
     // Retire the runner generation: an idle runner wakes and exits, and a
     // runner mid-turn exits after that turn. The durable task stays
     // recoverable for the next connection. Release idle waiters: with the
@@ -2514,14 +2843,46 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     // The watch pass runs before generic recovery so detection cannot race
     // recovery over the same task; pending events were already reconciled.
-    if (this.prWatchEvents.size > 0 && !this.boundRefreshFailed) {
-      try {
-        await this.runPrStateWatch();
-      } catch (err) {
-        process.stderr.write(
-          `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
-        );
+    // The comment watch is independent of the state-event subscription, so an
+    // empty prWatchEvents still runs the pass while comment watching is on.
+    const commentWatchActive =
+      this.deliverToBoundSessions && this.prCommentWatchEnabled;
+    if (
+      (this.prWatchEvents.size > 0 || commentWatchActive) &&
+      !this.boundRefreshFailed
+    ) {
+      // Protect the interactive notification lane: the watch runs first and
+      // is best-effort edge-triggered detection, so when the last known REST
+      // budget is at or below the reserve, skip the pass this poll rather
+      // than spend the budget a human mention needs. Skipping delays
+      // detection of a state that persists (baselines and pending queues are
+      // durable); a transition that appears and reverts between passes is
+      // not observed. The reactive isWatchFailFastError backstop still
+      // covers a wrong estimate. The gate covers the comment fetches too:
+      // they run inside the same pass and spend the same budget.
+      if (this.watchBudgetExhausted()) {
+        this.noteWatchBudgetLow();
+      } else {
+        this.watchBudgetLow = false;
+        this.closeWatchBudgetEpisode();
+        try {
+          await this.runPrStateWatch();
+        } catch (err) {
+          process.stderr.write(
+            `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+          );
+        }
+        // The pass itself may have spent down to the reserve and yielded
+        // mid-way; close nothing here, the next poll's gate sees the reading.
       }
+    } else {
+      // The watch stopped being eligible (subscriptions off, binding refresh
+      // failing). Release the skip latch so a later starvation journals a
+      // fresh skip rather than being suppressed as a repeat, but keep the
+      // EPISODE open until the budget itself recovers — a budget that
+      // recovers during this window still owes its recovery row.
+      this.watchBudgetLow = false;
+      this.closeWatchBudgetEpisode();
     }
 
     if (this.inboundRecoveryPending) {
@@ -2569,6 +2930,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.deliverToBoundSessions &&
       !this.boundSnapshotTrusted &&
       this.boundSessionByPr.size === 0 &&
+      // Under the gate the map can be empty while raw bindings exist (every
+      // listed follower watch-ineligible): the sidecars ARE readable, so the
+      // cold-empty premise is false and the lane must not stall.
+      !(this.requireBoundWatch && this.hasRawBoundPrs()) &&
       this.lastBindingsPartial &&
       this.coldEmptyPartialStreak < MAX_COLD_EMPTY_PARTIAL_POLLS
     ) {
@@ -3064,11 +3429,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           'comment',
         ).targets.length > 0;
       if (onlyMentioned && !hasMention && !mentionWaived) {
-        if (!this.journalOncePerWindow(`mention_required\0${key}`)) continue;
+        // Name the actual filter: when the waiver would have admitted this
+        // comment but the watch gate excluded every follower, the skip is
+        // bound_watch_required — not the mention_required an unbound PR's
+        // ambient chatter produces.
+        const reason =
+          this.gateExcludedAllFollowers(ctx.chatId, ctx.issueNumber) &&
+          this.waivesBoundMention(ctx.chatId, senderId) &&
+          this.admitsMessageRoute(text)
+            ? 'bound_watch_required'
+            : 'mention_required';
+        if (!this.journalOncePerWindow(`${reason}\0${key}`)) continue;
         this.recordChannelEvent({
           type: 'inbound',
           outcome: 'skipped',
-          reason: 'mention_required',
+          reason,
           triggerKind: ctx.reason,
           repository: ctx.chatId,
           thread: ctx.threadId,
@@ -3667,6 +4042,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
     dedupe: InboundTaskDedupe = {},
     privateOnly = false,
+    excludeSessionIds?: ReadonlySet<string>,
   ): Promise<boolean> {
     // The publication audit is the durable consumption record for the
     // public path: a reply can land (audit `posted`), the task be removed,
@@ -3708,12 +4084,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // template also catches a comment delivered under another reason.
     const laneClass =
       dedupe.dispatchedComments !== undefined ? 'comment' : undefined;
-    const { targets, followed } = this.resolveBoundTargets(
+    const resolved = this.resolveBoundTargets(
       envelope.chatId,
       issueNumber,
       eventClass,
       laneClass,
     );
+    // The bound PR comment watch withholds a comment from the session that
+    // posted it (authorship attribution), keeping every other bound target.
+    const targets =
+      excludeSessionIds && excludeSessionIds.size > 0
+        ? resolved.targets.filter(
+            (target) => !excludeSessionIds.has(target.sessionId),
+          )
+        : resolved.targets;
+    const followed = resolved.followed;
     if (targets.length > 0) {
       // Fan-out: one durable task per (event, target). Each settles
       // independently — a queue-full role defers without head-of-line
@@ -3744,6 +4129,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             },
             first && targets.length > 1 ? targets : undefined,
             privateOnly,
+            excludeSessionIds,
           ),
         );
         first = false;
@@ -3756,7 +4142,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     if (
       followed &&
-      this.boundRoleAware &&
+      (this.boundRoleAware || this.requireBoundWatch) &&
       this.boundSnapshotTrusted &&
       !this.lastBindingsPartial &&
       !this.boundRefreshFailed
@@ -3768,10 +4154,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // role. Under a partial or failing scan an unscanned role might
       // still match, so fall through to the untargeted claim: the absence
       // gate defers it as backpressure instead of consuming the event on
-      // incomplete evidence.
+      // incomplete evidence. The watch gate retires the same way in legacy
+      // mode: every follower is bound but none is watch-eligible. The
+      // journal reason names the ACTUAL filter: a gate exclusion is
+      // bound_watch_required in BOTH modes, not the role-aware template
+      // reason that would send the operator to templates that matched fine.
+      const gateExcludedAll = this.gateExcludedAllFollowers(
+        envelope.chatId,
+        issueNumber,
+      );
       this.applyTaskDedupe(dedupe);
       process.stderr.write(
-        `[Channel:${this.name}] event ${envelope.messageId} matched no role's boundSessionActions; retiring without public fallback\n`,
+        `[Channel:${this.name}] event ${envelope.messageId} ${
+          gateExcludedAll
+            ? 'has no watch-eligible bound session (requireBoundWatch)'
+            : "matched no role's boundSessionActions"
+        }; retiring without public fallback\n`,
       );
       // Retired before any task was claimed, so there is no task row to
       // close: the skip is the event's only journal trace. The dedupe cursor
@@ -3782,7 +4180,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.recordChannelEvent({
         type: 'inbound',
         outcome: 'skipped',
-        reason: 'no_role_matched',
+        reason: gateExcludedAll ? 'bound_watch_required' : 'no_role_matched',
         triggerKind: parseTriggerKind(envelope.metadata),
         repository: envelope.chatId,
         thread: envelope.threadId,
@@ -3818,6 +4216,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     delivery?: InboundTaskRecord['delivery'],
     fanout?: InboundTaskRecord['fanout'],
     privateOnly = false,
+    authorExclude?: ReadonlySet<string>,
   ): InboundTaskRecord {
     const existing = this.readInboundTasks().find(
       (record) =>
@@ -3871,6 +4270,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(delivery ? { delivery } : {}),
       ...(fanout ? { fanout } : {}),
       ...(privateOnly ? { privateOnly: true } : {}),
+      ...(authorExclude && authorExclude.size > 0
+        ? { authorExclude: [...authorExclude] }
+        : {}),
     };
     this.updateInboundTasks((records) => [...records, task]);
     this.applyTaskDedupe(task.dedupe);
@@ -4334,6 +4736,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           },
           undefined,
           task.privateOnly === true,
+          // The reconstructed sibling must inherit the authorship exclusion:
+          // it is the same event, so the same sessions authored it. Without
+          // this the reselection filter receives an empty set and can route
+          // the comment to its author once that session becomes the newest.
+          task.authorExclude ? new Set(task.authorExclude) : undefined,
         );
       }
     }
@@ -4457,10 +4864,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             // snapshot: the operator's subscription scoping retires this
             // event, not an absence. Under a partial or failing scan an
             // unscanned role might still match — leave the task untargeted
-            // so the absence gate keeps deferring it as backpressure.
+            // so the absence gate keeps deferring it as backpressure. Name
+            // the gate when the gate (not the templates) excluded everyone.
             this.retireBoundTask(
               task,
-              'no role matched the event class (operator subscription)',
+              this.gateExcludedAllFollowers(
+                task.envelope.chatId,
+                task.issueNumber,
+              )
+                ? 'no watch-eligible bound session (requireBoundWatch)'
+                : 'no role matched the event class (operator subscription)',
             );
             continue;
           }
@@ -4472,6 +4885,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           if (delivery) {
             this.transitionInboundTask(task.id, 'running', { delivery });
             task.delivery = delivery;
+          } else if (
+            this.requireBoundWatch &&
+            this.boundSnapshotTrusted &&
+            !this.lastBindingsPartial &&
+            !this.boundRefreshFailed &&
+            this.boundFollowersOf(task.envelope.chatId, task.issueNumber)
+              .length > 0
+          ) {
+            // The filtered map has no winner but raw followers exist on a
+            // COMPLETE fresh snapshot: every follower is bound but none is
+            // watch-eligible. The operator's scoping retires this event,
+            // not an absence — same rule as the role-aware branch above.
+            this.retireBoundTask(
+              task,
+              'no watch-eligible bound session (requireBoundWatch)',
+            );
+            continue;
           }
         }
       }
@@ -4979,6 +5409,165 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * The conditional exchange, owned at the transport boundary rather than in
+   * a request hook: `@octokit/request` hard-codes 304 into a RequestError
+   * INSIDE plugin-request-log's own wrap, so catching it any higher leaves an
+   * error-level log line per 304 (~1,800/hour at the watch cap) and hands
+   * githubApi a retryable failure. Converting it here means no layer above
+   * ever learns there was a 304.
+   */
+  private readonly conditionalFetch: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (
+      (init?.method ?? 'GET').toUpperCase() !== 'GET' ||
+      !isConditionalPollUrl(url)
+    ) {
+      return fetch(input, init);
+    }
+    const cached = this.conditionalCache.get(url);
+    const headers = new Headers(init?.headers);
+    if (cached) headers.set('if-none-match', cached.etag);
+    const response = await fetch(url, { ...init, headers });
+
+    if (response.status === 304 && cached) {
+      const merged = new Headers(response.headers);
+      // GitHub omits Link on a 304 (verified against the live API: the same
+      // URL's 200 carried next+last, the 304 carried neither). Without the
+      // cached value paginate stops after page 1 and silently drops the rest
+      // of the notifications list.
+      if (!merged.has('link') && cached.link !== undefined) {
+        merged.set('link', cached.link);
+      }
+      // The body is the cached, already-decoded text, so any framing headers
+      // describing the empty 304 body would misdescribe it.
+      merged.delete('content-length');
+      merged.delete('content-encoding');
+      merged.set('content-type', 'application/json; charset=utf-8');
+      // Refresh recency on a hit, not just on a write: a moved `since` cursor
+      // keeps minting dead notification entries, and without this they would
+      // evict the quiet PRs that are being read every poll.
+      this.storeCached(url, cached);
+      return new Response(cached.body, { status: 200, headers: merged });
+    }
+
+    if (response.status === 200) {
+      const etag = response.headers.get('etag');
+      if (etag !== null) {
+        const body = await response.clone().text();
+        const bytes = Buffer.byteLength(body);
+        if (bytes <= CONDITIONAL_CACHE_MAX_BODY_BYTES) {
+          this.storeCached(url, {
+            etag,
+            body,
+            link: response.headers.get('link') ?? undefined,
+            bytes,
+          });
+          for (const oldest of this.conditionalCache.keys()) {
+            if (
+              this.conditionalCache.size <= CONDITIONAL_CACHE_MAX_ENTRIES &&
+              this.conditionalCacheBytes <= CONDITIONAL_CACHE_MAX_TOTAL_BYTES
+            ) {
+              break;
+            }
+            this.dropCached(oldest);
+          }
+        }
+      }
+    }
+    return response;
+  };
+
+  /**
+   * The only two writers of the cache, so the byte total cannot drift from
+   * the map. Re-inserting moves the key to the most-recently-used end.
+   */
+  private dropCached(url: string): void {
+    const entry = this.conditionalCache.get(url);
+    if (entry === undefined) return;
+    this.conditionalCacheBytes -= entry.bytes;
+    this.conditionalCache.delete(url);
+  }
+
+  private storeCached(url: string, entry: ConditionalCacheEntry): void {
+    this.dropCached(url);
+    this.conditionalCache.set(url, entry);
+    this.conditionalCacheBytes += entry.bytes;
+  }
+
+  /**
+   * Record the REST budget from a successful response's headers. Called by
+   * the request hook on every response. A missing or malformed remaining
+   * header leaves the last known value untouched (a proxy that strips the
+   * header must not erase a real reading). The reset time is refreshed from
+   * the same response; if that header is absent the reset is cleared, so the
+   * gate falls back to protecting on the count alone rather than trusting a
+   * reset time from a different window.
+   */
+  private recordRateLimitBudget(
+    headers: Record<string, unknown> | undefined,
+  ): void {
+    const remaining = parseRateLimitCount(headers?.['x-ratelimit-remaining']);
+    if (remaining === undefined) return;
+    this.lastRateLimitRemaining = remaining;
+    const reset = parseRateLimitCount(headers?.['x-ratelimit-reset']);
+    this.lastRateLimitResetAt = reset === undefined ? undefined : reset * 1000;
+  }
+
+  /**
+   * Whether the watch pass must yield this poll to protect the notification
+   * lane. True only when a usable remaining reading is at or below the
+   * reserve AND its window has not already reset (a stale low count from a
+   * rolled-over window must not starve the watch). With no reading yet the
+   * watch runs normally; the reactive isWatchFailFastError backstop still
+   * covers a wrong estimate or a secondary limit.
+   */
+  private watchBudgetExhausted(): boolean {
+    const reserve = this.prWatchBudgetReserve;
+    // A reserve of 0 disables the gate outright. Without this, a remaining
+    // of 0 would still satisfy `0 <= 0` and skip the watch the operator
+    // explicitly opted out of protecting.
+    if (reserve === 0) return false;
+    if (this.lastRateLimitRemaining === undefined) return false;
+    if (
+      this.lastRateLimitResetAt !== undefined &&
+      Date.now() >= this.lastRateLimitResetAt
+    ) {
+      return false;
+    }
+    return this.lastRateLimitRemaining <= reserve;
+  }
+
+  /**
+   * Open a low-budget episode: latch the skip and journal its edge once.
+   * Shared by the poll-boundary gate and the in-pass yield so a mid-pass stop
+   * records the same row rather than a second vocabulary.
+   */
+  private noteWatchBudgetLow(): void {
+    this.watchBudgetEpisodeOpen = true;
+    if (this.watchBudgetLow) return;
+    this.watchBudgetLow = true;
+    this.recordPollDegraded('watch_budget_low', {
+      remaining: this.lastRateLimitRemaining ?? 0,
+      reserve: this.prWatchBudgetReserve,
+    });
+    process.stderr.write(
+      `[Channel:${this.name}] PR state watch skipped: REST budget ${this.lastRateLimitRemaining} at or below reserve ${this.prWatchBudgetReserve}; preserving budget for the notification lane\n`,
+    );
+  }
+
+  /**
+   * Close the episode once the budget is no longer exhausted. A still-low
+   * budget keeps it open: the watch being ineligible says nothing about the
+   * budget, and claiming recovery there would be a false report.
+   */
+  private closeWatchBudgetEpisode(): void {
+    if (!this.watchBudgetEpisodeOpen) return;
+    if (this.watchBudgetExhausted()) return;
+    this.watchBudgetEpisodeOpen = false;
+    this.recordPollDegraded('watch_budget_recovered');
+  }
+
+  /**
    * Journals a degraded dependency the poll loop itself survived: the poll
    * still reports `ok`, so without this row a binding scan that stalls every
    * notification is invisible in the timeline. Emitted only where the
@@ -5024,7 +5613,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const parsed = JSON.parse(readFileSync(this.inboundTasksPath(), 'utf-8'));
       if (!Array.isArray(parsed) || !parsed.every(isInboundTaskRecord)) {
-        throw new Error('invalid GitHub inbound task state');
+        // Name the offender: one bad record blocks every healthy task in the
+        // file, so an operator repairing it by hand needs the index and id
+        // rather than bisecting the JSON by eye.
+        const badIndex = Array.isArray(parsed)
+          ? parsed.findIndex((item) => !isInboundTaskRecord(item))
+          : -1;
+        const badId =
+          badIndex === -1
+            ? undefined
+            : (parsed[badIndex] as { id?: unknown } | undefined)?.id;
+        throw new Error(
+          `invalid GitHub inbound task state${
+            badIndex === -1 ? '' : ` at record ${badIndex}`
+          }${typeof badId === 'string' ? ` (${badId})` : ''}`,
+        );
       }
       this.inboundTaskSnapshot = parsed;
       return parsed;
@@ -5359,6 +5962,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.boundRefreshFailed = false;
       this.boundSnapshotSeen = true;
       this.boundSnapshotFailureStreak = 0;
+      this.bindingsGeneration += 1;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
       const map = new Map<string, PrBindingSummary>();
       for (const summary of snapshot.bindings) {
@@ -5368,6 +5972,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         for (const pr of summary.prs) {
           const identity = this.parsePrBindingUrl(pr.url);
           if (!identity || identity.number !== pr.number) continue;
+          if (this.watchGateExcludes(pr.role, pr.watching)) continue;
           const key = this.prBindingKey(identity.chatId, identity.number);
           const existing = map.get(key);
           if (
@@ -5402,14 +6007,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const retained = this.lastBindings.filter(
           (b) => !seen.has(b.sessionId),
         );
-        const retainedCapped =
+        const retainedCapped = (
           retained.length > MAX_PARTIAL_RETAINED
             ? [...retained]
                 .sort((a, b) =>
                   (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
                 )
                 .slice(0, MAX_PARTIAL_RETAINED)
-            : retained;
+            : retained
+        ).map((summary) => ({
+          ...summary,
+          // A retained row's last-stamped `watching` is stale evidence: the
+          // scan that would refresh it cannot read this session's sidecar.
+          // Keep the row (it still names its PRs and competes by recency)
+          // but reset the flag to unknown so the gate fails open on it — a
+          // watch installed during a permanent partial must not read as a
+          // confirmed false and ban the session for the partial's life.
+          prs: summary.prs.map((pr) => ({ ...pr, watching: undefined })),
+        }));
         retainedSessionCount = retainedCapped.length;
         if (retainedCapped.length < retained.length) {
           process.stderr.write(
@@ -5425,6 +6040,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           for (const pr of summary.prs) {
             const identity = this.parsePrBindingUrl(pr.url);
             if (!identity || identity.number !== pr.number) continue;
+            if (this.watchGateExcludes(pr.role, pr.watching)) continue;
             const key = this.prBindingKey(identity.chatId, identity.number);
             const existing = map.get(key);
             if (
@@ -5440,7 +6056,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.lastBindings = snapshot.bindings;
       }
       this.boundSessionByPr = map;
-      if (snapshot.partial && map.size === 0 && !this.boundSnapshotTrusted) {
+      if (
+        snapshot.partial &&
+        map.size === 0 &&
+        !this.boundSnapshotTrusted &&
+        !(this.requireBoundWatch && this.hasRawBoundPrs())
+      ) {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
@@ -5479,6 +6100,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive binding scans (${listedSessions} sessions listed): the daemon could not read every PR sidecar, transcript or live session list, or a registered workspace has no runtime. ${
               !this.boundSnapshotTrusted &&
               map.size === 0 &&
+              !(this.requireBoundWatch && this.hasRawBoundPrs()) &&
               this.coldEmptyPartialStreak < MAX_COLD_EMPTY_PARTIAL_POLLS
                 ? `The comment lane is still deferred (${this.coldEmptyPartialStreak}/${MAX_COLD_EMPTY_PARTIAL_POLLS} cold binding scans), so PR and issue events are both stalled.`
                 : 'Unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected).'
@@ -5506,7 +6128,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // No authoritative map exists: either no snapshot has ever succeeded,
       // or only empty partials / failures have (boundSnapshotSeen may already
       // be true). The cold-start gate defers the comment lane, so every
-      // notification is stalled.
+      // notification is stalled. The gate's raw-presence suppression is NOT
+      // applied here: a raw row left by an earlier scan says nothing about
+      // THIS failing lookup, so the failure accounting and the
+      // bindings_unreachable row must still run.
       const noAuthoritativeMap =
         !this.boundSnapshotTrusted && this.boundSessionByPr.size === 0;
       if (noAuthoritativeMap) {
@@ -5635,6 +6260,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     for (const follower of this.boundFollowersOf(chatId, issueNumber)) {
       if (excluded.has(follower.summary.sessionId)) continue;
       if (roleFilter && follower.role !== roleFilter.role) continue;
+      if (this.watchGateExcludes(follower.role, follower.watching)) continue;
       if (
         !best ||
         (follower.summary.updatedAt ?? '') > (best.summary.updatedAt ?? '')
@@ -5661,6 +6287,85 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * The active-watch gate (requireBoundWatch): a review/verify binding whose
+   * session holds no active watch on THIS PR is not a delivery target.
+   * Unknown watching (absent — detection failed or an older daemon) stays
+   * eligible: the gate is a noise filter, fail-open. fix and untyped
+   * bindings are never gated. Filtering happens at target selection only —
+   * the raw binding list keeps naming excluded followers so `followed` /
+   * absence semantics never mistake "bound but ineligible" for "unbound"
+   * and open the irreversible public path.
+   */
+  private watchGateExcludes(
+    role: PrBindingRole | undefined,
+    watching: boolean | undefined,
+  ): boolean {
+    return (
+      this.requireBoundWatch &&
+      (role === 'review' || role === 'verify') &&
+      watching === false
+    );
+  }
+
+  /**
+   * True when raw followers exist and the watch gate excludes EVERY one of
+   * them — the only "no candidate" state the gate itself caused. A winner
+   * that is merely author-excluded, or a removed binding (no followers), is
+   * not this state and keeps the legacy frozen-target contract.
+   */
+  private gateExcludedAllFollowers(
+    chatId: string,
+    issueNumber: number,
+  ): boolean {
+    if (!this.requireBoundWatch) return false;
+    const followers = this.boundFollowersOf(chatId, issueNumber);
+    return (
+      followers.length > 0 &&
+      followers.every((f) => this.watchGateExcludes(f.role, f.watching))
+    );
+  }
+
+  /**
+   * Whether any non-channel raw binding row names a PR — the population the
+   * gate can actually filter. The routing map is gate-filtered, so its
+   * emptiness alone cannot prove "no bindings exist": cold-start decisions
+   * must read raw presence, or a fully-ineligible snapshot stalls the lane
+   * as if the sidecars were unreadable. Channel-owned rows are excluded
+   * because the routing map deliberately skips them.
+   */
+  private hasRawBoundPrs(): boolean {
+    return this.lastBindings.some(
+      (b) => b.sourceType !== 'channel' && b.prs.length > 0,
+    );
+  }
+
+  /**
+   * Whether the gate excluded the FROZEN delivery target itself. The
+   * delivery-time retire must be about the target the event was frozen to,
+   * not the whole follower set: an exempt fix/untyped target keeps the
+   * legacy frozen-target contract even when some other ineligible
+   * review/verify follower still lists the PR, and a removed binding (the
+   * target no longer follows) keeps it too. Only a target whose own binding
+   * the gate excludes retires.
+   */
+  private frozenTargetGateExcluded(
+    delivery: NonNullable<InboundTaskRecord['delivery']>,
+    chatId: string,
+    issueNumber: number,
+  ): boolean {
+    if (!this.requireBoundWatch || delivery.kind !== 'bound-session') {
+      return false;
+    }
+    const follower = this.boundFollowersOf(chatId, issueNumber).find(
+      (f) => f.summary.sessionId === delivery.sessionId,
+    );
+    return (
+      follower !== undefined &&
+      this.watchGateExcludes(follower.role, follower.watching)
+    );
+  }
+
+  /**
    * Every non-channel follower of a PR from the full binding list, each with
    * the role of the entry that names THIS PR (a session may follow several
    * PRs with different roles). Scans lastBindings so partial-snapshot
@@ -5669,17 +6374,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private boundFollowersOf(
     chatId: string,
     issueNumber: number,
-  ): Array<{ summary: PrBindingSummary; role?: PrBindingRole }> {
+  ): Array<{
+    summary: PrBindingSummary;
+    role?: PrBindingRole;
+    watching?: boolean;
+  }> {
     const key = this.prBindingKey(chatId, issueNumber);
     const followers: Array<{
       summary: PrBindingSummary;
       role?: PrBindingRole;
+      watching?: boolean;
     }> = [];
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
       const entry = this.boundPrEntryFor(summary, key);
       if (!entry) continue;
-      followers.push({ summary, ...(entry.role ? { role: entry.role } : {}) });
+      followers.push({
+        summary,
+        ...(entry.role ? { role: entry.role } : {}),
+        ...(entry.watching !== undefined ? { watching: entry.watching } : {}),
+      });
     }
     return followers;
   }
@@ -5940,7 +6654,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const summary = this.boundSessionByPr.get(
         this.prBindingKey(chatId, issueNumber),
       );
-      if (!summary) return { targets: [], followed: false };
+      if (!summary) {
+        // The routing map holds only watch-eligible winners under the gate,
+        // so its absence is not "unbound": raw followers may still exist
+        // (all ineligible). `followed` must keep naming them, or the
+        // absence gate would open the public path for a bound PR.
+        return {
+          targets: [],
+          followed:
+            this.requireBoundWatch &&
+            this.boundFollowersOf(chatId, issueNumber).length > 0,
+        };
+      }
       const role = this.boundRoleOf(summary, chatId, issueNumber);
       return {
         targets: [{ sessionId: summary.sessionId, ...(role ? { role } : {}) }],
@@ -5953,6 +6678,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       { summary: PrBindingSummary; role?: PrBindingRole }
     >();
     for (const follower of followers) {
+      if (this.watchGateExcludes(follower.role, follower.watching)) continue;
       const groupKey = follower.role ?? '';
       const existing = byRole.get(groupKey);
       if (
@@ -5996,12 +6722,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
     eventClass: string | undefined,
     laneClass?: string,
+    excludeSessionIds?: ReadonlySet<string>,
   ): InboundTaskRecord['delivery'] {
     if (!this.boundRoleAware) {
-      return this.resolveBoundDelivery(chatId, issueNumber);
+      const legacy = this.resolveBoundDelivery(chatId, issueNumber);
+      if (legacy && excludeSessionIds?.has(legacy.sessionId)) return undefined;
+      return legacy;
     }
     const winner = this.boundFollowersOf(chatId, issueNumber)
       .filter((follower) => follower.role === delivery.role)
+      .filter(
+        (follower) => !this.watchGateExcludes(follower.role, follower.watching),
+      )
+      .filter((follower) => !excludeSessionIds?.has(follower.summary.sessionId))
       .reduce<{ summary: PrBindingSummary; role?: PrBindingRole } | undefined>(
         (best, follower) =>
           !best ||
@@ -6227,6 +6960,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         task.issueNumber,
         this.boundEventClass(envelope),
         this.boundLaneClass(task.dedupe),
+        task.authorExclude ? new Set(task.authorExclude) : undefined,
       );
       // The ROLE is part of the target, not just the session: a deferred
       // legacy delivery whose binding was re-roled in the meantime must not
@@ -6242,14 +6976,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'running', { delivery: current });
         task.delivery = current;
         delivery = current;
-      } else if (!current && (isWatch || this.boundRoleAware)) {
+      } else if (
+        !current &&
+        (isWatch ||
+          this.boundRoleAware ||
+          this.frozenTargetGateExcluded(
+            delivery,
+            envelope.chatId,
+            task.issueNumber,
+          ))
+      ) {
         // On a complete snapshot with no candidate left for the task's role,
         // retire privately. Watch events are private-only by contract; a
         // role-aware COMMENT whose role lost its match (the binding's role
         // changed, or the operator removed the template) must not keep
         // injecting the obsolete role's instruction into the frozen session
-        // either. Legacy single-winner comments keep the frozen target —
-        // their public fallback contract is handled by the gone path below.
+        // either. Under the watch gate a legacy comment retires too, but
+        // ONLY when the gate excluded the FROZEN TARGET itself (it stopped
+        // watching between claim and delivery). The decision is about the
+        // target, not the follower set: an exempt fix/untyped target, a
+        // merely author-excluded winner, or a REMOVED binding all keep the
+        // legacy contract — the frozen target stands and the gone path below
+        // owns the fallback — so the gate never changes behavior for the
+        // fix/untyped sessions it exempts.
         process.stderr.write(
           `[Channel:${this.name}] ${isWatch ? 'watch' : 'bound'} event ${envelope.messageId} has no bound candidate left for its role; retiring without public fallback\n`,
         );
@@ -6273,6 +7022,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         waiveGroupMention:
           !envelope.messageId?.startsWith('issue-body-') &&
           this.waivesBoundMention(envelope.chatId, envelope.senderId),
+        // The comment watch delivers the channel account's own comments (the
+        // notification lanes filter that login out, so this can only be the
+        // watch). The sender allowlist guidance excludes that account, which
+        // would otherwise retire every watched comment as preflight_rejected.
+        waiveGroupSender:
+          this.botUsername != null &&
+          envelope.senderId === this.botUsername.toLowerCase(),
       });
       const admitted =
         typeof preflight === 'boolean' ? preflight : await preflight;
@@ -6334,6 +7090,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // loop by the finite follower count even if a stale snapshot keeps
       // re-listing dead sessions.
       const goneSessions = new Set<string>([delivery.sessionId]);
+      // The comment watch withholds the comment from its author; the fallback
+      // re-resolves over the followers and must honor that exclusion too, or a
+      // Gone primary target would hand the comment back to its author. When no
+      // non-author follower remains the loop retires privately below.
+      for (const sessionId of task.authorExclude ?? []) {
+        goneSessions.add(sessionId);
+      }
       // The local `delivery` is the FIRST follower; the loop walks past it.
       // The terminal row must name the last one tried, or the operator opens
       // the workspace of a session evicted a step earlier.
@@ -6406,9 +7169,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // public. While any role still follows the PR, the event is (or will
       // be) delivered privately through that role's own task; a public
       // reply here would duplicate it on the PR. Only zero live followers
-      // across every role opens the public fallback below.
+      // across every role opens the public fallback below. The watch gate
+      // applies the same rule in legacy mode — but only on a COMPLETE
+      // snapshot: under a partial/failed refresh an unscanned workspace may
+      // still hold an eligible follower, so the deferral block below owns
+      // the event instead of a retirement on incomplete evidence.
       if (
-        this.boundRoleAware &&
+        (this.boundRoleAware ||
+          (this.requireBoundWatch &&
+            !this.lastBindingsPartial &&
+            !this.boundRefreshFailed)) &&
         (this.boundFollowersOf(envelope.chatId, task.issueNumber).length > 0 ||
           this.boundEventAlreadyDelivered(envelope))
       ) {
@@ -6663,12 +7433,42 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Requests reserved for the notification lane: at or below this remaining
+   * budget the watch pass yields. Clamped like prWatchLimit; a configured 0
+   * is honoured (disables the gate) so an operator can opt out, while unset
+   * or invalid keeps the default. Rounds up so the reserve is never silently
+   * smaller than requested.
+   */
+  private get prWatchBudgetReserve(): number {
+    const configured: unknown = (this.config as GithubConfig)
+      .prWatchBudgetReserve;
+    if (
+      typeof configured === 'number' &&
+      Number.isFinite(configured) &&
+      configured >= 0
+    ) {
+      return Math.min(Math.ceil(configured), MAX_PR_WATCH_BUDGET_RESERVE);
+    }
+    return DEFAULT_PR_WATCH_BUDGET_RESERVE;
+  }
+
+  /**
    * Edge-triggered state watch over the PRs bound to live sessions. Runs
    * inside the existing poll loop; detection is API-level and costs no model
    * tokens until a real transition fires.
    */
   private async runPrStateWatch(): Promise<void> {
-    if (!this.boundSessions || this.prWatchEvents.size === 0) return;
+    // The comment watch is default-on with deliverToBoundSessions and is
+    // independent of the state-event subscription, so an empty prWatchEvents
+    // must not skip the pass while comment watching is enabled.
+    const commentWatchActive =
+      this.deliverToBoundSessions && this.prCommentWatchEnabled;
+    if (
+      !this.boundSessions ||
+      (this.prWatchEvents.size === 0 && !commentWatchActive)
+    ) {
+      return;
+    }
     this.loadPrWatchState();
     const candidates = new Map<
       string,
@@ -6701,10 +7501,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // the PR: pruning it here would re-add the closed PR as a first
         // observation on the next poll (query oscillation) and lose the
         // terminal record. Binding retention and active polling are
-        // separate concerns.
+        // separate concerns. A comment-only channel subscribes no state
+        // event, so there is no state_change to observe and watchOnePr (the
+        // only prState writer) never runs: drain on the binding's terminal
+        // state alone, else merged/closed bindings would be comment-fetched
+        // forever. A reopened binding flips back to open and resumes.
         if (
           (pr.state === 'merged' || pr.state === 'closed') &&
-          this.prWatchState.entries[key]?.prState === 'closed'
+          (this.prWatchState.entries[key]?.prState === 'closed' ||
+            this.prWatchEvents.size === 0)
         ) {
           continue;
         }
@@ -6834,9 +7639,36 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] PR watch cap exceeded: watching ${watched.length}/${active.size} bound PRs (open first, most recent; open limit ${limit}); not watched: ${excluded.join(', ')}\n`,
       );
     }
+    // One burst budget for the whole pass: after an outage every watched PR
+    // can be due at once, and a per-PR cap would claim up to cap × watched-PR
+    // durable tasks in a single poll. PRs that find it spent keep their cursor
+    // and resume next pass.
+    const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
     for (const [key, candidate] of watched) {
+      // Yield at the spend site, not only at the poll boundary: one pass can
+      // issue several requests per watched PR, so a pass entered just above
+      // the reserve would otherwise spend the whole reserve before the
+      // notification lane runs. Break (not return) so the baseline observed
+      // so far still reaches savePrWatchState below.
+      if (this.watchBudgetExhausted()) {
+        this.noteWatchBudgetLow();
+        break;
+      }
       try {
-        await this.watchOnePr(key, candidate.chatId, candidate.number);
+        // The state observation costs a pulls.get per watched PR per poll; skip
+        // it when no state event is subscribed so a comment-only channel does
+        // not pay for transitions it never emits.
+        if (this.prWatchEvents.size > 0) {
+          await this.watchOnePr(key, candidate.chatId, candidate.number);
+        }
+        // Additive comment watch: isolates its own failures so a comment
+        // fetch problem never skips the state transitions above.
+        await this.watchPrComments(
+          key,
+          candidate.chatId,
+          candidate.number,
+          commentBudget,
+        );
       } catch (err) {
         if (isWatchPassAbortError(err)) {
           // Shared credential/rate-limit failure: abort the rest of the
@@ -7019,6 +7851,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? { mergeableState: entry.mergeableState }
           : {}),
       ...(prState !== undefined ? { prState } : {}),
+      ...(pr.title !== undefined
+        ? { title: pr.title }
+        : entry.title !== undefined
+          ? { title: entry.title }
+          : {}),
       ...(prUpdatedAt !== undefined ? { prUpdatedAt } : {}),
       ...(firstObservation || headChanged
         ? { headObservedAt: Date.now() }
@@ -7035,6 +7872,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(entry.fired !== undefined ? { fired: entry.fired } : {}),
       ...(!headChanged && entry.ciFiredSha !== undefined
         ? { ciFiredSha: entry.ciFiredSha }
+        : {}),
+      // The comment watch cursor is independent of head/CI transitions; carry
+      // it through so the state baseline write does not drop it.
+      ...(entry.commentBaseline !== undefined
+        ? { commentBaseline: entry.commentBaseline }
+        : {}),
+      ...(entry.commentSince !== undefined
+        ? { commentSince: entry.commentSince }
+        : {}),
+      ...(entry.commentLastFetchAt !== undefined
+        ? { commentLastFetchAt: entry.commentLastFetchAt }
         : {}),
     };
 
@@ -7187,6 +8035,404 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Bound PR comment watch (docs/design/2026-11-08-bound-pr-comment-watch.md).
+   * Poll conversation + inline review comments on a bound PR and deliver each
+   * new one to every bound session that did NOT post it. Unlike the
+   * notification lanes this does not filter the channel's own account: a
+   * comment by the same GitHub login used by a DIFFERENT session/agent must
+   * reach the follower. Authorship attribution (the daemon's posted-comment
+   * lookup) withholds a comment only from the session that wrote it, which is
+   * what prevents a fix session's own reply from re-triggering it.
+   *
+   * Default-on with deliverToBoundSessions; `prCommentWatch: false` disables
+   * it. Failures are isolated here so they never skip the state transitions.
+   */
+  private async watchPrComments(
+    key: string,
+    chatId: string,
+    number: number,
+    budget: { remaining: number },
+  ): Promise<void> {
+    if (
+      !this.deliverToBoundSessions ||
+      !this.prCommentWatchEnabled ||
+      !this.boundSessions
+    ) {
+      return;
+    }
+    const entry = this.prWatchState.entries[key] ?? {};
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    // First observation baselines silently (no backlog delivery), matching
+    // the state-watch convention; only comments created after it are eligible.
+    if (entry.commentBaseline === undefined) {
+      this.prWatchState.entries[key] = {
+        ...entry,
+        commentBaseline: nowIso,
+        commentSince: nowIso,
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      return;
+    }
+    if (
+      entry.commentLastFetchAt !== undefined &&
+      now - entry.commentLastFetchAt < COMMENT_RECHECK_INTERVAL_MS
+    ) {
+      return;
+    }
+    // The burst budget is shared by every watched PR in this pass. A PR that
+    // arrives after it is spent fetches nothing and keeps its cursor untouched,
+    // so its tail resumes on the next pass instead of being skipped past.
+    if (budget.remaining <= 0) {
+      return;
+    }
+    const [owner, repo] = chatId.split('/');
+    const since = entry.commentSince ?? entry.commentBaseline;
+    let conversation: GithubComment[] = [];
+    let review: GithubReviewComment[] = [];
+    try {
+      // Same fail-fast rule as the state watch: a rate-limited or credential
+      // answer must not sleep-retry inside the watch pass (it runs before task
+      // recovery and notification intake), and a shared error aborts the pass.
+      conversation = (await this.githubApi(
+        () =>
+          this.octokit.paginate(this.octokit.rest.issues.listComments, {
+            owner,
+            repo,
+            issue_number: number,
+            since,
+            per_page: 100,
+          }),
+        `listComments(comment watch ${key})`,
+        3,
+        (err) => !isWatchFailFastError(err),
+      )) as GithubComment[];
+      review = (await this.githubApi(
+        () =>
+          this.octokit.paginate(this.octokit.rest.pulls.listReviewComments, {
+            owner,
+            repo,
+            pull_number: number,
+            since,
+            per_page: 100,
+          }),
+        `listReviewComments(comment watch ${key})`,
+        3,
+        (err) => !isWatchFailFastError(err),
+      )) as GithubReviewComment[];
+    } catch (err) {
+      // A shared credential/rate-limit error condemns the whole pass: hand it
+      // to the outer watch loop's abort logic instead of swallowing it here.
+      if (isWatchPassAbortError(err)) throw err;
+      // Per-PR failure: advance the fetch clock so a persistent endpoint
+      // problem retries on the interval, not every poll, but keep commentSince
+      // so no comment is skipped past without a delivery attempt.
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      process.stderr.write(
+        `[Channel:${this.name}] comment watch fetch failed for ${key}, continuing without comments this pass: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+      );
+      return;
+    }
+
+    // Record created_at per fetched comment exactly as the notification lanes'
+    // fetch does, so the watch's dispatchedComments keys carry a time and stay
+    // evictable once older than the cursor. Without a time a key is treated as
+    // protected and the ring would grow monotonically for the daemon's life.
+    const commentTimes = (this.cursor.dispatchedCommentTimes ??= {});
+    for (const comment of [...conversation, ...review]) {
+      if (comment.created_at) {
+        commentTimes[comment.node_id || String(comment.id)] =
+          comment.created_at;
+      }
+    }
+
+    const { targets } = this.resolveBoundTargets(
+      chatId,
+      number,
+      'comment',
+      'comment',
+    );
+    // A partial/untrusted snapshot may omit bound sessions, so the target list
+    // is not a complete enumeration: retiring a comment as "no target" (or
+    // delivering to the visible subset and advancing past it) would skip it
+    // past a session in the unscanned workspace, and no other lane can deliver
+    // a same-account comment. Defer rather than consume (fail-closed, as the
+    // state watch): keep commentSince, advance only the fetch clock, and let a
+    // trustworthy pass re-evaluate.
+    if (
+      !this.boundSnapshotTrusted ||
+      this.lastBindingsPartial ||
+      this.boundRefreshFailed
+    ) {
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      return;
+    }
+    const baseline = entry.commentBaseline;
+    const alreadyDispatched = (commentKey: string): boolean =>
+      this.cursor.dispatchedComments?.includes(commentKey) === true;
+    const candidates: Array<{
+      key: string;
+      attrKey: string;
+      createdAt: string;
+      envelope: Envelope;
+    }> = [];
+    const threadId = `pr:${number}`;
+    const metadata = `${this.buildMetadata(chatId, threadId, entry.title ?? '')}\nTrigger: comment.`;
+    const renderBody = (body: string | undefined): string => {
+      const display = sanitizeDisplayText((body ?? '').trim());
+      const total = Array.from(display).length;
+      // A watch delivery carries ONE comment, so it uses the bound prompt's
+      // body ceiling, not the aggregate lane's per-comment batch budget (400):
+      // cutting a single finding at 400 code points drops the actionable steps
+      // past the cut. The bound prompt caps the final body at the same value.
+      return total > BOUND_PROMPT_BODY_MAX_CODE_POINTS
+        ? `${truncateCodePoints(display, BOUND_PROMPT_BODY_MAX_CODE_POINTS)}… [comment truncated: ${total - BOUND_PROMPT_BODY_MAX_CODE_POINTS} more characters]`
+        : display;
+    };
+    // The watch closes the SAME-account gap: GitHub sends the channel account no
+    // notification for its own comments, so the notification lanes never see
+    // them. Comments by any OTHER account do produce notifications and are
+    // delivered by the notification lanes under the thread's own reason and
+    // role templates. Watching them here too would pre-empt those lanes: the
+    // watch resolves the narrower `comment` class, and consuming the shared
+    // dedupe key after reaching only a subset of roles would starve the rest
+    // (e.g. fix:comment delivered, verify:mention lost). Leave other-account
+    // comments to the lanes.
+    const botLogin = this.botUsername?.toLowerCase();
+    const sameAccount = (login: string | undefined): boolean =>
+      botLogin !== undefined && login?.toLowerCase() === botLogin;
+    for (const comment of conversation) {
+      const commentKey = comment.node_id || String(comment.id);
+      if (
+        !sameAccount(comment.user?.login) ||
+        !comment.created_at ||
+        comment.created_at <= baseline ||
+        alreadyDispatched(commentKey)
+      ) {
+        continue;
+      }
+      const author = comment.user?.login || 'unknown';
+      const url = `${this.webOrigin}/${chatId}/pull/${number}#issuecomment-${comment.id}`;
+      candidates.push({
+        key: commentKey,
+        attrKey: `ic:${comment.id}`,
+        createdAt: comment.created_at,
+        envelope: {
+          channelName: this.name,
+          senderId: author.toLowerCase(),
+          senderName: author,
+          chatId,
+          threadId,
+          messageId: commentKey,
+          text: `New comment by @${author}:\n${renderBody(comment.body)}\nComment: ${url}`,
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        },
+      });
+    }
+    for (const comment of review) {
+      const commentKey = comment.node_id || String(comment.id);
+      if (
+        !sameAccount(comment.user?.login) ||
+        !comment.created_at ||
+        comment.created_at <= baseline ||
+        alreadyDispatched(commentKey)
+      ) {
+        continue;
+      }
+      const author = comment.user?.login || 'unknown';
+      const url =
+        comment.html_url ||
+        `${this.webOrigin}/${chatId}/pull/${number}#discussion_r${comment.id}`;
+      const line = comment.line ?? comment.original_line;
+      const location = `File: ${comment.path ?? '?'}${line != null ? ` (line ${line}${comment.side ? `, ${comment.side}` : ''})` : ''}`;
+      candidates.push({
+        key: commentKey,
+        attrKey: `rc:${comment.id}`,
+        createdAt: comment.created_at,
+        envelope: {
+          channelName: this.name,
+          senderId: author.toLowerCase(),
+          senderName: author,
+          chatId,
+          threadId,
+          messageId: commentKey,
+          text: `New inline review comment by @${author}:\n${location}\n${renderBody(comment.body)}\nComment: ${url}`,
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        },
+      });
+    }
+    candidates.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    const commitCursor = (newSince: string): void => {
+      // GitHub compares `since` at whole-second granularity while nowIso carries
+      // milliseconds: a comment created later in the same second as the fetch
+      // snapshot would be excluded from every later fetch. Floor the cursor to
+      // the second so that whole second is re-listed next pass (anything already
+      // delivered is deduped), never skipped past.
+      const floored = new Date(
+        Math.floor(Date.parse(newSince) / 1000) * 1000,
+      ).toISOString();
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentSince: floored,
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+    };
+
+    // No new comments: advance the cursor without any attribution round-trip.
+    if (candidates.length === 0) {
+      commitCursor(nowIso);
+      return;
+    }
+
+    // Look up posted comments only now that there is something to deliver, so a
+    // quiet pass costs no serve round-trips. A comment is withheld only from the
+    // session that wrote it. Query EVERY bound follower, not just the resolved
+    // targets: the delivery-time Gone fallback re-resolves over the followers,
+    // so the exclusion must also cover a same-role author that is not the
+    // primary target, or the fallback would hand the comment back to it.
+    const followerIds = new Set<string>(
+      targets.map((target) => target.sessionId),
+    );
+    for (const follower of this.boundFollowersOf(chatId, number)) {
+      followerIds.add(follower.summary.sessionId);
+    }
+    const postedBySession = new Map<string, ReadonlySet<string>>();
+    for (const sessionId of followerIds) {
+      const lookup = this.boundSessions.postedCommentIds;
+      const ids = lookup
+        ? await lookup
+            .call(this.boundSessions, sessionId)
+            .catch(() => new Set<string>())
+        : new Set<string>();
+      postedBySession.set(sessionId, ids);
+    }
+    const excludeFor = (
+      candidate: (typeof candidates)[number],
+    ): Set<string> => {
+      const exclude = new Set<string>();
+      for (const sessionId of followerIds) {
+        if (postedBySession.get(sessionId)?.has(candidate.attrKey)) {
+          exclude.add(sessionId);
+        }
+      }
+      return exclude;
+    };
+
+    // Exclude author-owned comments BEFORE the batch cap. They record no dedupe
+    // key, so if they occupied batch slots a run of same-second self-authored
+    // comments would re-fill every batch and the capped cursor would never reach
+    // the tail. Filtering them out keeps the cap and the cursor progressing over
+    // deliverable comments; the excluded ones are simply advanced past.
+    // A gate-only exclusion (every follower watch-ineligible) additionally
+    // earns ONE cycle of grace: a watch installed after this pass's snapshot
+    // was fetched surfaces on the next pass, and the comment it was installed
+    // to catch must not be skipped past with the cursor. The first such
+    // comment holds the cursor before itself; the second consumes it.
+    const gateBlocked =
+      targets.length === 0 && this.gateExcludedAllFollowers(chatId, number);
+    let gateHoldCursor: string | undefined;
+    const deliverable: typeof candidates = [];
+    for (const candidate of candidates) {
+      const exclude = excludeFor(candidate);
+      if (targets.some((target) => !exclude.has(target.sessionId))) {
+        this.gateGraceClear(candidate.key);
+        deliverable.push(candidate);
+        continue;
+      }
+      // A comment every raw follower authored can never be delivered, no
+      // matter what watch is installed: authorship, not the gate, is the
+      // cause. Skip the grace (holding it would be futile and would suppress
+      // its only journal row) and journal it as comment_watch_no_target.
+      const gateCaused = gateBlocked && exclude.size !== followerIds.size;
+      if (gateCaused && this.gateGraceShouldHold(candidate.key)) {
+        gateHoldCursor ??= candidate.createdAt;
+        continue;
+      }
+      this.gateGraceClear(candidate.key);
+      // No session is left to receive this comment. The notification lanes
+      // cannot see it either (same account => no notification), so this skip
+      // row is the comment's only journal trace — record it instead of
+      // consuming silently, naming the gate when the gate is the cause.
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: gateCaused ? 'bound_watch_required' : 'comment_watch_no_target',
+        repository: chatId,
+        thread: threadId,
+        number,
+        messageId: candidate.key,
+      });
+    }
+    if (deliverable.length === 0) {
+      commitCursor(gateHoldCursor ?? nowIso);
+      return;
+    }
+
+    // Cap the burst against the pass-wide budget shared by all watched PRs;
+    // the cursor resumes before the last processed comment when capped so the
+    // tail drains over subsequent passes.
+    const batch = deliverable.slice(
+      0,
+      Math.min(MAX_WATCH_COMMENTS_PER_PASS, budget.remaining),
+    );
+    budget.remaining -= batch.length;
+    const capped = deliverable.length > batch.length;
+
+    let allSettled = true;
+    for (const candidate of batch) {
+      // Private-only: never answered in public. The stable comment id dedupes
+      // across polls. Only same-account comments reach this loop (see the
+      // candidate filter), and those generate no GitHub notification, so
+      // recording the shared key cannot pre-empt a notification lane.
+      const settled = await this.dispatchEnvelope(
+        candidate.envelope,
+        number,
+        { dispatchedComments: [candidate.key] },
+        true,
+        excludeFor(candidate),
+      );
+      if (!settled) allSettled = false;
+    }
+
+    if (!allSettled) {
+      // A dispatch returned false without a durable claim (e.g. the publication
+      // audit is unreadable, which freezes the notification cursor but not this
+      // independent one). Keep commentSince so the next pass re-fetches and
+      // retries; dispatchedComments dedupes anything already claimed. Advancing
+      // here would skip the comment past with no task and no re-delivery chance.
+      commitCursor(since);
+    } else {
+      // Resume just before the last processed comment when capped so the
+      // unprocessed tail is re-fetched next pass (a second of overlap is
+      // deduped, never lost). A gate-held comment never reaches here: a hold
+      // implies an empty deliverable, which returned above.
+      const last = batch[batch.length - 1]!;
+      commitCursor(
+        capped
+          ? new Date(Date.parse(last.createdAt) - 1000).toISOString()
+          : nowIso,
+      );
+    }
+  }
+
+  /**
    * Deliver queued watch events. Order per event: claim the inbound task
    * (durable), move the key from pending to fired (durable), then run the
    * task. A crash at any point leaves either a pending event or a claimed
@@ -7257,7 +8503,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         if (current) {
           delivery = current;
+          this.gateGraceClear(pending.key);
         } else {
+          // One grace cycle when the gate is the cause: a watch installed
+          // after the snapshot was fetched surfaces on the next refresh, and
+          // the transition it was installed to catch must not retire first.
+          // The grace is scoped to the snapshot generation, so a second drain
+          // of the same PR in the same poll does not spend it.
+          if (
+            this.gateExcludedAllFollowers(
+              pending.envelope.chatId,
+              pending.issueNumber,
+            ) &&
+            this.gateGraceShouldHold(pending.key)
+          ) {
+            return;
+          }
+          this.gateGraceClear(pending.key);
           process.stderr.write(
             `[Channel:${this.name}] watch event ${pending.key} has no bound candidate left; retiring without public fallback\n`,
           );
@@ -7305,6 +8567,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           });
           continue;
         }
+      }
+      // A partial/failed scan keeps the frozen target — which may be absent
+      // because the gate filtered the map at detection time. Give that state
+      // the same one grace cycle before claiming a task that would retire
+      // targetless at run time.
+      if (
+        delivery === undefined &&
+        this.gateExcludedAllFollowers(
+          pending.envelope.chatId,
+          pending.issueNumber,
+        ) &&
+        this.gateGraceShouldHold(pending.key)
+      ) {
+        return;
       }
       let task: InboundTaskRecord;
       try {
@@ -7413,6 +8689,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ) {
           return;
         }
+        // One grace cycle when the gate is the cause: a watch installed
+        // after the snapshot was fetched surfaces on the next refresh. The
+        // grace is scoped to the snapshot generation (a second drain of the
+        // same PR in the same poll must not spend it).
+        if (
+          this.gateExcludedAllFollowers(
+            pending.envelope.chatId,
+            pending.issueNumber,
+          ) &&
+          this.gateGraceShouldHold(pending.key)
+        ) {
+          return;
+        }
+        this.gateGraceClear(pending.key);
         process.stderr.write(
           `[Channel:${this.name}] watch event ${pending.key} has no matching role target; retiring without public fallback\n`,
         );
@@ -7421,6 +8711,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.savePrWatchState();
         continue;
       }
+      this.gateGraceClear(pending.key);
       const tasksBefore = this.readInboundTasks();
       const knownIds = new Set(tasksBefore.map((task) => task.id));
       const claimable = targets.filter(

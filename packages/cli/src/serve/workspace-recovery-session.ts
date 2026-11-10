@@ -5,6 +5,14 @@
  */
 
 import path from 'node:path';
+import {
+  MANAGED_TOOL_MEASUREMENTS_KIND,
+  parseManagedToolMeasurementEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
+import {
+  EXECUTION_DIAGNOSTICS_KIND,
+  parseManagedExecutionEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import { validateTodos } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
@@ -180,6 +188,8 @@ const DOMAINS = [
   'session_source',
 ];
 const RESOURCE_KINDS = new Set([
+  EXECUTION_DIAGNOSTICS_KIND,
+  MANAGED_TOOL_MEASUREMENTS_KIND,
   'managed-definition',
   'managed-agent-instructions',
   'managed-agent-skills',
@@ -345,7 +355,7 @@ export async function verifyRecoverySession(
         typeof retiredHead.workspaceId === 'string' &&
         retiredHead.workspaceId.length > 0 &&
         retiredHead.state === 'DELETED' &&
-        [1, 2, 3].includes(retiredHead.storageVersion) &&
+        [1, 2, 3, 4, 5].includes(retiredHead.storageVersion) &&
         retiredHead.writerId === null &&
         retiredHead.writerLeaseUntil === null &&
         retiredHead.latestCheckpointResourceId === null &&
@@ -398,7 +408,7 @@ export async function verifyRecoverySession(
     !head ||
       (head.sessionId === source.sessionId &&
         head.tenantId === source.binding.tenantId &&
-        [1, 2, 3].includes(head.storageVersion) &&
+        [1, 2, 3, 4, 5].includes(head.storageVersion) &&
         head.journalRevision >= 1 &&
         head.compactedThroughRevision === 0 &&
         head.recoveryStatus === 'READY'),
@@ -1071,6 +1081,18 @@ export async function verifyRecoverySession(
     } else if (ref.kind === 'managed-checkpoint-history') {
       for (const nested of collectNestedResourceRefs(ref, bytes))
         await io.enqueue(nested);
+    } else if (ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND) {
+      requireValue(
+        ref.schemaVersion === 1 && (head?.storageVersion ?? 0) >= 5,
+        'unsupported tool measurements',
+      );
+      parseManagedToolMeasurementEvidence(bytes);
+    } else if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
+      if (ref.schemaVersion !== 1)
+        throw new Error(
+          'Workspace recovery: unsupported execution diagnostics.',
+        );
+      parseManagedExecutionEvidence(bytes);
     } else if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
       for (const nested of hostedRecoveryReferences(
         parseHostedRecoveryResource(bytes, key ?? undefined, ref.kind),

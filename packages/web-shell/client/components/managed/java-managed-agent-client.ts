@@ -8,6 +8,10 @@ import type {
   ManagedExtensionSelection,
   ManagedExtensionImportMetadata,
   ManagedExtensionInspection,
+  ManagedRuntimeSkillCandidates,
+  ManagedRuntimeSkillSnapshot,
+  ManagedRuntimeSkillImport,
+  ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
@@ -22,6 +26,12 @@ import type {
   ManagedArtifactResponse,
   ManagedToolResultResponse,
 } from './managed-tool-result-types';
+import type {
+  ManagedSideQuery,
+  ManagedSideQueryContext,
+  ManagedSideQueryCreate,
+  ManagedSideQueryPage,
+} from './managed-side-query-types';
 
 type Schemas = components['schemas'];
 
@@ -504,6 +514,25 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getActivityStatistics(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['ManagedDiagnosticActivityStats']>(
+      '/session-activity-stats/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  listActivity(
+    request: Schemas['WebShellActivityQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['ManagedDiagnosticActivityPage']>(
+      '/session-activity/query',
+      request,
+      signal,
+    );
+  }
+
   getDiagnosticResources(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['ManagedDiagnosticResources']>(
       '/session-resources/query',
@@ -686,6 +715,44 @@ export class JavaManagedAgentClient {
     return this.post<ManagedExtensionSnapshot>(
       '/session-extensions/operations/lookup',
       { sessionId, idempotencyKey },
+      signal,
+    );
+  }
+
+  getRuntimeSkillCandidates(sessionId: string, signal?: AbortSignal) {
+    return this.post<ManagedRuntimeSkillCandidates>(
+      '/session-extensions/skills/candidates/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  snapshotRuntimeSkill(
+    sessionId: string,
+    input: {
+      owner: ManagedRuntimeSkillOwner;
+      path: string;
+      digest: string;
+      target: ManagedExtensionImportMetadata['target'];
+    },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedRuntimeSkillSnapshot>(
+      '/session-extensions/skills/snapshot',
+      { sessionId, ...input },
+      signal,
+    );
+  }
+
+  importRuntimeSkill(
+    sessionId: string,
+    input: ManagedRuntimeSkillImport & { extensionId?: string },
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionPackageOperation>(
+      '/session-extensions/skills/imports',
+      { ...input, sessionId, idempotencyKey },
       signal,
     );
   }
@@ -1121,6 +1188,100 @@ export class JavaManagedAgentClient {
           `[web-shell] resyncing a Managed Agent stream that delivered only corrupt frames (${skippedTotal} skipped)`,
         );
         yield resyncFrame();
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  }
+
+  sideQueryContext(sessionId: string, signal?: AbortSignal) {
+    return this.post<ManagedSideQueryContext>(
+      '/session-side-queries/context',
+      { sessionId },
+      signal,
+    );
+  }
+
+  createSideQuery(
+    sessionId: string,
+    request: ManagedSideQueryCreate,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedSideQuery>(
+      '/session-side-queries/create',
+      { sessionId, ...request, idempotencyKey },
+      signal,
+    );
+  }
+
+  listSideQueries(
+    request: { sessionId: string; cursor?: string; limit?: number },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedSideQueryPage>(
+      '/session-side-queries/list',
+      request,
+      signal,
+    );
+  }
+
+  getSideQuery(sessionId: string, queryId: string, signal?: AbortSignal) {
+    return this.post<ManagedSideQuery>(
+      '/session-side-queries/get',
+      { sessionId, queryId },
+      signal,
+    );
+  }
+
+  cancelSideQuery(sessionId: string, queryId: string, signal?: AbortSignal) {
+    return this.post<ManagedSideQuery>(
+      '/session-side-queries/cancel',
+      { sessionId, queryId },
+      signal,
+    );
+  }
+
+  async *streamSideQuery(
+    request: { sessionId: string; queryId: string; afterRevision?: number },
+    signal?: AbortSignal,
+  ): AsyncGenerator<ManagedSideQuery> {
+    const response = await this.request(
+      '/session-side-queries/stream',
+      request,
+      signal,
+      true,
+    );
+    if (!response.body) throw new Error('Side query stream is unavailable');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let revision = request.afterRevision ?? -1;
+    try {
+      while (true) {
+        const result = await reader.read();
+        buffer += decoder.decode(result.value, { stream: !result.done });
+        let boundary = nextFrameBoundary(buffer);
+        while (boundary) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary.length);
+          const { data } = parseEventFrameFields(frame);
+          if (data.length) {
+            const value = JSON.parse(data.join('\n')) as ManagedSideQuery;
+            if (
+              value.sessionId !== request.sessionId ||
+              value.queryId !== request.queryId ||
+              !Number.isSafeInteger(value.resultRevision)
+            )
+              throw new Error('Side query stream identity mismatch');
+            if (value.resultRevision > revision) {
+              revision = value.resultRevision;
+              yield value;
+            }
+          }
+          boundary = nextFrameBoundary(buffer);
+        }
+        if (result.done) break;
       }
     } finally {
       await reader.cancel().catch(() => undefined);

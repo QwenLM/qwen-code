@@ -44,7 +44,7 @@ class ManagedMessagePagingTest {
         ManagedSchema.initialize(source);
         jdbc = new CountingJdbc(source);
         store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
         view = new TransactionTemplate(new DataSourceTransactionManager(source));
         view.setReadOnly(true);
         view.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);

@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiAppl
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.HistoricalScan;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Row;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -41,7 +42,7 @@ final class CsiModelDiagnosticProjection {
         String tenant = original.getScope().getTenantId();
         String workspace = original.getScope().getWorkspaceId();
         String session = original.getIsolationKey();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String key = ManagedExtensionProjection.recordKey(session, domain, "latest");
         boolean diagnostics = CsiFilesRetirementProfile.hasDiagnostics(original.getScope());
         var projected = records.stream().filter(row -> row.membership() == Membership.ORIGINAL
@@ -161,7 +162,7 @@ final class CsiModelDiagnosticProjection {
         values.clear();
         values.putAll(nullRowValues("ma_resource_ref"));
         Map.ofEntries(Map.entry("session_scope_key", scope), Map.entry("owner_kind", "SESSION_RECORD"), Map.entry("owner_key", key),
-                Map.entry("owner_revision", Long.toString(revision)), Map.entry("resource_key", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId)),
+                Map.entry("owner_revision", Long.toString(revision)), Map.entry("resource_key", ManagedSessionStore.resourceKey(scope, resourceId)),
                 Map.entry("tenant_id", tenant), Map.entry("workspace_id", workspace), Map.entry("session_id", session),
                 Map.entry("resource_id", resourceId), Map.entry("gmt_create", ref.text("gmt_create")))
                 .forEach((field, value) -> values.put(field, utf8(value)));

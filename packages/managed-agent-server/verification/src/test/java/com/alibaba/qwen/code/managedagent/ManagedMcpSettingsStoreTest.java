@@ -3,8 +3,9 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedMcpSettings;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,7 +39,7 @@ import static org.mockito.Mockito.when;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedMcpSettingsStoreTest {
-    @Autowired private ManagedSessionStore store;
+    @Autowired private JdbcManagedSessionStore store;
     @Autowired private AgentStateStore sessions;
     @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
@@ -63,7 +64,7 @@ class ManagedMcpSettingsStoreTest {
         journal.committed(disable);
         assertThat(ManagedMcpSettings.find(new JdbcTemplate(jdbc.getDataSource()), "tenant", id)).isEqualTo(json.readTree(disabled.toString()));
         assertThat(ManagedMcpSettings.find(jdbc, "other-tenant", id)).isNull();
-        var diagnostics = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc, sessions);
+        var diagnostics = new JdbcManagedExtensionRecordStore(jdbc, sessions);
         JsonNode configRef = diagnostics.diagnosticConfigRef("tenant", id).orElseThrow();
         assertThat(diagnostics.readRecordResource("tenant", id, configRef)).isEqualTo(json.readTree(disabled.toString()));
         assertThat(diagnostics.diagnosticConfigRef("other-tenant", id)).isEmpty();

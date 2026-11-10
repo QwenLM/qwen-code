@@ -605,6 +605,8 @@ export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
   'qwen.daemon.sessionInitializationDeadlineMs';
 export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
   'session_initialization_timeout';
+export const SESSION_STARTUP_SUBSCRIPTION_MODEL_META_KEY =
+  'qwen.session.startupSubscriptionModel';
 export const SESSION_MODEL_PERSIST_DEFAULT_META_KEY =
   'qwen.session.modelPersistDefault';
 
@@ -1889,6 +1891,11 @@ export type BridgeGenerationStreamEvent =
       requestId: string;
       seq: number;
       text: string;
+    }
+  | {
+      /** A retry restarted the answer; text from earlier deltas is void. */
+      type: 'reset';
+      requestId: string;
     }
   | {
       type: 'done';

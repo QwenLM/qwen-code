@@ -8,7 +8,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiag
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.ModelDiagnostics;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -20,9 +22,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 
-import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.readBody;
-import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.require;
-import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.requireReference;
+import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.readBody;
+import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.require;
+import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.requireReference;
 
 /** Two bounded projections updated under the native journal's existing Session fence. */
 final class ManagedModelDiagnosticProjection {
@@ -30,9 +32,9 @@ final class ManagedModelDiagnosticProjection {
     private static final String MODEL_CONTEXT_DOMAIN = ManagedModelDiagnostics.CONTEXT_DOMAIN;
     private static final String MODEL_USAGE_KIND = "managed-hosted-model-usage";
     private final JdbcTemplate jdbc;
-    private final ManagedExtensionRecordStore store;
+    private final JdbcManagedExtensionRecordStore store;
 
-    ManagedModelDiagnosticProjection(JdbcTemplate jdbc, ManagedExtensionRecordStore store) {
+    ManagedModelDiagnosticProjection(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore store) {
         this.jdbc = jdbc;
         this.store = store;
     }
@@ -45,7 +47,7 @@ final class ManagedModelDiagnosticProjection {
                     if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
                         return false;
                     }
-                    JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
+                    JsonNode body = ManagedExtensionRecordStore.parse(new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
                     return body != null && (body.path("v").asInt() == 3 || body.path("v").asInt() == 4);
                 });
         boolean diagnostics = validated.stream().anyMatch(resource -> {
@@ -55,11 +57,17 @@ final class ManagedModelDiagnosticProjection {
             if (!"managed-history_maintenance".equals(resource.resource().kind()) || resource.bytes() == null) {
                 return false;
             }
-            JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(
+            JsonNode body = ManagedExtensionRecordStore.parse(
                     new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
             return body != null && body.path("schemaVersion").asInt() == 2;
         });
-        return diagnostics ? 3 : promotes ? 2 : 1;
+        boolean activity = validated.stream().anyMatch(resource ->
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
+        boolean measured = new String(records, StandardCharsets.UTF_8).lines().anyMatch(line -> {
+            JsonNode envelope = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+            return envelope != null && "tool.measured".equals(envelope.path("managedSession").path("kind").asText());
+        });
+        return measured ? 5 : activity ? 4 : diagnostics ? 3 : promotes ? 2 : 1;
     }
 
     static void validateResource(StoredResource resource) {
@@ -114,7 +122,7 @@ final class ManagedModelDiagnosticProjection {
     private record DiagnosticRow(JsonNode body, long sequence, Long settledAt) { }
 
     private DiagnosticRow diagnosticRow(String tenantId, String sessionId, String domain) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         return jdbc.query("SELECT revision, settled_at, record_resource_id FROM ma_session_record"
                         + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ?"
                         + " AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
@@ -181,7 +189,7 @@ final class ManagedModelDiagnosticProjection {
                 Integer.class, tenantId, sessionId, workspaceId) == 0) {
             return;
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, ManagedModelDiagnostics.STATS_DOMAIN, "latest");
         List<String> existing = jdbc.queryForList("SELECT record_resource_id FROM ma_session_record"
                 + " WHERE session_scope_key = ? AND record_key = ?", String.class, scope, key);
@@ -224,7 +232,7 @@ final class ManagedModelDiagnosticProjection {
                     + " WHERE session_scope_key = ? AND record_key = ?", sequence, resource.resourceId(), occurredAt, scope, key);
         }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scope, key);
-        ManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, sequence, tenantId, workspaceId,
+        JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, sequence, tenantId, workspaceId,
                 sessionId, resource.resourceId());
     }
 
@@ -243,7 +251,7 @@ final class ManagedModelDiagnosticProjection {
     }
 
     static void invalidateModelContext(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         jdbc.update("UPDATE ma_session_record SET settled_at = NULL WHERE session_scope_key = ? AND record_key = ?"
                 + " AND EXISTS (SELECT 1 FROM ma_resource u WHERE u.session_scope_key = ma_session_record.session_scope_key"
                 + " AND u.resource_id = ma_session_record.record_resource_id AND u.kind = ?)", scope,
@@ -251,7 +259,7 @@ final class ManagedModelDiagnosticProjection {
     }
 
     static void clearLegacyModelContext(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, MODEL_CONTEXT_DOMAIN, "latest");
         Integer legacy = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record r JOIN ma_resource u"
                 + " ON u.session_scope_key = r.session_scope_key AND u.resource_id = r.record_resource_id"
@@ -263,7 +271,7 @@ final class ManagedModelDiagnosticProjection {
     }
 
     static WebShellModelContext modelContext(byte[] bytes, long observedAt, String kind) {
-        JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+        JsonNode body = ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
         if (ManagedModelDiagnostics.MAIN_KIND.equals(kind) && body != null && body.path("version").asInt() == 2) {
             try {
                 ManagedModelDiagnostics.requireBody(ManagedModelDiagnostics.MAIN_KIND, body);

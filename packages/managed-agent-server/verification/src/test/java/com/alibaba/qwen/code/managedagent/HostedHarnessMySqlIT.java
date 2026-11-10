@@ -239,7 +239,7 @@ class HostedHarnessMySqlIT {
         assertThat(snapshots).as("Committed diagnostic resources from the packaged Harness").isNotEmpty();
         assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head"
                         + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                Integer.class, tenant, sessionId)).isEqualTo(3);
+                Integer.class, tenant, sessionId)).isEqualTo(4);
         return snapshots.stream().max(java.util.Comparator.comparingLong(value -> value.path("snapshotRevision").asLong())).orElseThrow();
     }
 

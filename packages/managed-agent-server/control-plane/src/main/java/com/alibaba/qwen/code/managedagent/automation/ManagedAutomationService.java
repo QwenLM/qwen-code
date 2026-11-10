@@ -372,15 +372,12 @@ public class ManagedAutomationService {
                 }
                 // A definitive route refusal settles the decision as
                 // skipped under the claim: the first attempt is told so.
-                if (AutomationLedgerStore.OUTCOME_SKIPPED.equals(
-                        ledger.findOccurrence(tenantId, automationId,
-                                occurrenceKey).orElse(occurrence).outcome())) {
-                    String reason = ledger.findOccurrence(tenantId,
-                            automationId, occurrenceKey).orElse(occurrence)
-                            .reason();
+                var settled = ledger.findOccurrence(tenantId, automationId,
+                        occurrenceKey).orElse(occurrence);
+                if (AutomationLedgerStore.OUTCOME_SKIPPED.equals(settled.outcome())) {
                     throw new ManagedAgentException(409,
                             "automation_run_skipped",
-                            "The manual run was skipped: " + reason + ".");
+                            "The manual run was skipped: " + settled.reason() + ".");
                 }
             }
         } finally {
@@ -753,6 +750,7 @@ public class ManagedAutomationService {
             throw notFound;
         }
         SessionRecord session = found.get();
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId, workspaces);
         // The owner family's refusal, as lifecycle and cwd answer a
         // non-creator (SurfaceRegistry rule class OWNER).
         if (!workspaces.createdSession(tenantId, actorId, sessionId)) {
@@ -781,7 +779,9 @@ public class ManagedAutomationService {
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "automation_not_found",
                         "The automation was not found."));
-        if (!workspaces.canRead(tenantId, actorId, row.workspaceId())) {
+        SessionRecord session = sessions.findSession(tenantId, row.sessionId()).orElse(null);
+        if (!workspaces.canRead(tenantId, actorId, row.workspaceId()) || session == null
+                || session.ownerOnly() && !workspaces.isSessionOwner(tenantId, actorId, row.sessionId())) {
             throw new ManagedAgentException(404,
                     "automation_not_found", "The automation was not found.");
         }
@@ -837,7 +837,7 @@ public class ManagedAutomationService {
      * and the command row meets the definition it already created.
      */
     public static String scheduleIdFor(String tenantId, String idempotencyKey) {
-        return "asch_" + com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.sha256(tenantId + '\0'
+        return "asch_" + AutomationLedgerStore.sha256(tenantId + '\0'
                 + idempotencyKey).substring(0, 32);
     }
 
@@ -855,17 +855,8 @@ public class ManagedAutomationService {
     }
 
     private static String deferredCode(OccurrenceRow occurrence) {
-        String error = occurrence.lastError();
-        if (error != null) {
-            int at = error.indexOf("\"code\":\"");
-            if (at >= 0) {
-                int end = error.indexOf('"', at + 8);
-                if (end > at) {
-                    return error.substring(at + 8, end);
-                }
-            }
-        }
-        return "automation_operation_unknown";
+        String code = HarnessConflictCodes.bodyCode(occurrence.lastError());
+        return code != null ? code : "automation_operation_unknown";
     }
 
     private static ManagedAgentException deferred(OccurrenceRow occurrence) {

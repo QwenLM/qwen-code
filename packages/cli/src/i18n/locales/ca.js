@@ -1559,6 +1559,7 @@ export default {
   Reqs: 'Sol·licituds',
   'Input Tokens': "Tokens d'entrada",
   'Output Tokens': 'Tokens de sortida',
+  'Output (incl. Reasoning)': 'Sortida (amb raonament)',
   'Savings Highlight:': 'Estalvis destacats:',
   'of input tokens were served from the cache, reducing costs.':
     "dels tokens d'entrada s'han servit des de la memòria cau, reduint els costos.",
@@ -2048,6 +2049,8 @@ export default {
     "La revisió de l'assessor ha fallat: {{error}}",
   'No conversation context available for /advisor':
     'No hi ha context de conversa disponible per a /advisor',
+  'No conversation context available for /btw':
+    'No hi ha context de conversa disponible per a /btw',
   'Focus too long (max {{max}} chars)':
     'El focus és massa llarg (màx. {{max}} caràcters)',
   'Another operation is in progress, wait for it to complete before running /advisor':

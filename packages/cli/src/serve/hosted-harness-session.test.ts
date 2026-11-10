@@ -274,6 +274,7 @@ const state = vi.hoisted(() => ({
   ownershipReleases: [] as Array<Record<string, unknown>>,
   setLifecycleAuthority: vi.fn(),
   modelConfig: vi.fn(),
+  memory: vi.fn(),
   authorizeLifecycle: vi.fn(async () => undefined),
   authorizeOrdinary: vi.fn(async (_kind?: 'legacy-close') => undefined),
   approvalSelections: new Map<
@@ -293,6 +294,8 @@ const state = vi.hoisted(() => ({
       workspaceContext?: { read(): string | undefined };
       modelSelection?: { modelId: string; revision: number };
       modelConfig?: import('./hosted-model-config.js').HostedModelConfigReader;
+      memory?: import('./hosted-memory-session.js').HostedMemorySession;
+      recallUserInput?: boolean;
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -418,6 +421,7 @@ vi.mock(
         claimUserMessages: async () => [],
         setLifecycleAuthority: state.setLifecycleAuthority,
         modelConfig: state.modelConfig,
+        memory: state.memory,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
         approvalSelection: async () => {
@@ -563,6 +567,7 @@ beforeEach(({ task }) => {
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   state.modelConfig.mockReset();
+  state.memory.mockReset();
   vi.spyOn(
     HostedWorkspaceBroker.prototype,
     'capabilityDigest',
@@ -680,6 +685,7 @@ async function mcpApp(
   unknownConfigure = false,
   serverIds = ['demo'],
   toolProfile = 'hosted-workspace-mcp/1',
+  extra: Record<string, unknown> = {},
 ) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
@@ -758,6 +764,7 @@ async function mcpApp(
       serverRevision: 1,
       definitionDigest: 'a'.repeat(64),
     })),
+    ...extra,
   });
   expect(created.status).toBe(200);
   const authorize = (request: supertest.Test) =>
@@ -1662,6 +1669,250 @@ describe('Hosted Harness no-tool session', () => {
       expect(result.status).toBe(409);
       expect(result.body.code).toBe('hosted_agent_definition_conflict');
       expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['create', 'resident-load', 'cold-load'])(
+    'refuses an omitted personal memory binding on %s',
+    async (operation) => {
+      let server = await app();
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+      });
+      expect(created.status).toBe(200);
+      expect(state.memory).not.toHaveBeenCalled();
+      if (operation === 'cold-load') {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', created.body.clientId as string)
+          .expect(204);
+        server = await app();
+      }
+      const result = await headers(
+        supertest(server).post(
+          operation === 'create' ? '/session' : `/session/${SESSION_ID}/load`,
+        ),
+      ).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe('hosted_agent_definition_conflict');
+      expect(state.memory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'enables personal memory without a Workspace only when bound: %s',
+    async (bound) => {
+      const server = await app();
+      state.memory.mockImplementation(async (query: { operation: string }) =>
+        query.operation === 'binding'
+          ? { enabled: true, memoryStoreId: 'memstore_personal' }
+          : { status: 'ok', items: [{ memoryId: 'entry', content: 'saved' }] },
+      );
+      const warm = vi.spyOn(HostedWorkspaceBroker.prototype, 'warm');
+      state.model.mockImplementationOnce(async (input) => {
+        expect(input.recallUserInput).toBe(true);
+        if (bound) {
+          expect(input.memory).toBeDefined();
+          const tools = await input.toolTurn!.declarations(input.signal);
+          expect(tools.map((tool) => tool.name)).toEqual([
+            'context_search',
+            'context_remember',
+            'context_get',
+            'context_forget',
+          ]);
+          await input.memory!.recall(PROMPT_ID, 'preferences', input.signal);
+          const call = {
+            name: 'context_search',
+            callId: 'call-memory',
+            args: { query: 'preferences' },
+            isClientInitiated: false,
+            prompt_id: PROMPT_ID,
+          };
+          await input.toolTurn!.execute(
+            [call],
+            [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: call.args,
+                },
+              },
+            ],
+            'test-model',
+            input.signal,
+          );
+        } else {
+          expect(input.memory).toBeUndefined();
+          expect(input.toolTurn).toBeUndefined();
+        }
+        return { text: 'memory checked', model: 'test-model' };
+      });
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        ...(bound ? { memoryStoreId: 'memstore_personal' } : {}),
+      });
+      expect(created.status).toBe(200);
+      expect(state.memory).not.toHaveBeenCalled();
+      const prompt = [{ type: 'text', text: 'preferences' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      expect(
+        journal.events.find((event) => event.kind === 'turn.settled')?.payload[
+          'outcome'
+        ],
+      ).toBe('completed');
+      expect(state.memory.mock.calls.map(([query]) => query.operation)).toEqual(
+        bound ? ['binding', 'recall', 'search'] : [],
+      );
+      expect(warm).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['resident-load', 'cold-load'])(
+    'resumes committed personal memory results without a Runtime on %s',
+    async (operation) => {
+      let server = await app();
+      state.memory.mockImplementation(async (query: { operation: string }) =>
+        query.operation === 'binding'
+          ? { enabled: true, memoryStoreId: 'memstore_personal' }
+          : { status: 'ok', items: [{ memoryId: 'entry', content: 'saved' }] },
+      );
+      const warm = vi.spyOn(HostedWorkspaceBroker.prototype, 'warm');
+      let committed: Part[] = [];
+      state.model.mockImplementationOnce(async (input) => {
+        await input.toolTurn!.declarations(input.signal);
+        const call = {
+          name: 'context_search',
+          callId: 'call-memory',
+          args: { query: 'preferences' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        // Durable journal parts omit in-memory provenance symbols.
+        committed = structuredClone(
+          await input.toolTurn!.execute(
+            [call],
+            [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: call.args,
+                },
+              },
+            ],
+            'test-model',
+            input.signal,
+          ),
+        );
+        throw new HostedToolRecoveryRequiredError(
+          'Crash after committed memory result',
+        );
+      });
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+      });
+      expect(created.status).toBe(200);
+      const clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'preferences' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.recoveryBlocked).toBe(true);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(committed).toEqual([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ id: 'call-memory' }),
+        }),
+      ]);
+      if (operation === 'cold-load') {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', clientId)
+          .expect(204);
+        server = await app();
+      }
+      state.model.mockResolvedValueOnce({
+        text: 'recovered memory result',
+        model: 'test-model',
+      });
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+        driveRuntimeRecovery: true,
+      });
+      expect(loaded.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          expect(state.model).toHaveBeenCalledTimes(2);
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(state.model.mock.calls[1][0].resumeFromToolResults).toEqual(
+        committed,
+      );
+      expect(
+        state.memory.mock.calls.filter(
+          ([request]) => request.operation === 'search',
+        ),
+      ).toHaveLength(1);
+      expect(warm).not.toHaveBeenCalled();
     },
   );
 
@@ -2887,6 +3138,10 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('v2 MCP effects retain the owner until resources settle', async () => {
+    const closeResources = vi.spyOn(
+      HostedMcpSession.prototype,
+      'closeResources',
+    );
     const { server, authorize, requests } = await mcpApp();
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
@@ -2915,8 +3170,9 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(0);
-    // R14-1: kind:'close' is a detach — the owner hands its mount back through
-    // releaseMount but stays re-acquirable; only a delete terminally releases.
+    // The terminal release happens in settle_resources, the last phase; a
+    // reload of a closing Session carries a lifecycle authority, which sets
+    // mcpClosing, so no acquire follows it.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
       'v2-close-claim',
     );
@@ -2933,9 +3189,143 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'mcp-release'),
     ).toHaveLength(1);
-    expect(releaseMount).toHaveBeenCalledWith('v2-close-claim');
-    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+    // The MCP session's own owner is the one released, and every row it
+    // configured ends released, as the release fault gates require.
+    const mcp = closeResources.mock.contexts[0] as HostedMcpSession;
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+    ).toContain(mcp.broker);
+    expect(releaseMount).not.toHaveBeenCalled();
+    const releaseStates = () =>
+      (Reflect.get(mcp, 'session') as ManagedSession).authority
+        .extensionRecordsInDomain('mcp_configuration')
+        .map(
+          (entry) => (entry.record as { releaseState?: string }).releaseState,
+        );
+    expect(releaseStates()).not.toHaveLength(0);
+    expect(releaseStates()).toEqual(releaseStates().map(() => 'released'));
+    // A retried settle_resources, as after a lost answer, finds every row
+    // released: it dispatches no second release and acquires nothing.
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    acquire.mockClear();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({ ...operation, phase: 'settle_resources' })
+      .expect(200);
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(1);
+    expect(acquire).not.toHaveBeenCalled();
+    expect(releaseStates()).toEqual(releaseStates().map(() => 'released'));
     expect(state.model).not.toHaveBeenCalled();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: operation.authority })
+      .expect(204);
+  });
+
+  it('releases the Hook owner it shares with MCP on a v2 close', async () => {
+    // With both an MCP server and a Hook catalog the Hook session borrows the
+    // MCP broker, so the MCP release on a close releases the owner the
+    // SessionEnd Hook ran on as well.
+    const catalog: ManagedHookCatalog = {
+      ...hookPin,
+      hooks: [HookEventName.SessionEnd, HookEventName.SessionDelete].map(
+        (eventName) => ({
+          hookId: eventName,
+          eventName,
+          sequential: false,
+          async: false,
+          failClosed: true,
+          onceKey: null,
+          config: { type: 'command' as const },
+        }),
+      ),
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'authorizeLifecycle',
+    ).mockResolvedValue();
+    const hookRequests: ManagedHookControl[] = [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        hookRequests.push(operation);
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: { ...catalog, ...operation.pin },
+          };
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { success: true, outcome: 'success', duration: 0 },
+        };
+      },
+    );
+    const closeResources = vi.spyOn(
+      HostedMcpSession.prototype,
+      'closeResources',
+    );
+    const hookClose = vi.spyOn(HostedHookSession.prototype, 'close');
+    const { server, authorize, requests } = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-mcp/1',
+      { hookCatalog: hookPin, approvalMode: 'yolo' },
+    );
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        serverId: 'demo',
+        request: { kind: 'resource_read', uri: 'memory://note' },
+      })
+      .expect(202);
+    const operation = {
+      protocolVersion: 2,
+      kind: 'close',
+      toolProfile: 'hosted-workspace-mcp/1',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'v2-shared', claimGeneration: 1 },
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'v2-close-claim',
+    );
+    const releaseMount = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+      .mockResolvedValue();
+    for (const phase of ['effects', 'prepare_resources', 'settle_resources']) {
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      )
+        .send({ ...operation, phase })
+        .expect(200);
+    }
+    expect(
+      hookRequests.filter((request) => request.kind === 'hook-execute'),
+    ).not.toHaveLength(0);
+    const mcp = closeResources.mock.contexts[0] as HostedMcpSession;
+    const hooks = hookClose.mock.contexts[0] as HostedHookSession;
+    expect(hooks.broker).toBe(mcp.broker);
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(1);
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mock.contexts,
+    ).toContain(mcp.broker);
+    expect(releaseMount).not.toHaveBeenCalled();
+    const releaseStates = (
+      Reflect.get(mcp, 'session') as ManagedSession
+    ).authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => (entry.record as { releaseState?: string }).releaseState);
+    expect(releaseStates).not.toHaveLength(0);
+    expect(releaseStates).toEqual(releaseStates.map(() => 'released'));
     await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .send({ authority: operation.authority })
       .expect(204);
@@ -24999,6 +25389,59 @@ describe('Hosted Harness tool approvals', () => {
       await (
         wakeDeps.last as { session: { managed: ManagedSession } }
       ).session.managed.close();
+    },
+  );
+
+  it.each([
+    ['candidates', 'skill_source_busy', 'hosted_skill_source_unavailable'],
+    ['snapshot', 'source_changed', 'hosted_skill_source_unavailable'],
+    [
+      'archive',
+      'skill_snapshot_unavailable',
+      'hosted_skill_snapshot_unavailable',
+    ],
+  ])(
+    'preserves Runtime Skill refusals on the %s route without replay',
+    async (route, code, fallback) => {
+      const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'skillControl');
+      const warm = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'warm')
+        .mockResolvedValue();
+      const { server, authorize } = await mcpApp();
+      const warmCalls = warm.mock.calls.length;
+      const operationId = randomUUID();
+      const send = () => {
+        const base = `/session/${SESSION_ID}/extensions/skills`;
+        const request =
+          route === 'snapshot'
+            ? supertest(server)
+                .post(`${base}/snapshot`)
+                .send({
+                  operationId,
+                  owner: { bindingId: 'binding', generation: '1' },
+                  path: '.qwen/skills/check',
+                  digest: 'a'.repeat(64),
+                })
+            : supertest(server).get(
+                route === 'candidates'
+                  ? `${base}/candidates`
+                  : `${base}/archives/${randomUUID()}?operationId=${operationId}&bindingId=binding&generation=1&offset=0`,
+              );
+        return authorize(request);
+      };
+      control.mockRejectedValueOnce(
+        new HostedWorkspaceBrokerRejection(409, code),
+      );
+      expect((await send().expect(409)).body).toMatchObject({ code });
+      expect(control).toHaveBeenCalledOnce();
+      control.mockRejectedValueOnce(new Error('private transport detail'));
+      expect((await send().expect(409)).body).toMatchObject({ code: fallback });
+      expect(control).toHaveBeenCalledTimes(2);
+      expect(warm).toHaveBeenCalledTimes(warmCalls);
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      ).expect(204);
     },
   );
 

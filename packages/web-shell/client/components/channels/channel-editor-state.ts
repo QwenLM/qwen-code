@@ -11,7 +11,10 @@ import type {
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
-import { isRepositoryOnlyChannelType } from './channel-platform';
+import {
+  isPrivateOnlyChannelType,
+  isRepositoryOnlyChannelType,
+} from './channel-platform';
 
 export type ChannelPrivatePolicy =
   | 'disabled'
@@ -62,7 +65,8 @@ export type ChannelEditorValidationCode =
   | 'number'
   | 'outOfRange'
   | 'policy'
-  | 'requiresBoundDelivery';
+  | 'requiresBoundDelivery'
+  | 'requiresBoundDeliveryForWatchGate';
 
 export type ChannelEditorValidationErrors = Record<
   string,
@@ -76,6 +80,14 @@ export const PRIVATE_ONLY_FIELD_KEYS = new Set([
   'privatePolicy',
   'allowedUsers',
 ]);
+
+/**
+ * The mirror set: access fields that only gate group traffic, which
+ * private-only channels never receive. `operators` stays out — it governs
+ * shared sessions, which a private-only channel can still have under
+ * `chat_thread` or `single`.
+ */
+export const GROUP_ONLY_FIELD_KEYS = new Set(['groupPolicy']);
 
 const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
@@ -343,7 +355,10 @@ function initialFieldValue(
 ): string | boolean {
   const value = instance?.config[field.key];
   if (field.kind === 'boolean') {
-    return typeof value === 'boolean' ? value : false;
+    // Honour the declared default when the key is absent so a default-on field
+    // (prCommentWatch) is not silently saved as false by every UI edit. An
+    // explicit stored boolean — including false — is preserved verbatim.
+    return typeof value === 'boolean' ? value : field.default === 'true';
   }
   if (field.kind === 'number') {
     return typeof value === 'number' ? String(value) : '';
@@ -447,8 +462,10 @@ export function createChannelEditorDraft(
 ): ChannelEditorDraft {
   const values: Record<string, string | boolean> = {};
   const secrets: Record<string, ChannelSecretDraft> = {};
+  const privateOnly = isPrivateOnlyChannelType(descriptor.type);
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
+    if (privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) continue;
     if (field.kind === 'secret') {
       secrets[field.key] = instance?.secrets[field.key]?.present
         ? { operation: 'preserve' }
@@ -525,8 +542,12 @@ export function validateChannelEditorDraft(
   } else if (existingNames.includes(name)) {
     errors['name'] = 'duplicate';
   }
+  const privateOnly = isPrivateOnlyChannelType(descriptor.type);
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
+    // The draft deliberately omits these, so the required-field check must not
+    // ask the operator to fill in a control the editor never renders.
+    if (privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) continue;
     const draftValue = draft.values[field.key];
     if (field.required && isMissingField(field, draft)) {
       errors[field.key] = 'required';
@@ -550,6 +571,7 @@ export function validateChannelEditorDraft(
         !unchanged &&
         ((field.exclusiveMinimum !== undefined &&
           parsed <= field.exclusiveMinimum) ||
+          (field.minimum !== undefined && parsed < field.minimum) ||
           (field.maximum !== undefined && parsed > field.maximum))
       ) {
         errors[field.key] = 'outOfRange';
@@ -583,6 +605,14 @@ export function validateChannelEditorDraft(
       draft.values['deliverToBoundSessions'] !== true
     ) {
       errors['prWatchEvents'] = 'requiresBoundDelivery';
+    }
+    if (
+      draft.values['requireBoundWatch'] === true &&
+      draft.values['deliverToBoundSessions'] !== true
+    ) {
+      // Its own code: the shared requiresBoundDelivery message names "the
+      // selected watch events", a control this field's operator never touched.
+      errors['requireBoundWatch'] = 'requiresBoundDeliveryForWatchGate';
     }
     // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
     // of owner/repo entries. While the mode is off the list is ignored (and
@@ -994,10 +1024,14 @@ export function buildChannelUpsertRequest(
     type: descriptor.type,
   };
   const repositoryOnly = isRepositoryOnlyChannelType(descriptor.type);
+  const privateOnly = isPrivateOnlyChannelType(descriptor.type);
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
     if (repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) continue;
+    // Skipping here as well as in the draft is what preserves a stored value:
+    // assignField() reads an absent draft key as empty and deletes the key.
+    if (privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) continue;
     if (field.kind === 'secret') {
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
@@ -1035,7 +1069,7 @@ export function buildChannelUpsertRequest(
   } else if (!hasDescriptorPrivatePolicy(descriptor)) {
     config['privatePolicy'] = draft.privatePolicy;
   }
-  if (hasDescriptorGroupPolicy(descriptor)) {
+  if (!privateOnly && hasDescriptorGroupPolicy(descriptor)) {
     if (config['groupPolicy'] === 'allowlist') {
       assignGroups(
         config,
