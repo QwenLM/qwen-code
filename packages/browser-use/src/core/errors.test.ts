@@ -19,9 +19,7 @@ describe('model-facing argument errors', () => {
     if (result.success) throw new Error('Expected invalid keys');
 
     const error = invalidArguments('cua.keypress', result.error);
-    expect(error.message).toContain('keys:');
-    expect(error.message).toContain('expected array');
-    expect(error.message).toContain('received string');
+    expect(error.message).toContain('keys: Expected array, received string');
     expect(error.message).toContain('cua.keypress({ keys: ["Enter"] })');
     expect(error.message).not.toContain('private input');
     expect(error.details).toMatchObject({
