@@ -18,10 +18,18 @@ import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { FileReadCache } from '@qwen-code/qwen-code-core/services/fileReadCache.js';
 import { createRestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -478,17 +486,21 @@ function createFakeConfig(
     : undefined;
   // One stable client object: tests spy on its addHistory through
   // getGeminiClient() (R5-4/R6-5).
+  const addHistory = vi.fn(async () => {});
+  const chat = {
+    addHistory,
+    getCompletedToolCallIds: () => [],
+    setCompletedToolCallIds: vi.fn(),
+    // The startup flight's setTools() has completed.
+    getGenerationConfig: () => ({ tools: [{ functionDeclarations: [] }] }),
+  };
   const client = {
     sendMessageStream,
     isInitialized,
     // R5-4/R6-5: an abort at the sampling boundary still writes the
     // completed batch's function responses to history before returning.
-    addHistory: vi.fn(async () => {}),
-    // A chat the startup flight has already completed: `setTools()` ran, so
-    // its declarations are in the generation config the send reads.
-    getChat: () => ({
-      getGenerationConfig: () => ({ tools: [{ functionDeclarations: [] }] }),
-    }),
+    addHistory,
+    getChat: () => chat,
   };
   return {
     initialize: vi.fn(async () => {}),
@@ -4568,6 +4580,62 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     ]);
   });
 
+  it.each([
+    { clipped: true, cancelled: false },
+    { clipped: true, cancelled: true },
+    { clipped: false, cancelled: false },
+  ])(
+    'updates residency for retained reads (clipped: $clipped, cancelled: $cancelled)',
+    async ({ clipped, cancelled }) => {
+      const directory = await mkdtemp(
+        path.join(tmpdir(), 'qwen-opentui-read-'),
+      );
+      try {
+        const filePath = path.join(directory, 'fresh.txt');
+        const output = 'file contents\n'.repeat(110);
+        await writeFile(filePath, output);
+        const stats = await stat(filePath);
+        const cache = new FileReadCache();
+        cache.recordRead(filePath, stats, { full: true, cacheable: true });
+        const send = batchStream([
+          { ...call('replay').value, providerCallId: 'old' },
+          {
+            callId: 'fresh',
+            name: 'read_file',
+            args: {
+              file_path: filePath,
+              __cancelled: cancelled,
+              __restoreResult: { output },
+            },
+          },
+        ]);
+        const config = shared(
+          createFakeConfig(send),
+          new Map([['old', getToolCallFingerprint('test_tool', {})]]),
+        );
+        Object.assign(config, {
+          getToolOutputBatchBudget: () => (clipped ? 1600 : Infinity),
+          getFileReadCache: () => cache,
+        });
+        await drain(livePromptEvents(config, 'read'));
+        const parts = (send.mock.calls[1] as unknown[])[0] as Part[];
+        const sentOutput = parts[1].functionResponse?.response?.['output'];
+        expect(typeof sentOutput).toBe('string');
+        expect(sentOutput === output).toBe(!clipped);
+        expect(cache.check(stats)).toMatchObject({
+          state: 'fresh',
+          entry: {
+            lastReadWasFull: true,
+            lastReadCacheable: true,
+            readResidentInHistory: !clipped,
+          },
+        });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('settles the batch when the scheduler completes it, not when it returns', async () => {
     // A call waiting for approval: `schedule` returns before it completes.
     schedulerControl.finish = null;
@@ -4722,25 +4790,63 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     const send = vi.fn(function* () {
       sends++;
       if (sends > 2) return;
-      yield { type: 'tool_call_request', value: { ...replay } };
+      yield {
+        type: 'tool_call_request',
+        value: { ...replay, callId: `r${sends}` },
+      };
+      if (sends === 2) yield call('fresh');
     });
+    const recordToolResult = vi.fn<ChatRecordingService['recordToolResult']>();
     const config = shared(
-      createFakeConfig(send),
+      createFakeConfig(send, undefined, undefined, {
+        recordMidTurnUserMessage: vi.fn(),
+        recordToolResult,
+      }),
       new Map([['p-old', getToolCallFingerprint('test_tool', {})]]),
     );
     const dualOutput = fakeDualOutput();
+    const onStreamEvent = vi.fn();
     Object.assign(config, { getProjectRoot: () => '/project' });
     const events = await drain(
       livePromptEvents(config, 'start', undefined, {
         dualOutput: dualOutput as unknown as DualOutputBridge,
         checkpointHistory: checkpointPort(),
+        onStreamEvent,
       }),
     );
     expect(send).toHaveBeenCalledTimes(2);
     expect(events.at(-1)).toMatchObject({ type: 'info' });
-    expect(toolEnds(events)).toEqual(['r1:error', 'r1:cancelled']);
-    // Both rounds' replays close their sidecar tool uses.
-    expect(dualOutput['emitToolResult']).toHaveBeenCalledTimes(2);
+    expect(toolEnds(events)).toEqual([
+      'r1:error',
+      'r2:cancelled',
+      'fresh:cancelled',
+    ]);
+    expect(dualOutput['emitToolResult']).toHaveBeenCalledTimes(3);
+    expect(onStreamEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: LlmEventType.LoopDetected }),
+    );
+    expect(
+      recordToolResult.mock.calls.map(([, result]) => result?.callId),
+    ).toEqual(['r1', 'r2', 'fresh']);
+    expect(recordToolResult.mock.calls[1][2]).toBeUndefined();
+    expect(recordToolResult).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'fresh',
+        status: 'cancelled',
+        executionStatus: 'not_started',
+      }),
+      { subtype: 'tool_loop_end' },
+    );
+    expect(config.getGeminiClient().addHistory).toHaveBeenCalledExactlyOnceWith(
+      {
+        role: 'user',
+        parts: recordToolResult.mock.calls.slice(1).flatMap(([parts]) => parts),
+      },
+    );
+    expect(
+      config.getGeminiClient().getChat().setCompletedToolCallIds,
+    ).toHaveBeenCalledExactlyOnceWith(['fresh']);
     const history = snapshotCanonicalHistory(
       events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []),
     );
@@ -4751,7 +4857,10 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
       },
       {
         type: 'tool_group',
-        tools: [{ callId: 'r1', status: ToolCallStatus.Canceled }],
+        tools: [
+          { callId: 'r2', status: ToolCallStatus.Canceled },
+          { callId: 'fresh', status: ToolCallStatus.Canceled },
+        ],
       },
       { type: 'info' },
     ]);

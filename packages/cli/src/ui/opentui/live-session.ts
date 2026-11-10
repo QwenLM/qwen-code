@@ -49,7 +49,7 @@ import {
   endInteractionSpan,
   getActiveInteractionSpan,
 } from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
-import { formatInteractiveLoopDetectedMessage } from '../../utils/loop-detected-message.js';
+import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
@@ -1665,8 +1665,45 @@ export async function* livePromptEvents(
         errorMessage: 'loop detected',
         errorType: 'loop_detected',
       });
+      if (!isCurrentSession()) return;
+
       const message = 'Tool skipped because the model repeated a tool-call id.';
       const skipped = skippedCalls('cancelled', message);
+      const last = skipped.at(-1)!;
+      const chat = client.getChat();
+      chat.addHistory({
+        role: 'user',
+        parts: skipped.flatMap(({ response }) => response.responseParts),
+      });
+      chat.setCompletedToolCallIds([
+        ...chat.getCompletedToolCallIds(),
+        last.request.callId,
+      ]);
+      const recorder = config.getChatRecordingService();
+      for (const call of skipped) {
+        const { request, response, status } = call;
+        recorder?.recordToolResult(
+          response.responseParts,
+          {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+            executionStatus: response.executionStatus,
+          },
+          call === last ? { subtype: 'tool_loop_end' } : undefined,
+        );
+      }
+      const loopEvent = {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+        },
+      } satisfies ServerLlmStreamEvent;
+      options?.onStreamEvent?.(loopEvent);
+
       const history = toolHistoryEvent(skipped);
       if (history) yield history;
       for (const { request, response } of skipped) {
@@ -1678,18 +1715,36 @@ export async function* livePromptEvents(
           summary: 'cancelled',
         };
       }
-      yield {
-        type: 'info',
-        text: formatInteractiveLoopDetectedMessage({
-          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
-        }),
-      };
+      if (isCurrentSession()) dualOutput?.processEvent(loopEvent);
+      yield* map(loopEvent);
       return;
     }
     const sharedParts = new Map(
       (shared?.responses ?? []).map(({ callId, parts }) => [callId, parts]),
     );
+    if (
+      shared &&
+      isCurrentSession() &&
+      completed.some(
+        ({ request, response, tool }) =>
+          canonicalToolName(tool?.name ?? request.name) ===
+            ToolNames.READ_FILE &&
+          sharedParts.get(request.callId)?.some((part, index) => {
+            const output =
+              response.responseParts[index]?.functionResponse?.response?.[
+                'output'
+              ];
+            return (
+              typeof output === 'string' &&
+              output !== part.functionResponse?.response?.['output']
+            );
+          }),
+      )
+    ) {
+      // A batch cut can hide bytes from a read the cache marked as resident.
+      // Mods can relabel that result after the read. Keep prior-read rights.
+      config.getFileReadCache().markAllReadsEvictedFromHistory();
+    }
 
     const usesMods = completed.some((call) => call.nativeAttemptsObserved);
     const finalResponses = shared
