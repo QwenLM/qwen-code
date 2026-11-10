@@ -753,7 +753,6 @@ async function hostCall(
           return { value: undefined };
         }
         if (MOD_STORE_EVENTS.includes(method)) {
-          if (!keepsStore) throw new Error('This host keeps no Mod store.');
           const key = String(e['key']);
           return {
             value: await storeCall(

@@ -1672,6 +1672,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       const writer = await createStore(
         [
           command(`
+            await $.store.set('first', 0);
             await $.store.set('10', 'ten');
             await $.store.set('2', 'two');
             await $.store.set('__proto__', {own: true});
@@ -1685,7 +1686,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         dir,
       );
       expect(await go(writer)).toEqual([
-        ['10', '__proto__', 'when'],
+        ['first', '10', '__proto__', 'when'],
         'ten again',
         true,
       ]);
@@ -1699,7 +1700,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         dir,
       );
       expect(await go(reader)).toEqual([
-        ['10', '__proto__', 'when'],
+        ['first', '10', '__proto__', 'when'],
         { own: true },
         { at: '1970-01-01T00:00:00.000Z', map: {} },
       ]);
