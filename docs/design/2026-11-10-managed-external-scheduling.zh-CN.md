@@ -91,24 +91,39 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
    外部调度器拥有自己的计时并推送触发。两者都经同一 funnel 在目标 Session
    的 journal 中产生 `automation_run` 记录，带同样的 run block、overlap
    准入与 settle 路径。执行、恢复、可观测性绝不按计时所有者分叉。
-2. **内置分支不变。** H6 definition、scanner、gate 探针与 `/loop` 设计原样
-   运行。本设计不新增 cron 能力，不改任何内置策略。
+2. **内置分支保留其策略。** H6 definition、gate 探针与 `/loop` 设计原样
+   运行。本设计不新增 cron 能力；唯一的内置变更是 scanner 的发现过滤
+   （决策 11）——其触发、恢复、settle 策略不动。
 3. **外部触发是一等 occurrence。** webhook ingress 切片激活预留的
    `webhook:<eventId>` 身份。`eventId` 是外部调度器经验证的稳定实例身份——
    每个点名调度器都有的属性（DataWorks 调度实例、Airflow DAG run / task
-   instance、DolphinScheduler 进程 / task instance）；适配器把其产品身份
-   映射进 `eventId`，控制面从不解析它。run 记录其 trigger kind，使账本区分
-   外部 fire 与 manual 或 scheduled。
+   instance、DolphinScheduler 进程 / task instance）。ingress 由经验证的
+   来源与原始实例身份组合 `eventId`（`<source>:<instanceId>`），使两个产品
+   报同一原始 id 绝不在一个 occurrence 上冲突；控制面从不解析原始身份。
+   run 记录其 trigger kind，使账本区分外部 fire 与 manual 或 scheduled。
 4. **零改动路径是 manual run，如实标注。** ingress 切片落地前，适配器以
    外部实例身份作 `Idempotency-Key` 驱动
-   `POST /v1/agent-automations/{id}/runs`。今天这就恰好一次且持久，但账本
-   记为 `manual`——适配器与运维绝不能把它读成「人跑的」。ingress 切片把
-   同一流程升级为 `webhook` trigger，不改适配器的身份纪律。
-5. **ingress 契约通用且经鉴权。** 一次推送携带：稳定事件身份（`eventId`）、
-   目标（run 所属的 definition 或 Session）、输入 payload（run 执行的
-   prompt/context）、以及 ingress 在准入前验证的鉴权证明。验证是 ingress
-   的职责——签名或 token 方案是切片决策——未验证事件绝不进 funnel。契约
-   与传输无关（先 HTTP 推送；轮询适配器可走同一准入路径）。
+   `POST /v1/agent-automations/{id}/runs`。适配器把产品身份确定性地映射进
+   key 的 1–128 可见 ASCII 界限（`^[\x21-\x7e]{1,128}$`，超出时用稳定
+   digest），使同一实例的重试推导同一 key。适配器指向的 definition 以
+   `enabled: false` 创建：manual-run 路由只查 live 状态，而 scanner 的
+   `findArmed` 过滤 `is_enabled = TRUE`，因此内置 scanner 绝不会同时触发它
+   （决策 11 的过渡机制）。今天这就恰好一次且持久，但账本记为 `manual`——
+   适配器与运维绝不能把它读成「人跑的」。ingress 切片把同一流程升级为
+   `webhook` trigger；为保持切换期去重，ingress 先在已提交的
+   `manual:<eventId>` key 上准入，仅对未见事件铸造 `webhook:<eventId>`
+   （决策 8），使已准入实例的重试绝不跑两次。
+5. **ingress 契约通用、经鉴权且有作用域。** 一次推送携带：稳定事件身份
+   （`eventId`）、目标（run 所属的 definition 或 Session）、输入 payload
+   （run 执行的 prompt/context）、以及 ingress 在准入前验证的鉴权证明。
+   验证是 ingress 的职责——签名或 token 方案是切片决策——未验证事件绝不进
+   funnel。ingress 把 `target` 严格解析在经验证来源的 tenant/Workspace
+   绑定内并拒绝其他；来源凭据是 tenant 作用域的，因此正确签名但点名另一
+   tenant definition 的事件在 funnel 前被拒绝。输入 payload 在 claim 前
+   发布为持久的按 occurrence `managed-input` 资源，fire 携带其引用：
+   dispatch 与重放读该资源而非 definition 的 prompt，因此两个不同 context
+   的事件执行不同文本，claim 后崩溃保留原始输入。契约与传输无关（先 HTTP
+   推送；轮询适配器可走同一准入路径）。
 6. **适配器在控制面之外、开源 repo 之内。** `packages/channels/dataworks`
    是第一个适配器；Airflow 与 DolphinScheduler 沿用同一形状。适配器把产品
    事件翻译成通用 ingress、把产品凭据翻译成控制面凭据；它在边缘拥有产品的
@@ -122,9 +137,12 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
    输入，以其 OpenAPI 暴露者为界。
 8. **恰好一次是继承的，不是重新实现的。** 重复事件身份的外部重试或补数据
    遇到已提交 occurrence 并重放它——与重复 manual key 获得的结构去重相同。
-   错过外部事件的 catch-up 属于外部调度器：ingress 执行到达的东西、去重，
-   绝不合成错过的外部 slot。overlap 准入像对任何 fire 一样适用；繁忙目标
-   按 definition 策略排队或跳过。
+   由于 run 身份哈希整个 occurrence key，`manual:` → `webhook:` 切换否则
+   会以新 key 重跑丢失响应的实例；因此 ingress 在其原始已提交的
+   `manual:<eventId>` occurrence 上准入重试，仅对两个入口都未准入的事件
+   铸造 `webhook:<eventId>`。错过外部事件的 catch-up 属于外部调度器：
+   ingress 执行到达的东西、去重，绝不合成错过的外部 slot。overlap 准入像
+   对任何 fire 一样适用；繁忙目标按 definition 策略排队或跳过。
 9. **结果消费保持开放。** 轮询 runs API 今天可用，是基线。推送回调（agent
    的已结算结果驱动下游节点）在 H5 落地时走它；本设计不把回调形状烧进
    ingress 契约，使该决定可按产品做出而无需契约变更。
@@ -133,33 +151,45 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
     自然模型。适配器在平台授权下把产品 tenant/project/workspace 身份映射到
     控制面 tenant/Workspace/Session；任何产品机密不进 journal（凭据走现有
     凭据处理，payload 携带引用）。
-11. **外部驱动的 definition 对 scanner 不可见。** 为外部触发创建的
-    definition 绝不能同时被内置 scanner 触发——否则两个计时所有者会对同一
-    definition 双重触发。这样的 definition 携带 scanner 跳过的外部 trigger
-    source（具体标记是 ingress 切片的契约决策）；内置 cron 路径与外部路径
-    绝不同时武装同一个 definition。
+11. **外部驱动的 definition 排除于 cron 推导，而非恢复。** 为外部触发创建
+    的 definition 绝不能同时推导 cron slot——否则两个计时所有者会对同一
+    definition 双重触发。排除是窄的：scanner 的武装 definition 查询
+    （`findArmed`）跳过它，但其待触发恢复（`findFiringSchedules` / redrive）
+    仍完成已持久认领、Harness 中继丢失的外部 occurrence，正像它对禁用
+    definition 的 manual run 所做的那样。计时来源是 definition 记录的判别
+    属性——内置 `cron` + `timezone` 与外部 trigger source 二选一——在解除
+    `webhook` 拒绝的同一 schema 修订中加入（`Schedule` body 是带强制 `cron`
+    的封闭 key 集，因此这是契约变更，不是装饰字段）。该标记落地前，过渡
+    机制是 `enabled: false`（决策 4），`findArmed` 已过滤它、manual-run
+    路由已忽略它。
 
 ## 流水线，逐步
 
-| 步骤 | 位置                   | 提交                                                                             |
-| ---- | ---------------------- | -------------------------------------------------------------------------------- |
-| 1    | 外部调度器             | 其自有日历/依赖触发一个实例（Managed Agent 之外）                                |
-| 2    | 适配器（边缘）         | 把产品事件翻译成通用 ingress：eventId、目标、payload、鉴权证明；产品重试留在边缘 |
-| 3    | ingress（控制面）      | 验证鉴权证明；准入事件；按 eventId 对已提交 occurrence 去重                      |
-| 4    | Harness funnel         | `automation_run` claim + dispatch + input + wake 同事务（现有 persistent fire）  |
-| 5    | wake pump              | run 的 turn 执行；`turn.settled` settle 该 run                                   |
-| 6    | 结果消费               | 今天轮询 runs API；之后按产品决定走 H5 回调                                      |
-| 7    | 出站（agent → 调度器） | agent 在 Session 权限规则下调用产品 MCP 服务器的准入工具                         |
+| 步骤 | 位置                   | 提交                                                                                                                                                    |
+| ---- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | 外部调度器             | 其自有日历/依赖触发一个实例（Managed Agent 之外）                                                                                                       |
+| 2    | 适配器（边缘）         | 把产品事件翻译成通用 ingress：eventId、目标、payload、鉴权证明；产品重试留在边缘                                                                        |
+| 3    | ingress（控制面）      | 验证鉴权证明；把目标绑定到来源的 tenant/Workspace；组合 `<source>:<instanceId>`；发布 payload 资源；按 eventId（先 manual key）对已提交 occurrence 去重 |
+| 4    | Harness funnel         | 按 occurrence 的 input 资源在 claim 前发布；claim 提交后 dispatch 读该资源；run + input + wake 同事务（现有 persistent fire）                           |
+| 5    | wake pump              | run 的 turn 执行；`turn.settled` settle 该 run                                                                                                          |
+| 6    | 结果消费               | 今天轮询 runs API；之后按产品决定走 H5 回调                                                                                                             |
+| 7    | 出站（agent → 调度器） | agent 在 Session 权限规则下调用产品 MCP 服务器的准入工具                                                                                                |
 
 ## 契约触点
 
 - `packages/core/src/managed-runtime/managed-automation-record.ts`：
-  `webhook` occurrence 拒绝在 ingress 切片解除；trigger 词汇新增外部种类，
-  由两个宿主的 fixture 重放。
-- ingress 面（新增）：准入、验证、通用事件形状，配 `SurfaceRegistry` 条目、
-  OpenAPI 契约、`ManagedAgentApiContractTest`、`SurfaceRegistryGateTest`。
-- `ManagedAutomationService` / Harness funnel：无执行变更；ingress 经现有
-  fire 路径准入。
+  `webhook` occurrence 拒绝在 ingress 切片解除；`Schedule` body 在同一
+  schema 修订中获得判别式计时来源（决策 11），由两个宿主的 fixture 重放。
+- `packages/core/src/managed-runtime/managed-automation-operations.ts`：
+  `AUTOMATION_RUN_TRIGGERS` 及其 envelope trigger 校验新增外部种类，加上
+  Harness 侧 trigger 校验器——新种类必须到达这三处，而非仅记录文件。
+- `AutomationScanner`（控制面）：`findArmed` 跳过外部驱动的 definition；
+  `findFiringSchedules` / redrive 仍恢复它们（决策 11）。
+- ingress 面（新增）：准入、验证、目标绑定、payload 发布、通用事件形状，
+  配 `SurfaceRegistry` 条目、OpenAPI 契约、`ManagedAgentApiContractTest`、
+  `SurfaceRegistryGateTest`。
+- `ManagedAutomationService` / Harness funnel：fire 携带按 occurrence 的
+  input 引用，dispatch 读它；claim/dispatch 顺序不变。
 - `packages/channels/dataworks`（新增）：第一个入站适配器与 DataWorks
   OpenAPI MCP 服务器（出站）；Airflow/DolphinScheduler 适配器沿用此形状。
 - Managed MCP 运行时：不变；产品 MCP 服务器经它准入。
@@ -170,14 +200,22 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
 - fixture 对等：激活的 `webhook` occurrence 与新 trigger kind 在两个宿主
   一致重放；`webhook-reserved` fixture 在准入它的同一改动中翻转。
 - 身份去重：重复事件身份重放已提交 run，绝不创建第二个；两个适配器重复同一
-  实例收敛到一个 run。
-- 验证：未验证或错误签名的事件在 funnel 前被拒绝；已验证事件准入。
-- manual 路径诚实：零改动路径记 `manual` 且在实例 key 下恰好一次；ingress
-  路径记外部 trigger kind。
+  实例收敛到一个 run。两个来源报同一原始实例 id 产生两个 run（`<source>:`
+  命名空间）。
+- 切换去重：经 manual 桥提交、响应丢失的 run，再经 ingress 重试，恰好一个
+  run——ingress 在已提交的 `manual:<eventId>` key 上准入。
+- 验证与作用域：未验证或错误签名的事件在 funnel 前被拒绝；正确签名但点名
+  另一 tenant definition 的事件被拒绝；已验证且在作用域内的事件准入。
+- 按 occurrence 输入：两个不同 context 的事件执行不同文本；claim 后崩溃在
+  重驱动时保留原始输入。
+- manual 路径诚实：零改动路径记 `manual`、在实例 key 下恰好一次，且指向
+  scanner 绝不触发的 `enabled: false` definition；ingress 路径记外部
+  trigger kind。
 - overlap 与繁忙目标：外部 fire 像 scheduled fire 一样遇到 definition 的
   overlap 策略。
-- scanner 不可见：外部驱动的 definition 绝不被内置 scanner 触发；内置
-  definition 绝不被 ingress 触发。
+- cron 推导排除且保留恢复：外部驱动的 definition 推导零个 `schedule:*`
+  occurrence，但丢失中继的 claim 在重启后由 `findFiringSchedules` /
+  redrive 完成；内置 definition 绝不被 ingress 触发。
 - 出站准入：产品 MCP 服务器的有副作用工具遵守 Session 权限规则；被拒绝的
   操作不执行。
 - 适配器隔离：产品凭据绝不出现在 journal；控制面不解析任何产品字段。
@@ -186,9 +224,12 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
 
 ## 验收标准
 
-- 一个外部调度器实例触发恰好一个 run，同一实例的重试重放它而非创建第二个。
+- 一个外部调度器实例触发恰好一个 run，同一实例的重试重放它而非创建第二个
+  ——包括丢失响应后跨越 manual-to-webhook 切换的重试。
 - 账本区分外部触发与 manual 或 scheduled run。
-- 外部驱动的 definition 绝不被内置 scanner 双重触发。
+- 外部驱动的 definition 不推导 cron occurrence、绝不被内置 scanner 双重
+  触发，而丢失中继的 claim 仍恢复。
+- 正确签名但点名另一 tenant definition 的事件在 funnel 前被拒绝。
 - 控制面不含任何产品特定字段或依赖；第二个调度器适配器复用同一 ingress 而
   无需控制面变更。
 - agent 在 Session 权限规则下经准入 MCP 工具操作外部调度器。

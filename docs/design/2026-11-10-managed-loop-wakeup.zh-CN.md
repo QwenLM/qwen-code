@@ -116,11 +116,18 @@ Managed Session 今天无法运行这条路径：
    与 turn id 为 `loop:<wakeupId>`，每次安排使用新的 `wakeupId`。
    autonomous 与 `loop.md` sentinel（`<<autonomous-loop-dynamic>>`、
    `<<loop.md-dynamic>>`）逐字存入 envelope，在触发时而非安排时展开：
-   funnel 在 pump 选取 input 时展开它们，对应本地的触发时展开，从
-   Session 已验证的 Workspace 目录读取 `.qwen/loop.md`，受与其他 Hosted
-   文件工具相同的读取边界约束——因此任务文件的变更在下一次触发时被
-   拾取，重启或压缩后重新提供完整指令。不产生 `schedule` 或
-   `automation_run` 记录、不产生控制面行、不涉及 scanner：journal 是
+   funnel 在 pump 选取 input 时展开它们，对应本地的触发时展开。展开
+   复用共享的 loop-task-file 读取器，因此携带本地守卫而非裸文件读取：
+   项目 `.qwen/loop.md` 仅在工作区受信任时读取（本地 `allowProjectFile`
+   门，每次 resolve 重新求值，默认 false），否则读 home 文件或 absent-file
+   tick；内容按 `LOOP_TASK_FILE_MAX_BYTES`（25 000）字节截断并带本地
+   截断警告；文件缺失收敛到 autonomous tick，瞬时读取失败收敛到 no-op
+   re-arm tick，因此抛错的 turn 绝不会永久终结 loop。由于安排时分类器
+   审查的是 sentinel 常量而非文件文本，展开是分类器可见的：当解析出的
+   内容与安排时审查的不同时，fire 在运行前被重新审查（deny 即拒绝），
+   `managed-admission` 记录点名 fire 将读取的内容。任务文件的变更因此在
+   下一次触发时被拾取，重启或压缩后重新提供完整指令。不产生 `schedule`
+   或 `automation_run` 记录、不产生控制面行、不涉及 scanner：journal 是
    唯一事实，与 monitor 通知完全一致。
 2. **`notBefore` 是 `input.accepted` 新增的可选 payload 字段**
    （`timeOrNull`），loop 唤醒是它的第一个生产者。语义：`notBefore`
@@ -178,8 +185,9 @@ Managed Session 今天无法运行这条路径：
    取消被拒绝。应答是幂等的——不 pending 的 id 应答「未取消」，对应
    `cancelWakeup` 的布尔值。`/loop clear` 走 skill 现有的
    `cron_list` + `cron_delete` 路由，取消那一个未触发的 pending 唤醒。
-   close 路径把 `loop` 加入其无模型 settle 的 source 集，关闭中的
-   Session 绝不会把唤醒遗留为下次打开时的
+   close 路径把 `loop` 加入其无模型 settle 的 source 集，并 settle 每一个
+   pending `loop` input——未触发的那个，以及它按先前尝试规则中止其 turn
+   的 firing 那个——关闭中的 Session 绝不会把唤醒遗留为下次打开时的
    `hosted_turn_recovery_required`。
 8. **工具面是 `loop_wakeup` 加共享的 cron list/cancel。** `loop_wakeup`
    由可写 profile 的新修订版声明，沿用添加 `todo_write` 的 `files/3`
@@ -203,7 +211,9 @@ Managed Session 今天无法运行这条路径：
    安排时把同样的分类器输入（`delaySeconds`、`prompt`、`reason`）经
    Hosted 权限分类器提交，显式 deny 规则在任何模式下都拒绝安排。裁决
    记录在该次安排的 `managed-admission` 资源中。调度未来模型输入保留
-   本地工具注释所要求的审查；未经准入的东西不会触发。
+   本地工具注释所要求的审查；未经准入的东西不会触发。对 sentinel 安排，
+   准入值是常量，因此决策 1 的触发时展开在解析内容不同时重新审查——
+   准入门覆盖实际运行的东西，而非仅 sentinel。
 10. **预算是结构性的，不是新的配额表。** 一个未触发唤醒（决策 4）、
     24 h 链（决策 4）、prompt 与 envelope 界限（决策 4）、部署开关
     （决策 8）就是全部预算。不消耗 definition 配额，因为不存在
@@ -212,15 +222,15 @@ Managed Session 今天无法运行这条路径：
 
 ## 流水线，逐步
 
-| 步骤 | 位置                     | 提交                                                                                                                                                                                                         |
-| ---- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1    | `loop_wakeup`（funnel）  | 分类器审查；发布 `managed-input` + `managed-admission`；一个事务：被替换 input 的 `cancelled` settle（如有）+ `input.accepted`（`loop`、`notBefore`）+ `wake.requested`；应答 id、触发时刻、clamp、被替换 id |
-| 2    | wake pump                | 无提交；`next()` 跳过未到期 input，在最早 `notBefore` 安排一个定时器                                                                                                                                         |
-| 3    | wake pump `runTurn`      | 在该 input 的 `turnId` 下的普通文本 turn；`turn.settled` 消费该 input                                                                                                                                        |
-| 4    | 被触发的 turn            | 另一个 `loop_wakeup`（回到步骤 1）或没有——loop 结束                                                                                                                                                          |
-| 5    | `cron_delete`（loop id） | pending input 的 `cancelled` settle（`loop_cancelled`），无先前尝试；幂等                                                                                                                                    |
-| 6    | close 路径               | 对 pending loop input 的无模型 `cancelled` settle（`session_closing`）                                                                                                                                       |
-| 7    | 重启后的加载             | 无提交；重新推导 pending 集，过期唤醒立即到期                                                                                                                                                                |
+| 步骤 | 位置                     | 提交                                                                                                                                                                                                                 |
+| ---- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | `loop_wakeup`（funnel）  | 分类器审查；发布 `managed-input` + `managed-admission`；一个事务：被替换的未触发 input 的 `cancelled` settle（如有）+ `input.accepted`（`loop`、`notBefore`）+ `wake.requested`；应答 id、触发时刻、clamp、被替换 id |
+| 2    | wake pump                | 无提交；`next()` 跳过未到期 input，在最早 `notBefore` 安排一个定时器                                                                                                                                                 |
+| 3    | wake pump `runTurn`      | 在该 input 的 `turnId` 下的普通文本 turn；`turn.settled` 消费该 input                                                                                                                                                |
+| 4    | 被触发的 turn            | 另一个 `loop_wakeup`（回到步骤 1）或没有——loop 结束                                                                                                                                                                  |
+| 5    | `cron_delete`（loop id） | pending input 的 `cancelled` settle（`loop_cancelled`），无先前尝试；幂等                                                                                                                                            |
+| 6    | close 路径               | 对每一个 pending loop input 的无模型 `cancelled` settle（`session_closing`）——未触发的那个与它中止其 turn 的 firing 那个                                                                                             |
+| 7    | 重启后的加载             | 无提交；重新推导 pending 集，过期唤醒立即到期                                                                                                                                                                        |
 
 ## 契约触点
 
@@ -274,12 +284,18 @@ Managed Session 今天无法运行这条路径：
 - loop turn 内部崩溃：善后将其 settle 为 `failed`/`outcome_unknown`；
   不自动重新安排唤醒。
 - sentinel：`loop.md` sentinel 在触发时从当前文件展开，安排与触发之间
-  的变更被拾取；重启或压缩后重新提供完整指令；autonomous sentinel
-  无需文件即展开。
+  的变更被拾取；重启或压缩后重新提供完整指令；内容不变投递简短提醒；
+  文件缺失投递 autonomous tick（不抛错、不空 prompt）；瞬时不可读投递
+  no-op re-arm tick；autonomous sentinel 无需文件即展开。100 KB 的
+  `loop.md` 触发按 `LOOP_TASK_FILE_MAX_BYTES` 截断并带警告的输入。
+  不受信任工作区的 `.qwen/loop.md` 产出 absent-file tick，而非其内容。
+- sentinel 准入：安排 `<<loop.md-dynamic>>` 后在触发前改文件，重新审查
+  解析出的内容（deny 即拒绝），而非未经审查执行。
 - 取消：`loop:<wakeupId>` id 经 `cron_delete` 路由；幂等；turn 有先前
   尝试后被拒绝；`/loop clear` 消费那一个未触发的 pending 唤醒。开关
   关闭时，已安排的唤醒仍触发且仍可列出/取消，新安排被拒绝。
-- close：pending loop input 以无模型方式 settle；下次打开不被卡死。
+- close：每一个 pending loop input 以无模型方式 settle（未触发的那个与
+  close 中止其 turn 的 firing 那个）；下次打开不被卡死。
 - 分类器：deny 规则拒绝安排；admission 资源记录裁决。
 - 变异检查：逐个禁用各决策的守卫都会使某个测试失败（延迟跳过、替换
   settle、先丢弃后检查、链锚点、取消与替换的先前尝试守卫、触发时展开、
@@ -296,7 +312,8 @@ Managed Session 今天无法运行这条路径：
   scanner 行。
 - 3600 s 唤醒只花一个定时器，而非轮询节奏。
 - 已安排的唤醒在部署开关关闭后存活，且仍可经 `cron_delete` 取消。
-- `loop.md` sentinel 触发时读取当前文件。
+- `loop.md` sentinel 触发时读取当前文件，截断并带警告；不受信任工作区
+  的文件不被读取；变更内容在运行前被重新审查。
 - clamp、默认值、链上限、替换与取消应答与
   `CronScheduler.scheduleWakeup` 的契约一致。
 - 两个宿主一致地重放扩展后的 fixtures。
@@ -308,8 +325,11 @@ Managed Session 今天无法运行这条路径：
    可以比 TUI 会话多活数天：首个 loop input 之后 24 h，即使上一个
    loop 早已结束，也无法再安排任何新 loop。确认这一更严格的读法，或
    采用可从 journal 推导的重置规则——例如，一次安排发现没有存活的
-   loop（既无未触发 pending input，也无 firing loop turn）时开启新链
-   ——并在实现前钉住该规则。
+   loop（既无未触发 pending input，也无 firing loop turn）时开启新链。
+   显式说明其中的张力：这种重置是安排时开启新 loop 的属性，而非取消
+   本身的属性，但终结 loop 的取消会让下一次安排开启新链——因此采纳它
+   会取代决策 4「取消不重置锚点」的读法。在实现前钉住该规则，以及它
+   取代哪种读法。
 2. **profile 修订版号。** `loop_wakeup` 的修订版按落地顺序取
    [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)的
    cron 三件套修订版之后的一批；切片落地时与控制面的 profile 准入核对

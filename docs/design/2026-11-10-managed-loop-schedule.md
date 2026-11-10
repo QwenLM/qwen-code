@@ -140,12 +140,18 @@ The facts below are from this repository at `488845a4a81`.
    not provide this isolation: the same user may create several
    Sessions. The delegation inherits the creator check, the mode gate,
    the capacity check, the command ledger, and the mirror write. The
-   deployment gate gates creation only: `list` and `retire` stay
-   available with the gate off, so a disabled feature never strands what
-   it already scheduled. A direct funnel call is refused as a creation
-   path: a journal-only definition has no mirror row, so the scanner
-   would never fire it — the route, not the funnel, is what makes a
-   definition discoverable.
+   Session scoping lives inside the service/ledger, where filtering
+   happens before the page limit and the `next` cursor is derived from
+   the filtered stream — a controller-side post-filter would cut the page
+   first and return a wrong cursor. The deployment gate gates creation
+   and also halts the scanner (`AutomationScanner.scan` returns early on
+   the same setting), so already-armed definitions stop firing while the
+   gate is off; `list` and `retire` stay available so an operator can see
+   and retire what the gate stopped. This is the existing gate semantics,
+   not a new promise that firing continues. A direct funnel call is
+   refused as a creation path: a journal-only definition has no mirror
+   row, so the scanner would never fire it — the route, not the funnel,
+   is what makes a definition discoverable.
 3. **The Idempotency-Key derives from the tool execution's identity.**
    Each mutation uses a key derived from its `executionCallId` and verb
    (for example `loop:<executionCallId>:create`, within the key's 1–128
@@ -179,19 +185,26 @@ The facts below are from this repository at `488845a4a81`.
    schedule runs until cancelled.
 6. **List and delete cover both arms, as locally.** `cron_list` answers
    the union: the bound Session's definitions from the control plane
-   ledger — the same rows the scanner reads, paged as the public list is
-   — plus the pending unfired loop input from the journal, once the
-   wakeup slice has landed. `create` mirrors before it answers, so a
+   ledger — the same rows the scanner reads — plus the pending unfired
+   loop input from the journal, once the wakeup slice has landed. The
+   public list defaults to 20 rows while a Session may hold 32
+   definitions, so `cron_list` walks every page before answering (the
+   single journal wakeup rides alongside the last page); the unchanged
+   skill `clear` recipe — list, then delete every returned id — therefore
+   drains the whole Session. `create` mirrors before it answers, so a
    list after a create is consistent. `cron_delete` routes by id: a
    definition id retires (the relay commits the terminal journal
    revision and the mirror retires with it; retiring a retired
    definition answers the replay, and a Session that is not ACTIVE takes
    the inherited local-retire fallback); a `loop:<wakeupId>` id cancels
    the wakeup through the sibling slice's journal-only consume, under
-   its prior-attempt guard. This is the local shape — `cron_list`
-   already lists wakeups (`@wakeup`) and `CronScheduler.delete` already
-   falls through to `cancelWakeup` — so the skill's `list`/`clear`
-   subcommands ride unchanged.
+   its prior-attempt guard. `cron_list` renders the wakeup id exactly as
+   `cron_delete` accepts it (`loop:<wakeupId>`), so the id fed straight
+   from list into delete cancels the wakeup — the local shape, where
+   `cron_list` lists wakeups (`@wakeup`) and `CronScheduler.delete` falls
+   through to `cancelWakeup`, with the prefix produced by list and
+   consumed by delete. The skill's `list`/`clear` subcommands ride
+   unchanged.
 7. **Firing rides the existing pipeline unchanged.** A due slot becomes
    an `automation_run`, its input and wake commit in one transaction,
    the wake pump runs the turn, and the turn settles the run — overlap
@@ -239,8 +252,8 @@ The facts below are from this repository at `488845a4a81`.
 | 1    | `cron_create` (the tool execution) | the executor journals the intent under `executionCallId`; the internal `automations:create` route claims the derived key, relays `define_schedule`, mirrors the definition, settles the command; the tool answers the schedule id |
 | 2    | the skill's immediate first run    | the current turn — no new mechanism                                                                                                                                                                                               |
 | 3    | scanner tick                       | the mirror row's due slot becomes an occurrence; `fire_run` commits the run, its input and wake; the wake pump runs the turn; the turn settles the run                                                                            |
-| 4    | `cron_list`                        | the internal `automations:list` route answers the ledger page                                                                                                                                                                     |
-| 5    | `cron_delete`                      | the internal `automations:retire` route relays `retire_schedule` and retires the mirror; a retired id answers the replay                                                                                                          |
+| 4    | `cron_list`                        | the internal `automations:list` route walks every ledger page and adds the pending unfired wakeup; the tool answers the full union, each wakeup id rendered as `cron_delete` accepts it                                           |
+| 5    | `cron_delete`                      | a definition id relays `retire_schedule` and retires the mirror (a retired id answers the replay); a `loop:<wakeupId>` id routes to the sibling slice's journal-only cancel                                                       |
 | 6    | a re-driven execution              | the same `executionCallId` derives the same key; the control plane answers the replay, never a second definition                                                                                                                  |
 
 ## Contract touchpoints
@@ -250,15 +263,20 @@ The facts below are from this repository at `488845a4a81`.
   internal surface, `ManagedAgentApiContractTest`,
   `SurfaceRegistryGateTest`, and the `managed-surface.txt` fixture.
 - `ManagedAutomationService`: the controller derives the creator actor
-  and delegates; the service gains Session-scoped list/retire (or the
-  controller enforces the scope around the actor-scoped calls) and
-  permits list/retire with the deployment gate off — creation stays
+  and delegates; list/retire become Session-scoped inside the
+  service/ledger (filter before the page limit, correct `next` cursor)
+  and stay permitted with the deployment gate off — creation stays
   gated.
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` and the Hosted
   tool turn: the new profile revisions (skipping the retired `shell/2`)
   and the cron trio's declarations and execution wiring, calling the
   internal routes over the existing store channel (`baseUrl` + writer
-  binding); the unknown-profile fixtures that list `files/4` flip in the
+  binding). Shell identity is not centralised: the profile predicates
+  (`isHostedWorkspaceShellProfile` and friends), the admission paths that
+  compare the literal `hosted-workspace-shell/1`, and the control plane's
+  canonical Shell admission must all recognise `shell/3`, or a `shell/3`
+  Session loses the shell lane, child-agent and foreground-only
+  admission. The unknown-profile fixtures that list `files/4` flip in the
   same change.
 - The managed loop skill variant as a skill asset in the Session Skills
   publication.
@@ -273,7 +291,9 @@ The facts below are from this repository at `488845a4a81`.
   creator; the deployment gate off refuses create but not list/retire.
 - Session isolation: same tenant, same creator, two Sessions — one
   Session's writer neither lists nor retires the other's definitions,
-  and create's target is always the bound Session.
+  and create's target is always the bound Session. Page semantics: a
+  bound Session owning 32 definitions among others returns all 32 on the
+  first page with no further cursor.
 - Replay: a re-driven execution with the same `executionCallId` answers
   the same `scheduleId` with the replay mark; a different body under one
   key answers the conflict.
@@ -287,11 +307,15 @@ The facts below are from this repository at `488845a4a81`.
 - List-after-create consistency; delete idempotency; the not-ACTIVE
   Session's local-retire fallback.
 - Union surface (with the wakeup slice landed): `cron_list` returns the
-  definitions plus the pending unfired wakeup; `cron_delete` routes a
-  `loop:<wakeupId>` id to cancel and a definition id to retire.
+  definitions plus the pending unfired wakeup; the id `cron_list` emits
+  fed straight into `cron_delete` settles the pending loop input
+  `cancelled`/`loop_cancelled`; a definition id retires. With 21+
+  definitions, `cron_list` returns every id and `/loop clear` leaves zero
+  live definitions.
 - Profile admission: the retired `hosted-workspace-shell/2` stays
-  refused; the unknown-profile fixtures that list `files/4` flip in the
-  same change that admits it.
+  refused; a `hosted-workspace-shell/3` Session keeps the shell lane,
+  child-agent and foreground-only admission; the unknown-profile fixtures
+  that list `files/4` flip in the same change that admits it.
 - Failure split: a 503 re-drives with the same key; a pre-commit refusal
   releases the key; a lost answer replays.
 - Skill E2E: `/loop 5m …` creates the definition and runs the prompt

@@ -134,13 +134,25 @@ The facts below are from this repository at `488845a4a81`.
    (`<<autonomous-loop-dynamic>>`, `<<loop.md-dynamic>>`) ride in the
    envelope verbatim and are expanded at fire time, not at arm time: the
    funnel expands them when the pump picks the input, mirroring the
-   local fire-time expansion, reading `.qwen/loop.md` from the Session's
-   verified Workspace directory under the same read boundary as the
-   other Hosted file tools — so a changed task file is picked up on the
-   next fire, and a restart or compaction re-provides the full guidance.
-   No `schedule` or `automation_run` record, no control-plane row, and no
-   scanner involvement: the journal is the only fact, exactly as for a
-   monitor notification.
+   local fire-time expansion. The expansion reuses the shared
+   loop-task-file reader, so it carries the local guards rather than a
+   bare file read: the project `.qwen/loop.md` is read only when the
+   workspace is trusted (the local `allowProjectFile` gate, re-evaluated
+   on every resolve, defaulting to false), otherwise the home file or the
+   absent-file tick; the content is byte-capped at
+   `LOOP_TASK_FILE_MAX_BYTES` (25 000) with the local truncation warning;
+   an absent file converges on the autonomous tick and a transient read
+   failure on the no-op re-arm tick, so a thrown turn never ends the loop
+   forever. Because the arm-time classifier reviewed the sentinel
+   constant, not the file text, the expansion is classifier-visible: when
+   the resolved content differs from what was reviewed at arm time, the
+   fire is re-reviewed before it runs (refused on deny), and the
+   `managed-admission` record names what the fire will read. A changed
+   task file is thus picked up on the next fire, and a restart or
+   compaction re-provides the full guidance. No `schedule` or
+   `automation_run` record, no control-plane row, and no scanner
+   involvement: the journal is the only fact, exactly as for a monitor
+   notification.
 2. **`notBefore` is a new optional `input.accepted` payload field**
    (`timeOrNull`), and the loop wakeup is its first producer. Semantics:
    an input whose `notBefore` is in the future must not start a turn
@@ -161,8 +173,8 @@ The facts below are from this repository at `488845a4a81`.
    `notBefore` is in the future, picks the oldest _due_ wake input, and
    reports the earliest future `notBefore` it skipped; the scheduler arms
    exactly one timer at that instant instead of its 500 ms retry cadence.
-   A kick (a new arm, a cancel, a load) re-evaluates. A not-yet-due loop
-   input never blocks a due monitor/channel/automation input behind it:
+   A kick (a new arm, a cancel, a load) re-evaluates. Not-yet-due loop
+   inputs never block a due monitor/channel/automation input behind them:
    deferral is per input, not a head-of-line park. `pendingSessionInputs`
    passes `notBefore` through so the pick stays one journal read.
 4. **Admission enforces the local semantics, atomically.** The delay is
@@ -211,8 +223,10 @@ The facts below are from this repository at `488845a4a81`.
    cancelled", mirroring `cancelWakeup`'s boolean. `/loop clear` rides
    the skill's existing `cron_list` + `cron_delete` routing and cancels
    the single unfired pending wakeup. The close path adds `loop` to its
-   model-free settle sources, so a closing Session never strands a
-   wakeup as `hosted_turn_recovery_required` at its next open.
+   model-free settle sources and settles every pending `loop` input — the
+   unfired one, and a firing one whose turn it aborts under the
+   prior-attempt rule — so a closing Session never strands a wakeup as
+   `hosted_turn_recovery_required` at its next open.
 8. **The tool surface is `loop_wakeup` plus the shared cron
    list/cancel.** `loop_wakeup` is declared by new revisions of the
    write-capable profiles, following the `files/3` precedent that added
@@ -244,7 +258,10 @@ The facts below are from this repository at `488845a4a81`.
    deny rule refuses the arm in every mode. The verdict is recorded in the
    arm's `managed-admission` resource. Scheduling future model input keeps
    the scrutiny the local tool's comment demands; nothing fires that was
-   not admitted.
+   not admitted. For a sentinel arm the admitted value is the constant, so
+   decision 1's fire-time expansion re-reviews the resolved content when it
+   differs — the admission gate covers what actually runs, not only the
+   sentinel.
 10. **The budget is structural, not a new quota table.** One unfired
     wakeup (decision 4), a 24 h chain (decision 4), the prompt and
     envelope bounds (decision 4), and the deployment gate (decision 8)
@@ -254,15 +271,15 @@ The facts below are from this repository at `488845a4a81`.
 
 ## The pipeline, step by step
 
-| Step | Where                      | Commit                                                                                                                                                                                                                                   |
-| ---- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | `loop_wakeup` (the funnel) | classifier review; `managed-input` + `managed-admission` published; one transaction: replaced input's `cancelled` settle (if any) + `input.accepted` (`loop`, `notBefore`) + `wake.requested`; answers id, fire time, clamp, replaced id |
-| 2    | wake pump                  | no commit; `next()` skips the not-yet-due input, one timer armed at the earliest `notBefore`                                                                                                                                             |
-| 3    | wake pump `runTurn`        | an ordinary text turn under the input's `turnId`; `turn.settled` consumes the input                                                                                                                                                      |
-| 4    | the fired turn             | another `loop_wakeup` (back to step 1) or none — the loop ends                                                                                                                                                                           |
-| 5    | `cron_delete` (loop id)    | the pending input's `cancelled` settle (`loop_cancelled`), no prior attempt; idempotent                                                                                                                                                  |
-| 6    | close path                 | model-free `cancelled` settle (`session_closing`) for the pending loop input                                                                                                                                                             |
-| 7    | load after a restart       | no commit; the pending set is re-derived, an overdue wakeup is due immediately                                                                                                                                                           |
+| Step | Where                      | Commit                                                                                                                                                                                                                                           |
+| ---- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | `loop_wakeup` (the funnel) | classifier review; `managed-input` + `managed-admission` published; one transaction: replaced unfired input's `cancelled` settle (if any) + `input.accepted` (`loop`, `notBefore`) + `wake.requested`; answers id, fire time, clamp, replaced id |
+| 2    | wake pump                  | no commit; `next()` skips the not-yet-due input, one timer armed at the earliest `notBefore`                                                                                                                                                     |
+| 3    | wake pump `runTurn`        | an ordinary text turn under the input's `turnId`; `turn.settled` consumes the input                                                                                                                                                              |
+| 4    | the fired turn             | another `loop_wakeup` (back to step 1) or none — the loop ends                                                                                                                                                                                   |
+| 5    | `cron_delete` (loop id)    | the pending input's `cancelled` settle (`loop_cancelled`), no prior attempt; idempotent                                                                                                                                                          |
+| 6    | close path                 | model-free `cancelled` settle (`session_closing`) for every pending loop input — the unfired one and a firing one whose turn it aborts                                                                                                           |
+| 7    | load after a restart       | no commit; the pending set is re-derived, an overdue wakeup is due immediately                                                                                                                                                                   |
 
 ## Contract touchpoints
 
@@ -326,15 +343,23 @@ The facts below are from this repository at `488845a4a81`.
   `failed`/`outcome_unknown`; no wakeup is re-armed automatically.
 - Sentinels: a `loop.md` sentinel expands at fire time from the current
   file, so a change between arm and fire is picked up; after a restart
-  or compaction the full guidance is re-provided; the autonomous
-  sentinel expands without a file.
+  or compaction the full guidance is re-provided; unchanged content
+  delivers the short reminder; an absent file delivers the autonomous
+  tick (no throw, no empty prompt); a transiently unreadable file
+  delivers the no-op re-arm tick; the autonomous sentinel expands
+  without a file. A 100 KB `loop.md` fires a truncated, warned input
+  capped at `LOOP_TASK_FILE_MAX_BYTES`. An untrusted workspace's
+  `.qwen/loop.md` yields the absent-file tick, not its content.
+- Sentinel admission: arming `<<loop.md-dynamic>>` then changing the file
+  before the fire re-reviews the resolved content (refused on deny)
+  rather than executing it unreviewed.
 - Cancel: a `loop:<wakeupId>` id routes through `cron_delete`;
   idempotent; refused once the turn has a prior attempt; `/loop clear`
   consumes the single unfired pending wakeup. With the gate off, an
   armed wakeup still fires and stays listable/cancellable, while a new
   arm is refused.
-- Close: the pending loop input settles model-free; the next open is not
-  wedged.
+- Close: every pending loop input settles model-free (the unfired one and
+  a firing one whose turn the close aborts); the next open is not wedged.
 - Classifier: a deny rule refuses the arm; the admission resource
   records the verdict.
 - Mutation checks: each decision's guard disabled in turn fails a test
@@ -355,7 +380,9 @@ The facts below are from this repository at `488845a4a81`.
 - A 3600 s wakeup costs one timer, not a poll cadence.
 - An armed wakeup survives the deployment gate going off and stays
   cancellable through `cron_delete`.
-- A `loop.md` sentinel fire reads the current file.
+- A `loop.md` sentinel fire reads the current file, capped and warned; an
+  untrusted workspace's file is not read; changed content is re-reviewed
+  before it runs.
 - The clamp, default, chain cap, replacement, and cancel answers match
   `CronScheduler.scheduleWakeup`'s contract.
 - Both hosts replay the extended fixtures identically.
@@ -369,7 +396,12 @@ The facts below are from this repository at `488845a4a81`.
    arm even though the previous one ended long ago. Confirm the stricter
    reading, or adopt a journal-derivable reset — for example, an arm that
    finds no live loop (no unfired pending input and no firing loop turn)
-   starts a new chain — and name the rule before implementation.
+   starts a new chain. Note the tension explicitly: such a reset is a
+   property of starting a new loop at arm time, not of the cancel itself,
+   but a cancel that ends the loop would let the next arm start a new
+   chain — so adopting it supersedes decision 4's "a cancel does not reset
+   the anchor" reading. Name the rule, and which reading it replaces,
+   before implementation.
 2. **Profile revision numbers.** The `loop_wakeup` revisions follow the
    [fixed-interval sibling](2026-11-10-managed-loop-schedule.md)'s cron
    trio revisions, in landing order; confirm the assigned numbers

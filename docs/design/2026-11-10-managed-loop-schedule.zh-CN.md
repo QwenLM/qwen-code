@@ -119,10 +119,15 @@ Session 内部的模型没有任何创建途径。
    看到另一个的；`retire` 在执行或应答重放前验证目标 definition 属于
    绑定 Session。仅凭创建者 actor 不提供这种隔离：同一用户可以创建多个
    Session。委托继承创建者检查、模式门、容量检查、command 账本与镜像
-   写入。部署开关只门控创建：`list` 与 `retire` 在开关关闭时仍可用，
-   被关闭的功能绝不遗留它已安排的东西。直接 funnel 调用被拒绝作为创建
-   路径：仅存 journal 的 definition 没有镜像行，scanner 永远不会触发
-   它——使 definition 可被发现的是路由，不是 funnel。
+   写入。Session 作用域落在服务/账本内部，过滤发生在分页 limit 之前、
+   `next` 游标从过滤后的流推导——controller 侧后置过滤会先切页再返回
+   错误游标。部署开关门控创建，同时也停掉 scanner
+   （`AutomationScanner.scan` 在同一设置上提前返回），因此开关关闭期间
+   已武装的 definition 停止触发；`list` 与 `retire` 仍可用，使运维能
+   查看并退役开关停掉的东西。这是现有开关语义，不是「触发继续」的新
+   承诺。直接 funnel 调用被拒绝作为创建路径：仅存 journal 的 definition
+   没有镜像行，scanner 永远不会触发它——使 definition 可被发现的是
+   路由，不是 funnel。
 3. **Idempotency-Key 从工具执行的身份推导。** 每个变更使用从其
    `executionCallId` 与动词推导的 key（例如
    `loop:<executionCallId>:create`，符合 key 的 1–128 可打印 ASCII
@@ -148,15 +153,20 @@ Session 内部的模型没有任何创建途径。
    managed skill 变体告知用户任务会一直运行直到取消。
 6. **list 与 delete 覆盖两个分支，与本地一致。** `cron_list` 应答并集：
    绑定 Session 的 definition 来自控制面账本——与 scanner 读取的同一批
-   行，按公开 list 的方式分页——加上 wakeup 切片落地后来自 journal 的
-   未触发 pending loop input。`create` 在应答前完成镜像，因此创建后的
-   list 是一致的。`cron_delete` 按 id 路由：definition id 走退役（中继
-   提交终态 journal 修订版，镜像随之退役；退役已退役的 definition 应答
-   重放，非 ACTIVE 的 Session 走继承的本地退役兜底）；`loop:<wakeupId>`
-   id 经姊妹切片的仅 journal 消费取消唤醒，受其先前尝试守卫。这就是
-   本地形状——`cron_list` 本就列出唤醒（`@wakeup`），
-   `CronScheduler.delete` 本就 fall-through 到 `cancelWakeup`——因此
-   skill 的 `list`/`clear` 子命令原样复用。
+   行——加上 wakeup 切片落地后来自 journal 的未触发 pending loop input。
+   公开 list 默认 20 行而一个 Session 可持有 32 个 definition，因此
+   `cron_list` 走完每一页再应答（单个 journal 唤醒随最后一页一起返回）；
+   未改动的 skill `clear` 配方——list 后 delete 每个返回 id——因此清空
+   整个 Session。`create` 在应答前完成镜像，因此创建后的 list 是一致的。
+   `cron_delete` 按 id 路由：definition id 走退役（中继提交终态 journal
+   修订版，镜像随之退役；退役已退役的 definition 应答重放，非 ACTIVE 的
+   Session 走继承的本地退役兜底）；`loop:<wakeupId>` id 经姊妹切片的仅
+   journal 消费取消唤醒，受其先前尝试守卫。`cron_list` 渲染的唤醒 id 与
+   `cron_delete` 接受的完全一致（`loop:<wakeupId>`），因此从 list 直接
+   喂给 delete 的 id 取消该唤醒——本地形状，`cron_list` 本就列出唤醒
+   （`@wakeup`）、`CronScheduler.delete` 本就 fall-through 到
+   `cancelWakeup`，前缀由 list 产生、由 delete 消费。skill 的
+   `list`/`clear` 子命令原样复用。
 7. **fire 原样走现有流水线。** 到期 slot 成为 `automation_run`，其
    input 与 wake 同事务提交，wake pump 执行 turn，turn settle 该
    run——overlap 策略、公开 Turn 抑制、catch-up、gate 探针全部像对待
@@ -194,8 +204,8 @@ Session 内部的模型没有任何创建途径。
 | 1    | `cron_create`（工具执行） | 执行器以 `executionCallId` 记录 intent；内部 `automations:create` 路由认领推导的 key，中继 `define_schedule`，镜像 definition，结算 command；工具应答 schedule id |
 | 2    | skill 的立即首次执行      | 当前 turn——无新机制                                                                                                                                               |
 | 3    | scanner tick              | 镜像行的到期 slot 成为 occurrence；`fire_run` 提交 run、其 input 与 wake；wake pump 执行 turn；turn settle 该 run                                                 |
-| 4    | `cron_list`               | 内部 `automations:list` 路由应答账本页                                                                                                                            |
-| 5    | `cron_delete`             | 内部 `automations:retire` 路由中继 `retire_schedule` 并退役镜像；已退役的 id 应答重放                                                                             |
+| 4    | `cron_list`               | 内部 `automations:list` 路由走完每一账本页并加上未触发 pending 唤醒；工具应答完整并集，每个唤醒 id 渲染为 `cron_delete` 接受的形式                                |
+| 5    | `cron_delete`             | definition id 中继 `retire_schedule` 并退役镜像（已退役的 id 应答重放）；`loop:<wakeupId>` id 路由到姊妹切片的仅 journal 取消                                     |
 | 6    | 被重驱动的执行            | 同一 `executionCallId` 推导同一 key；控制面应答重放，绝不产生第二个 definition                                                                                    |
 
 ## 契约触点
@@ -204,14 +214,19 @@ Session 内部的模型没有任何创建途径。
   三个动词，配 `SurfaceRegistry` 条目、OpenAPI 内部面、
   `ManagedAgentApiContractTest`、`SurfaceRegistryGateTest` 与
   `managed-surface.txt` fixture。
-- `ManagedAutomationService`：controller 推导创建者 actor 并委托；服务
-  获得 Session 作用域的 list/retire（或由 controller 在 actor 作用域
-  调用外围强制作用域），并允许开关关闭时的 list/retire——创建仍受
+- `ManagedAutomationService`：controller 推导创建者 actor 并委托；
+  list/retire 在服务/账本内部变为 Session 作用域（分页 limit 前过滤、
+  正确的 `next` 游标），并允许开关关闭时的 list/retire——创建仍受
   门控。
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` 与 Hosted 工具
   turn：新 profile 修订版（跳过已退役的 `shell/2`）、cron 三件套的声明
   与执行接线，经现有 store 通道（`baseUrl` + writer 绑定）调用内部
-  路由；列出 `files/4` 的 unknown-profile fixture 在同一改动中翻转。
+  路由。Shell 身份并非集中式：profile 谓词
+  （`isHostedWorkspaceShellProfile` 等）、比较字面量
+  `hosted-workspace-shell/1` 的准入路径、控制面的规范 Shell 准入都必须
+  识别 `shell/3`，否则 `shell/3` Session 会失去 shell lane、child-agent
+  与 foreground-only 准入。列出 `files/4` 的 unknown-profile fixture 在
+  同一改动中翻转。
 - managed loop skill 变体，作为 Session Skills 发布中的 skill 资产。
 - `packages/cli/src/serve/capability-parity.ts`：cron 三件套 Managed
   地位的条目。
@@ -224,7 +239,8 @@ Session 内部的模型没有任何创建途径。
   list/retire。
 - Session 隔离：同 tenant、同创建者、两个 Session——一个 Session 的
   writer 既不能列出也不能退役另一个的 definition，create 的目标永远
-  是绑定 Session。
+  是绑定 Session。分页语义：在其他 Session 之间持有 32 个 definition 的
+  绑定 Session 第一页返回全部 32 个、无后续游标。
 - 重放：同一 `executionCallId` 的重驱动执行应答同一 `scheduleId` 并带
   重放标记；同一 key 下不同 body 应答冲突。
 - scanner 发现：工具创建的 definition 在下一个到期 slot 触发；仅存
@@ -236,10 +252,14 @@ Session 内部的模型没有任何创建途径。
 - 创建后 list 的一致性；delete 幂等；非 ACTIVE Session 的本地退役
   兜底。
 - 并集工具面（wakeup 切片落地后）：`cron_list` 返回 definition 加未触发
-  pending 唤醒；`cron_delete` 把 `loop:<wakeupId>` id 路由到取消、
-  definition id 路由到退役。
-- profile 准入：已退役的 `hosted-workspace-shell/2` 仍被拒绝；列出
-  `files/4` 的 unknown-profile fixture 在准入它的同一改动中翻转。
+  pending 唤醒；`cron_list` 发出的 id 直接喂给 `cron_delete` 把 pending
+  loop input settle 为 `cancelled`/`loop_cancelled`；definition id 走
+  退役。21+ 个 definition 时 `cron_list` 返回每个 id，`/loop clear` 后
+  零个存活 definition。
+- profile 准入：已退役的 `hosted-workspace-shell/2` 仍被拒绝；
+  `hosted-workspace-shell/3` Session 保留 shell lane、child-agent 与
+  foreground-only 准入；列出 `files/4` 的 unknown-profile fixture 在
+  准入它的同一改动中翻转。
 - 失败划分：503 以同一 key 重驱动；pre-commit 拒绝释放 key；丢失的
   应答被重放。
 - skill E2E：`/loop 5m …` 创建 definition 并立即执行 prompt；
