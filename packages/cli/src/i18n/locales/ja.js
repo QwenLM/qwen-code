@@ -1260,6 +1260,7 @@ export default {
   Reqs: 'リクエスト',
   'Input Tokens': '入力トークン',
   'Output Tokens': '出力トークン',
+  'Output (incl. Reasoning)': '出力（推論を含む）',
   'Savings Highlight:': '節約ハイライト:',
   'of input tokens were served from the cache, reducing costs.':
     '入力トークンがキャッシュから提供され、コストを削減しました',
@@ -1627,6 +1628,8 @@ export default {
     'アドバイザーレビューに失敗しました：{{error}}',
   'No conversation context available for /advisor':
     '/advisor に使用できる会話コンテキストがありません',
+  'No conversation context available for /btw':
+    '/btw に使用できる会話コンテキストがありません',
   'Focus too long (max {{max}} chars)':
     'フォーカスが長すぎます（最大 {{max}} 文字）',
   'Another operation is in progress, wait for it to complete before running /advisor':

@@ -10,6 +10,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -31,10 +33,10 @@ final class AgentLifecycleOperations {
     private final AgentSessionQueries sessionQueries;
     private final AgentStoreRows storeRows;
     private final JdbcTemplate jdbc;
-    private final WorkspaceLifecycleStore lifecycle;
+    private final JdbcWorkspaceLifecycleStore lifecycle;
     private final ObjectMapper objectMapper;
     private final Clock clock;
-    private final ManagedWorkspaceRegistry workspaces;
+    private final JdbcManagedWorkspaceRegistry workspaces;
     private final boolean workspaceFilesEnabled;
     private final long lifecycleHandoffMillis;
 
@@ -44,10 +46,10 @@ final class AgentLifecycleOperations {
             AgentSessionQueries sessionQueries,
             AgentStoreRows storeRows,
             JdbcTemplate jdbc,
-            WorkspaceLifecycleStore lifecycle,
+            JdbcWorkspaceLifecycleStore lifecycle,
             ObjectMapper objectMapper,
             Clock clock,
-            ManagedWorkspaceRegistry workspaces,
+            JdbcManagedWorkspaceRegistry workspaces,
             boolean workspaceFilesEnabled,
             long lifecycleHandoffMillis) {
         this.eventJournal = eventJournal;
@@ -129,14 +131,7 @@ final class AgentLifecycleOperations {
     // pre-V40 creator fallback) holding a current read grant. Unreadable is
     // invisible; a readable non-owner gets the sibling family's 403.
     void requireWorkspaceCreator(SessionRecord session, String actorId) {
-        if (!workspaces.canRead(session.tenantId(), actorId, session.workspace().getWorkspaceId())) {
-            throw new ManagedAgentException(
-                    404, "session_not_found", "The Session was not found.");
-        }
-        if (!workspaces.isSessionOwner(session.tenantId(), actorId, session.sessionId())) {
-            throw new ManagedAgentException(403, "session_operation_forbidden",
-                    "Only the Session owner may manage it.");
-        }
+        AgentSessionAccess.requireWorkspaceCreator(session, actorId, workspaces);
     }
 
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
@@ -221,7 +216,7 @@ final class AgentLifecycleOperations {
                             }
                             return operationMapper.mapRow(result, row);
                         },
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         operationId)
                 .stream()
                 .findFirst();
@@ -243,7 +238,7 @@ final class AgentLifecycleOperations {
                             }
                             return operationMapper.mapRow(result, row);
                         },
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         kind.name(),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         actorDigest,
@@ -268,7 +263,7 @@ final class AgentLifecycleOperations {
                             }
                             return operationMapper.mapRow(result, row);
                         },
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         operationId)
                 .stream()
@@ -381,7 +376,7 @@ final class AgentLifecycleOperations {
         }
         if (protocolVersion < 0 || protocolVersion > 2
                 || protocolVersion != 0 && protocolVersion != WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
         }
         if (publicLifecycle && WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
                 && (WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 2
@@ -432,7 +427,7 @@ final class AgentLifecycleOperations {
             validateOperationStart(session, kind);
         }
         if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
-            WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true, protocolVersion == 2);
+            JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true, protocolVersion == 2);
         }
         long now = storeRows.lifecycleDatabaseTime();
         String operationId = AgentStoreRows.publicId("op");
@@ -450,8 +445,8 @@ final class AgentLifecycleOperations {
                     + " (?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'JAVA_DURABLE',"
                     + " ?, ?, ?, ?, ?, ?, ?, ?)",
                 AgentStoreRows.sessionOperationKey(tenantId, sessionId, kind, operationId),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId),
                 sessionId,
                 archive ? "COMPLETED" : "PENDING",
@@ -617,7 +612,7 @@ final class AgentLifecycleOperations {
                         owner,
                         leaseDuration.toMillis(),
                         now,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -636,9 +631,9 @@ final class AgentLifecycleOperations {
         storeRows.requireLegacyMutation(tenantId, sessionId);
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
         if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                    jdbc, tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+            JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                    jdbc, tenantId, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         }
         if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
@@ -656,7 +651,7 @@ final class AgentLifecycleOperations {
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ? FOR UPDATE",
                         Boolean.class,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -675,7 +670,7 @@ final class AgentLifecycleOperations {
         }
         if (WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion())) {
             if (lifecycle == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+                throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
             lifecycle.verifyCompletion(operation);
         }
@@ -715,7 +710,7 @@ final class AgentLifecycleOperations {
                 AgentStoreRows.publicId("rcpt"),
                 now,
                 now,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId),
                 tenantId,
                 sessionId,
@@ -755,7 +750,7 @@ final class AgentLifecycleOperations {
                         + " AND claim_owner = ? AND claim_generation = ?"
                         + " AND claim_until > " + ManagedSchemaTime.SQL_NOW,
                 failureCode, AgentStoreRows.publicId("rcpt"), now, now,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId), tenantId, sessionId,
                 operationId, owner, claimGeneration);
         if (updated == 1) {
@@ -794,7 +789,7 @@ final class AgentLifecycleOperations {
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         duration.toMillis(),
                         now,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -814,7 +809,7 @@ final class AgentLifecycleOperations {
                                 + AgentStoreRows.SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
                                 + " operation_id = ?",
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -860,7 +855,7 @@ final class AgentLifecycleOperations {
                         failureCode,
                         Math.addExact(now, Math.max(0, availableAt - clock.millis())),
                         now,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -903,7 +898,7 @@ final class AgentLifecycleOperations {
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND operation_id = ? AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
                         availableAt,
                         now,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         AgentStoreRows.sessionOperationTarget(sessionId),
                         tenantId,
                         sessionId,
@@ -949,7 +944,7 @@ final class AgentLifecycleOperations {
                         + " 'LEASED' AND claim_owner = ? AND claim_generation = ? AND"
                         + " claim_until > " + ManagedSchemaTime.SQL_NOW,
                 now,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId),
                 tenantId,
                 sessionId,
