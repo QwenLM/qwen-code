@@ -181,7 +181,7 @@ OSS 实现在既有 guarded read loop 内用 Range GET（重试所有权同 `Tra
 
 ## 7. 附录 A — 搭车 schema 增补
 
-**A3 会话列表 preview。** `ma_session` 增加 `preview VARCHAR(1024)`（有界、可空），带类比 `title_revision` 的 revision 守卫（陈旧 writer 不能覆盖更新 preview）。`last_activity` **无需新列**：列表查询 `AgentStoreRows:99`（`SESSION_WITH_STREAM`）已 LEFT JOIN `ma_event_stream`；增选 `es.gmt_modified AS list_last_activity`，扩展 `StreamCounters`/`SessionRecord` 与两个 mapper（`AgentStoreRows:104-127`）。更新 `ManagedSchemaProjection.SESSION` 列清单。列表排序/索引变更仅在测量证明需要时做（模块设计文化）。
+**A3 会话列表 preview。** `ma_session` 增加 `preview VARCHAR(1024)`（有界、可空），带类比 `title_revision` 的 revision 守卫（陈旧 writer 不能覆盖更新 preview）。首片在用户输入 admission 时 settlement preview（最后一条用户输入、截断 1024 字符、`preview_revision < sequence` 守卫）；agent 终端 preview settlement 为同计划后续 slice。`last_activity` **无需新列**：列表查询 `AgentStoreRows:99`（`SESSION_WITH_STREAM`）已 LEFT JOIN `ma_event_stream`；增选 `es.gmt_modified AS list_last_activity`，扩展 `StreamCounters`/`SessionRecord` 与两个 mapper（`AgentStoreRows:104-127`）。更新 `ManagedSchemaProjection.SESSION` 列清单。列表排序/索引变更仅在测量证明需要时做（模块设计文化）。
 
 **A4 队列修订号。** `ma_user_message_queue`（V1:114-127）增加 `queue_revision BIGINT UNSIGNED NOT NULL DEFAULT 0`。在 `JdbcManagedUserMessageStore` 的每个内容/状态变更点同事务维护：submit（`:92-99`）、edit/withdraw（`:103-121`）、resume（`:131`）、claim（`:168`）与 startNext（`:235`）、reconcile 驱动的 `recovery_blocked` 转换；排除 `attempted()`（`:186-190`，仅调度时间戳）。一个私有 helper 做 `queue_revision = queue_revision + 1`；WebShell 轮询/ETag 降为单行读。更新 `ManagedSchemaProjection` 队列列清单与队列插入（`:259-261`）。
 

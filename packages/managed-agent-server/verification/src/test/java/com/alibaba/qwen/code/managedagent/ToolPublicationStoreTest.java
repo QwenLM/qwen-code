@@ -414,6 +414,16 @@ class ToolPublicationStoreTest {
     private ToolPublicationDataStore csiData(Map<String, byte[]> objects) {
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) { objects.putIfAbsent(key, bytes.clone()); }
             @Override
             public InputStream open(String key) { return new ByteArrayInputStream(objects.get(key)); }
@@ -539,6 +549,16 @@ class ToolPublicationStoreTest {
         reserve();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("Unexpected OSS write"); }
 
             @Override
@@ -572,6 +592,16 @@ class ToolPublicationStoreTest {
         Map<String, byte[]> objects = new java.util.HashMap<>();
         java.util.concurrent.atomic.AtomicInteger writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 if (writes.incrementAndGet() == 1) {
@@ -616,6 +646,16 @@ class ToolPublicationStoreTest {
         CountDownLatch release = new CountDownLatch(1);
         var writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
@@ -766,6 +806,16 @@ class ToolPublicationStoreTest {
         var release = new CountDownLatch(1);
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
                 if (!terminal) {
@@ -858,6 +908,16 @@ class ToolPublicationStoreTest {
         reserve();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) { throw new IllegalStateException("lost PUT reply"); }
 
             @Override
@@ -891,6 +951,16 @@ class ToolPublicationStoreTest {
         Map<String, byte[]> objects = new java.util.HashMap<>();
         var objectReads = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
@@ -1056,6 +1126,16 @@ class ToolPublicationStoreTest {
         }
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
@@ -1424,6 +1504,16 @@ class ToolPublicationStoreTest {
         boolean[] corruptNext = {false};
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 byte[] stored = bytes.clone();
                 if (corruptNext[0]) {
@@ -1467,6 +1557,16 @@ class ToolPublicationStoreTest {
         reserve();
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
@@ -1520,6 +1620,16 @@ class ToolPublicationStoreTest {
         boolean[] slow = {false};
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
             }
 
@@ -1563,6 +1673,16 @@ class ToolPublicationStoreTest {
         reserve();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 throw new IllegalStateException("Lost candidate PUT reply");
             }
@@ -1604,6 +1724,16 @@ class ToolPublicationStoreTest {
         boolean[] slow = {false};
         long[] verificationTime = {0};
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) { }
 
@@ -1701,6 +1831,16 @@ class ToolPublicationStoreTest {
             }
         };
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             private Path file(String key) { return root.resolve(digest(key)); }
 
             @Override
@@ -2792,6 +2932,16 @@ class ToolPublicationStoreTest {
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket =
                 new ToolPublicationObjectStore() {
+                    @Override
+                    public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                        guard.run();
+                        try (InputStream full = open(key)) {
+                            byte[] bytes = full.readAllBytes();
+                            return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                        } catch (java.io.IOException error) {
+                            throw new IllegalStateException(error);
+                        }
+                    }
                     @Override
                     public void putIfAbsent(String key, byte[] bytes) {
                         objects.putIfAbsent(key, bytes.clone());

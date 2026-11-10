@@ -217,6 +217,16 @@ class HostedWorkspaceToolTurnIT {
         var objects = new ConcurrentHashMap<String, byte[]>();
         context.registerBean("unicodeObjects", ToolPublicationObjectStore.class, () -> new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 byte[] previous = objects.putIfAbsent(key, bytes.clone());
                 if (previous != null && !java.util.Arrays.equals(previous, bytes)) {

@@ -66,6 +66,7 @@ public class ManagedAgentProperties
     private final SessionStore sessionStore = new SessionStore();
     private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
+    private final SessionResources sessionResources = new SessionResources();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
     private final ManagedExtensions managedExtensions = new ManagedExtensions();
@@ -760,6 +761,21 @@ public class ManagedAgentProperties
         private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
+    }
+
+    @Getter
+    @Setter
+    public static class SessionResources
+            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                    .SessionResources {
+        private boolean enabled;
+        private String ossKeyPrefix = "session-resources/";
+        private boolean packJobEnabled;
+        private boolean deletionEnabled;
+        private long packTargetBytes = 16L * 1024 * 1024;
+        private int packMaxTransactions = 4096;
+        @DurationUnit(ChronoUnit.HOURS)
+        private Duration deletionGrace = Duration.ofHours(72);
     }
 
     @Getter

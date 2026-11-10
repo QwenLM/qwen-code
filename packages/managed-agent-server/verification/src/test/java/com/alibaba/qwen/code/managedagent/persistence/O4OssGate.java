@@ -84,6 +84,16 @@ public class O4OssGate extends O4MySqlGate {
         try (var real = new OssFixture(client())) {
             String objectKey = ownedPrefix() + "one";
             var uncertain = new ToolPublicationObjectStore() {
+                @Override
+                public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                    guard.run();
+                    try (InputStream full = open(key)) {
+                        byte[] bytes = full.readAllBytes();
+                        return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                    } catch (java.io.IOException error) {
+                        throw new IllegalStateException(error);
+                    }
+                }
                 private boolean first = true;
                 @Override public void putIfAbsent(String key, byte[] bytes) { real.putIfAbsent(key, bytes); }
                 @Override public InputStream open(String key) { return real.open(key); }

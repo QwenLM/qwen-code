@@ -96,7 +96,7 @@ final class AgentStoreRows {
             "ACCEPTED", "RUNNING", "CANCELLING");
 
     static final String SESSION_WITH_STREAM =
-            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
+            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
 
     final RowMapper<SessionRecord> sessionMapper;
 
@@ -123,7 +123,8 @@ final class AgentStoreRows {
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
                 result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
-                result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"));
+                result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"),
+                result.getString("preview"), nullableLong(result, "list_last_activity"));
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
