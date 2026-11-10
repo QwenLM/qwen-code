@@ -1724,6 +1724,32 @@ describe('PermissionManager', () => {
       const ctx = sh('cat ./secret.txt', '/project/subdir');
       expect(await pm2.evaluate(ctx)).toBe('deny');
     });
+
+    // B3: the virtual operations are the only input the path rules see, so a
+    // `#` the lexer cannot prove to be at a word start must not hide a write
+    // from them — hiding it lets a Bash allow rule bypass a Write deny.
+    describe('comment word boundaries keep writes visible', () => {
+      const rules = {
+        permissionsAllow: ['Bash(echo *)', 'Bash(printf *)', 'Bash(cat *)'],
+        permissionsDeny: ['Write(./out.txt)'],
+        cwd: '/repo',
+      };
+
+      it.each([
+        ['an arithmetic close', 'echo $((1))#x > out.txt'],
+        ['a process-substitution close', 'cat <(echo hi)#x > out.txt'],
+        ['a continued word', 'printf hi\\\n#x > out.txt'],
+        ['an escaped space', 'echo a\\ # x > out.txt'],
+      ])('keeps a write after %s subject to the deny', async (_t, command) => {
+        expect(await makePm(rules).evaluate(sh(command, '/repo'))).toBe('deny');
+      });
+
+      it('drops a write inside a proven comment', async () => {
+        expect(
+          await makePm(rules).evaluate(sh('echo hi #x > out.txt', '/repo')),
+        ).toBe('allow');
+      });
+    });
   });
 
   describe('monitor command-level evaluation', () => {

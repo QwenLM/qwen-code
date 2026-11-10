@@ -445,6 +445,28 @@ describe('isDestructiveCommand — git commit --amend', () => {
     }
   });
 
+  it('looks inside a flag value that runs a command substitution', () => {
+    // B2: a flag value is an argument, but the shell runs its substitutions
+    // first, so a nested amend is part of what executes.
+    expect(amendNeedsApproval('git commit -m "$(git commit --$x)"')).toBe(true);
+    expect(amendNeedsApproval('git commit --author="$(git commit --$x)"')).toBe(
+      true,
+    );
+    expect(amendNeedsApproval('git commit -m "`git commit --$x`"')).toBe(true);
+    // A harmless substitution stays a value.
+    expect(amendNeedsApproval('git commit -m "$(cat msg)"')).toBe(false);
+    expect(amendNeedsApproval('git commit -m "note $(echo hi)"')).toBe(false);
+  });
+
+  it('consumes the next token only when m ends a short-option cluster', () => {
+    expect(amendNeedsApproval('git commit -am "$msg"')).toBe(false);
+    expect(amendNeedsApproval('git commit -avm "$msg"')).toBe(false);
+    expect(amendNeedsApproval('git commit -a -m "$msg"')).toBe(false);
+    // `m` takes the inline `a` as its value here, leaving `$msg` a bare
+    // argument that could become a flag.
+    expect(amendNeedsApproval('git commit -ma "$msg"')).toBe(true);
+  });
+
   it.each([
     'git status',
     'git commit -m "a normal commit"',

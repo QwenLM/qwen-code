@@ -227,6 +227,15 @@ function mentionsGitCommitAmendInSegment(command: string): boolean {
     // (`-m "fix: $issue"`, `--author="$a"`).
     const valueToken =
       isGitCommitValueFlag(previousToken) || isValueFlagToken(token);
+    if (valueToken) {
+      // A flag value is exempt from the structural checks, but the shell runs
+      // a command substitution inside it first: `-m "$(git commit --$x)"` is
+      // an amend. Recurse into each substitution body instead of exempting the
+      // whole token.
+      for (const nested of commandSubstitutions(token)) {
+        if (amendNeedsApproval(nested)) return true;
+      }
+    }
     let tokenBare: string | undefined;
     // A redirect glued to a word still splits it in bash (`git>|/dev/null`),
     // so split it here too before deciding what the word is (R25-2).
@@ -296,7 +305,49 @@ function isLeadingExpansion(word: string): boolean {
 }
 
 function isGitCommitValueFlag(word: string | undefined): boolean {
-  return word !== undefined && GIT_COMMIT_VALUE_FLAGS.has(word);
+  if (word === undefined) return false;
+  if (GIT_COMMIT_VALUE_FLAGS.has(word)) return true;
+  // In a combined short-option cluster the last letter takes the value:
+  // `-am "$msg"` / `-avm "$msg"` consume it, while `-ma "$msg"` carries `a` as
+  // the value of `m` and leaves `$msg` a bare argument.
+  return /^-[A-Za-z]*m$/.test(word);
+}
+
+/**
+ * Bodies of the `$(…)` and backtick substitutions in a token, in source order.
+ * Arithmetic expansions (`$((…))`) run no command and are skipped.
+ */
+function commandSubstitutions(text: string): string[] {
+  const bodies: string[] = [];
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === '`') {
+      const end = text.indexOf('`', index + 1);
+      if (end === -1) break;
+      bodies.push(text.slice(index + 1, end));
+      index = end;
+      continue;
+    }
+    if (char !== '$' || text[index + 1] !== '(') continue;
+    if (text[index + 2] === '(') {
+      index += 2;
+      continue;
+    }
+    let depth = 1;
+    let cursor = index + 2;
+    for (; cursor < text.length && depth > 0; cursor++) {
+      const inner = text[cursor];
+      if (inner === '\\') {
+        cursor++;
+        continue;
+      }
+      if (inner === '(') depth++;
+      else if (inner === ')') depth--;
+    }
+    if (depth === 0) bodies.push(text.slice(index + 2, cursor - 1));
+    index = cursor - 1;
+  }
+  return bodies;
 }
 
 /** `--author=$a` or `-m$msg`: a value flag carrying its value inline. */

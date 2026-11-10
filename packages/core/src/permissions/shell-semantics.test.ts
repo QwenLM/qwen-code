@@ -1097,6 +1097,27 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
   });
 });
 
+describe('comment word boundaries', () => {
+  it.each([
+    ['an arithmetic close', 'echo $((1))#x > out.txt'],
+    ['a process-substitution close', 'cat <(echo hi)#x > out.txt'],
+    ['a continued word', 'printf hi\\\n#x > out.txt'],
+  ])('keeps the write after %s visible', (_title, command) => {
+    // B3: hiding the write here bypasses a `Write(./out.txt)` deny, so the
+    // operation must stay in the extracted set.
+    expect(across(command)).toContainEqual(
+      expect.objectContaining({
+        virtualTool: 'write_file',
+        filePath: '/repo/out.txt',
+      }),
+    );
+  });
+
+  it('drops a write inside a proven comment', () => {
+    expect(across('echo hi #x > out.txt')).toEqual([]);
+  });
+});
+
 describe('ANSI-C wrapper payloads', () => {
   it.each([
     [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],

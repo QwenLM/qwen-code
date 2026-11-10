@@ -2705,8 +2705,16 @@ class HeredocLexer {
    * pops `subst` closes a command substitution, so a following `#` is word
    * data rather than a comment.
    */
-  private parenStack: Array<'subst' | 'plain'> = [];
-  private closedCommandSubstitution = false;
+  private parenStack: Array<'subst' | 'process' | 'plain'> = [];
+  /**
+   * True when the `)` just scanned closed something that is part of a word
+   * (`$(…)`, `<(…)`, `$((…))`), so a following `#` stays inside the word.
+   */
+  private closeBindsWord = false;
+  /** True when the previous line ended with a line continuation. */
+  private continuedLine = false;
+  /** Whether each open `((` was a `$((` expansion (part of a word). */
+  private arithmeticIsWord: boolean[] = [];
 
   hasUncertainty(): boolean {
     return this.uncertain;
@@ -2737,6 +2745,8 @@ class HeredocLexer {
   scan(line: string): string[] {
     const dollarFromPreviousLine = this.continuedDollar;
     this.continuedDollar = false;
+    const continuedFromPreviousLine = this.continuedLine;
+    this.continuedLine = false;
     this.ambiguousCommentTail = false;
     this.commentStart = null;
     const delimiters: string[] = [];
@@ -2810,12 +2820,14 @@ class HeredocLexer {
         // `))` is seen instead of latching the depth past the line (R25-1).
         if (char === ')' && line[index + 1] === ')') {
           this.arithmeticDepth--;
+          this.closeBindsWord = this.arithmeticIsWord.pop() === true;
           index++;
         }
         continue;
       }
       if (char === '(' && line[index + 1] === '(') {
         this.arithmeticDepth++;
+        this.arithmeticIsWord.push(line[index - 1] === '$');
         index++;
         continue;
       }
@@ -2827,11 +2839,16 @@ class HeredocLexer {
         continue;
       }
       if (char === '(') {
-        this.parenStack.push('plain');
+        this.parenStack.push(
+          line[index - 1] === '<' || line[index - 1] === '>'
+            ? 'process'
+            : 'plain',
+        );
         continue;
       }
       if (char === ')') {
-        this.closedCommandSubstitution = this.parenStack.pop() === 'subst';
+        const kind = this.parenStack.pop();
+        this.closeBindsWord = kind === 'subst' || kind === 'process';
         continue;
       }
       if (char === '#' && (index === 0 || /[\s;&|()]/.test(line[index - 1]!))) {
@@ -2844,7 +2861,8 @@ class HeredocLexer {
           this.commentBoundaryIsAmbiguous(
             line,
             index,
-            this.closedCommandSubstitution,
+            this.closeBindsWord,
+            continuedFromPreviousLine,
           )
         ) {
           // The `#` may belong to the previous word, so the rest of the line
@@ -2882,6 +2900,8 @@ class HeredocLexer {
     }
     this.escaped = false;
     this.continuedDollar = endsWithDollarContinuation(line);
+    const trailing = /\\+$/.exec(line)?.[0].length ?? 0;
+    this.continuedLine = trailing % 2 === 1;
     return delimiters;
   }
 
@@ -2898,8 +2918,13 @@ class HeredocLexer {
   private commentBoundaryIsAmbiguous(
     line: string,
     index: number,
-    closesCommandSubstitution: boolean,
+    closeBindsWord: boolean,
+    continuedFromPreviousLine: boolean,
   ): boolean {
+    if (index === 0) {
+      // A continued line glues this `#` onto the previous line's word.
+      return continuedFromPreviousLine;
+    }
     const previous = line[index - 1];
     if (previous === ' ' || previous === '\t') {
       let backslashes = 0;
@@ -2907,11 +2932,11 @@ class HeredocLexer {
       return backslashes % 2 === 1;
     }
     if (previous === ')') {
-      // `(true)#` closes a subshell, where `#` really is a comment; `$(…)#`
-      // closes a command substitution inside the word, where it is data. The
-      // scan tracks which paren this `)` popped, so an earlier `$(` elsewhere
-      // on the line cannot make a subshell look like a substitution.
-      return closesCommandSubstitution;
+      // `(true)#` closes a subshell, where `#` really is a comment. A `)`
+      // that closes `$(…)`, `<(…)`/`>(…)` or `$((…))` leaves the word open,
+      // so a `#` there is data. Anything the scan cannot classify is treated
+      // as word data rather than truncated away.
+      return closeBindsWord;
     }
     return false;
   }
