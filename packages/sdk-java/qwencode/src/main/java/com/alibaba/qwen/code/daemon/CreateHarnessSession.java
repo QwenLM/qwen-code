@@ -16,6 +16,7 @@ public final class CreateHarnessSession {
     private final Long captureBytes;
     private final Map<String, Object> agentDefinition;
     private final String modelConfigDigest;
+    private final String memoryStoreId;
     private final Map<String, Object> sessionSkillsRef;
     private final Map<String, Object> initialSelection;
     private final List<Map<String, Object>> mcpServers;
@@ -40,6 +41,10 @@ public final class CreateHarnessSession {
         this.captureBytes = builder.captureBytes;
         this.agentDefinition = builder.agentDefinition;
         this.modelConfigDigest = builder.modelConfigDigest;
+        this.memoryStoreId = builder.memoryStoreId;
+        if (memoryStoreId != null && managedSessionStore == null) {
+            throw new IllegalArgumentException("Personal memory requires a Managed Session Store");
+        }
         if (modelConfigDigest != null && managedSessionStore == null) {
             throw new IllegalArgumentException("Session model configuration requires a Managed Session Store");
         }
@@ -105,6 +110,9 @@ public final class CreateHarnessSession {
         if (modelConfigDigest != null) {
             result.put("modelConfigDigest", modelConfigDigest);
         }
+        if (memoryStoreId != null) {
+            result.put("memoryStoreId", memoryStoreId);
+        }
         if (initialSelection != null) {
             result.put("initialSelection", initialSelection);
         }
@@ -142,6 +150,7 @@ public final class CreateHarnessSession {
         private Long captureBytes;
         private Map<String, Object> agentDefinition;
         private String modelConfigDigest;
+        private String memoryStoreId;
         private Map<String, Object> sessionSkillsRef;
         private Map<String, Object> initialSelection;
         private List<Map<String, Object>> mcpServers;
@@ -185,6 +194,14 @@ public final class CreateHarnessSession {
 
         public Builder agentDefinition(Map<String, Object> value) {
             this.agentDefinition = Map.copyOf(value);
+            return this;
+        }
+
+        public Builder memoryStoreId(String value) {
+            if (value != null && !value.matches("[A-Za-z0-9_-]{1,128}")) {
+                throw new IllegalArgumentException("Invalid memoryStoreId");
+            }
+            this.memoryStoreId = value;
             return this;
         }
 

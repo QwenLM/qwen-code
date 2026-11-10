@@ -1688,6 +1688,14 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             try {
                 Map<String, Object> fields = ManagedContextProtocol.parse(body.bytes());
                 Object code = fields.get("code");
+                if (ManagedExtensionProtocol.PATH.equals(path) && fields.keySet().equals(Set.of("code"))
+                        && code instanceof String skillCode
+                        && Set.of("source_changed", "skill_source_unavailable", "skill_source_busy",
+                                "skill_snapshot_unavailable", "skill_snapshot_capacity", "skill_snapshot_pending",
+                                "skill_snapshot_conflict", "skill_source_limit", "skill_candidate_limit").contains(skillCode)
+                        && response.headers().firstValue("Content-Encoding").isEmpty()) {
+                    return error(409, skillCode, "Runtime Skill source was refused.", false);
+                }
                 if (fields.keySet().equals(Set.of("code", "error"))
                         && fields.get("error") instanceof String
                         && ("managed_context_unavailable".equals(code)

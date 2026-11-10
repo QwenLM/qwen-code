@@ -21,6 +21,7 @@ interface TipHistoryEntry {
 interface TipHistoryData {
   sessionCount: number;
   tips: Record<string, TipHistoryEntry>;
+  btwUseCount?: number;
 }
 
 export class TipHistory {
@@ -36,6 +37,15 @@ export class TipHistory {
 
   get sessionCount(): number {
     return this.data.sessionCount;
+  }
+
+  get btwUseCount(): number {
+    return this.data.btwUseCount ?? 0;
+  }
+
+  recordBtwUse(): void {
+    this.data.btwUseCount = this.btwUseCount + 1;
+    this.persist();
   }
 
   /**
@@ -146,6 +156,11 @@ export class TipHistory {
                 ? Math.floor(parsed.sessionCount)
                 : 0,
             tips: parsed.tips ?? {},
+            ...(typeof parsed.btwUseCount === 'number' &&
+            Number.isFinite(parsed.btwUseCount) &&
+            parsed.btwUseCount > 0
+              ? { btwUseCount: Math.floor(parsed.btwUseCount) }
+              : {}),
           };
         }
       }

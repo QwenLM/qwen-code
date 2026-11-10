@@ -79,11 +79,13 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.n
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.workerRefusedRelease;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
 public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerOperations {
@@ -673,13 +675,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         });
     }
 
-    private static boolean workerRefusedRelease(Throwable error) {
-        Throwable cause = unwrap(error);
-        return cause instanceof RuntimeBrokerException failure
-                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
-                        || "managed_runtime_release_timeout".equals(failure.getCode()));
-    }
-
     /**
      * Clears durable Workspace ownership for Sessions this drain has retired.
      * Their worker is stopped and their rows are released, so no writer can
@@ -859,11 +854,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        return capabilitiesContext(harnessSessionId, authority).thenApply(HarnessSessionResolver.Capabilities::scope);
+    }
+
+    @Override
+    public CompletionStage<HarnessSessionResolver.Capabilities> capabilitiesContext(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
-                "harnessSessionId");
-        return resolveScope(harnessId, true, authority);
+        return RuntimeBrokerSupport.resolveCapabilities(sessionResolver, harnessSessionId, authority);
     }
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
@@ -935,7 +932,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         Map<String, Object> immutable = immutableMap(operation, "extension operation");
         ManagedExtensionProtocol.validateOperation(immutable);
         boolean recovery = ManagedExtensionProtocol.isRecovery(immutable);
-        boolean status = "extension-status".equals(immutable.get("kind"));
+        boolean status = "extension-status".equals(immutable.get("kind")) || "extension-skill-candidates".equals(immutable.get("kind"));
         if ((expectedBindingId == null) != (expectedGeneration == null) || expectedBindingId == null && !status) {
             throw invalid("runtime_control_operation_invalid", "Extension mutations require the original Runtime identity.");
         }
@@ -2657,10 +2654,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         provisioner.close();
     }
 
-    private CompletionStage<RuntimeScope> resolveScope(String harnessSessionId) {
-        return resolveScope(harnessSessionId, null);
-    }
-
     private CompletionStage<RuntimeScope> resolveScope(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         return resolveScope(harnessSessionId, false, authority);
@@ -2683,17 +2676,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             // such as one without a storage ID, rather than fall back.
             throw new RuntimeBrokerException(400, "runtime_placement_invalid",
                     "Runtime placement is invalid", false, exception);
-        }
-    }
-
-    private static void requireSameSession(RuntimeSession actual,
-            RuntimeSession requested) {
-        if (!actual.getHarnessSessionId().equals(
-                requested.getHarnessSessionId())
-                || !actual.getTurnKind().equals(requested.getTurnKind())
-                || !actual.getScope().equals(requested.getScope())) {
-            throw conflict("runtime_session_conflict",
-                    "runtimeSessionId belongs to another Session identity");
         }
     }
 

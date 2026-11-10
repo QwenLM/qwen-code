@@ -72,7 +72,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setTimeout(10);
         this.managed = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, harnessRules);
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, harnessRules);
         this.storage = new WorkspaceCsiReservationStore(jdbc, manager, json);
         this.registration = Objects.requireNonNull(registration);
         this.sessionId = sessionId;

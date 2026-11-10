@@ -1,8 +1,9 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
@@ -106,7 +107,7 @@ public class WorkspaceRuntimeInstallProbeTest {
         when(guard.enabled()).thenReturn(true);
         var dataSource = probeDataSource("probe-guarded");
         WorkspaceRuntimeResolver guarded = new WorkspaceRuntimeResolver(
-                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(
+                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new JdbcTemplate(
                         dataSource),
                         new DataSourceTransactionManager(dataSource), guard)),
                 mountProperties(root));
@@ -121,7 +122,7 @@ public class WorkspaceRuntimeInstallProbeTest {
         // against the current binding (would permanently refuse the escape).
         org.mockito.Mockito.verifyNoMoreInteractions(guard);
 
-        org.mockito.Mockito.doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable())
+        org.mockito.Mockito.doThrow(WorkspaceExecutionStore.unavailable())
                 .when(guard).verifyProbe(
                         org.mockito.ArgumentMatchers.any(
                                 ContextBinding.class));
@@ -211,7 +212,7 @@ public class WorkspaceRuntimeInstallProbeTest {
         when(guard.enabled()).thenReturn(true);
         var dataSource = probeDataSource("probe-candidate");
         WorkspaceRuntimeResolver guarded = new WorkspaceRuntimeResolver(
-                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(
+                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new JdbcTemplate(
                         dataSource),
                         new DataSourceTransactionManager(dataSource), guard)),
                 mountProperties(root));
@@ -284,7 +285,7 @@ public class WorkspaceRuntimeInstallProbeTest {
     private WorkspaceRuntimeResolver resolver(Path root) {
         var dataSource = probeDataSource("probe");
         return new WorkspaceRuntimeResolver(null,
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new JdbcTemplate(dataSource),
                         new DataSourceTransactionManager(dataSource))),
                 mountProperties(root));
     }

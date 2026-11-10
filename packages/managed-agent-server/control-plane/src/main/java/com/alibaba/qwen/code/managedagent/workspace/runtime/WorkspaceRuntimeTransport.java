@@ -101,7 +101,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 && !(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(current.getRequest().getProvisionerKind())
                         && ManagedExtensionExecutionProfile.admits(current.getRequest().getScope().getCapabilityDigest()))
                 || !WorkspaceExecutionProfile.admitsCapabilityDigest(current.getRequest().getScope().getCapabilityDigest())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return delegate.mcpDefinitions(current);
     }
@@ -128,7 +128,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !Long.toString(saved.getWorkspaceGeneration()).equals(current.getRequest().getScope().getWorkspaceGeneration())
                 || !saved.getStorageId().equals(current.getRequest().getStorageId())
                 || !harnessSessionId.equals(current.getRequest().getIsolationKey())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return delegate.extensionControl(current, harnessSessionId, saved, operation);
     }
@@ -171,10 +171,10 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                     // Hosted tool turn recognizes instead of the ssh_runtime_*
                     // verdict an unrecognized code would park into Session
                     // recovery. The original verdict stays as the cause.
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+                    throw WorkspaceExecutionStore.unavailable(error);
                 }
             } else {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         }
         ownership.claim(context.binding(), context.session());
@@ -233,7 +233,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         if (v3(reference)) {
             if (captureContext == null || !"run_shell_command".equals(reference.get("toolName"))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             Map<String, Object> capture = Map.of("tenantId", session.getScope().getTenantId(),
                     "sessionId", session.getHarnessSessionId(), "turnId", reference.get("promptId"),
@@ -242,7 +242,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                     "capturePolicy", "complete_required");
             return delegate.executeV3(lease, session, wireReference(reference), capture).thenApply(answer -> {
                 if (!"settled".equals(answer.get("state")) || !(answer.get("result") instanceof Map<?, ?>)) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
                 @SuppressWarnings("unchecked")
                 Map<String, Object> result = (Map<String, Object>) answer.get("result");
@@ -318,7 +318,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
             Map<String, Object> expectedCaptureIdentity) {
         if (!managed(session)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Context context = context(lease, session, false, false, true);
         var runtime = context.runtime();
@@ -328,7 +328,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || context.session().getState() != RuntimeSessionRecord.State.READY
                 || !context.session().getSession().getScope().equals(session.getScope())
                 || !Long.toString(runtime.getGeneration()).equals(expectedCaptureIdentity.get("bindingGeneration"))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         try {
             @SuppressWarnings("unchecked")
@@ -337,14 +337,14 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             ManagedCsiProtocol.validateAcknowledgementRequest(request, originalBoot, expectedPod);
             ManagedCsiProtocol.validateAcknowledgementIdentity(lease, session, boot, request, expectedCaptureIdentity);
         } catch (RuntimeException failure) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return delegate.acknowledgeCsi(lease, session, boot, expectedPod, request, expectedCaptureIdentity);
     }
 
     private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
         if (!managed(session)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Context context = context(lease, session, true);
         if (external(context)) {
@@ -355,7 +355,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
 
     private void requireOriginalRuntime(RuntimeLease lease, RuntimeSession session) {
         if (!managed(session)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         context(lease, session, false);
     }
@@ -364,7 +364,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> publisher) {
         if (!managed(session)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Context context = requireLocalCapture(context(lease, session, true));
         assertHeld(context);
@@ -375,7 +375,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> reference, Map<String, Object> receipt) {
         if (!managed(session) || !v3(reference)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         requireLocalCapture(context(lease, session, false));
         return delegate.acknowledgeV3(lease, session, wireReference(reference), receipt)
@@ -387,7 +387,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             Map<String, Object> reference, long afterSequence) {
         if (v3(reference)) {
             if (!managed(session)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             requireLocalCapture(context(lease, session, false));
             return delegate.statusV3(lease, session, wireReference(reference), afterSequence)
@@ -401,7 +401,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             Map<String, Object> reference) {
         if (v3(reference)) {
             if (!managed(session)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             requireLocalCapture(context(lease, session, false));
             return delegate.cancelV3(lease, session, wireReference(reference))
@@ -417,7 +417,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private static Context requireLocalCapture(Context context) {
         if (!java.util.Set.of(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS, com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)
                 .contains(context.runtime().getRequest().getProvisionerKind())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return context;
     }
@@ -484,7 +484,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || ManagedShellProtocol.isOperation(operation)
                 || ManagedMonitorProtocol.isOperation(operation)) {
             if (!managed(session)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (ManagedExtensionCommandProtocol.isOperation(operation)) {
                 ManagedExtensionCommandProtocol.validateSession(session, operation);
@@ -504,7 +504,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (recovery) {
                 if (!isHeld(context)) {
@@ -547,7 +547,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         return delegate.release(lease, session).thenCompose(released -> {
             if (!Boolean.TRUE.equals(released)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false);
         })
@@ -732,7 +732,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             var resolved = hook ? resolver.resolveHook(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority())
                     : resolver.resolve(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
             if (!resolved.scope().equals(session.getScope())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             binding = resolved.binding();
         } else {
@@ -756,7 +756,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !Long.toString(binding.getWorkspaceGeneration()).equals(
                         session.getScope().getWorkspaceGeneration())
                 || !sameLease(lease, runtime.getLease())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(runtime.getRequest())) {
             // Repository identity excludes transient lifecycle authority; preserve only the caller's

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
@@ -212,7 +213,7 @@ public final class JdbcRuntimeBindingRepository
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
             clear.setLong(3, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
-            com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.releaseMembers(connection, key,
+            JdbcWorkspaceExecutionStore.releaseMembers(connection, key,
                     clear.executeUpdate());
         }
     }

@@ -85,6 +85,7 @@ export function createHostedHarnessContract(
       'hosted_model_round_recovery_v1',
       'model-selection/1',
       'session-model-config/1',
+      'session-memory/1',
       'context-compression/1',
       'user-message-queue/1',
       'public-child-agents/1',
@@ -100,6 +101,8 @@ export function createHostedHarnessContract(
       'workspace-shell-mcp/1',
       'session-mcp-management/1',
       'session-extension-packages/1',
+      'managed-package-preparation/1',
+      'managed-runtime-skill-import/1',
       'recovery-cleanup/1',
       'targeted-cancel/1',
       // GET /session/:id/events writes keepalive comments while no event

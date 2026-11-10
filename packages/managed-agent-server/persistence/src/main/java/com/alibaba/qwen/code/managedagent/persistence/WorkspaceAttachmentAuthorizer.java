@@ -17,11 +17,11 @@ import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionSt
  * the store enforced inline.
  */
 final class WorkspaceAttachmentAuthorizer {
-    private final WorkspaceExecutionStore store;
+    private final JdbcWorkspaceExecutionStore store;
     private final JdbcTemplate jdbc;
     private final ResidentWorkspaces residents;
 
-    WorkspaceAttachmentAuthorizer(WorkspaceExecutionStore store, JdbcTemplate jdbc, ResidentWorkspaces residents) {
+    WorkspaceAttachmentAuthorizer(JdbcWorkspaceExecutionStore store, JdbcTemplate jdbc, ResidentWorkspaces residents) {
         this.store = store;
         this.jdbc = jdbc;
         this.residents = residents;
@@ -172,7 +172,7 @@ final class WorkspaceAttachmentAuthorizer {
         java.util.Set<String> visited = new java.util.HashSet<>();
         String current = sessionId;
         while (visited.add(current)) {
-            SessionWorktreeStore.requireReady(store.worktreeFiles(), jdbc, tenantId, current);
+            JdbcSessionWorktreeStore.requireReady(store.worktreeFiles(), jdbc, tenantId, current);
             var parents = jdbc.query("SELECT parent_session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     (row, index) -> row.getString(1), tenantId, current);
             if (parents.size() != 1) {

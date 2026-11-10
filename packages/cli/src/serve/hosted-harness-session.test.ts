@@ -70,6 +70,7 @@ import type {
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
+import { HostedRestoreKeptBytes } from './hosted-restore-kept-bytes.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -273,6 +274,7 @@ const state = vi.hoisted(() => ({
   ownershipReleases: [] as Array<Record<string, unknown>>,
   setLifecycleAuthority: vi.fn(),
   modelConfig: vi.fn(),
+  memory: vi.fn(),
   authorizeLifecycle: vi.fn(async () => undefined),
   authorizeOrdinary: vi.fn(async (_kind?: 'legacy-close') => undefined),
   approvalSelections: new Map<
@@ -292,6 +294,8 @@ const state = vi.hoisted(() => ({
       workspaceContext?: { read(): string | undefined };
       modelSelection?: { modelId: string; revision: number };
       modelConfig?: import('./hosted-model-config.js').HostedModelConfigReader;
+      memory?: import('./hosted-memory-session.js').HostedMemorySession;
+      recallUserInput?: boolean;
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -417,6 +421,7 @@ vi.mock(
         claimUserMessages: async () => [],
         setLifecycleAuthority: state.setLifecycleAuthority,
         modelConfig: state.modelConfig,
+        memory: state.memory,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
         approvalSelection: async () => {
@@ -562,6 +567,7 @@ beforeEach(({ task }) => {
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   state.modelConfig.mockReset();
+  state.memory.mockReset();
   vi.spyOn(
     HostedWorkspaceBroker.prototype,
     'capabilityDigest',
@@ -1661,6 +1667,250 @@ describe('Hosted Harness no-tool session', () => {
       expect(result.status).toBe(409);
       expect(result.body.code).toBe('hosted_agent_definition_conflict');
       expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['create', 'resident-load', 'cold-load'])(
+    'refuses an omitted personal memory binding on %s',
+    async (operation) => {
+      let server = await app();
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+      });
+      expect(created.status).toBe(200);
+      expect(state.memory).not.toHaveBeenCalled();
+      if (operation === 'cold-load') {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', created.body.clientId as string)
+          .expect(204);
+        server = await app();
+      }
+      const result = await headers(
+        supertest(server).post(
+          operation === 'create' ? '/session' : `/session/${SESSION_ID}/load`,
+        ),
+      ).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe('hosted_agent_definition_conflict');
+      expect(state.memory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'enables personal memory without a Workspace only when bound: %s',
+    async (bound) => {
+      const server = await app();
+      state.memory.mockImplementation(async (query: { operation: string }) =>
+        query.operation === 'binding'
+          ? { enabled: true, memoryStoreId: 'memstore_personal' }
+          : { status: 'ok', items: [{ memoryId: 'entry', content: 'saved' }] },
+      );
+      const warm = vi.spyOn(HostedWorkspaceBroker.prototype, 'warm');
+      state.model.mockImplementationOnce(async (input) => {
+        expect(input.recallUserInput).toBe(true);
+        if (bound) {
+          expect(input.memory).toBeDefined();
+          const tools = await input.toolTurn!.declarations(input.signal);
+          expect(tools.map((tool) => tool.name)).toEqual([
+            'context_search',
+            'context_remember',
+            'context_get',
+            'context_forget',
+          ]);
+          await input.memory!.recall(PROMPT_ID, 'preferences', input.signal);
+          const call = {
+            name: 'context_search',
+            callId: 'call-memory',
+            args: { query: 'preferences' },
+            isClientInitiated: false,
+            prompt_id: PROMPT_ID,
+          };
+          await input.toolTurn!.execute(
+            [call],
+            [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: call.args,
+                },
+              },
+            ],
+            'test-model',
+            input.signal,
+          );
+        } else {
+          expect(input.memory).toBeUndefined();
+          expect(input.toolTurn).toBeUndefined();
+        }
+        return { text: 'memory checked', model: 'test-model' };
+      });
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        ...(bound ? { memoryStoreId: 'memstore_personal' } : {}),
+      });
+      expect(created.status).toBe(200);
+      expect(state.memory).not.toHaveBeenCalled();
+      const prompt = [{ type: 'text', text: 'preferences' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      expect(
+        journal.events.find((event) => event.kind === 'turn.settled')?.payload[
+          'outcome'
+        ],
+      ).toBe('completed');
+      expect(state.memory.mock.calls.map(([query]) => query.operation)).toEqual(
+        bound ? ['binding', 'recall', 'search'] : [],
+      );
+      expect(warm).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['resident-load', 'cold-load'])(
+    'resumes committed personal memory results without a Runtime on %s',
+    async (operation) => {
+      let server = await app();
+      state.memory.mockImplementation(async (query: { operation: string }) =>
+        query.operation === 'binding'
+          ? { enabled: true, memoryStoreId: 'memstore_personal' }
+          : { status: 'ok', items: [{ memoryId: 'entry', content: 'saved' }] },
+      );
+      const warm = vi.spyOn(HostedWorkspaceBroker.prototype, 'warm');
+      let committed: Part[] = [];
+      state.model.mockImplementationOnce(async (input) => {
+        await input.toolTurn!.declarations(input.signal);
+        const call = {
+          name: 'context_search',
+          callId: 'call-memory',
+          args: { query: 'preferences' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        // Durable journal parts omit in-memory provenance symbols.
+        committed = structuredClone(
+          await input.toolTurn!.execute(
+            [call],
+            [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: call.args,
+                },
+              },
+            ],
+            'test-model',
+            input.signal,
+          ),
+        );
+        throw new HostedToolRecoveryRequiredError(
+          'Crash after committed memory result',
+        );
+      });
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+      });
+      expect(created.status).toBe(200);
+      const clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'preferences' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.recoveryBlocked).toBe(true);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(committed).toEqual([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ id: 'call-memory' }),
+        }),
+      ]);
+      if (operation === 'cold-load') {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', clientId)
+          .expect(204);
+        server = await app();
+      }
+      state.model.mockResolvedValueOnce({
+        text: 'recovered memory result',
+        model: 'test-model',
+      });
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+        driveRuntimeRecovery: true,
+      });
+      expect(loaded.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          expect(state.model).toHaveBeenCalledTimes(2);
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(state.model.mock.calls[1][0].resumeFromToolResults).toEqual(
+        committed,
+      );
+      expect(
+        state.memory.mock.calls.filter(
+          ([request]) => request.operation === 'search',
+        ),
+      ).toHaveLength(1);
+      expect(warm).not.toHaveBeenCalled();
     },
   );
 
@@ -18581,6 +18831,88 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it('reads each resource once on a workspace cold load, apart from the definition and the latest checkpoint', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const toolProfile = 'hosted-workspace-files/1';
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile,
+    });
+    expect(created.status).toBe(200);
+    for (const promptId of [PROMPT_ID, randomUUID()]) {
+      const prompt = [{ type: 'text', text: `hello ${promptId}` }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+    }
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    const reads = new Map<string, { kind: string; count: number }>();
+    const read = LocalManagedSessionResourceStore.prototype.read;
+    const counted = vi
+      .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+      .mockImplementation(function (
+        this: LocalManagedSessionResourceStore,
+        ref,
+      ) {
+        const entry = reads.get(ref.resourceId);
+        reads.set(ref.resourceId, {
+          kind: ref.kind,
+          count: (entry?.count ?? 0) + 1,
+        });
+        return read.call(this, ref);
+      });
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile });
+    counted.mockRestore();
+    expect(loaded.status).toBe(200);
+    const kinds = new Set([...reads.values()].map(({ kind }) => kind));
+    for (const kind of [
+      'managed-message',
+      'managed-checkpoint',
+      'managed-input',
+      'managed-turn-result',
+    ])
+      expect(kinds).toContain(kind);
+    expect(
+      [...reads.values()].filter(({ kind }) => kind === 'managed-checkpoint')
+        .length,
+    ).toBeGreaterThan(2);
+    // The checkpoints and message bodies the restore verification reads
+    // serve the checkpoint checks and the history projection too. Two reads
+    // happen once per load whatever the history: the load route reads the
+    // definition before the verification does, and the restore bundle reads
+    // the latest checkpoint for its run authorization.
+    expect(
+      [...reads.values()].filter(
+        ({ kind, count }) => count !== (kind === 'managed-definition' ? 2 : 1),
+      ),
+    ).toEqual([{ kind: 'managed-checkpoint', count: 2 }]);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      loaded.body.clientId as string,
+    );
+  });
+
   it('refuses a cold load when a settled file tool outcome is missing from its checkpoint', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
@@ -18721,6 +19053,24 @@ describe('Hosted Harness no-tool session', () => {
     const created = await headers(supertest(server).post('/session')).send(
       body,
     );
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       created.body.clientId as string,
@@ -18825,24 +19175,68 @@ describe('Hosted Harness no-tool session', () => {
     expect(seal).toBeDefined();
     sealedResources.delete(sealKey);
     const read = vi.spyOn(state.toolResults, 'read');
+    const handedOver = vi.spyOn(
+      ManagedSessionRecordSink.prototype,
+      'rememberMessageBody',
+    );
     const refused = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
     expect(refused.body.reason).toBe('restore_verification_failed');
+    // The content check failed after the message bodies were verified, and a
+    // load the checks refuse hands none of them to the shared body cache.
+    expect(handedOver).not.toHaveBeenCalled();
     expect(
       read.mock.calls.map(([ref]) => [ref.kind, ref.resourceId]),
     ).toContainEqual(['managed-tool-result-content', sealId]);
     read.mockRestore();
     sealedResources.set(sealKey, seal);
+    const reread = vi.spyOn(state.toolResults, 'read');
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(loaded.status).toBe(200);
+    expect(handedOver.mock.calls.map(([ref]) => ref.kind)).toContain(
+      'managed-message',
+    );
+    handedOver.mockRestore();
+    // The verification read the manifest once, through the Session's
+    // resources; its manifest check and both content reads use those bytes.
+    expect(
+      reread.mock.calls.filter(
+        ([ref]) => ref.resourceId === manifest.resourceId,
+      ),
+    ).toEqual([]);
+    expect(
+      reread.mock.calls.map(([ref]) => [ref.kind, ref.resourceId]),
+    ).toContainEqual(['managed-tool-result-content', sealId]);
+    reread.mockRestore();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       loaded.body.clientId as string,
+    );
+    // Past its budget a manifest is read through the tool-result store again,
+    // for the manifest check and for each content stream.
+    const unkept = vi
+      .spyOn(HostedRestoreKeptBytes.prototype, 'keep')
+      .mockReturnValue(false);
+    const fallback = vi.spyOn(state.toolResults, 'read');
+    const reloaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
+    expect(reloaded.status).toBe(200);
+    expect(
+      fallback.mock.calls.filter(
+        ([ref]) => ref.resourceId === manifest.resourceId,
+      ),
+    ).toHaveLength(3);
+    fallback.mockRestore();
+    unkept.mockRestore();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      reloaded.body.clientId as string,
     );
   });
 
@@ -20006,12 +20400,15 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       clientId,
@@ -25124,6 +25521,59 @@ describe('Hosted Harness tool approvals', () => {
       await (
         wakeDeps.last as { session: { managed: ManagedSession } }
       ).session.managed.close();
+    },
+  );
+
+  it.each([
+    ['candidates', 'skill_source_busy', 'hosted_skill_source_unavailable'],
+    ['snapshot', 'source_changed', 'hosted_skill_source_unavailable'],
+    [
+      'archive',
+      'skill_snapshot_unavailable',
+      'hosted_skill_snapshot_unavailable',
+    ],
+  ])(
+    'preserves Runtime Skill refusals on the %s route without replay',
+    async (route, code, fallback) => {
+      const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'skillControl');
+      const warm = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'warm')
+        .mockResolvedValue();
+      const { server, authorize } = await mcpApp();
+      const warmCalls = warm.mock.calls.length;
+      const operationId = randomUUID();
+      const send = () => {
+        const base = `/session/${SESSION_ID}/extensions/skills`;
+        const request =
+          route === 'snapshot'
+            ? supertest(server)
+                .post(`${base}/snapshot`)
+                .send({
+                  operationId,
+                  owner: { bindingId: 'binding', generation: '1' },
+                  path: '.qwen/skills/check',
+                  digest: 'a'.repeat(64),
+                })
+            : supertest(server).get(
+                route === 'candidates'
+                  ? `${base}/candidates`
+                  : `${base}/archives/${randomUUID()}?operationId=${operationId}&bindingId=binding&generation=1&offset=0`,
+              );
+        return authorize(request);
+      };
+      control.mockRejectedValueOnce(
+        new HostedWorkspaceBrokerRejection(409, code),
+      );
+      expect((await send().expect(409)).body).toMatchObject({ code });
+      expect(control).toHaveBeenCalledOnce();
+      control.mockRejectedValueOnce(new Error('private transport detail'));
+      expect((await send().expect(409)).body).toMatchObject({ code: fallback });
+      expect(control).toHaveBeenCalledTimes(2);
+      expect(warm).toHaveBeenCalledTimes(warmCalls);
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      ).expect(204);
     },
   );
 
