@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.session;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -20,7 +20,7 @@ class ActionResponseCoordinatorTest {
     @Test
     void disabledHarnessLeavesApprovalResponsesForAnotherReplica() {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         ExecutorService executor = mock(ExecutorService.class);
         ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
                 sessions, actions, new UnavailableHarnessConnector(), executor,

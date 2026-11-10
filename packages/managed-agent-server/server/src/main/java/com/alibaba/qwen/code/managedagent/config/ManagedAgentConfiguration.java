@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
+import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
@@ -85,7 +86,7 @@ public class ManagedAgentConfiguration {
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations.Factory managedWorktreeFactory() {
         return (git, timeout) -> new com.alibaba.qwen.code.managedagent.adapters.workspace.SessionWorktreeGit(
-                new com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit(git, timeout));
+                new ChildWorktreeGit(git, timeout));
     }
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader managedStorageIdentityReader() {

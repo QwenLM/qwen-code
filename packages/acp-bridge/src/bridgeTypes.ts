@@ -1893,6 +1893,11 @@ export type BridgeGenerationStreamEvent =
       text: string;
     }
   | {
+      /** A retry restarted the answer; text from earlier deltas is void. */
+      type: 'reset';
+      requestId: string;
+    }
+  | {
       type: 'done';
       requestId: string;
       model: string;
