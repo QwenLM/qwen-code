@@ -307,8 +307,27 @@ public class ManagedChannelService {
         // receipt written after stepLedger closed the delivery would leave a
         // gap no recovery entry can reach.
         if ("accepted".equals(request.outcome())) {
-            segments.receipt(tenantId, channelId, deliveryId,
+            boolean stored = segments.receipt(tenantId, channelId, deliveryId,
                     request.ordinal(), request.providerMessageId());
+            // A false is either a benign replay (the row already holds a
+            // receipt) or a row that was never planned — a delivery claimed
+            // before the segment ledger existed. Only the missing row needs
+            // convergence: plan it from the committed record and retry, so the
+            // receipt is durable before the line closes.
+            if (!stored && segments.list(tenantId, channelId, deliveryId).stream()
+                    .noneMatch(segment -> segment.ordinal() == request.ordinal())) {
+                instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
+                        .ifPresent(record -> {
+                            String json = instances.readResource(tenantId,
+                                    claim.sessionId(), record.recordResourceId());
+                            if (json != null) {
+                                planSegments(tenantId, channelId, deliveryId,
+                                        readJson(json, "channel delivery record"));
+                            }
+                        });
+                segments.receipt(tenantId, channelId, deliveryId,
+                        request.ordinal(), request.providerMessageId());
+            }
         }
         ChannelDelivery row = stepLedger(tenantId, channelId, deliveryId,
                 state, providerReceipt);
@@ -569,7 +588,6 @@ public class ManagedChannelService {
             PendingDelivery pending) {
         JsonNode record = readJson(instances.readResource(tenantId, pending.sessionId(),
                 pending.recordResourceId()), "channel delivery record");
-        planSegments(tenantId, channelId, pending.deliveryId(), record);
         JsonNode firstSegment = null;
         JsonNode firstUnsent = null;
         for (JsonNode segment : record.required("segments")) {
@@ -584,13 +602,26 @@ public class ManagedChannelService {
         if (firstUnsent == null) {
             throw new IllegalStateException("delivery has no unsent segment");
         }
+        String firstSegmentId = firstSegment.required("segmentId").asText();
+        int firstOrdinal = firstSegment.required("ordinal").asInt();
+        // Identity pre-check before planning: a pending record whose first
+        // segment differs from a stored delivery row is a conflicting chain;
+        // refuse it before any segment row is written, so no orphan rows
+        // persist under the key for the public projection to publish.
+        Optional<ChannelDelivery> stored = deliveries.find(tenantId, channelId,
+                pending.deliveryId());
+        if (stored.isPresent() && (!stored.get().segmentId().equals(firstSegmentId)
+                || stored.get().ordinal() != firstOrdinal)) {
+            throw new IllegalStateException(
+                    "delivery id already belongs to another segment");
+        }
+        planSegments(tenantId, channelId, pending.deliveryId(), record);
         // The delivery-level identity is the record's first segment, stable
         // across a resumed partial: naming the first unsent segment here
         // would make findOrCreate reject the row the first claim wrote.
         ChannelDelivery ledger = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, pending.deliveryId(),
-                firstSegment.required("segmentId").asText(),
-                firstSegment.required("ordinal").asInt(), "planned", null,
+                firstSegmentId, firstOrdinal, "planned", null,
                 0, 0));
         Optional<ChannelClaim> existing = instances.findClaim(tenantId,
                 channelId, pending.deliveryId());

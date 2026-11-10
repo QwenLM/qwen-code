@@ -550,6 +550,58 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void aTerminalReceiptOnAPreLedgerClaimReplansTheSegmentRows() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:101", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        // A delivery claimed before the segment ledger existed: its segment
+        // rows are absent when the receipts arrive.
+        jdbc.update("DELETE FROM ma_channel_segment WHERE tenant_id=?"
+                        + " AND channel_id=?",
+                TENANT, channel);
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId)).isEmpty();
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 1, "<m1@example.com>", null));
+        assertThat(service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 2, "<m2@example.com>", null))
+                .state()).isEqualTo("delivered");
+        // The receipts are durable on the re-planned rows even though the
+        // delivery reached a terminal state the reconciler will not revisit.
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", "<m1@example.com>",
+                        "<m2@example.com>");
+    }
+
+    @Test
+    void aConflictingPendingRecordIsNotPlannedByTheClaimSweep() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:102", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        // A pending record whose first segment is deliveryId:0, but a stored
+        // delivery row already names a different first segment.
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        deliveryId, "other:0", 0, "planned", null, 0, 0));
+        segmentLedger.plan(TENANT, channel, deliveryId,
+                List.of(new SegmentLedger("other:0", 0, null)));
+        // The claim sweep must refuse the conflicting record before planning,
+        // so no orphan segment rows persist under the key.
+        ClaimResponse claimed = service.claimDeliveries(TENANT, channel, 16);
+        assertThat(claimed.deliveries()).isEmpty();
+        assertThat(segmentLedger.list(TENANT, channel, deliveryId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly("other:0");
+    }
+
+    @Test
     void aFailedLastSegmentReceiptKeepsTheDeliveryRecoverable() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:93", "please reply"));
