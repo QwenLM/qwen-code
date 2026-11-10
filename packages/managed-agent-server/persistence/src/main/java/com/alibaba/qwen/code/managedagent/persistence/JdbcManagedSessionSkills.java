@@ -99,7 +99,14 @@ public class JdbcManagedSessionSkills
             }
             return skills;
         } catch (ManagedAgentException error) {
-            throw error;
+            // Keep a corrupt stored snapshot inside this class's conflict
+            // vocabulary: sessionSkills raises the admission code
+            // agent_definition_unsupported, which would blame the caller's
+            // definition for a fault in the server's own committed row.
+            if ("session_skills_conflict".equals(error.getCode())) {
+                throw error;
+            }
+            throw conflict(error);
         } catch (Exception error) {
             throw conflict(error);
         }
