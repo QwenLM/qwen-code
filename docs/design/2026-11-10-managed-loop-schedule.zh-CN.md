@@ -106,20 +106,36 @@ Session 内部的模型没有任何创建途径。
    `cron_list`、`cron_delete` 由 Hosted profile 以 Managed 描述声明，
    正如今天 `write_file`/`edit` 携带 profile 专属文本。skill 的
    `allowedTools` 与其间隔换算表因此原样复用；只有 managed skill 变体
-   中关于 durable 与过期的措辞不同。
+   中关于 durable 与过期的措辞不同。并集的 list/cancel 工具面（决策 6）
+   使 `list`/`clear` 子命令无需改白名单即可工作。
 2. **变更经控制面，绝不单独走 funnel。** store 前缀下新增内部路由族——
    `/internal/managed-session-store/v1/sessions/{sessionId}` 上的
    `automations:create`、`automations:list`、`automations:retire`——
    与 `memory:query` 完全相同地以 writer 绑定鉴权，从绑定 Session 的
-   创建者推导 actor，并委托 `ManagedAutomationService`。委托继承创建者
-   检查、部署开关、模式门、容量检查、command 账本与镜像写入。直接
-   funnel 调用被拒绝作为创建路径：仅存 journal 的 definition 没有镜像
-   行，scanner 永远不会触发它——使 definition 可被发现的是路由，不是
-   funnel。
+   创建者推导 actor，并委托 `ManagedAutomationService`。内部路由是 Session
+   作用域而非 actor 作用域：`create` 的目标是绑定 Session；`list` 在
+   分页前按绑定 Session 过滤——服务的 actor 作用域 `list` 读取创建者
+   在整个 Workspace 可读的全部 definition，会让一个 Session 的 writer
+   看到另一个的；`retire` 在执行或应答重放前验证目标 definition 属于
+   绑定 Session。仅凭创建者 actor 不提供这种隔离：同一用户可以创建多个
+   Session。此作用域是内部路由专属的 carve-out——公开 controller 以无
+   绑定 Session 调用同一服务、保留其 actor 作用域，因此变更绝不能回归
+   公开 API。作用域落在服务/账本内部，过滤发生在分页 limit 之前、`next`
+   游标从过滤后的流推导——controller 侧后置过滤会先切页再返回错误游标。
+   内部 `list` 用覆盖每 Session 容量的页大小（账本的 100 行上限），使满
+   Session 一页装下。委托继承创建者检查、模式门、容量检查、command 账本
+   与镜像写入。部署开关门控创建，同时也停掉 scanner
+   （`AutomationScanner.scan` 在同一设置上提前返回），因此开关关闭期间
+   已武装的 definition 停止触发。`list` 今天已解门控、保持可用；`retire`
+   今天调用 `requireEnabled`，因此切片为内部路由解门控（一处代码变更，
+   非现有行为），使运维能退役开关停掉的东西。直接 funnel 调用被拒绝作为
+   创建路径：仅存 journal 的 definition 没有镜像行，scanner 永远不会触发
+   它——使 definition 可被发现的是路由，不是 funnel。
 3. **Idempotency-Key 从工具执行的身份推导。** 每个变更使用从其
    `executionCallId` 与动词推导的 key（例如
-   `loop:<executionCallId>:create`）。receipt 丢失后被重驱动的执行复用
-   该 key，因此控制面重放已提交的 definition，而不是铸造第二个；重试
+   `loop:<executionCallId>:create`，符合 key 的 1–128 可打印 ASCII
+   界限）。receipt 丢失后被重驱动的执行复用该 key，因此控制面重放已
+   提交的 definition，而不是铸造第二个；重试
    绝不铸造新 key。工具执行器的 journal 拥有至多一次执行语义，推导的
    key 把该保证延伸到控制面，无需新状态。
 4. **参数契约映射到 definition，拒绝 H6 无法表示者。** `recurring`
@@ -129,32 +145,53 @@ Session 内部的模型没有任何创建途径。
    名称，默认 UTC，与每个 definition 一样在准入时解析。prompt 遵守
    `maxPromptBytes` 与包装输入界限；cron 遵守 `maxCronBytes` 与 H6a
    文法。可选 `gate` 透传到 definition，由共享的 `gateCommandError`
-   校验；其无人值守审批由安排时分类器审查覆盖（姊妹设计决策 9 的
-   模式），正如 managed gate 设计已为 definition 作者规定的那样。
+   校验。安排时分类器审查是对模型创建 definition 的新增要求，而非
+   managed gate 设计已规定的内容——该设计的作者审批路径没有分类器。
+   分类器输入同时覆盖续跑 prompt 与 gate 命令，沿用姊妹设计决策 9 的
+   模式。
 5. **本切片不做自动过期。** legacy 的 7 天过期没有 definition 字段；
    工具创建的 definition 持续存在直到被退役，与经公开 API 创建的完全
    一致。预算是每 Session 容量、每次 fire 的 turn 计价、以及让安静
    监视变便宜的 gate 探针。该对等差距记录为开放问题，不予隐藏：
    managed skill 变体告知用户任务会一直运行直到取消。
-6. **list 读 scanner 的真相；delete 即 retire。** `cron_list` 从控制面
-   账本应答——与 scanner 读取的同一批行——且 `create` 在应答前完成
-   镜像，因此创建后的 list 是一致的。`cron_delete` 即退役：中继提交
-   终态 journal 修订版，镜像随之退役；退役已退役的 definition 应答
-   重放，非 ACTIVE 的 Session 走继承的本地退役兜底。唤醒取消属于姊妹
-   切片的 `loop_cancel`，不属于本工具。
+6. **list 与 delete 覆盖两个分支，与本地一致。** `cron_list` 应答并集：
+   绑定 Session 的 definition 来自控制面账本——与 scanner 读取的同一批
+   行——加上 wakeup 切片落地后来自 journal 的未触发 pending loop input。
+   本设计拥有并集契约；wakeup 姊妹篇引用它而非复述。内部 `list` 一页返回
+   满 Session（决策 2 覆盖容量的页大小），但公开 list 默认 20 行而一个
+   Session 可持有 32 个 definition，因此 `cron_list` 无论如何走完每一页
+   再应答（单个 journal 唤醒随最后一页一起返回）；未改动的 skill `clear`
+   配方——list 后 delete 每个返回 id——因此清空整个 Session。`create` 在
+   应答前完成镜像，因此创建后的 list 是一致的。
+   `cron_delete` 按 id 路由：definition id 走退役（中继提交终态 journal
+   修订版，镜像随之退役；退役已退役的 definition 应答重放，非 ACTIVE 的
+   Session 走继承的本地退役兜底）；`loop:<wakeupId>` id 经姊妹切片的仅
+   journal 消费取消唤醒，受其先前尝试守卫。`cron_list` 渲染的唤醒 id 与
+   `cron_delete` 接受的完全一致（`loop:<wakeupId>`），因此从 list 直接
+   喂给 delete 的 id 取消该唤醒——本地形状，`cron_list` 本就列出唤醒
+   （`@wakeup`）、`CronScheduler.delete` 本就 fall-through 到
+   `cancelWakeup`，前缀由 list 产生、由 delete 消费。skill 的
+   `list`/`clear` 子命令原样复用。
 7. **fire 原样走现有流水线。** 到期 slot 成为 `automation_run`，其
    input 与 wake 同事务提交，wake pump 执行 turn，turn settle 该
    run——overlap 策略、公开 Turn 抑制、catch-up、gate 探针全部像对待
    公开 API definition 一样适用。skill 的立即首次执行就是当前 turn；
    不为其新增机制。
 8. **工具面随下一批 profile 修订版发布。**
-   `hosted-workspace-files/4`、`hosted-workspace-shell/2`、
+   `hosted-workspace-files/4`、`hosted-workspace-shell/3`、
    `hosted-workspace-team-lead/2` 声明 cron 三件套，沿用 `files/3`
-   先例；版号假设本切片先落地，若姊妹切片先落地则两族互换。准入要求
-   `qwen.managed-agent.automation.enabled`。read profile 永不声明
-   它们。姊妹切片的 loop 三件套按落地顺序取其后的一批修订版。managed loop skill 变体作为 skill 资产经现有 Session Skills
-   发布；其可见性与工具一同门控，对应本地 `BundledSkillLoader` 在
-   cron 关闭时隐藏 `cron_` skill 的规则。
+   先例；版号假设本切片先落地，若姊妹切片先落地则两族互换。`shell/2`
+   被有意跳过：它是已退役标识符，由
+   [2026-10-23 Shell profile 设计](2026-10-23-managed-shell-profile.zh-CN.md)
+   撤回并被回归测试钉死，重新启用会反转它们。`cron_create` 的准入要求
+   `qwen.managed-agent.automation.enabled`；`cron_list` 与
+   `cron_delete` 在开关关闭时仍声明且可用（决策 2）。read profile 永不
+   声明它们。姊妹切片在其后的一批修订版上新增 `loop_wakeup`，并把
+   `cron_list`/`cron_delete` 扩展到决策 6 的并集——工具名是持久化词汇，
+   行为可以生长；无论哪个切片先落地都由它声明 `cron_list`/`cron_delete`。
+   managed loop skill 变体作为 skill 资产经现有 Session Skills 发布，
+   `allowedTools` 与 bundled skill 相同；其可见性与工具一同门控，对应
+   本地 `BundledSkillLoader` 在 cron 关闭时隐藏 `cron_` skill 的规则。
 9. **失败语义区分可重试与终态。** 传输故障或 503 使工具执行保持
    pending；重驱动推导同一 key，遇到认领或重放。`PRE_COMMIT_REFUSALS`
    与其他所有确定性 4xx（容量、冲突、文法、时区）是携带类型化 code 的
@@ -172,8 +209,8 @@ Session 内部的模型没有任何创建途径。
 | 1    | `cron_create`（工具执行） | 执行器以 `executionCallId` 记录 intent；内部 `automations:create` 路由认领推导的 key，中继 `define_schedule`，镜像 definition，结算 command；工具应答 schedule id |
 | 2    | skill 的立即首次执行      | 当前 turn——无新机制                                                                                                                                               |
 | 3    | scanner tick              | 镜像行的到期 slot 成为 occurrence；`fire_run` 提交 run、其 input 与 wake；wake pump 执行 turn；turn settle 该 run                                                 |
-| 4    | `cron_list`               | 内部 `automations:list` 路由应答账本页                                                                                                                            |
-| 5    | `cron_delete`             | 内部 `automations:retire` 路由中继 `retire_schedule` 并退役镜像；已退役的 id 应答重放                                                                             |
+| 4    | `cron_list`               | 内部 `automations:list` 路由走完每一账本页并加上未触发 pending 唤醒；工具应答完整并集，每个唤醒 id 渲染为 `cron_delete` 接受的形式                                |
+| 5    | `cron_delete`             | definition id 中继 `retire_schedule` 并退役镜像（已退役的 id 应答重放）；`loop:<wakeupId>` id 路由到姊妹切片的仅 journal 取消                                     |
 | 6    | 被重驱动的执行            | 同一 `executionCallId` 推导同一 key；控制面应答重放，绝不产生第二个 definition                                                                                    |
 
 ## 契约触点
@@ -182,11 +219,20 @@ Session 内部的模型没有任何创建途径。
   三个动词，配 `SurfaceRegistry` 条目、OpenAPI 内部面、
   `ManagedAgentApiContractTest`、`SurfaceRegistryGateTest` 与
   `managed-surface.txt` fixture。
-- `ManagedAutomationService`：无语义变更；controller 推导创建者 actor
-  并委托。
+- `ManagedAutomationService`：controller 推导创建者 actor 并委托；内部
+  路由的 list/retire 在服务/账本内部变为 Session 作用域（分页 limit 前
+  过滤、正确的 `next` 游标、覆盖容量的页大小），作为保留公开 actor 作用域
+  路由不变的 carve-out。`retire` 为内部路由解门控（它今天调用
+  `requireEnabled`——一处代码变更）；`list` 已解门控；创建仍受门控。
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` 与 Hosted 工具
-  turn：新 profile 修订版、cron 三件套的声明与执行接线，经现有 store
-  通道（`baseUrl` + writer 绑定）调用内部路由。
+  turn：新 profile 修订版（跳过已退役的 `shell/2`）、cron 三件套的声明
+  与执行接线，经现有 store 通道（`baseUrl` + writer 绑定）调用内部
+  路由。Shell 身份并非集中式：profile 谓词
+  （`isHostedWorkspaceShellProfile` 等）、比较字面量
+  `hosted-workspace-shell/1` 的准入路径、控制面的规范 Shell 准入都必须
+  识别 `shell/3`，否则 `shell/3` Session 会失去 shell lane、child-agent
+  与 foreground-only 准入。列出 `files/4` 的 unknown-profile fixture 在
+  同一改动中翻转。
 - managed loop skill 变体，作为 Session Skills 发布中的 skill 资产。
 - `packages/cli/src/serve/capability-parity.ts`：cron 三件套 Managed
   地位的条目。
@@ -195,7 +241,12 @@ Session 内部的模型没有任何创建途径。
 ## 验证计划
 
 - 内部路由准入：要求 writer 绑定；外部 Session 或 tenant 被拒绝；
-  actor 是绑定 Session 的创建者；部署开关关闭时拒绝每个动词。
+  actor 是绑定 Session 的创建者；部署开关关闭时拒绝 create 但不拒绝
+  list/retire。
+- Session 隔离：同 tenant、同创建者、两个 Session——一个 Session 的
+  writer 既不能列出也不能退役另一个的 definition，create 的目标永远
+  是绑定 Session。分页语义：在其他 Session 之间持有 32 个 definition 的
+  绑定 Session 第一页返回全部 32 个、无后续游标。
 - 重放：同一 `executionCallId` 的重驱动执行应答同一 `scheduleId` 并带
   重放标记；同一 key 下不同 body 应答冲突。
 - scanner 发现：工具创建的 definition 在下一个到期 slot 触发；仅存
@@ -206,12 +257,22 @@ Session 内部的模型没有任何创建途径。
   definition 与 fire 生效。
 - 创建后 list 的一致性；delete 幂等；非 ACTIVE Session 的本地退役
   兜底。
+- 并集工具面（wakeup 切片落地后）：`cron_list` 返回 definition 加未触发
+  pending 唤醒；`cron_list` 发出的 id 直接喂给 `cron_delete` 把 pending
+  loop input settle 为 `cancelled`/`loop_cancelled`；definition id 走
+  退役。21+ 个 definition 时 `cron_list` 返回每个 id，`/loop clear` 后
+  零个存活 definition。
+- profile 准入：已退役的 `hosted-workspace-shell/2` 仍被拒绝；
+  `hosted-workspace-shell/3` Session 保留 shell lane、child-agent 与
+  foreground-only 准入；列出 `files/4` 的 unknown-profile fixture 在
+  准入它的同一改动中翻转。
 - 失败划分：503 以同一 key 重驱动；pre-commit 拒绝释放 key；丢失的
   应答被重放。
 - skill E2E：`/loop 5m …` 创建 definition 并立即执行 prompt；
   `/loop list` 展示它；`/loop clear` 退役它。
 - 变异检查：逐个禁用各决策的守卫都会使某个测试失败（镜像写入、推导
-  key、一次性拒绝、durable 拒绝、创建者推导、gate）。
+  key、一次性拒绝、durable 拒绝、创建者推导、Session 作用域、开关关闭
+  时的 list/retire、gate）。
 
 ## 验收标准
 
@@ -220,7 +281,10 @@ Session 内部的模型没有任何创建途径。
 - 被重驱动的工具执行绝不创建第二个 definition。
 - 仅提交进 journal 的 definition 永不触发：内部路由而非 funnel 才是
   创建路径。
-- `/loop list` 与 `/loop clear` 对工具创建的 definition 有效。
+- `/loop list` 与 `/loop clear` 对工具创建的 definition 有效，wakeup
+  切片落地后也覆盖 pending 唤醒。
+- 一个 Session 的 writer 不能列出或退役另一个 Session 的 definition，
+  即使创建者相同。
 - 无新 journal 事件种类或 payload 字段；无第二个调度器。
 
 ## 开放问题
