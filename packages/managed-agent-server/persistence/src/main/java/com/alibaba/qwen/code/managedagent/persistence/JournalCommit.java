@@ -761,9 +761,10 @@ final class JournalCommit {
                 throw JournalStoreRows.invalid("Resource version or length is invalid.");
             }
             int maxResourceBytes = ManagedSessionStoreModels.inlineResourceBytes(resource.kind());
-            if (resource.byteLength() > maxResourceBytes
-                    && !("managed-tool-outcome".equals(resource.kind())
-                    && resource.bytesBase64() == null)) {
+            // Over-cap bodies must arrive as external references (bytesBase64 null);
+            // admission of the referenced allocation happens in commitResources against
+            // the finalized ma_resource row, never from this static validation.
+            if (resource.byteLength() > maxResourceBytes && resource.bytesBase64() != null) {
                 throw new ManagedAgentException(501,
                         ManagedSessionStoreModels.ERROR_OSS_DISABLED,
                         "Resources larger than " + (maxResourceBytes / 1024) + " KiB require the disabled"

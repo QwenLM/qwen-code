@@ -475,6 +475,15 @@ final class JournalStoreRows {
             }
             return;
         }
+        if ("OSS_OBJECT".equals(resource.storageKind())) {
+            if (!("PUBLISHED".equals(resource.state()) || "REFERENCED".equals(resource.state()))
+                    || resource.bytes() != null || resource.objectKey() == null
+                    || resource.objectVersionId() != null || resource.encryptionKeyId() != null
+                    || resource.captureState() != null) {
+                throw resourceCorrupt();
+            }
+            return;
+        }
         if (!"MYSQL_INLINE".equals(resource.storageKind())
                 || !("REFERENCED".equals(resource.state())
                     || "PUBLISHED".equals(resource.state()) && resource.schemaVersion() == 1

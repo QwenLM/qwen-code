@@ -49,14 +49,17 @@ public class ManagedSessionStoreController {
     private final JdbcManagedSessionStore store;
     private final JdbcManagedUserMessageStore userMessages;
     private final ManagedNativeJournalSnapshots snapshots;
+    private final com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects;
     @org.springframework.beans.factory.annotation.Autowired
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
 
     public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
-            ManagedNativeJournalSnapshots snapshots) {
+            ManagedNativeJournalSnapshots snapshots,
+            com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects) {
         this.store = store;
         this.userMessages = userMessages;
         this.snapshots = snapshots;
+        this.resourceObjects = resourceObjects;
     }
 
     public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
@@ -309,5 +312,47 @@ public class ManagedSessionStoreController {
                         Integer.toString(resource.schemaVersion()))
                 .header("X-Qwen-Resource-Digest", resource.digest())
                 .body(resource.bytes());
+    }
+
+    @PostMapping("/resources:allocate")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> allocateResource(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody com.alibaba.qwen.code.managedagent.persistence
+                    .JdbcSessionResourceObjects.AllocateRequest request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(request.workspaceId(),
+                        request.writerId(), request.writerGeneration()));
+        return ResponseEntity.ok(resourceObjects.allocate(tenant.tenantId(), sessionId, request));
+    }
+
+    @PostMapping(value = "/resources/{resourceId}:upload",
+            consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> uploadResource(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration, @RequestBody byte[] bytes) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId, bytes);
+        return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId));
+    }
+
+    @PostMapping("/resources/{resourceId}:finalize")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> finalizeResource(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        resourceObjects.finalize(tenant.tenantId(), sessionId, resourceId);
+        return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId, "state", "PUBLISHED"));
     }
 }
