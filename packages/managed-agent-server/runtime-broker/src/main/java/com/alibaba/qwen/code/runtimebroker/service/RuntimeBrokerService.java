@@ -28,6 +28,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
@@ -77,6 +78,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.i
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.prepareExecutionReference;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
@@ -285,7 +287,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 publicationVerifier, this.brokerOwnerId, this.dispatchLeaseDuration, this.v3ResultWindow,
                 clock, scheduler, renewalScheduler, closed);
         this.executionReconciler = new RuntimeExecutionReconciler(bindingRegistry, executionState, executionRepository,
-                provisioner, transport, publicationVerifier, this.operationLeaseDuration, clock, closed,
+                provisioner, transport, publicationVerifier, this.operationLeaseDuration, clock, scheduler, closed,
                 new ExecutionObservationCooldown(clock, scheduler));
         this.executionRecovery = new RuntimeExecutionRecovery(bindingRegistry, executionState, executionRepository,
                 sessionRepository, transport, executionReconciler, closed);
@@ -944,7 +946,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         Map<String, Object> immutable = immutableMap(operation, "extension operation");
         ManagedExtensionProtocol.validateOperation(immutable);
         boolean recovery = ManagedExtensionProtocol.isRecovery(immutable);
-        boolean status = "extension-status".equals(immutable.get("kind"));
+        boolean status = "extension-status".equals(immutable.get("kind")) || "extension-skill-candidates".equals(immutable.get("kind"));
         if ((expectedBindingId == null) != (expectedGeneration == null) || expectedBindingId == null && !status) {
             throw invalid("runtime_control_operation_invalid", "Extension mutations require the original Runtime identity.");
         }
@@ -1506,46 +1508,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             String payloadDigest, String publicationId) {
         requireOpen(closed);
         String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
-        Map<String, Object> immutable = immutableMap(reference, "reference");
-        if (ProviderRuntimeProtocol.isReference(immutable)) {
-            ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
-        } else {
-            boolean v3 = Integer.valueOf(3).equals(immutable.get("runtimeProtocol"));
-            if (v3 && payloadDigest != null) {
-                throw invalid("runtime_reference_invalid", "Tool v3 publication modes conflict");
-            }
-            Set<String> fields = v3
-                    ? Set.of("sessionId", "promptId", "callId", "argsDigest", "runtimeProtocol", "inputDigest")
-                    : Set.of("sessionId", "promptId", "callId", "argsDigest");
-            if (!immutable.keySet().equals(fields)
-                    || !(immutable.get("argsDigest") instanceof String digest)
-                    || !digest.matches("sha256:[0-9a-f]{64}")
-                    || v3 && (!(immutable.get("inputDigest") instanceof String inputDigest)
-                        || !inputDigest.matches("[0-9a-f]{64}"))) {
-                throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
-            }
-            Map<String, Object> deferred = new LinkedHashMap<>(immutable);
-            if (payloadDigest == null) {
-                deferred.put("dispatchMode", "deferred");
-            } else {
-                if (!payloadDigest.matches("sha256:[0-9a-f]{64}")
-                        || publicationId == null
-                        || !publicationId.matches("[a-z0-9_-]{1,128}")) {
-                    throw invalid("runtime_reference_invalid", "Payload digest or publication ID is invalid");
-                }
-                deferred.put("dispatchMode", "deferred_v3");
-                deferred.put("payloadDigest", payloadDigest);
-                deferred.put("publicationId", publicationId);
-            }
-            if (deferred.containsValue(null)) {
-                // immutableMap admits null values; keep the rejection on the
-                // stage channel as a 400 rather than a synchronous NPE.
-                return CompletableFuture.failedFuture(invalid("runtime_reference_invalid",
-                        "Deferred execution reference is invalid"));
-            }
-            immutable = Map.copyOf(deferred);
-        }
-        return createExecutionReceipt(harnessSessionId, runtimeSessionId, key, immutable, false);
+        return prepareExecutionReference(runtimeSessionId, reference, payloadDigest, publicationId)
+                .thenCompose(immutable -> createExecutionReceipt(harnessSessionId, runtimeSessionId, key, immutable, false));
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -1568,6 +1532,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     try {
                         bindingRegistry.requireReadySessionRecord(context);
                         ToolExecutionRecord record = executionState.requireExecution(context, executionId);
+                        if (RuntimeToolMeasurements.selected(record.getReference())) {
+                            RuntimeToolMeasurements.requireProfile(context.session());
+                        }
                         boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
                         if (!"deferred".equals(record.getReference().get("dispatchMode")) && !v3) {
                             throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
@@ -1682,7 +1649,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     }
                 });
         return mapStoreFailure(executionState.unknownWhenAdmissionClosed(started,
-                harnessSessionId, runtimeSessionId, executionId));
+                harnessSessionId, runtimeSessionId, executionId)
+                .thenCompose(record -> executionReconciler.measuredResult(record, 0)));
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -1732,7 +1700,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     throw conflict("runtime_idempotency_conflict",
                             "idempotency key belongs to another request");
                 }
-                return CompletableFuture.completedFuture(receipt);
+                return executionReconciler.measuredResult(receipt, 0);
             }
             return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenApply(context -> createExecution(context, key, reference, dispatch));
@@ -1749,7 +1717,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             ToolExecutionRecord saved = executionState.requireOwnedExecution(harnessSessionId,
                     runtimeSessionId, executionId);
             if (saved.isTerminal()) {
-                return CompletableFuture.completedFuture(saved);
+                return executionReconciler.measuredResult(saved, 0);
             }
             if ("deferred_v3".equals(saved.getReference().get("dispatchMode"))) {
                 if (saved.getState() == ToolExecutionRecord.State.UNKNOWN
@@ -1833,7 +1801,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             }
             return safeStage(() -> {
                 bindingRegistry.requireUsableLease(context);
-                return transport.acknowledge(context.lease(), context.session(), record.getReference(), savedReceipt);
+                return RuntimeToolMeasurements.selected(record.getReference())
+                        ? executionReconciler.acknowledgeMeasured(context, record, savedReceipt)
+                        : transport.acknowledge(context.lease(), context.session(), record.getReference(), savedReceipt);
             }).thenApply(status -> {
                 if (!"settled".equals(status.get("state"))) {
                     throw conflict("runtime_execution_conflict", "Runtime did not confirm the result acknowledgement");
@@ -1887,7 +1857,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                         "Session receipt conflicts with publication");
                             }
                             bindingRegistry.requireUsableLease(context);
-                            return transport.acknowledgeV3(context.lease(),
+                            return RuntimeToolMeasurements.selected(original.getReference())
+                                    ? executionReconciler.acknowledgeMeasured(context, original, receipt)
+                                    : transport.acknowledgeV3(context.lease(),
                                     context.session(), original.getReference(),
                                     receipt);
                         }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
@@ -1902,7 +1874,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
                         }
                         bindingRegistry.requireUsableLease(context);
-                        return transport.acknowledgeV3(context.lease(), context.session(),
+                        return RuntimeToolMeasurements.selected(original.getReference())
+                                ? executionReconciler.acknowledgeMeasured(context, original, saved)
+                                : transport.acknowledgeV3(context.lease(), context.session(),
                                 original.getReference(), saved);
                     }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
                             .whenComplete((ignored, error) -> context.endControl());

@@ -2053,6 +2053,8 @@ export default {
     'Berater-Überprüfung fehlgeschlagen: {{error}}',
   'No conversation context available for /advisor':
     'Kein Gesprächskontext für /advisor verfügbar',
+  'No conversation context available for /btw':
+    'Kein Gesprächskontext für /btw verfügbar',
   'Focus too long (max {{max}} chars)': 'Fokus zu lang (max. {{max}} Zeichen)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Ein anderer Vorgang läuft gerade. Warten Sie, bis er abgeschlossen ist, bevor Sie /advisor ausführen',

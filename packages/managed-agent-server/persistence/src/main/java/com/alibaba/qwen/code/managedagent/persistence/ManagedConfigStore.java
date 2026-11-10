@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import org.springframework.jdbc.core.JdbcTemplate;
 final class ManagedConfigStore {
     private ManagedConfigStore() { }
@@ -13,7 +14,7 @@ final class ManagedConfigStore {
     public static boolean blocked(JdbcTemplate jdbc, String tenantId, String sessionId) {
         return !jdbc.queryForList("SELECT record_key FROM ma_session_record WHERE session_scope_key=? AND tenant_id=?"
                 + " AND session_id=? AND record_kind='DOMAIN' AND domain='config_install' AND record_id=?"
-                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 tenantId, sessionId, ManagedMcpSettings.RECORD_ID).isEmpty();
     }
 }

@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,7 +24,7 @@ class ManagedSessionQueryTest {
     private static final String SESSION = "query-session";
     private static final String TOKEN = "extension-writer-token-0123456789";
     protected JdbcTemplate jdbc;
-    private ManagedSessionStore sessions;
+    private JdbcManagedSessionStore sessions;
     private TransactionTemplate tx;
     private ExtensionRecordJournal journal;
 
