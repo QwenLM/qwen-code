@@ -37,6 +37,12 @@ export type VirtualizedListProps<T> = {
   renderStatic?: boolean;
   isStaticItem?: (item: T, index: number) => boolean;
   width?: number | string;
+  /**
+   * Maximum viewport height in rows. A host that derives this from the
+   * terminal can pass `0` when the surrounding chrome fills it; `0` means "no
+   * room this frame", not "size to content", so the last positive value keeps
+   * bounding the root box and the scroll math.
+   */
   containerHeight?: number;
   showScrollbar?: boolean;
   measureAtFullHeight?: boolean;
