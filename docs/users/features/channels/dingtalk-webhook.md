@@ -92,20 +92,24 @@ signing secret stay in Channel configuration.
 
 ## Delivery behavior
 
-- Sends plain text. It does not receive messages, run inbound webhook tasks or
-  enable Channel loops.
+- Sends messages as Markdown, with a short title derived from the first line.
+  Ordinary text is also accepted. DingTalk supports only a Markdown subset;
+  tables are not among the officially listed elements. The adapter preserves
+  the supplied body without converting tables or other unsupported syntax.
+- It does not receive messages, run inbound webhook tasks or enable Channel loops.
 - Checks both HTTP status and DingTalk's business response. Rejected signatures,
   credentials, security rules and rate limits are failures with sanitized errors.
 - Does not automatically retry. A timeout can leave remote acceptance unknown.
 - Cancels in-flight sending when the Channel stops. Reload uses the updated
   saved configuration.
 - Keeps the shared delivery size protection, which marks truncated results.
-  The adapter does not add another silent truncation layer; platform rejection
-  of oversized text is reported as failure.
+  The adapter does not add another silent truncation layer or split long messages;
+  platform rejection of oversized messages is reported as failure.
 - Scheduled delivery retains its existing best-effort successful-final-result
   behavior. This does not introduce failure/cancellation alerts, a durable retry
   queue, attachments or a generic webhook payload contract.
 
-See DingTalk's [sending API](https://open.dingtalk.com/document/orgapp/custom-robots-send-group-messages)
+See DingTalk's [sending API](https://open.dingtalk.com/document/orgapp/custom-robots-send-group-messages),
+[message types](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type),
 and [security settings](https://open.dingtalk.com/document/orgapp/customize-robot-security-settings)
 for platform requirements.

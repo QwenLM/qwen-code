@@ -9,11 +9,11 @@ group robot. Existing DingTalk application bots require application credentials
 and a user or conversation ID. A custom robot instead has a configured group
 webhook URL, optionally protected by a signing secret.
 
-The first milestone adds DingTalk webhook text sending and the shared Web Shell
-configuration, Scheduled Tasks selection and test-send flow. Notify, explicit
-prompt results and persistent scheduled results continue to use the existing
-Channel delivery path. This design implements a bounded logical destination
-rather than introducing a new wire target kind.
+The first milestone adds DingTalk webhook Markdown sending and shared Web Shell
+configuration and Scheduled Tasks selection. Notify, explicit prompt results
+and persistent scheduled results continue to use the existing Channel delivery
+path. This design implements a bounded logical destination rather than
+introducing a new wire target kind.
 
 Implementation is split into a backend PR for #16752 and a dependent Web PR for
 #16753. The Web behavior below describes that dependent change; the backend can
@@ -63,7 +63,15 @@ existing environment-reference and secret-edit mechanisms. Existing application
 bot configuration remains unchanged.
 
 Validate the HTTPS DingTalk robot endpoint and required access token. Each send
-builds a text message and, when configured, a fresh millisecond timestamp and
+uses `msgtype: markdown`, derives `markdown.title` with the existing DingTalk
+`extractTitle` helper and preserves the supplied body in `markdown.text`. Plain
+text is also valid message content. The public Channel delivery contract remains
+a text string; no message-format setting or Markdown conversion is introduced.
+DingTalk supports only a [Markdown subset](https://open.dingtalk.com/document/orgapp/custom-bot-send-message-type).
+Tables are not among the officially listed elements, and this adapter does not
+convert them or promise full GitHub-flavored Markdown rendering.
+
+When signing is configured, generate a fresh millisecond timestamp and
 HMAC-SHA256 signature using the documented DingTalk algorithm. Do not cache a
 signed URL. Transport errors, invalid responses, non-success HTTP status and
 nonzero business error codes reject with a bounded, sanitized reason in line
@@ -76,10 +84,10 @@ ready to send, not that remote credentials were verified. Requests have a bounde
 timeout; disconnect cancels in-flight requests, and shutdown drains them.
 
 Use the existing shared 100,000-length delivery protection. Do not add another
-silent truncation layer or invent an undocumented DingTalk text limit. Platform
-rejection, including oversized messages, is reported as failure. A recorded
-real-robot smoke test remains necessary to establish live platform behavior;
-local protocol tests must not be presented as that validation.
+silent truncation layer, split long messages or invent an undocumented DingTalk
+message limit. Platform rejection, including oversized messages, is reported as
+failure. A recorded real-robot smoke test remains necessary to establish live
+platform behavior; local protocol tests must not be presented as that validation.
 
 ## Web behavior
 
@@ -94,24 +102,19 @@ unavailable saved targets and create/edit/clear round trips. Do not silently
 rewrite a saved unsupported ID to the default. Persistent/per-run restrictions
 continue to apply.
 
-Offer explicit test sending for saved, running Channels. Reuse workspace Notify
-through a thin workspace action, retain its capability and ownership checks, and
-show sanitized errors. The action sends a real test message; success reports
-platform API acceptance, not receipt or reading by a person. Unsaved credentials
-are not sent through a separate endpoint. Shared components provide the same
-behavior in qwen serve and WebShellWithProviders with the relevant navigation
-and daemon workspace enabled.
+Shared components provide the same behavior in qwen serve and
+WebShellWithProviders with the relevant navigation and daemon workspace enabled.
 
 ## Affected components
 
-| Component                      | Change                                                                          |
-| ------------------------------ | ------------------------------------------------------------------------------- |
-| Channel base types and exports | Optional management metadata; existing runtime hooks retained                   |
-| CLI registry and management    | Register webhook plugin, validate/project metadata, omit inbound-only controls  |
-| TypeScript SDK catalog         | Mirror optional metadata; delivery wire types unchanged                         |
-| DingTalk package               | Webhook adapter, plugin and protocol/lifecycle tests                            |
-| Web Shell                      | Platform method choice, editor, configured task target, Notify action and tests |
-| User and design documentation  | Configuration, logical target, behavior and validation limits                   |
+| Component                      | Change                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------ |
+| Channel base types and exports | Optional management metadata; existing runtime hooks retained                  |
+| CLI registry and management    | Register webhook plugin, validate/project metadata, omit inbound-only controls |
+| TypeScript SDK catalog         | Mirror optional metadata; delivery wire types unchanged                        |
+| DingTalk package               | Webhook adapter, plugin and protocol/lifecycle tests                           |
+| Web Shell                      | Platform method choice, editor, configured task target and tests               |
+| User and design documentation  | Configuration, logical target, behavior and validation limits                  |
 
 ## Alternatives and boundaries
 
@@ -132,12 +135,13 @@ required before a second adapter demonstrates shared behavior.
 
 ## Validation and acceptance
 
-Verify strict target ownership and rejection, payload/signature generation,
+Verify strict target ownership and rejection, Markdown payload/title generation,
+body preservation for plain and Markdown content, signature generation,
 HTTP-success/business-failure responses, malformed responses, timeout, shutdown
 cancellation and error sanitization. Verify catalog compatibility, secret editing,
 default selection without contacts, saved target round trips, older-daemon
-fallback and workspace-scoped test sending. Include regression coverage for
-existing application-bot and manual user/chat targets.
+fallback and workspace-scoped configuration and delivery. Include regression
+coverage for existing application-bot and manual user/chat targets.
 
 Build, typecheck, bundle and run focused tests. Run a local HTTP fixture through
 the delivery path without model credentials, plus the shared Web Shell browser
