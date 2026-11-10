@@ -24,6 +24,10 @@ import {
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
+import {
+  createToolRevealStore,
+  ToolRevealProvider,
+} from '../../toolRevealContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import {
@@ -1030,6 +1034,138 @@ describe('tool row rendering', () => {
     expect(content.hasAttribute('inert')).toBe(false);
     expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
     expect(container.textContent).toContain('Architecture Agent');
+  });
+
+  describe('reveal requests from the composer task chips', () => {
+    const workflowTask = (
+      toolUseId: string,
+    ): DaemonSessionWorkflowTaskStatus => ({
+      kind: 'workflow',
+      id: 'wf_reveal',
+      label: 'Reveal run',
+      description: 'Reveal run',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 200,
+      isBackgrounded: true,
+      toolUseId,
+      currentPhase: 'Inspect',
+      phaseVisits: [],
+      dispatches: [
+        {
+          id: 'dispatch-reveal',
+          phaseVisitId: 'phase-inspect',
+          label: 'Reveal Agent',
+          prompt: 'Inspect',
+          status: 'running',
+          dependsOn: [],
+          queuedAt: 1_020,
+          startedAt: 1_030,
+        },
+      ],
+      agentsDispatched: 1,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    });
+
+    function renderGroup(tools: ACPToolCall[], toolUseId: string) {
+      const store = createToolRevealStore();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const render = () =>
+        act(() => {
+          root.render(
+            <I18nProvider language="en">
+              <ToolRevealProvider store={store}>
+                <WorkflowDetailsProvider tasks={[workflowTask(toolUseId)]}>
+                  <ToolGroup tools={tools} />
+                </WorkflowDetailsProvider>
+              </ToolRevealProvider>
+            </I18nProvider>,
+          );
+        });
+      render();
+      mounted.push({ root, container });
+      return { container, store, render };
+    }
+
+    it('unfolds a collapsed workflow group when its call is requested', () => {
+      // Background launch: the tool call itself finished, the run goes on.
+      const tool = makeTool({
+        callId: 'wf-call',
+        toolName: 'workflow',
+        status: 'completed',
+      });
+      const { container, store } = renderGroup([tool], 'wf-call');
+      const summary = container.querySelector('button') as HTMLButtonElement;
+      expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+      act(() => store.request('other-call'));
+      expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+      act(() => store.request('wf-call'));
+      expect(summary.getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('opens a request that arrived before the group mounted', () => {
+      const store = createToolRevealStore();
+      store.request('wf-call');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolRevealProvider store={store}>
+              <WorkflowDetailsProvider tasks={[workflowTask('wf-call')]}>
+                <ToolGroup
+                  tools={[
+                    makeTool({
+                      callId: 'wf-call',
+                      toolName: 'workflow',
+                      status: 'completed',
+                    }),
+                  ]}
+                />
+              </WorkflowDetailsProvider>
+            </ToolRevealProvider>
+          </I18nProvider>,
+        );
+      });
+      mounted.push({ root, container });
+
+      expect(
+        container.querySelector('button')?.getAttribute('aria-expanded'),
+      ).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('opens the requested row inside a multi-tool group', () => {
+      const { container, store } = renderGroup(
+        [
+          makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+          makeTool({
+            callId: 'wf-call',
+            toolName: 'workflow',
+            status: 'completed',
+          }),
+        ],
+        'wf-call',
+      );
+      expect(container.textContent).not.toContain('Reveal Agent');
+
+      act(() => store.request('wf-call'));
+
+      expect(
+        container.querySelector('button')?.getAttribute('aria-expanded'),
+      ).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
   });
 
   it.each([

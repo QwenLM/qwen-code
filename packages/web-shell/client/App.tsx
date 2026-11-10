@@ -114,6 +114,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionWorkflowTaskStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
   DaemonStandaloneCreationRecovery,
@@ -168,11 +169,9 @@ import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
+import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import {
-  hasActiveBackgroundAgent,
-  isComposerTask,
-} from './utils/composerTasks';
+import { isComposerTask } from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -217,7 +216,10 @@ import {
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
-import { StatusBar, type StatusBarHandle } from './components/StatusBar';
+import {
+  ComposerTaskChips,
+  type ComposerTaskChipsHandle,
+} from './components/ComposerTaskChips';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import { SessionLimitBanner } from './components/SessionLimitBanner';
@@ -461,7 +463,10 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
-import { getSubagentDetailsUnavailableReason } from './components/messages/toolFormatting';
+import {
+  getSubagentDetailsUnavailableReason,
+  toolContainsCallId,
+} from './components/messages/toolFormatting';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
 import {
   projectStreamingTailMessages,
@@ -3444,6 +3449,22 @@ function findToolCall(
   return undefined;
 }
 
+/** The id of the tool-group message whose row (or nested row) is `callId`. */
+function findToolMessageId(
+  messages: readonly Message[],
+  callId: string,
+): string | undefined {
+  for (const message of messages) {
+    if (
+      message.role === 'tool_group' &&
+      message.tools.some((tool) => toolContainsCallId(tool, callId))
+    ) {
+      return message.id;
+    }
+  }
+  return undefined;
+}
+
 function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
   const state = createDaemonTranscriptState({
     maxBlocks: Math.max(2_000, events.length),
@@ -3794,9 +3815,10 @@ export function App({
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
   // The environment panel is only reachable through the chat header toggle,
-  // so its sections replace the composer git entry / footer task pills only
-  // when that header is actually enabled. Embeddings that omit the header keep
-  // the legacy entries.
+  // so its sections replace the composer git entry (and give background
+  // agents a home, which the composer task chips rely on) only when that
+  // header is actually enabled. Embeddings that omit the header keep the
+  // legacy entries.
   const environmentPanelReachable =
     chatHeaderEnabled &&
     environmentHeaderItemVisible &&
@@ -9418,8 +9440,9 @@ export function App({
     () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
     [footerHostTasks, renderFooter],
   );
-  const statusBarRef = useRef<StatusBarHandle>(null);
+  const composerTaskChipsRef = useRef<ComposerTaskChipsHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const toolRevealStore = useMemo(createToolRevealStore, []);
   const locateWaitingActivity = useCallback((messageId: string) => {
     messageListRef.current?.scrollToMessage(messageId);
   }, []);
@@ -18600,6 +18623,61 @@ export function App({
     },
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
+  // A workflow chip scrolls the transcript to the call that started the run
+  // and opens its inline view. A run with no row in this transcript (started
+  // from the runs page, a rerun, or history that is not loaded) opens in the
+  // tasks dialog instead, which renders the same run view.
+  const locateWorkflowTask = useCallback(
+    (task: DaemonSessionWorkflowTaskStatus) => {
+      const callId = task.toolUseId;
+      const messageId = callId
+        ? findToolMessageId(messages, callId)
+        : undefined;
+      if (callId && messageId) {
+        toolRevealStore.request(callId);
+        if (messageListRef.current?.scrollToMessage(messageId, callId)) return;
+        toolRevealStore.cancel(callId);
+      }
+      openTasksPanel();
+    },
+    [messages, openTasksPanel, toolRevealStore],
+  );
+  const openComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      switch (task.kind) {
+        case 'workflow':
+          locateWorkflowTask(task);
+          return;
+        case 'shell':
+          handleOpenShellDetails(task);
+          return;
+        case 'monitor':
+          handleOpenMonitorDetails(task);
+          return;
+        case 'agent': {
+          if (!connection.sessionId) return;
+          const tool = task.toolUseId
+            ? findToolCall(messages, task.toolUseId)
+            : undefined;
+          openSubagentPanelForSession(
+            tool ?? agentTaskAsToolCall(task),
+            connection.sessionId,
+            connection.workspaceCwd,
+          );
+          return;
+        }
+      }
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      handleOpenMonitorDetails,
+      handleOpenShellDetails,
+      locateWorkflowTask,
+      messages,
+      openSubagentPanelForSession,
+    ],
+  );
 
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
@@ -19161,7 +19239,6 @@ export function App({
       ),
     [hiddenSlashCommands],
   );
-  const hideSettings = hiddenCommands.has('settings');
 
   const handleSubmit = useCallback(
     (
@@ -20905,9 +20982,9 @@ export function App({
     hasQueuedPrompts,
   ]);
 
-  const handleFocusTaskPill = useCallback((): boolean => {
+  const handleFocusTaskChips = useCallback((): boolean => {
     if (interactionBlocked) return false;
-    return statusBarRef.current?.focusTaskPill() ?? false;
+    return composerTaskChipsRef.current?.focus() ?? false;
   }, [interactionBlocked]);
 
   const handleReturnToEditor = useCallback((text?: string) => {
@@ -25485,7 +25562,9 @@ export function App({
                             );
                             const messageListWithWorkflowDetails = (
                               <WorkflowDetailsProvider tasks={sessionTasks}>
-                                {messageListWithTurnCalls}
+                                <ToolRevealProvider store={toolRevealStore}>
+                                  {messageListWithTurnCalls}
+                                </ToolRevealProvider>
                               </WorkflowDetailsProvider>
                             );
                             const messageListWithSubagentDetails = (
@@ -25965,6 +26044,18 @@ export function App({
                             )}
                           </div>
                         )}
+                        {!CustomFooter && (
+                          <ComposerTaskChips
+                            ref={composerTaskChipsRef}
+                            tasks={sessionTasks}
+                            // Headerless embeds have no environment panel to
+                            // list background agents, and keep them out of
+                            // their task surfaces.
+                            includeAgents={environmentTasksReplacementEnabled}
+                            onSelectTask={openComposerTask}
+                            onReturnToInput={handleReturnToEditor}
+                          />
+                        )}
                         {(queuedPrompts.length > 0 ||
                           liveGoalSnapshot?.goal) && (
                           <div
@@ -26122,7 +26213,7 @@ export function App({
                           }
                           voiceStatusRevision={mainVoiceStatusRevision}
                           queuedMessages={queuedTexts}
-                          onFocusFooter={handleFocusTaskPill}
+                          onFocusFooter={handleFocusTaskChips}
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={executionMode}
@@ -26410,53 +26501,7 @@ export function App({
                             onSelectModel={handleModelSelect}
                           />
                         )
-                      ) : (
-                        <StatusBar
-                          onSelectMode={() =>
-                            setShowApprovalModeDialog((v) => !v)
-                          }
-                          onSelectModel={() =>
-                            isStandaloneModelPickerUnavailable({
-                              sessionId: connection.sessionId,
-                              sessionContextKind: effectiveSessionContext?.kind,
-                              models: connection.models,
-                            })
-                              ? pushToast('info', t('model.unavailable'))
-                              : setModelDialogMode((v) =>
-                                  v ? null : 'main',
-                                )
-                          }
-                          onShowContext={() =>
-                            showContextUsage('/context', false)
-                          }
-                          onOpenSettings={() => openPanel('settings')}
-                          ref={statusBarRef}
-                          onOpenTasks={() => openTasksPanel()}
-                          onReturnToInput={handleReturnToEditor}
-                          // The pill filters composer tasks itself; it also
-                          // counts background agents, which the
-                          // pre-filtered list would have dropped. The full
-                          // snapshot reaches the pill only while a
-                          // background agent is still running in the
-                          // shipped entry, where the environment panel
-                          // replaces the footer task list; the empty chat
-                          // and headerless embeds keep the pre-filtered
-                          // composer tasks, so agents never reach them.
-                          tasks={
-                            isChatEmptyState ||
-                            !environmentTasksReplacementEnabled
-                              ? backgroundTasks
-                              : hasActiveBackgroundAgent(sessionTasks)
-                                ? sessionTasks
-                                : []
-                          }
-                          hideSettings={
-                            hideSettings || !workspaceContextActive
-                          }
-                          onToggleShortcuts={handleToggleShortcuts}
-                          compact={true}
-                        />
-                      )}
+                      ) : null}
                       {isChatEmptyState && welcomeFooter && (
                         <div
                           className={[
