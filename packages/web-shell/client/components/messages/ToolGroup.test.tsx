@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall, PermissionRequest } from '../../adapters/types';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import type { SessionContentGenerator } from './AssistantMessage';
 import {
@@ -1076,13 +1076,16 @@ describe('tool row rendering', () => {
       const container = document.createElement('div');
       document.body.appendChild(container);
       const root = createRoot(container);
-      const render = (nextTools = tools) =>
+      const render = (nextTools = tools, pendingApproval?: PermissionRequest) =>
         act(() => {
           root.render(
             <I18nProvider language="en">
               <ToolRevealProvider store={store}>
                 <WorkflowDetailsProvider tasks={[workflowTask(toolUseId)]}>
-                  <ToolGroup tools={nextTools} />
+                  <ToolGroup
+                    tools={nextTools}
+                    pendingApproval={pendingApproval}
+                  />
                 </WorkflowDetailsProvider>
               </ToolRevealProvider>
             </I18nProvider>,
@@ -1168,20 +1171,74 @@ describe('tool row rendering', () => {
     });
 
     it('keeps the revealed workflow open when its group gains tools', () => {
+      vi.useFakeTimers();
       const workflow = makeTool({
         callId: 'wf-call',
         toolName: 'workflow',
         status: 'completed',
       });
       const { container, store, render } = renderGroup([workflow], 'wf-call');
-      act(() => store.request('wf-call'));
-      expect(container.textContent).toContain('Reveal Agent');
+      try {
+        act(() => store.request('wf-call'));
+        expect(container.textContent).toContain('Reveal Agent');
+        act(() => vi.advanceTimersByTime(1_500));
 
-      render([workflow, makeTool({ callId: 'shell-call', toolName: 'Shell' })]);
+        render([
+          workflow,
+          makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+        ]);
 
-      expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
-      expect(container.textContent).toContain('Reveal Agent');
+        expect(
+          container.querySelector('[data-workflow-summary]'),
+        ).not.toBeNull();
+        expect(container.textContent).toContain('Reveal Agent');
+      } finally {
+        vi.useRealTimers();
+      }
     });
+
+    it.each([
+      [500, true],
+      [1_500, false],
+    ])(
+      'only replays an approval remount within the reveal grace (%i ms)',
+      (delay, reopened) => {
+        vi.useFakeTimers();
+        try {
+          const tools = [
+            makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+            makeTool({ callId: 'wf-call', toolName: 'workflow' }),
+          ];
+          const { container, store, render } = renderGroup(tools, 'wf-call');
+          act(() => store.request('wf-call'));
+          const row = container.querySelector<HTMLElement>(
+            '[data-transcript-tool-call-id="wf-call"] [role="button"]',
+          )!;
+          act(() => row.click());
+          expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+          act(() => vi.advanceTimersByTime(delay));
+          render(tools, {
+            id: 'shell-approval',
+            toolCallId: 'shell-call',
+            content: [],
+            options: [],
+          });
+
+          expect(
+            container.querySelector('[data-workflow-summary]') !== null,
+          ).toBe(reopened);
+          if (!reopened) {
+            act(() => store.request('wf-call'));
+            expect(
+              container.querySelector('[data-workflow-summary]'),
+            ).not.toBeNull();
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it('keeps a manually collapsed workflow closed until it is requested again', () => {
       const tools = [

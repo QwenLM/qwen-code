@@ -38,7 +38,10 @@ import { useSharedNow } from '../../hooks/useSharedNow';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
 import { useWorkflowDetails } from '../../workflowDetailsContext';
-import { useToolRevealRequest } from '../../toolRevealContext';
+import {
+  REVEAL_REMOUNT_GRACE_MS,
+  useToolRevealRequest,
+} from '../../toolRevealContext';
 import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
@@ -2158,13 +2161,22 @@ export const ToolGroup = memo(function ToolGroup({
   // Another surface (the composer task chips) asked to open one of this
   // group's calls: unfold the group and tell that call's row to open.
   const [reveal, setReveal] = useState<{ callId: string; seq: number }>();
+  const revealSequence = useRef(0);
   useToolRevealRequest(
     (callId) => tools.some((tool) => toolContainsCallId(tool, callId)),
     (callId) => {
       setChatExpanded(true);
-      setReveal((current) => ({ callId, seq: (current?.seq ?? 0) + 1 }));
+      setReveal({ callId, seq: ++revealSequence.current });
     },
   );
+  useEffect(() => {
+    if (!reveal) return;
+    const timer = setTimeout(
+      () => setReveal(undefined),
+      REVEAL_REMOUNT_GRACE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [reveal]);
   const revealSeqFor = (tool: ACPToolCall) =>
     reveal && toolContainsCallId(tool, reveal.callId) ? reveal.seq : undefined;
 

@@ -58,16 +58,20 @@ function shell(
 describe('ComposerTaskChips', () => {
   let container: HTMLDivElement;
   let root: Root;
+  let outsideInput: HTMLInputElement;
 
   beforeEach(() => {
     container = document.createElement('div');
     document.body.append(container);
+    outsideInput = document.createElement('input');
+    document.body.append(outsideInput);
     root = createRoot(container);
   });
 
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    outsideInput.remove();
   });
 
   function render(
@@ -218,6 +222,85 @@ describe('ComposerTaskChips', () => {
     render([workflow('wf-1', 'completed'), shell('shell-1')]);
 
     expect(chips().map((chip) => chip.textContent)).toEqual(['1 shell']);
+  });
+
+  it('closes only when focus leaves the list and chips', () => {
+    render([workflow('wf-1'), workflow('wf-2')]);
+    act(() => chips()[0].click());
+    const list = container.querySelector('[data-testid="composer-task-list"]');
+    const rows = list!.querySelectorAll('button');
+
+    act(() => rows[1].focus());
+    expect(list!.isConnected).toBe(true);
+    act(() => chips()[0].focus());
+    expect(list!.isConnected).toBe(true);
+
+    act(() => outsideInput.focus());
+    expect(list!.isConnected).toBe(false);
+    render([workflow('wf-1'), workflow('wf-2')]);
+    expect(document.activeElement).toBe(outsideInput);
+  });
+
+  it('returns selection focus to its chip before opening the task surface', () => {
+    let focusAtSelection: Element | null = null;
+    const onSelectTask = vi.fn(() => {
+      focusAtSelection = document.activeElement;
+      outsideInput.focus();
+    });
+    render([workflow('wf-1'), workflow('wf-2')], { onSelectTask });
+    act(() => chips()[0].click());
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="composer-task-list"] button',
+        )!
+        .click();
+    });
+
+    expect(onSelectTask).toHaveBeenCalledOnce();
+    expect(focusAtSelection).toBe(chips()[0]);
+    expect(document.activeElement).toBe(outsideInput);
+  });
+
+  it.each([2, 3])(
+    'returns focus to the chip when a focused task finishes out of %i tasks',
+    (count) => {
+      const tasks = Array.from({ length: count }, (_, i) =>
+        workflow(`wf-${i}`),
+      );
+      render(tasks);
+      act(() => chips()[0].click());
+
+      render([workflow('wf-0', 'completed'), ...tasks.slice(1)]);
+
+      expect(document.activeElement).toBe(chips()[0]);
+      expect(
+        container.querySelector('[data-testid="composer-task-list"]') !== null,
+      ).toBe(count > 2);
+    },
+  );
+
+  it('returns to the composer when the last focused chip disappears', () => {
+    const onReturnToInput = vi.fn(() => outsideInput.focus());
+    render([workflow('wf-1')], { onReturnToInput });
+    act(() => chips()[0].focus());
+
+    render([workflow('wf-1', 'completed')], { onReturnToInput });
+
+    expect(onReturnToInput).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(outsideInput);
+  });
+
+  it('does not reclaim outside focus when tasks finish', () => {
+    const onReturnToInput = vi.fn();
+    render([workflow('wf-1'), workflow('wf-2')], { onReturnToInput });
+    act(() => chips()[0].click());
+    act(() => outsideInput.focus());
+
+    render([], { onReturnToInput });
+
+    expect(onReturnToInput).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(outsideInput);
   });
 
   it('moves focus between chips and back to the composer from the keyboard', () => {

@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,7 @@ import {
   type ComposerTaskChipKind,
 } from '../utils/composerTasks';
 import { formatRuntime } from '../utils/formatRuntime';
+import { isFocusUnclaimed } from '../utils/dom';
 import styles from './ComposerTaskChips.module.css';
 
 export interface ComposerTaskChipsHandle {
@@ -117,6 +119,9 @@ export const ComposerTaskChips = forwardRef<
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const chipRefs = useRef(new Map<ComposerTaskChipKind, HTMLButtonElement>());
+  const focusedElementRef = useRef<{ element: HTMLElement; root: Node } | null>(
+    null,
+  );
   const now = useSharedNow(Boolean(openGroup));
 
   useImperativeHandle(
@@ -145,6 +150,18 @@ export const ComposerTaskChips = forwardRef<
     }
   }, [openKind]);
 
+  useLayoutEffect(() => {
+    const focused = focusedElementRef.current;
+    if (!focused || focused.element.isConnected) return;
+    focusedElementRef.current = null;
+    if (!isFocusUnclaimed(focused.root)) return;
+    const chip =
+      (openKind && chipRefs.current.get(openKind)) ||
+      chipRefs.current.get(groups[0]?.kind);
+    if (chip) chip.focus({ preventScroll: true });
+    else onReturnToInput?.();
+  }, [groups, openKind, onReturnToInput]);
+
   // The list closes on a click anywhere outside the chip row.
   useEffect(() => {
     if (!openGroup) return;
@@ -155,6 +172,7 @@ export const ComposerTaskChips = forwardRef<
       ) {
         return;
       }
+      focusedElementRef.current = null;
       setOpenKind(null);
     };
     document.addEventListener('pointerdown', closeOnOutsidePointerDown);
@@ -165,6 +183,7 @@ export const ComposerTaskChips = forwardRef<
   if (groups.length === 0) return null;
 
   const selectTask = (task: DaemonSessionTaskWithWorkflowStatus) => {
+    chipRefs.current.get(task.kind)?.focus({ preventScroll: true });
     setOpenKind(null);
     onSelectTask(task);
   };
@@ -232,6 +251,22 @@ export const ComposerTaskChips = forwardRef<
       className={styles.root}
       data-web-shell-composer-task-chips=""
       data-testid="composer-task-chips"
+      onFocus={(event) => {
+        focusedElementRef.current = {
+          element: event.target,
+          root: event.target.getRootNode(),
+        };
+      }}
+      onBlur={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        focusedElementRef.current = null;
+        setOpenKind(null);
+      }}
     >
       {openGroup && (
         <div

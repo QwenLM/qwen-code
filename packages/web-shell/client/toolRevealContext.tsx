@@ -43,7 +43,7 @@ const REVEAL_REQUEST_TTL_MS = 5_000;
  * re-measures), and the fresh instance must open too. A remount after this
  * is the user scrolling back, which keeps the row's own state.
  */
-const REVEAL_REMOUNT_GRACE_MS = 1_000;
+export const REVEAL_REMOUNT_GRACE_MS = 1_000;
 
 export function createToolRevealStore(
   now: () => number = Date.now,

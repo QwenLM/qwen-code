@@ -7,6 +7,7 @@ import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   installMockDaemon,
+  permissionRequestEvent,
   replayCompleteEvent,
   toolCallEvent,
   turnCompleteEvent,
@@ -108,7 +109,7 @@ async function openSession(
       replayedCount: events.length,
     }),
   );
-  return { daemon, tasksPolled };
+  return { daemon, scenario, tasksPolled };
 }
 
 test('a workflow chip above the composer locates and opens the run', async ({
@@ -203,6 +204,132 @@ test('a chip for several runs lists them to pick from', async ({
   await expect(
     page.getByRole('dialog', { name: 'Background tasks' }),
   ).toBeVisible();
+});
+
+test('an expired reveal does not reopen a collapsed workflow on sibling approval', async ({
+  page,
+}, testInfo) => {
+  const { daemon, scenario } = await openSession(
+    page,
+    testInfo,
+    [workflowTask()],
+    [
+      userTextEvent('Run a workflow and inspect the project.', { id: 1 }),
+      toolCallEvent(
+        'workflow-call',
+        'workflow',
+        { name: 'Review and fix' },
+        { id: 2, rawOutput: { runId: 'workflow-review' } },
+      ),
+      toolCallEvent('shell-call', 'shell', { command: 'pwd' }, { id: 3 }),
+    ],
+  );
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 workflow' })
+    .click();
+  const graph = page.locator('[data-workflow-dispatch="correctness"]');
+  await expect(graph).toBeVisible();
+  await page
+    .locator('[data-transcript-tool-call-id="workflow-call"] [role="button"]')
+    .first()
+    .click();
+  await expect(graph).toHaveCount(0);
+  // Let the one-second reveal/remount grace expire before changing branches.
+  await page.waitForTimeout(1300);
+  await daemon.sendEvent(
+    permissionRequestEvent('approval-sibling', {
+      id: 4,
+      sessionId: scenario.sessionId,
+      toolCall: {
+        toolCallId: 'shell-call',
+        title: 'shell',
+        kind: 'execute',
+        _meta: { toolName: 'shell' },
+        rawInput: { command: 'pwd' },
+      },
+    }),
+  );
+
+  await expect(page.locator('[data-web-shell-permission-panel]')).toBeVisible();
+  await expect(graph).toHaveCount(0);
+});
+
+test('keyboard focus leaving task choices closes the list', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({ id: 'workflow-docs', label: 'Update the docs' }),
+  ]);
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+  await chip.focus();
+  await page.keyboard.press('Enter');
+  await expect(
+    list.getByRole('button', { name: /Review and fix/ }),
+  ).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(
+    list.getByRole('button', { name: /Update the docs/ }),
+  ).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(chip).toBeFocused();
+  await expect(list).toBeVisible();
+  await page.keyboard.press('Tab');
+
+  const composer = page.locator('.cm-content').first();
+  await expect(composer).toBeFocused();
+  await expect(list).toHaveCount(0);
+  await page.keyboard.type('keep typing');
+  await expect(composer).toHaveText('keep typing');
+});
+
+test('selection and task completion keep focus near the composer', async ({
+  page,
+}, testInfo) => {
+  const first = workflowTask();
+  const second = workflowTask({
+    id: 'workflow-docs',
+    label: 'Update the docs',
+  });
+  const { scenario } = await openSession(page, testInfo, [first, second]);
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .locator('[data-kind="workflow"]');
+  const list = page.getByTestId('composer-task-list');
+  await chip.focus();
+  await page.keyboard.press('Enter');
+  await expect(
+    list.getByRole('button', { name: /Review and fix/ }),
+  ).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(list).toHaveCount(0);
+  await expect(
+    page.locator('[data-workflow-dispatch="correctness"]'),
+  ).toBeVisible();
+  await expect(chip).toBeFocused();
+
+  await page.keyboard.press('Enter');
+  await expect(
+    list.getByRole('button', { name: /Review and fix/ }),
+  ).toBeFocused();
+  scenario.workflowTasks = [first, { ...second, status: 'completed' }];
+  await expect(chip).toHaveText('1 workflow');
+  await expect(list).toHaveCount(0);
+  await expect(chip).toBeFocused();
+
+  scenario.workflowTasks = [
+    { ...first, status: 'completed' },
+    { ...second, status: 'completed' },
+  ];
+  await expect(chip).toHaveCount(0);
+  const composer = page.locator('.cm-content').first();
+  await expect(composer).toBeFocused();
+  await page.keyboard.type('next task');
+  await expect(composer).toHaveText('next task');
 });
 
 test('a multi-task chip opens keyboard choices and returns focus on Escape @smoke', async ({
