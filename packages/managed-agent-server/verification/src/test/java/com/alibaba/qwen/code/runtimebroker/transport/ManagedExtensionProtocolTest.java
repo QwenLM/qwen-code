@@ -72,6 +72,34 @@ class ManagedExtensionProtocolTest {
     }
 
     @Test
+    void skillSnapshotsKeepPathsDigestsAndChunkBoundsClosed() {
+        var scan = Map.<String, Object>of("kind", "extension-skill-candidates", "operationId", OPERATION);
+        ManagedExtensionProtocol.validateOperation(scan);
+        var candidate = Map.<String, Object>of("name", "check", "description", "Check a project", "path", ".qwen/skills/check",
+                "digest", "a".repeat(64), "shadowed", false, "compatible", true);
+        assertEquals(List.of(candidate), ManagedExtensionProtocol.response(
+                response(Map.of("operationId", OPERATION, "candidates", List.of(candidate))), SCOPE, "harness", scan).get("candidates"));
+        var snapshot = Map.<String, Object>of("kind", "extension-skill-snapshot", "operationId", OPERATION,
+                "path", ".qwen/skills/check", "digest", "a".repeat(64));
+        ManagedExtensionProtocol.validateOperation(snapshot);
+        var outside = new LinkedHashMap<>(snapshot);
+        outside.put("path", ".qwen/skills/../../outside");
+        assertThrows(RuntimeBrokerException.class, () -> ManagedExtensionProtocol.validateOperation(outside));
+        var chunk = Map.<String, Object>of("kind", "extension-skill-archive", "operationId", OPERATION,
+                "preparationId", OPERATION, "offset", 0);
+        ManagedExtensionProtocol.validateOperation(chunk);
+        var result = new LinkedHashMap<String, Object>(Map.of("operationId", OPERATION, "preparationId", OPERATION,
+                "offset", 0, "totalBytes", 3, "base64", "YWJj"));
+        ManagedExtensionProtocol.response(response(result), SCOPE, "harness", chunk);
+        result.put("offset", 1);
+        assertEquals(502, assertThrows(RuntimeBrokerException.class,
+                () -> ManagedExtensionProtocol.response(response(result), SCOPE, "harness", chunk)).getStatusCode());
+        result.put("offset", 0);
+        result.put("totalBytes", 2);
+        assertThrows(RuntimeBrokerException.class, () -> ManagedExtensionProtocol.response(response(result), SCOPE, "harness", chunk));
+    }
+
+    @Test
     void everyInvokePathRejectsAnotherHarnessExtensionContextBeforeSending() {
         RuntimeSession session = new RuntimeSession("harness", "runtime", "bootstrap", SCOPE);
         RuntimeLease lease = new RuntimeLease("worker", URI.create("http://127.0.0.1:9"), "token", "lease", 1);

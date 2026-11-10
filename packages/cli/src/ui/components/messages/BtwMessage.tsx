@@ -42,6 +42,25 @@ function normalizeCodeFences(text: string): string {
   return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
 }
 
+/** Keeps a streaming answer inside the viewport by showing its last lines. */
+function streamingTail(text: string, rows: number): string {
+  const lines = text.split('\n');
+  return lines.length > rows ? lines.slice(-rows).join('\n') : text;
+}
+
+function footerHint(btw: BtwProps): string {
+  const hints: string[] = [];
+  if (btw.historyCount) hints.push(t('←/→ browse earlier answers'));
+  if (btw.browsing && !btw.isError) hints.push(t('c copy'));
+  if (btw.browsing && btw.historyCount) hints.push(t('x clear history'));
+  hints.push(
+    btw.ownRequestPending
+      ? t('Press Escape, Ctrl+C, or Ctrl+D to cancel')
+      : t('Press Space, Enter, or Escape to dismiss'),
+  );
+  return hints.join(' · ');
+}
+
 const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
   btw,
   containerWidth,
@@ -75,14 +94,19 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
     [answerItems, maxAnswerRows],
   );
   const renderAnswer = useCallback(
-    ({ item }: { item: BtwAnswerItem }) => (
-      <MarkdownDisplay
-        text={item.text}
-        isPending={false}
-        contentWidth={contentWidth}
-      />
-    ),
-    [contentWidth],
+    ({ item }: { item: BtwAnswerItem }) =>
+      btw.isError ? (
+        <Text color={Colors.AccentRed} wrap="wrap">
+          {item.text}
+        </Text>
+      ) : (
+        <MarkdownDisplay
+          text={item.text}
+          isPending={false}
+          contentWidth={contentWidth}
+        />
+      ),
+    [btw.isError, contentWidth],
   );
 
   return (
@@ -100,12 +124,28 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
         <Text wrap="wrap" color={Colors.AccentYellow}>
           {btw.question}
         </Text>
+        {btw.browsePosition !== undefined && btw.historyCount ? (
+          <Text dimColor>{` (${btw.browsePosition}/${btw.historyCount})`}</Text>
+        ) : null}
       </Box>
       {btw.isPending ? (
         <Box flexDirection="column" marginTop={1}>
+          {btw.answer ? (
+            <MarkdownDisplay
+              text={normalizeCodeFences(
+                maxAnswerRows === undefined
+                  ? btw.answer
+                  : streamingTail(btw.answer, maxAnswerRows),
+              )}
+              isPending={true}
+              contentWidth={contentWidth}
+            />
+          ) : null}
           <Box>
             <Text color={Colors.AccentYellow}>{'+ '}</Text>
-            <Text color={Colors.AccentYellow}>{t('Answering...')}</Text>
+            <Text color={Colors.AccentYellow}>
+              {btw.retryStatus ?? t('Answering...')}
+            </Text>
           </Box>
           <Box marginTop={1}>
             <Text dimColor>
@@ -130,6 +170,10 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
               // below — this panel has no other scroll affordance.
               scrollbarAutoHide={false}
             />
+          ) : btw.isError ? (
+            <Text color={Colors.AccentRed} wrap="wrap">
+              {btw.answer}
+            </Text>
           ) : (
             <MarkdownDisplay
               text={normalizeCodeFences(btw.answer)}
@@ -137,10 +181,17 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
               contentWidth={contentWidth}
             />
           )}
-          <Box marginTop={1}>
-            <Text dimColor>
-              {t('Press Space, Enter, or Escape to dismiss')}
-            </Text>
+          <Box marginTop={1} flexDirection="column">
+            {btw.notice ? (
+              <Text
+                color={
+                  btw.notice.isError ? Colors.AccentRed : Colors.AccentGreen
+                }
+              >
+                {btw.notice.text}
+              </Text>
+            ) : null}
+            <Text dimColor>{footerHint(btw)}</Text>
           </Box>
         </Box>
       )}
