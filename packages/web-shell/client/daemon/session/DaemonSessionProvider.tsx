@@ -5526,7 +5526,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd?: string,
           overrides?: Pick<
             CreateSessionRequest,
-            'approvalMode' | 'sourceType' | 'worktree' | 'branch'
+            | 'approvalMode'
+            | 'sourceType'
+            | 'worktree'
+            | 'branch'
+            | 'startupConfig'
           >,
         ) => {
           const client =
@@ -5553,6 +5557,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               : {}),
             ...(overrides?.branch !== undefined
               ? { branch: overrides.branch }
+              : {}),
+            ...(overrides?.startupConfig
+              ? { startupConfig: overrides.startupConfig }
               : {}),
           };
           const requestClientId = clientId

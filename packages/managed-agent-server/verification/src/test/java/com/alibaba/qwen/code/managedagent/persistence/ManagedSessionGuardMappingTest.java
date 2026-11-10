@@ -38,7 +38,7 @@ class ManagedSessionGuardMappingTest {
                 new CannotAcquireLockException("injected 1213", DEADLOCK),
                 new CannotAcquireLockException("injected 1205", LOCK_WAIT_TIMEOUT),
                 new QueryTimeoutException("injected statement timeout"))) {
-            assertThatThrownBy(() -> ManagedSessionStore.lockBounded(() -> {
+            assertThatThrownBy(() -> JdbcManagedSessionStore.lockBounded(() -> {
                 throw failure;
             }))
                     .as(failure.getClass().getSimpleName() + ": " + failure.getMessage())
@@ -53,7 +53,7 @@ class ManagedSessionGuardMappingTest {
         for (DataAccessException failure : List.of(
                 new CannotAcquireLockException("injected 1213", DEADLOCK),
                 new DeadlockLoserDataAccessException("injected 1213", DEADLOCK))) {
-            assertThatThrownBy(() -> ManagedSessionStore.namedRootDeadlock(() -> {
+            assertThatThrownBy(() -> JdbcManagedSessionStore.namedRootDeadlock(() -> {
                 throw failure;
             }))
                     .as(failure.getClass().getSimpleName())
@@ -62,10 +62,10 @@ class ManagedSessionGuardMappingTest {
         // An ordinary root wait is not a tenant-guard wait and keeps its
         // own failure.
         var timedOut = new CannotAcquireLockException("injected 1205", LOCK_WAIT_TIMEOUT);
-        assertThatThrownBy(() -> ManagedSessionStore.namedRootDeadlock(() -> {
+        assertThatThrownBy(() -> JdbcManagedSessionStore.namedRootDeadlock(() -> {
             throw timedOut;
         })).isSameAs(timedOut);
-        assertThat(ManagedSessionStore.namedRootDeadlock(() -> true)).isTrue();
+        assertThat(JdbcManagedSessionStore.namedRootDeadlock(() -> true)).isTrue();
     }
 
     private void requireGuardContended(ManagedAgentException error) {

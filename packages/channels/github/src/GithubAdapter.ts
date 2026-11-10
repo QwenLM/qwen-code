@@ -36,6 +36,7 @@ import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   lowercaseGroupAllowedUsers,
+  MAX_POLL_INTERVAL_MS,
   PollingChannelBase,
   PR_BINDING_ROLES,
   renderBoundActionTemplate,
@@ -1271,6 +1272,7 @@ function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
       typeof record.backpressure === 'boolean') &&
     (record.privateOnly === undefined ||
       typeof record.privateOnly === 'boolean') &&
+    isOptionalStringArray(record.authorExclude) &&
     (record.lostSessionId === undefined ||
       typeof record.lostSessionId === 'string')
   );
@@ -1298,6 +1300,61 @@ function isNoReplySentinel(text: string): boolean {
 
 /** GitHub's wording for a secondary (abuse) rate limit. */
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
+
+/**
+ * Cap on cached conditional responses, sized from the fan-out it has to
+ * serve: up to MAX_PR_WATCH_LIMIT open PRs, a terminal-drain slice on top,
+ * and the notifications pages. A cap below the sweep does not degrade
+ * proportionally — each miss evicts the entry the sweep is about to read, so
+ * every read of every later pass misses and the saving is exactly zero for
+ * the high-fan-out deployments this is meant to help. Derived from the watch
+ * limit so the two cannot drift apart.
+ *
+ * A moved notifications `since` cursor still mints new keys, so the map is
+ * bounded and evicts least-recently-used first; an evicted URL simply pays
+ * for one full 200 again.
+ */
+export const CONDITIONAL_CACHE_MAX_ENTRIES = MAX_PR_WATCH_LIMIT * 2;
+
+/**
+ * Bodies above this size are not cached, so a pathologically large page
+ * cannot pin memory. Sized against the entry cap above to keep the retention
+ * bound in the same order as a smaller cache of larger bodies. A declined URL
+ * stays unconditional — the behavior from before conditional requests
+ * existed — and a page this large is one whose contents are churning, where a
+ * 304 was unlikely anyway.
+ */
+const CONDITIONAL_CACHE_MAX_BODY_BYTES = 256 * 1024;
+
+/**
+ * Total retained body bytes. The entry and per-body caps only bound the
+ * product loosely — a thousand maximum-size bodies would be a quarter of a
+ * gigabyte — so the cache is also bounded directly. Real responses are one to
+ * two orders of magnitude below the per-body cap, so this binds only the
+ * pathological case and never evicts a working set.
+ */
+export const CONDITIONAL_CACHE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+interface ConditionalCacheEntry {
+  etag: string;
+  body: string;
+  link: string | undefined;
+  bytes: number;
+}
+
+/**
+ * The two polling reads worth making conditional: the PR state watch and the
+ * notifications list. Matching on the pathname suffix keeps this working
+ * under an enterprise baseUrl prefix, and anchors the end so thread reads
+ * (`/notifications/threads/<id>`) and issue comments stay out of scope.
+ */
+function isConditionalPollUrl(url: string): boolean {
+  const { pathname } = new URL(url);
+  return (
+    /\/repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(pathname) ||
+    /\/notifications$/.test(pathname)
+  );
+}
 
 type GithubRequestError = {
   status?: number;
@@ -1617,6 +1674,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    */
   private watchBudgetEpisodeOpen = false;
   /**
+   * ETag cache for the two polling reads, keyed by full request URL so a
+   * moved notifications `since` cursor is a distinct entry rather than a
+   * false hit. Connection-scoped: cleared on disconnect so a reconnect never
+   * serves a body cached under a previous credential.
+   */
+  private readonly conditionalCache = new Map<string, ConditionalCacheEntry>();
+  /** Running total of cached body bytes, maintained by the two helpers below. */
+  private conditionalCacheBytes = 0;
+  /**
+   * Floor (ms) from the notifications endpoint's `X-Poll-Interval`. GitHub
+   * asks polling clients not to poll faster than this; pollInterval raises
+   * the whole loop to it, which also slows the watch pass.
+   */
+  private notificationsPollFloorMs = 0;
+  /**
    * Consecutive binding-refresh failures since the last success. While no
    * snapshot has ever succeeded, the cold-start gate defers the comment lane,
    * so a permanent failure (an old daemon lacking the route, rotated
@@ -1858,9 +1930,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.octokit = new Octokit({
       auth,
       baseUrl,
-      ...(this.proxy
-        ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
-        : {}),
+      request: {
+        ...(this.proxy ? { agent: new HttpsProxyAgent(this.proxy) } : {}),
+        fetch: this.conditionalFetch,
+      },
     });
     // One choke point for the success-path budget: the wrap sees the response
     // headers on every request, including each page of a paginate call,
@@ -1870,6 +1943,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.octokit.hook.wrap('request', async (request, options) => {
       const response = await request(options);
       this.recordRateLimitBudget(response.headers);
+      // Only the notifications endpoint sends this header, in seconds. It
+      // survives a 304, so an idle channel keeps honouring it.
+      const pollSeconds = parseRateLimitCount(
+        response.headers['x-poll-interval'],
+      );
+      if (pollSeconds !== undefined) {
+        this.notificationsPollFloorMs = pollSeconds * 1000;
+      }
       return response;
     });
     try {
@@ -1966,8 +2047,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.pendingFinalDeliveryRetry = retry;
   }
 
+  /**
+   * GitHub asks polling clients not to poll the notifications endpoint
+   * faster than its `X-Poll-Interval`. The base class exposes one interval
+   * for the whole poll and the watch pass runs before the notifications lane,
+   * so honouring the floor also slows the watch. At the default 60s poll the
+   * header is also 60 and nothing changes; only a faster configured poll is
+   * raised, which is exactly what GitHub is asking for.
+   *
+   * The ceiling is re-applied because the header is server-controlled and
+   * super's clamp only covers the configured value: Node rounds a timeout
+   * above its 32-bit range down to 1ms, so an unbounded floor would turn the
+   * poll loop into a hot loop that burns the quota this is meant to save.
+   */
+  protected override get pollInterval(): number {
+    return Math.min(
+      Math.max(super.pollInterval, this.notificationsPollFloorMs),
+      MAX_POLL_INTERVAL_MS,
+    );
+  }
+
   disconnect(): void {
     this.stopPollLoop();
+    this.conditionalCache.clear();
+    this.conditionalCacheBytes = 0;
+    this.notificationsPollFloorMs = 0;
     // Retire the runner generation: an idle runner wakes and exits, and a
     // runner mid-turn exits after that turn. The durable task stays
     // recoverable for the next connection. Release idle waiters: with the
@@ -5195,6 +5299,92 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * The conditional exchange, owned at the transport boundary rather than in
+   * a request hook: `@octokit/request` hard-codes 304 into a RequestError
+   * INSIDE plugin-request-log's own wrap, so catching it any higher leaves an
+   * error-level log line per 304 (~1,800/hour at the watch cap) and hands
+   * githubApi a retryable failure. Converting it here means no layer above
+   * ever learns there was a 304.
+   */
+  private readonly conditionalFetch: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (
+      (init?.method ?? 'GET').toUpperCase() !== 'GET' ||
+      !isConditionalPollUrl(url)
+    ) {
+      return fetch(input, init);
+    }
+    const cached = this.conditionalCache.get(url);
+    const headers = new Headers(init?.headers);
+    if (cached) headers.set('if-none-match', cached.etag);
+    const response = await fetch(url, { ...init, headers });
+
+    if (response.status === 304 && cached) {
+      const merged = new Headers(response.headers);
+      // GitHub omits Link on a 304 (verified against the live API: the same
+      // URL's 200 carried next+last, the 304 carried neither). Without the
+      // cached value paginate stops after page 1 and silently drops the rest
+      // of the notifications list.
+      if (!merged.has('link') && cached.link !== undefined) {
+        merged.set('link', cached.link);
+      }
+      // The body is the cached, already-decoded text, so any framing headers
+      // describing the empty 304 body would misdescribe it.
+      merged.delete('content-length');
+      merged.delete('content-encoding');
+      merged.set('content-type', 'application/json; charset=utf-8');
+      // Refresh recency on a hit, not just on a write: a moved `since` cursor
+      // keeps minting dead notification entries, and without this they would
+      // evict the quiet PRs that are being read every poll.
+      this.storeCached(url, cached);
+      return new Response(cached.body, { status: 200, headers: merged });
+    }
+
+    if (response.status === 200) {
+      const etag = response.headers.get('etag');
+      if (etag !== null) {
+        const body = await response.clone().text();
+        const bytes = Buffer.byteLength(body);
+        if (bytes <= CONDITIONAL_CACHE_MAX_BODY_BYTES) {
+          this.storeCached(url, {
+            etag,
+            body,
+            link: response.headers.get('link') ?? undefined,
+            bytes,
+          });
+          for (const oldest of this.conditionalCache.keys()) {
+            if (
+              this.conditionalCache.size <= CONDITIONAL_CACHE_MAX_ENTRIES &&
+              this.conditionalCacheBytes <= CONDITIONAL_CACHE_MAX_TOTAL_BYTES
+            ) {
+              break;
+            }
+            this.dropCached(oldest);
+          }
+        }
+      }
+    }
+    return response;
+  };
+
+  /**
+   * The only two writers of the cache, so the byte total cannot drift from
+   * the map. Re-inserting moves the key to the most-recently-used end.
+   */
+  private dropCached(url: string): void {
+    const entry = this.conditionalCache.get(url);
+    if (entry === undefined) return;
+    this.conditionalCacheBytes -= entry.bytes;
+    this.conditionalCache.delete(url);
+  }
+
+  private storeCached(url: string, entry: ConditionalCacheEntry): void {
+    this.dropCached(url);
+    this.conditionalCache.set(url, entry);
+    this.conditionalCacheBytes += entry.bytes;
+  }
+
+  /**
    * Record the REST budget from a successful response's headers. Called by
    * the request hook on every response. A missing or malformed remaining
    * header leaves the last known value untouched (a proxy that strips the
@@ -5313,7 +5503,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const parsed = JSON.parse(readFileSync(this.inboundTasksPath(), 'utf-8'));
       if (!Array.isArray(parsed) || !parsed.every(isInboundTaskRecord)) {
-        throw new Error('invalid GitHub inbound task state');
+        // Name the offender: one bad record blocks every healthy task in the
+        // file, so an operator repairing it by hand needs the index and id
+        // rather than bisecting the JSON by eye.
+        const badIndex = Array.isArray(parsed)
+          ? parsed.findIndex((item) => !isInboundTaskRecord(item))
+          : -1;
+        const badId =
+          badIndex === -1
+            ? undefined
+            : (parsed[badIndex] as { id?: unknown } | undefined)?.id;
+        throw new Error(
+          `invalid GitHub inbound task state${
+            badIndex === -1 ? '' : ` at record ${badIndex}`
+          }${typeof badId === 'string' ? ` (${badId})` : ''}`,
+        );
       }
       this.inboundTaskSnapshot = parsed;
       return parsed;

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegi
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Membership;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Row;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Snapshot;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
@@ -48,12 +49,12 @@ final class WorkspaceCsiApplicationHistory {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final JdbcRuntimeBindingRepository bindings;
-    private final ManagedSessionStore nativeStore;
+    private final JdbcManagedSessionStore nativeStore;
     private final ObjectMapper identityJson;
     private final TransactionTemplate transaction;
 
     WorkspaceCsiApplicationHistory(JdbcTemplate jdbc, PlatformTransactionManager manager,
-            JdbcRuntimeBindingRepository bindings, ManagedSessionStore nativeStore, ObjectMapper identityJson) {
+            JdbcRuntimeBindingRepository bindings, JdbcManagedSessionStore nativeStore, ObjectMapper identityJson) {
         require(jdbc != null && jdbc.getDataSource() != null && manager != null && bindings != null && nativeStore != null
                 && identityJson != null && bindings.usesDataSource(jdbc.getDataSource()) && nativeStore.usesDataSource(jdbc.getDataSource()));
         this.jdbc = jdbc;
@@ -210,7 +211,7 @@ final class WorkspaceCsiApplicationHistory {
                 require(committed.add(row.number("journal_revision")));
             }
         }
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(original.getScope().getTenantId(), original.getIsolationKey());
+        String sessionScope = ManagedSessionStore.sessionScopeKey(original.getScope().getTenantId(), original.getIsolationKey());
         Row modelContext = WorkspaceCsiApplicationInventory.modelContextReference(baseline.table("ma_session_journal_tx").rows(),
                 baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(), baseline.table("ma_resource_ref").rows(),
                 original, WorkspaceCsiApplicationImage.sole(baseline, "ma_operation").number("settlement_deadline_ms"));

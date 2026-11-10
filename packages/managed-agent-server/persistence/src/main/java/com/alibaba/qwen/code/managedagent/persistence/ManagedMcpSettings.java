@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -85,7 +87,7 @@ public final class ManagedMcpSettings {
     }
 
     public static JsonNode find(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         return jdbc.query("SELECT u.inline_bytes, u.byte_length, u.sha256, u.kind, u.schema_version, r.revision,"
                         + " u.state, u.storage_kind, u.object_key, u.object_version_id, u.encryption_key_id"
                         + " FROM ma_session_record r LEFT JOIN ma_resource u ON u.session_scope_key=r.session_scope_key"
@@ -102,7 +104,7 @@ public final class ManagedMcpSettings {
                             && row.getString("object_key") == null && row.getString("object_version_id") == null
                             && row.getString("encryption_key_id") == null,
                             "The committed MCP settings are corrupt");
-                    JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+                    JsonNode body = ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
                     require(body);
                     check(body.get("revision").longValue() == row.getLong("revision"), "MCP settings projection conflicts");
                     return body;
