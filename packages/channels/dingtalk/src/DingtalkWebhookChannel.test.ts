@@ -118,13 +118,24 @@ describe('DingTalk webhook configuration', () => {
 });
 
 describe('DingTalk webhook delivery', () => {
-  it.each([0, '0'])(
-    'sends text through the real proactive boundary (%s)',
-    async (errcode) => {
+  it.each([
+    {
+      errcode: 0,
+      text: '完成报告 😀\nsecond line',
+      title: '完成报告 😀',
+    },
+    {
+      errcode: '0',
+      text: '## Daily report\n\n**Completed**\n> Summary\n[Details](https://example.com/report)',
+      title: 'Daily report',
+    },
+  ])(
+    'sends Markdown through the real proactive boundary ($errcode)',
+    async ({ errcode, text, title }) => {
       const { channel, bridge } = make();
       fetchMock.mockResolvedValueOnce(Response.json({ errcode, errmsg: 'ok' }));
       await channel.connect();
-      await channel.deliverProactive(TARGET, '完成报告 😀\nsecond line');
+      await channel.deliverProactive(TARGET, text);
       expect(fetchMock).toHaveBeenCalledOnce();
       const [url, request] = fetchMock.mock.calls[0]!;
       expect(String(url)).toBe(WEBHOOK_URL);
@@ -133,8 +144,8 @@ describe('DingTalk webhook delivery', () => {
         headers: { 'Content-Type': 'application/json' },
         redirect: 'error',
         body: JSON.stringify({
-          msgtype: 'text',
-          text: { content: '完成报告 😀\nsecond line' },
+          msgtype: 'markdown',
+          markdown: { title, text },
         }),
       });
       expect(request?.signal).toBeInstanceOf(AbortSignal);
@@ -287,7 +298,7 @@ describe('DingTalk webhook delivery', () => {
     });
     await expect(result).rejects.not.toHaveProperty('cause');
     expect(
-      JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)).text.content,
+      JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)).markdown.text,
     ).toBe(text);
     expect(fetchMock).toHaveBeenCalledOnce();
   });

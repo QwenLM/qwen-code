@@ -16,6 +16,7 @@ import type {
   ChannelConfig,
   SessionTarget,
 } from '@qwen-code/channel-base';
+import { extractTitle } from './markdown.js';
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 16_384;
@@ -160,7 +161,10 @@ export class DingtalkWebhookChannel extends ChannelBase {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ msgtype: 'text', text: { content: text } }),
+        body: JSON.stringify({
+          msgtype: 'markdown',
+          markdown: { title: extractTitle(text), text },
+        }),
         redirect: 'error',
         signal: controller.signal,
       });
