@@ -10377,18 +10377,21 @@ export function registerHostedHarnessSessionRoutes(
     // A lease is a Turn's obligation; a reload-stable owner outlives the Turn.
     // Releasing it here persists RELEASED under the id the next load
     // recomputes — the tombstone the held-Runtime drains also refuse (R3-1).
-    // The owner's own close is its only terminal releaser, and a delete runs
-    // that close, so declining here strands nothing. It still proved no stop,
-    // which the close reports rather than certifying one.
-    const deferred = sessionReloadStableOwnerIds(session).has(runtimeSessionId);
+    // Only a Session that survives needs that protection. A delete has no
+    // next load, and the blocked resident R5-1 exempts builds no live owner
+    // object, so the close this used to defer to does not exist there:
+    // declining a terminal handback left the owner released by nobody (R6-1).
+    // The delete's drain and owner close already release the same id twice
+    // when both reach it, so handing it back here is the established shape.
+    const deferred =
+      !terminal && sessionReloadStableOwnerIds(session).has(runtimeSessionId);
     // The lease carrier reaches this decision without passing either drain,
     // so it names the id itself — otherwise the half of the invariant that
     // leaves an owner READY is the half missing from the log (R4-1). Not
     // "detach": a settled prompt and a recovery recheck hand back here too.
-    // A terminal close already released the owner through its own close, so
-    // the owed line would name a leak that does not exist — on the one route
-    // an operator uses as the contrast for a real park (R4-1 follow-up).
-    if (deferred && !terminal)
+    // A terminal handback is never deferred, so this only names a real park
+    // — never a leak the route already discharged (R4-1 follow-up).
+    if (deferred)
       writeStderrLineSafe(
         `qwen serve: Hosted Harness keeps reload-stable owner ${runtimeSessionId} running: release deferred, obligation still owed (#16579).`,
       );
@@ -10486,9 +10489,9 @@ export function registerHostedHarnessSessionRoutes(
       (outcome) => {
         if (outcome !== 'released' && outcome !== 'deferred')
           throw new Error('Original Runtime cleanup is still owed.');
-        // A delete releases the owner through its own close above, so the
-        // deferred handback certifies nothing false there.
-        unproven = outcome === 'deferred' && !terminal;
+        // Only a non-terminal handback can defer, so a deferral here always
+        // means the owner really was left running.
+        unproven = outcome === 'deferred';
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;
           session.runtimeLeaseOwedByTerminalRoute = false;

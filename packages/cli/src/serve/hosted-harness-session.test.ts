@@ -25979,7 +25979,14 @@ describe('Hosted Harness tool approvals', () => {
       { arm: 'legacy delete', terminal: true, protocol: 1 },
     ].flatMap((route) =>
       (
-        ['held turn', 'mcp', 'lease', 'ordinary lease', 'durable only'] as const
+        [
+          'held turn',
+          'mcp',
+          'lease',
+          'ordinary lease',
+          'durable only',
+          'durable lease',
+        ] as const
       ).map((carrier) => ({
         ...route,
         carrier,
@@ -26152,14 +26159,16 @@ describe('Hosted Harness tool approvals', () => {
         .set('X-Qwen-Client-Id', clientId)
         .expect(204);
       releasedOwners.clear();
-      // The lease arm keeps the owner out of the hold rows: there the only
+      // The lease arms keep the owner out of the hold rows: there the only
       // thing that could release it is the lease handback (R3-1).
+      const leaseCarried =
+        carrier === 'lease' ||
+        carrier === 'ordinary lease' ||
+        carrier === 'durable lease';
       const activeHolds = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
         .mockResolvedValue(
-          carrier === 'lease' || carrier === 'ordinary lease'
-            ? [ordinary, lookalike]
-            : [owner, ordinary, lookalike],
+          leaseCarried ? [ordinary, lookalike] : [owner, ordinary, lookalike],
         );
       // A bare load carries no lifecycle authority, so the restore runs and
       // seeds the hold rows; the same Session can then settle under either
@@ -26201,9 +26210,7 @@ describe('Hosted Harness tool approvals', () => {
       // Ownership control: without a real owner the exemption has nothing to
       // match, and every assertion below would pass for the wrong reason.
       expect(resident.hooks?.broker.runtimeSessionId).toBe(owner);
-      expect(resident.heldRuntimeTurns.has(owner)).toBe(
-        carrier !== 'lease' && carrier !== 'ordinary lease',
-      );
+      expect(resident.heldRuntimeTurns.has(owner)).toBe(!leaseCarried);
       if (carrier === 'mcp') {
         // Hooks no longer names the owner, so a drain reduced to
         // `reloadStableOwnerIds({ hooks })` loses the exemption here (R3-4).
@@ -26228,7 +26235,7 @@ describe('Hosted Harness tool approvals', () => {
           promptId: ordinary,
           runtimeSessionId: owner,
         };
-      } else if (carrier === 'durable only') {
+      } else if (carrier === 'durable only' || carrier === 'durable lease') {
         // The blocked-resident shape R5-1 describes: the passive load set
         // `blocked` and built neither live object, yet the durable
         // config_install chain still names revision 1. Only that chain can
@@ -26236,6 +26243,18 @@ describe('Hosted Harness tool approvals', () => {
         resident.hooks = undefined;
         resident.mcp = undefined;
         expect(resident.extensions?.configRevisions).toContain(1);
+        if (carrier === 'durable lease') {
+          // R6-1: the same object-less resident, with the owner arriving on
+          // the recovery lease instead of the hold rows. The carriers above
+          // are mutually exclusive, so none of them reached this combination
+          // — and it is the one where the deferral's premise fails: there is
+          // no `hooks.close` to be the owner's terminal releaser, so a delete
+          // that also declines the handback releases it nowhere.
+          resident.runtimeLeaseHeld = {
+            promptId: ordinary,
+            runtimeSessionId: owner,
+          };
+        }
       } else if (carrier === 'ordinary lease') {
         // The other direction of the same decision: a lease that is NOT a
         // reload-stable owner must still be handed back, or the Workspace
@@ -26288,18 +26307,30 @@ describe('Hosted Harness tool approvals', () => {
       // a reload — this resident cannot offer one, because the v2 close pins
       // lifecycleKind and every later kind conflicts (R2-6/R3-5).
       expect(resident.heldRuntimeTurns.has(owner)).toBe(
-        carrier === 'lease' || carrier === 'ordinary lease' ? false : !terminal,
+        leaseCarried ? false : !terminal,
       );
       if (carrier === 'ordinary lease') {
         // M06: the deferral must not swallow an ordinary recovered lease.
         expect(releasedOwners.has(ordinaryLease)).toBe(true);
         expect(resident.runtimeLeaseHeld).toBeUndefined();
       }
-      if (carrier === 'lease') {
+      // Both drains word their deferral identically, and only a carrier that
+      // put the owner in the hold rows reaches one. Asserting both directions
+      // pins the line the lease assertion below cannot see: a delete releases
+      // the owner instead of announcing a park it never made (M12).
+      expect(
+        stderr.mock.calls.some(([line]) =>
+          String(line).includes(
+            `detach keeps reload-stable owner ${owner} running: release deferred`,
+          ),
+        ),
+      ).toBe(!terminal && !leaseCarried);
+      if (carrier === 'lease' || carrier === 'durable lease') {
         // R4-1: the lease path names the id it left running, like the drains
-        // — but only when it really left it running. A terminal close already
-        // released the owner through its own close, so the owed line there
-        // would report a leak that does not exist (R4-1 follow-up).
+        // — but only when it really left it running. A terminal route releases
+        // the owner (through its own close when one exists, through this
+        // handback when none does), so the owed line there would report a leak
+        // that does not exist (R4-1 follow-up, R6-1).
         expect(
           stderr.mock.calls.some(([line]) =>
             String(line).includes(
