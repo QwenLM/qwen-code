@@ -128,7 +128,7 @@ export async function runBillSplitter(
     );
     const ok =
       observed.total === total &&
-      JSON.stringify([...observed.shares].sort((a, b) => b - a)) ===
+      JSON.stringify(observed.shares) ===
         JSON.stringify(billShares(BILL_SCENARIO));
     checks.expect(
       'scenario',
@@ -706,6 +706,17 @@ export async function runComparator(
   const first = await env.waitForCard(0);
   await env.waitForIdle();
   const initialSeats = await first.view.locator('#seats').inputValue();
+  const initialBilling = await first.view
+    .locator('input[id^="billing-"]:checked')
+    .getAttribute('id');
+  const initialPlan = await first.view
+    .locator('input[id^="plan-"]:checked')
+    .getAttribute('id');
+  const initialInputs: ComparatorInputs = {
+    seats: Number(initialSeats),
+    billing: initialBilling === 'billing-annual' ? 'annual' : 'monthly',
+    support: false,
+  };
   const withoutSupport: ComparatorInputs = {
     ...COMPARATOR_SCENARIO,
     support: false,
@@ -800,7 +811,17 @@ export async function runComparator(
     await env.send(prompts.reset);
     await env.waitForIdle();
     const reset = await env.waitForCard(Math.max(0, views().length - 1));
+    const observed = await settle(
+      () => readComparator(reset.view),
+      (value) => comparatorMatches(value, initialInputs),
+    );
     const seats = await reset.view.locator('#seats').inputValue();
+    const billing = await reset.view
+      .locator('input[id^="billing-"]:checked')
+      .getAttribute('id');
+    const plan = await reset.view
+      .locator('input[id^="plan-"]:checked')
+      .getAttribute('id');
     const support = await reset.view
       .locator('#support')
       .isChecked()
@@ -808,8 +829,12 @@ export async function runComparator(
     return checks.expect(
       'reset-via-follow-up',
       'case 4',
-      seats === initialSeats && !support,
-      `after reset: seats=${seats} (initial ${initialSeats}) support=${support}`,
+      seats === initialSeats &&
+        billing === initialBilling &&
+        plan === initialPlan &&
+        !support &&
+        comparatorMatches(observed, initialInputs),
+      `after reset: seats=${seats} billing=${billing} plan=${plan} support=${support}; initial seats=${initialSeats} billing=${initialBilling} plan=${initialPlan}; ${describeComparator(observed)}`,
     );
   });
   return checks.results;
