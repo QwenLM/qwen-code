@@ -577,7 +577,7 @@ describe('enrolling', () => {
     routes: (
       url: string,
       input: Record<string, unknown>,
-    ) => Response | undefined = () => undefined,
+    ) => Response | Promise<Response> | undefined = () => undefined,
   ) {
     const qwenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'host-enroll-'));
     const sent: string[] = [];
@@ -588,7 +588,7 @@ describe('enrolling', () => {
         const input = init?.body
           ? (JSON.parse(init.body as string) as Record<string, unknown>)
           : {};
-        const answer = routes(url, input);
+        const answer = await routes(url, input);
         if (answer) return answer;
         if (url.endsWith('/enroll')) {
           sent.push(input['secret'] as string);
@@ -1198,6 +1198,222 @@ describe('enrolling', () => {
           secret: other,
         });
       },
+    );
+  });
+
+  it('goes on, run again, with the credential its enrollment saved before the connection failed', async () => {
+    let busy = true;
+    await withCoordinator(
+      (secret) => Response.json({ host: { id: 'host-1' }, secret }),
+      async (files, sent) => {
+        await expect(connect()).rejects.toThrow(
+          'Agent Host could not confirm its connection',
+        );
+        await expect(readJson(files.credential)).resolves.toMatchObject({
+          hostId: 'host-1',
+          secret: sent[0],
+          enrollmentTokenHash: tokenHash('join-token'),
+        });
+
+        // The same command: its token is spent, by this enrollment.
+        await connect();
+
+        expect(sent).toHaveLength(1);
+      },
+      (url, input) => {
+        if (!url.includes('/host-1/heartbeat')) return undefined;
+        if (input['enrollmentToken']) {
+          return Response.json({ error: 'refused' }, { status: 401 });
+        }
+        if (!busy) return undefined;
+        // The first heartbeat meets a busy store.
+        busy = false;
+        return Response.json({ error: 'busy' }, { status: 503 });
+      },
+    );
+  });
+
+  it.each([
+    ['an older version saved', 'v2', undefined],
+    ['another command recorded', 'v2', tokenHash('an-earlier-join')],
+    ['an older version saved under the older name', 'legacy', undefined],
+  ])(
+    'goes on, run again, after a re-join whose first heartbeat failed, with a credential %s',
+    async (_label, where, recorded) => {
+      let spent = false;
+      let busy = true;
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files, sent) => {
+          const saved =
+            where === 'legacy'
+              ? files.credential.replace(/\.v2\.json$/, '.json')
+              : files.credential;
+          await fs.mkdir(path.dirname(saved), { recursive: true });
+          await fs.writeFile(
+            saved,
+            JSON.stringify({
+              schemaVersion: 1,
+              serverUrl,
+              workspaceId,
+              hostId: 'x',
+              secret: 'x'.repeat(43),
+              ...(recorded ? { enrollmentTokenHash: recorded } : {}),
+            }),
+          );
+
+          await expect(connect()).rejects.toThrow(
+            'Agent Host could not confirm its connection',
+          );
+          await expect(readJson(files.credential)).resolves.toMatchObject({
+            hostId: 'x',
+            enrollmentTokenHash: tokenHash('join-token'),
+          });
+
+          await connect();
+
+          expect(sent).toEqual([]);
+        },
+        (url, input) => {
+          if (!url.includes('/x/heartbeat')) return undefined;
+          if (input['enrollmentToken']) {
+            // The first re-join spends the token.
+            if (!spent) {
+              spent = true;
+              return undefined;
+            }
+            return Response.json({ error: 'refused' }, { status: 401 });
+          }
+          if (!busy) return undefined;
+          busy = false;
+          return Response.json({ error: 'busy' }, { status: 503 });
+        },
+      );
+    },
+  );
+
+  it('starts on a re-join even when its credential cannot record the token', async () => {
+    const saved = {
+      schemaVersion: 1,
+      serverUrl,
+      workspaceId,
+      hostId: 'x',
+      secret: 'x'.repeat(43),
+    };
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files) => {
+          await fs.mkdir(path.dirname(files.credential), { recursive: true });
+          await fs.writeFile(files.credential, JSON.stringify(saved));
+
+          await connect();
+
+          expect(stderr.mock.calls.map(([line]) => String(line))).toContain(
+            'Agent Host credential could not record its enrollment: ENOSPC: no space left on device\n',
+          );
+          // Only a rerun of this command would have needed it.
+          await expect(readJson(files.credential)).resolves.toEqual(saved);
+        },
+        (url, input) => {
+          if (url.includes('/x/heartbeat') && input['enrollmentToken']) {
+            // The next rename is the credential's save, after this answer.
+            vi.mocked(fs.rename).mockRejectedValueOnce(
+              Object.assign(new Error('ENOSPC: no space left on device'), {
+                code: 'ENOSPC',
+              }),
+            );
+          }
+          return undefined;
+        },
+      );
+    } finally {
+      stderr.mockRestore();
+      // Back to the real rename, should the rejection above not be used.
+      vi.mocked(fs.rename).mockReset();
+    }
+  });
+
+  it('does not save a re-join’s token over a credential removed meanwhile', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files) => {
+          await fs.mkdir(path.dirname(files.credential), { recursive: true });
+          await fs.writeFile(
+            files.credential,
+            JSON.stringify({
+              schemaVersion: 1,
+              serverUrl,
+              workspaceId,
+              hostId: 'x',
+              secret: 'x'.repeat(43),
+            }),
+          );
+
+          await connect();
+
+          // Removed (revoked, say) by another process: not written back.
+          expect(stderr.mock.calls.map(([line]) => String(line))).toContain(
+            'Agent Host credential could not record its enrollment: Saved Agent Host credential was removed.\n',
+          );
+          await expect(fs.access(files.credential)).rejects.toThrow();
+        },
+        (url, input) => {
+          if (url.includes('/x/heartbeat') && input['enrollmentToken']) {
+            const files = hostFiles(
+              process.env['QWEN_HOME']!,
+              serverUrl,
+              workspaceId,
+              workspaceCwd,
+            );
+            return fs
+              .rm(files.credential)
+              .then(() =>
+                Response.json({ host: { id: 'x' }, leases: [], decisions: [] }),
+              );
+          }
+          return undefined;
+        },
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('still says the token is spent when another command spent it', async () => {
+    await withCoordinator(
+      (secret) => Response.json({ host: { id: 'h2' }, secret }),
+      async (files, sent) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+            enrollmentTokenHash: tokenHash('an-earlier-join'),
+          }),
+        );
+
+        // A Replace refused outright, say: it did nothing.
+        await expect(connect()).rejects.toThrow(
+          'Invalid or expired Agent Host enrollment token.',
+        );
+        expect(sent).toEqual([]);
+      },
+      (url, input) =>
+        url.includes('/x/heartbeat') && input['enrollmentToken']
+          ? Response.json({ error: 'refused' }, { status: 401 })
+          : undefined,
     );
   });
 

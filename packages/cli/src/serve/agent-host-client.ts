@@ -100,6 +100,12 @@ interface AgentHostCredential {
   workspaceId: string;
   hostId: string;
   secret: string;
+  /**
+   * {@link enrollmentTokenHash} of the token this credential enrolled with,
+   * or last spent re-joining: run again, that command goes on with it.
+   * Absent from what older versions wrote.
+   */
+  enrollmentTokenHash?: string;
 }
 
 export interface AgentHostConnectionOptions {
@@ -166,10 +172,15 @@ async function readCredential(
   }
 }
 
+/**
+ * `onlyOverSaved`: write only over a credential still saved, not one
+ * removed meanwhile (revoked, say).
+ */
 async function writeCredential(
   filePath: string,
   credential: AgentHostCredential,
   expected: AgentHostCredential | undefined,
+  { onlyOverSaved = false } = {},
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const lock = await lockCredential(filePath);
@@ -178,6 +189,9 @@ async function writeCredential(
   try {
     const current = await readCredential(filePath);
     lock.assertHeld();
+    if (onlyOverSaved && !current) {
+      throw new Error('Saved Agent Host credential was removed.');
+    }
     if (
       current &&
       (current.hostId !== expected?.hostId ||
@@ -936,8 +950,13 @@ async function connectAgentHost(
       }),
     });
   if (savedCredential && options.enrollmentToken) {
+    const tokenHash = enrollmentTokenHash(options.enrollmentToken);
     try {
       await sendHeartbeat(savedCredential, options.enrollmentToken);
+      // This credential spent the token: run again, the command goes on.
+      if (savedCredential.enrollmentTokenHash !== tokenHash) {
+        credential = { ...savedCredential, enrollmentTokenHash: tokenHash };
+      }
     } catch (error) {
       if (
         (error as { status?: number }).status === 409 &&
@@ -964,15 +983,19 @@ async function connectAgentHost(
             () => undefined,
           );
           if (
-            pending === undefined ||
-            pending.secret === savedCredential.secret ||
-            !pending.tokenHashes.includes(
-              enrollmentTokenHash(options.enrollmentToken),
-            )
+            pending !== undefined &&
+            pending.secret !== savedCredential.secret &&
+            pending.tokenHashes.includes(tokenHash)
           ) {
+            credential = undefined;
+          } else if (savedCredential.enrollmentTokenHash !== tokenHash) {
+            // Not the token this credential was enrolled or re-joined with:
+            // whatever this command did (a Replace refused outright did
+            // nothing), it did not get this credential.
             throw new Error('Invalid or expired Agent Host enrollment token.');
           }
-          credential = undefined;
+          // Otherwise this command's first run got this credential and
+          // failed after that: run again, it goes on with what it got.
         }
       }
     }
@@ -1066,11 +1089,22 @@ async function connectAgentHost(
       workspaceId: options.workspaceId,
       hostId: enrolled.host.id,
       secret: enrolled.secret,
+      enrollmentTokenHash: tokenHash,
     };
     await writeCredential(filePath, credential, savedCurrentCredential);
     await clearEnrollmentSecret(files.enrollment, proposed.secret);
   } else if (!savedCurrentCredential) {
     await writeCredential(filePath, credential, undefined);
+  } else if (credential !== savedCurrentCredential) {
+    // Only the token it spent changed. A failed save costs only a rerun of
+    // this command, refused as it was before.
+    await writeCredential(filePath, credential, savedCurrentCredential, {
+      onlyOverSaved: true,
+    }).catch((error: unknown) =>
+      writeStderrLine(
+        `Agent Host credential could not record its enrollment: ${extractErrorMessage(error)}`,
+      ),
+    );
   }
   const activeCredential = credential;
 
