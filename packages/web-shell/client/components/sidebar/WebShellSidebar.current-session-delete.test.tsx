@@ -800,7 +800,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(active.deleteSession).not.toHaveBeenCalled();
   });
 
-  it('shares the existing Projects search text with Managed navigation', async () => {
+  it('shares dialog search text with Managed navigation and resets it on close', async () => {
     const onSearchQueryChange = vi.fn();
     renderSidebar({
       managedWorkspaces: <div data-managed-workspaces />,
@@ -815,7 +815,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
       ),
     );
     await flushSidebar();
-    const input = container.querySelector<HTMLInputElement>(
+    const input = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     )!;
     expect(input).not.toBeNull();

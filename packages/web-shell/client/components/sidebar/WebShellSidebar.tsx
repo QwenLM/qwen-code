@@ -153,6 +153,7 @@ import {
   sessionMatchesSource as matchesSessionSource,
 } from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
+import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
 import {
@@ -1996,6 +1997,7 @@ export function WebShellSidebar({
   );
   const [collapsedSessionsOpen, setCollapsedSessionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchTriggerRef = useRef<HTMLElement | null>(null);
   const [bodyScrolled, setBodyScrolled] = useState(false);
   const [workspaceRenameCandidate, setWorkspaceRenameCandidate] =
     useState<DaemonWorkspaceCapability | null>(null);
@@ -2059,8 +2061,8 @@ export function WebShellSidebar({
   }, []);
   const [searchQuery, setSearchQuery] = useState('');
   useEffect(() => {
-    onSearchQueryChange?.(searchQuery);
-  }, [onSearchQueryChange, searchQuery]);
+    if (!searchOpen) onSearchQueryChange?.('');
+  }, [onSearchQueryChange, searchOpen]);
   // Order-insensitive membership key: poll-driven catalog updates change
   // it only when the session-id set actually changes, so externally
   // deleted/archived sessions invalidate content-search hits the same way
@@ -2107,10 +2109,11 @@ export function WebShellSidebar({
   }, []);
   const isCollapsedCloseBlocked = useCallback(
     () =>
+      searchOpen ||
       sessionMenuOpenRef.current ||
       groupMenu !== null ||
       deleteCandidate !== null,
-    [deleteCandidate, groupMenu],
+    [deleteCandidate, groupMenu, searchOpen],
   );
   const previousRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
@@ -6749,35 +6752,11 @@ export function WebShellSidebar({
     searchEnabled &&
     !activityOpen &&
     (!collapsed || mobileOpen || homePreviewOpen);
-  // A narrow column cannot fit a usable field beside the icon buttons, so
-  // there the field drops to a full-width row under the brand row instead.
-  const topRowColumnWidth =
-    sidebarWidth - (railLayout ? SIDEBAR_RAIL_WIDTH : 0);
-  const inlineTopRowSearch =
-    topRowSearchVisible && !mobileOpen && topRowColumnWidth >= 285;
   // The top row owns the search control whenever it is visible. Hosts that
   // hide the brand row, and the collapsed strip (whose session list lives in
   // a popover), fall back to the older Projects-header placement.
   const searchInProjectHeader =
     !shouldRenderBrand || (!railLayout && collapsed && !mobileOpen);
-  const renderSearchField = (className?: string) => (
-    <div className={cx(styles.projectSearch, className)}>
-      <SearchIcon aria-hidden="true" />
-      <Input
-        value={searchQuery}
-        placeholder={t('sidebar.searchPlaceholder')}
-        aria-label={t('sidebar.search')}
-        autoFocus
-        onChange={(event) => setSearchQuery(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') {
-            setSearchQuery('');
-            setSearchOpen(false);
-          }
-        }}
-      />
-    </div>
-  );
   const renderSearchToggle = (className: string) => (
     <button
       type="button"
@@ -6785,12 +6764,10 @@ export function WebShellSidebar({
       title={t('sidebar.search')}
       aria-label={t('sidebar.search')}
       aria-expanded={searchOpen}
-      onClick={() => {
-        setSearchOpen((open) => {
-          if (open) setSearchQuery('');
-          return !open;
-        });
-        setProjectsExpanded(true);
+      aria-haspopup="dialog"
+      onClick={(event) => {
+        searchTriggerRef.current = event.currentTarget;
+        setSearchOpen(true);
       }}
     >
       <SearchIcon size={18} strokeWidth={1.5} />
@@ -7203,6 +7180,70 @@ export function WebShellSidebar({
   );
   return (
     <>
+      {searchOpen && searchEnabled && (
+        <SessionSearchDialog
+          client={workspace.client}
+          workspaces={projectWorkspaces}
+          initialSessions={sessions}
+          primaryWorkspaceCwd={primaryWorkspaceCwd}
+          includeStandalone={standaloneSessionsVisible}
+          source={selectedSessionSource}
+          organizationEnabled={organizationEnabled}
+          qualified={workspaceQualifiedRestCoreEnabled}
+          restoreFocus={searchTriggerRef.current}
+          customContent={sessionContent}
+          additionalContent={
+            managedWorkspaces && !sectionView ? (
+              <div
+                onClick={(event) => {
+                  if (
+                    (event.target as HTMLElement).closest(
+                      '[data-managed-session-id]',
+                    )
+                  ) {
+                    setSearchOpen(false);
+                    onSearchQueryChange?.('');
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    (event.key === 'Enter' || event.key === ' ') &&
+                    !event.nativeEvent.isComposing &&
+                    event.nativeEvent.keyCode !== 229 &&
+                    (event.target as HTMLElement).closest(
+                      '[data-managed-session-id]',
+                    )
+                  ) {
+                    setSearchOpen(false);
+                    onSearchQueryChange?.('');
+                  }
+                }}
+              >
+                {managedWorkspaces}
+              </div>
+            ) : undefined
+          }
+          onQueryChange={(query) => {
+            onSearchQueryChange?.(query);
+          }}
+          onClose={() => {
+            setSearchOpen(false);
+            setSearchQuery('');
+            onSearchQueryChange?.('');
+          }}
+          onSelect={({ session, workspaceCwd }) => {
+            if (workspaceCwd)
+              handleLoadSession(session.sessionId, workspaceCwd);
+            else
+              void Promise.resolve(
+                onLoadStandaloneSession?.(
+                  session.sessionId,
+                  session.displayName,
+                ),
+              ).catch((error) => onError(error, t('sidebar.switchFailed')));
+          }}
+        />
+      )}
       <aside
         ref={sidebarRef}
         className={cx(
@@ -7741,30 +7782,11 @@ export function WebShellSidebar({
               <div className={styles.sectionHeader}>
                 {t(liveView ? 'sidebar.live' : 'sidebar.channels')}
                 {channelView && searchEnabled && shouldRenderBrand && (
-                  <div
-                    className={cx(
-                      styles.topRowActions,
-                      searchOpen &&
-                        inlineTopRowSearch &&
-                        styles.topRowActionsSearching,
-                    )}
-                  >
-                    {searchOpen &&
-                      inlineTopRowSearch &&
-                      renderSearchField(styles.topRowSearchField)}
+                  <div className={styles.topRowActions}>
                     {renderSearchToggle(styles.searchToggle)}
                   </div>
                 )}
               </div>
-              {channelView &&
-                searchEnabled &&
-                shouldRenderBrand &&
-                searchOpen &&
-                !inlineTopRowSearch && (
-                  <div className={styles.topRowSearchRow}>
-                    {renderSearchField()}
-                  </div>
-                )}
             </>
           )}
           {liveView &&
@@ -7780,9 +7802,7 @@ export function WebShellSidebar({
             <>
               <div className={styles.topRow}>
                 {branding?.render ? (
-                  searchOpen && inlineTopRowSearch ? null : (
-                    branding.render()
-                  )
+                  branding.render()
                 ) : (
                   <>
                     <span className={styles.brandLogo} aria-hidden="true">
@@ -7799,24 +7819,12 @@ export function WebShellSidebar({
                           <IconQwenLogo />
                         ))}
                     </span>
-                    {(!collapsed || mobileOpen || homePreviewOpen) &&
-                      !(searchOpen && inlineTopRowSearch) && (
-                        <span className={styles.brandName}>{brandName}</span>
-                      )}
+                    {(!collapsed || mobileOpen || homePreviewOpen) && (
+                      <span className={styles.brandName}>{brandName}</span>
+                    )}
                   </>
                 )}
-                <div
-                  className={cx(
-                    styles.topRowActions,
-                    searchOpen &&
-                      inlineTopRowSearch &&
-                      styles.topRowActionsSearching,
-                  )}
-                >
-                  {topRowSearchVisible &&
-                    searchOpen &&
-                    inlineTopRowSearch &&
-                    renderSearchField(styles.topRowSearchField)}
+                <div className={styles.topRowActions}>
                   {activityEnabled &&
                     (!railLayout || !collapsed || mobileOpen) && (
                       <button
@@ -7857,11 +7865,6 @@ export function WebShellSidebar({
                     renderSearchToggle(styles.searchToggle)}
                 </div>
               </div>
-              {topRowSearchVisible && searchOpen && !inlineTopRowSearch && (
-                <div className={styles.topRowSearchRow}>
-                  {renderSearchField()}
-                </div>
-              )}
             </>
           )}
           {!sectionView &&
@@ -7987,7 +7990,7 @@ export function WebShellSidebar({
                       sessionArchiveEnabled && sessionActionItems.has('archive')
                     }
                   />
-                ) : (
+                ) : searchOpen && sessionContent !== undefined ? null : (
                   sessionContent
                 )
               }
@@ -8251,13 +8254,9 @@ export function WebShellSidebar({
                   </div>
                 </div>
               )}
-              {searchEnabled &&
-                searchOpen &&
-                searchInProjectHeader &&
-                renderSearchField()}
               {/* Managed 历史由外部 App Host 注入，不受本地 Workspaces
                   折叠状态控制；否则折叠分组会把仍有效的 Managed 会话一起隐藏。 */}
-              {!channelView && !liveView && managedWorkspaces}
+              {!channelView && !liveView && !searchOpen && managedWorkspaces}
               <div
                 className="flex flex-col"
                 hidden={liveView || !projectsExpanded}

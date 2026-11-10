@@ -541,7 +541,7 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
   await installScenario(page, scenario, testInfo);
   await page.goto('/');
 
-  const sidebar = page.getByRole('complementary');
+  const sidebar = page.getByRole('complementary', { includeHidden: true });
   const projects = sidebar
     .getByRole('button', {
       name: 'Workspaces',
@@ -553,6 +553,7 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
   const toggle = group.getByRole('button', {
     name: 'No-workspace sessions',
     exact: true,
+    includeHidden: true,
   });
   const row = group.getByText('Independent conversation', { exact: true });
   await expect(row).toBeVisible();
@@ -578,10 +579,18 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
   await sidebar
     .getByRole('button', { name: 'Search sessions', exact: true })
     .click();
-  await sidebar
+  const searchDialog = page.getByRole('dialog', {
+    name: 'Search sessions',
+    exact: true,
+  });
+  await searchDialog
     .getByRole('textbox', { name: 'Search sessions', exact: true })
     .fill('Independent');
-  await expect(row).toBeVisible();
+  const searchResult = searchDialog
+    .getByRole('option')
+    .filter({ hasText: 'Independent' });
+  await expect(searchResult).toBeVisible();
+  await expect(row).toHaveCount(0);
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   expect(
     await page.evaluate(() =>
@@ -590,7 +599,7 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
       ),
     ),
   ).toBe('false');
-  await row.click();
+  await searchResult.click();
   await expect(page).toHaveURL(
     new URL(
       `/session/${sessionId}?context=standalone`,
