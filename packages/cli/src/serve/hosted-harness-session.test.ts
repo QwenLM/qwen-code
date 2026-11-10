@@ -23701,6 +23701,64 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it.each(['settled prompt', 'recovery recheck'] as const)(
+    'leaves a reload-stable owner owed on the %s handback (R4-2)',
+    async (driver) => {
+      const f = await recoveryFileSession();
+      const owner = hostedConfigScopedOwnerId(
+        f.resident.managed.authority.sessionHeader.sessionKey,
+        1,
+      );
+      // These two routes reach releaseHeldRuntime without passing either
+      // drain, so the close arms cannot pin them. Neither refuses a
+      // Hook-configured Session; the managed-runtime replay routes do
+      // (hosted_hook_recovery_required), which is why this arm drives these.
+      f.resident.hooks = {
+        broker: { runtimeSessionId: owner },
+        hasPendingOperations: false,
+        ensureReady: async () => {},
+      } as unknown as HostedHookSession;
+      const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+      const adopt = () => {
+        f.resident.runtimeLeaseHeld = {
+          promptId: PROMPT_ID,
+          runtimeSessionId: owner,
+        };
+        f.resident.runtimeLeaseOwedByTerminalRoute = true;
+        release.mockClear();
+      };
+      if (driver === 'settled prompt') {
+        adopt();
+        await f.submit();
+        await f.idle();
+      } else {
+        await f.submit();
+        await f.idle();
+        f.resident.blocked = true;
+        f.resident.cleanupBlocked = true;
+        adopt();
+        await f
+          .authorize(
+            supertest(f.server).post(`/session/${SESSION_ID}/recovery/recheck`),
+          )
+          .send({ promptId: PROMPT_ID })
+          .expect(202);
+      }
+      // The lease is a Turn obligation and is discharged; the owner it names
+      // is not, and only its own close may release it terminally.
+      await vi.waitFor(
+        () => expect(f.resident.runtimeLeaseHeld).toBeUndefined(),
+        { timeout: settleTimeoutMs() },
+      );
+      expect(f.resident.runtimeLeaseOwedByTerminalRoute).toBe(false);
+      expect(
+        release.mock.contexts.map(
+          (broker) => (broker as HostedWorkspaceBroker).runtimeSessionId,
+        ),
+      ).not.toContain(owner);
+    },
+  );
+
   it('rechecks an admitted prompt before running queued cleanup', async () => {
     vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
       () => undefined,

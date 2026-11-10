@@ -10358,10 +10358,11 @@ export function registerHostedHarnessSessionRoutes(
     const deferred = reloadStableOwnerIds(session).has(runtimeSessionId);
     // The lease carrier reaches this decision without passing either drain,
     // so it names the id itself — otherwise the half of the invariant that
-    // leaves an owner READY is the half missing from the log (R4-1).
+    // leaves an owner READY is the half missing from the log (R4-1). Not
+    // "detach": a settled prompt and a recovery recheck hand back here too.
     if (deferred)
       writeStderrLineSafe(
-        `qwen serve: Hosted Harness detach keeps reload-stable owner ${runtimeSessionId} running: release deferred, obligation still owed (#16579).`,
+        `qwen serve: Hosted Harness keeps reload-stable owner ${runtimeSessionId} running: release deferred, obligation still owed (#16579).`,
       );
     if (
       !deferred &&
