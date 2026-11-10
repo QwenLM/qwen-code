@@ -137,17 +137,21 @@ The facts below are from this repository at `488845a4a81`.
    local fire-time expansion. The expansion reuses the shared
    loop-task-file reader, so it carries the local guards rather than a
    bare file read: the project `.qwen/loop.md` is read only when the
-   workspace is trusted (the local `allowProjectFile` gate, re-evaluated
-   on every resolve, defaulting to false), otherwise the home file or the
-   absent-file tick; the content is byte-capped at
+   workspace is trusted under the Hosted trust gate (the slice pins that
+   gate's evaluation model; the local reader's `allowProjectFile`
+   defaults to false), otherwise the home file (the process-global
+   `QWEN_HOME`) or the absent-file tick; the content is byte-capped at
    `LOOP_TASK_FILE_MAX_BYTES` (25 000) with the local truncation warning;
    an absent file converges on the autonomous tick and a transient read
    failure on the no-op re-arm tick, so a thrown turn never ends the loop
    forever. Because the arm-time classifier reviewed the sentinel
-   constant, not the file text, the expansion is classifier-visible: when
-   the resolved content differs from what was reviewed at arm time, the
-   fire is re-reviewed before it runs (refused on deny), and the
-   `managed-admission` record names what the fire will read. A changed
+   constant, not the file text, the expansion is classifier-visible: the
+   `managed-admission` record persists the last-reviewed content, and a
+   fire whose resolved content differs from that last-reviewed value is
+   re-reviewed before it runs — steady-state unchanged content is not
+   re-reviewed on every tick. A denied re-review settles the input
+   `cancelled` with stop reason `loop_admission_denied` (ending the loop),
+   rather than re-picking it forever or dropping it silently. A changed
    task file is thus picked up on the next fire, and a restart or
    compaction re-provides the full guidance. No `schedule` or
    `automation_run` record, no control-plane row, and no scanner
@@ -223,10 +227,14 @@ The facts below are from this repository at `488845a4a81`.
    cancelled", mirroring `cancelWakeup`'s boolean. `/loop clear` rides
    the skill's existing `cron_list` + `cron_delete` routing and cancels
    the single unfired pending wakeup. The close path adds `loop` to its
-   model-free settle sources and settles every pending `loop` input — the
-   unfired one, and a firing one whose turn it aborts under the
-   prior-attempt rule — so a closing Session never strands a wakeup as
-   `hosted_turn_recovery_required` at its next open.
+   model-free settle sources, settling the unfired pending `loop` input
+   (the `wakeHasPriorAttempt` filter excludes a firing one). A firing loop
+   turn is not settled model-free: the close aborts it and the existing
+   wake recovery aftermath settles it, exactly as for any started wake
+   turn — a second `cancelled` line on a turn that ran would collide with
+   its fixed `turn:<turnId>` settle (decision 4). Together these leave no
+   pending `loop` input stranded as `hosted_turn_recovery_required` at the
+   next open.
 8. **The tool surface is `loop_wakeup` plus the shared cron
    list/cancel.** `loop_wakeup` is declared by new revisions of the
    write-capable profiles, following the `files/3` precedent that added
@@ -248,8 +256,11 @@ The facts below are from this repository at `488845a4a81`.
    The gate gates arming only: with it off, `loop_wakeup` is refused,
    but an already-armed wakeup survives — the pump delivers journal
    inputs regardless of tool declarations — and `cron_list`/`cron_delete`
-   still list and cancel it, so turning the feature off never strands
-   what it already scheduled.
+   still list and cancel it. Because that cancel is a model-called tool,
+   an operator also has a non-model path: the control plane's internal
+   Session route settles the pending loop input journal-only, independent
+   of the tool surface and the gate. Turning the feature off therefore
+   never strands what it already scheduled.
 9. **Arm-time classifier review replaces the interactive dialog.** The
    local tool returns `'ask'` so the AUTO classifier vets the continuation
    prompt; a Hosted Session has no interactive approval, so the funnel
@@ -267,7 +278,9 @@ The facts below are from this repository at `488845a4a81`.
     envelope bounds (decision 4), and the deployment gate (decision 8)
     are the whole budget. No definition quota is consumed because no
     definition exists; the Session's existing turn and tool budgets price
-    each fired tick like any other turn.
+    each fired tick like any other turn, including a fire-time re-review
+    (decision 1) — which only runs when the resolved content changed, not
+    on every steady-state tick.
 
 ## The pipeline, step by step
 
@@ -278,7 +291,7 @@ The facts below are from this repository at `488845a4a81`.
 | 3    | wake pump `runTurn`        | an ordinary text turn under the input's `turnId`; `turn.settled` consumes the input                                                                                                                                                              |
 | 4    | the fired turn             | another `loop_wakeup` (back to step 1) or none — the loop ends                                                                                                                                                                                   |
 | 5    | `cron_delete` (loop id)    | the pending input's `cancelled` settle (`loop_cancelled`), no prior attempt; idempotent                                                                                                                                                          |
-| 6    | close path                 | model-free `cancelled` settle (`session_closing`) for every pending loop input — the unfired one and a firing one whose turn it aborts                                                                                                           |
+| 6    | close path                 | model-free `cancelled` settle (`session_closing`) for the unfired pending loop input; a firing loop turn is aborted and settled by the wake recovery aftermath, not a model-free line                                                            |
 | 7    | load after a restart       | no commit; the pending set is re-derived, an overdue wakeup is due immediately                                                                                                                                                                   |
 
 ## Contract touchpoints
@@ -351,15 +364,18 @@ The facts below are from this repository at `488845a4a81`.
   capped at `LOOP_TASK_FILE_MAX_BYTES`. An untrusted workspace's
   `.qwen/loop.md` yields the absent-file tick, not its content.
 - Sentinel admission: arming `<<loop.md-dynamic>>` then changing the file
-  before the fire re-reviews the resolved content (refused on deny)
-  rather than executing it unreviewed.
+  before the fire re-reviews the resolved content rather than executing
+  it unreviewed; a denied re-review settles the input `cancelled`
+  (`loop_admission_denied`); steady-state unchanged content is not
+  re-reviewed on every tick.
 - Cancel: a `loop:<wakeupId>` id routes through `cron_delete`;
   idempotent; refused once the turn has a prior attempt; `/loop clear`
   consumes the single unfired pending wakeup. With the gate off, an
-  armed wakeup still fires and stays listable/cancellable, while a new
-  arm is refused.
-- Close: every pending loop input settles model-free (the unfired one and
-  a firing one whose turn the close aborts); the next open is not wedged.
+  armed wakeup still fires and stays listable/cancellable (including via
+  the operator's internal route), while a new arm is refused.
+- Close: the unfired pending loop input settles model-free; a firing loop
+  turn is aborted and settled by the wake recovery aftermath (no second
+  `cancelled` line); the next open is not wedged.
 - Classifier: a deny rule refuses the arm; the admission resource
   records the verdict.
 - Mutation checks: each decision's guard disabled in turn fails a test
@@ -400,7 +416,10 @@ The facts below are from this repository at `488845a4a81`.
    property of starting a new loop at arm time, not of the cancel itself,
    but a cancel that ends the loop would let the next arm start a new
    chain — so adopting it supersedes decision 4's "a cancel does not reset
-   the anchor" reading. Name the rule, and which reading it replaces,
+   the anchor" reading. The bypass also needs a non-loop turn: inside a
+   firing loop turn a live loop always exists, so the reset cannot fire
+   there — a model-driven cancel-then-arm restarts the 24 h budget only
+   from an ordinary turn. Name the rule, and which reading it replaces,
    before implementation.
 2. **Profile revision numbers.** The `loop_wakeup` revisions follow the
    [fixed-interval sibling](2026-11-10-managed-loop-schedule.md)'s cron

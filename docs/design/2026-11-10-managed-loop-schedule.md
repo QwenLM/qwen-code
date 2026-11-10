@@ -130,7 +130,7 @@ The facts below are from this repository at `488845a4a81`.
    `/internal/managed-session-store/v1/sessions/{sessionId}` —
    authenticates with the writer binding exactly as `memory:query` does,
    derives the actor from the bound Session's creator, and delegates to
-   `ManagedAutomationService`. The delegation is Session-scoped, not
+   `ManagedAutomationService`. The internal routes are Session-scoped, not
    actor-scoped: `create`'s target is the bound Session; `list` filters
    to the bound Session before pagination — the service's actor-scoped
    `list` reads every definition the creator can read across the
@@ -138,20 +138,26 @@ The facts below are from this repository at `488845a4a81`.
    `retire` verifies the target definition belongs to the bound Session
    before it executes or answers a replay. The creator actor alone does
    not provide this isolation: the same user may create several
-   Sessions. The delegation inherits the creator check, the mode gate,
-   the capacity check, the command ledger, and the mirror write. The
-   Session scoping lives inside the service/ledger, where filtering
-   happens before the page limit and the `next` cursor is derived from
-   the filtered stream — a controller-side post-filter would cut the page
-   first and return a wrong cursor. The deployment gate gates creation
-   and also halts the scanner (`AutomationScanner.scan` returns early on
-   the same setting), so already-armed definitions stop firing while the
-   gate is off; `list` and `retire` stay available so an operator can see
-   and retire what the gate stopped. This is the existing gate semantics,
-   not a new promise that firing continues. A direct funnel call is
-   refused as a creation path: a journal-only definition has no mirror
-   row, so the scanner would never fire it — the route, not the funnel,
-   is what makes a definition discoverable.
+   Sessions. This scoping is a carve-out for the internal routes only —
+   the public controller calls the same service with no bound Session and
+   keeps its actor scope, so the change must not regress the public API.
+   The scoping lives inside the service/ledger, where filtering happens
+   before the page limit and the `next` cursor is derived from the
+   filtered stream — a controller-side post-filter would cut the page
+   first and return a wrong cursor. The internal `list` uses a page size
+   that covers the per-Session capacity (the ledger's 100-row cap), so a
+   full Session fits one page. The delegation inherits the creator check,
+   the mode gate, the capacity check, the command ledger, and the mirror
+   write. The deployment gate gates creation and also halts the scanner
+   (`AutomationScanner.scan` returns early on the same setting), so
+   already-armed definitions stop firing while the gate is off. `list` is
+   ungated today and stays available; `retire` calls `requireEnabled`
+   today, so the slice ungates it for the internal route (a code change,
+   not existing behaviour) so an operator can retire what the gate
+   stopped. A direct funnel call is refused as a creation path: a
+   journal-only definition has no mirror row, so the scanner would never
+   fire it — the route, not the funnel, is what makes a definition
+   discoverable.
 3. **The Idempotency-Key derives from the tool execution's identity.**
    Each mutation uses a key derived from its `executionCallId` and verb
    (for example `loop:<executionCallId>:create`, within the key's 1–128
@@ -186,13 +192,16 @@ The facts below are from this repository at `488845a4a81`.
 6. **List and delete cover both arms, as locally.** `cron_list` answers
    the union: the bound Session's definitions from the control plane
    ledger — the same rows the scanner reads — plus the pending unfired
-   loop input from the journal, once the wakeup slice has landed. The
-   public list defaults to 20 rows while a Session may hold 32
-   definitions, so `cron_list` walks every page before answering (the
-   single journal wakeup rides alongside the last page); the unchanged
-   skill `clear` recipe — list, then delete every returned id — therefore
-   drains the whole Session. `create` mirrors before it answers, so a
-   list after a create is consistent. `cron_delete` routes by id: a
+   loop input from the journal, once the wakeup slice has landed. This
+   design owns the union contract; the wakeup sibling references it rather
+   than restating it. The internal `list` returns a full Session in one
+   page (decision 2's capacity-covering page size), but the public list
+   defaults to 20 rows while a Session may hold 32 definitions, so
+   `cron_list` walks every page before answering regardless (the single
+   journal wakeup rides alongside the last page); the unchanged skill
+   `clear` recipe — list, then delete every returned id — therefore drains
+   the whole Session. `create` mirrors before it answers, so a list after
+   a create is consistent. `cron_delete` routes by id: a
    definition id retires (the relay commits the terminal journal
    revision and the mirror retires with it; retiring a retired
    definition answers the replay, and a Session that is not ACTIVE takes
@@ -263,10 +272,12 @@ The facts below are from this repository at `488845a4a81`.
   internal surface, `ManagedAgentApiContractTest`,
   `SurfaceRegistryGateTest`, and the `managed-surface.txt` fixture.
 - `ManagedAutomationService`: the controller derives the creator actor
-  and delegates; list/retire become Session-scoped inside the
-  service/ledger (filter before the page limit, correct `next` cursor)
-  and stay permitted with the deployment gate off — creation stays
-  gated.
+  and delegates; the internal routes' list/retire become Session-scoped
+  inside the service/ledger (filter before the page limit, correct `next`
+  cursor, capacity-covering page size) as a carve-out that leaves the
+  public actor-scoped routes unchanged. `retire` is ungated for the
+  internal route (it calls `requireEnabled` today — a code change);
+  `list` is already ungated; creation stays gated.
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` and the Hosted
   tool turn: the new profile revisions (skipping the retired `shell/2`)
   and the cron trio's declarations and execution wiring, calling the

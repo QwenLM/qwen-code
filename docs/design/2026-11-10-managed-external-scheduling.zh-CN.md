@@ -9,8 +9,10 @@ Airflow、DolphinScheduler 等——通过一个通用的外部触发契约驱�
 [运行时](2026-10-07-managed-automation-runtime.zh-CN.md)、
 [Managed MCP 运行时](2026-09-28-managed-mcp-runtime.zh-CN.md)，以及
 channel 适配器的打包先例（`packages/channels/base`）；不重新设计其中任何
-一个。自定步调与固定间隔 `/loop`
-[设计](2026-11-10-managed-loop-schedule.zh-CN.md)走内置分支。
+一个。自定步调
+[`/loop` 唤醒设计](2026-11-10-managed-loop-wakeup.zh-CN.md)与
+[固定间隔 `/loop` 设计](2026-11-10-managed-loop-schedule.zh-CN.md)
+走内置分支。
 
 ## 问题
 
@@ -95,31 +97,38 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
    运行。本设计不新增 cron 能力；唯一的内置变更是 scanner 的发现过滤
    （决策 11）——其触发、恢复、settle 策略不动。
 3. **外部触发是一等 occurrence。** webhook ingress 切片激活预留的
-   `webhook:<eventId>` 身份。`eventId` 是外部调度器经验证的稳定实例身份——
-   每个点名调度器都有的属性（DataWorks 调度实例、Airflow DAG run / task
-   instance、DolphinScheduler 进程 / task instance）。ingress 由经验证的
-   来源与原始实例身份组合 `eventId`（`<source>:<instanceId>`），使两个产品
-   报同一原始 id 绝不在一个 occurrence 上冲突；控制面从不解析原始身份。
-   run 记录其 trigger kind，使账本区分外部 fire 与 manual 或 scheduled。
+   `webhook:<eventId>` 身份。`eventId` 是一个共享的稳定 key `K`，由经验证
+   的来源与原始实例身份推导——`encode(<source>:<instanceId>)`——使两个产品
+   报同一原始 id 绝不在一个 occurrence 上冲突，控制面从不解析原始身份。
+   同一个 `K` 就是适配器在 manual 桥上的 `Idempotency-Key`（决策 4），因此
+   两个入口提交并探测完全相同的 occurrence key（决策 8）。`encode` 确定且
+   有界：符合 key 的 1–128 可见 ASCII 界限（`^[\x21-\x7e]{1,128}$`，原始
+   身份超出时用稳定 digest），且完整 occurrence key（`manual:`/`webhook:`
+   前缀 + `K`）符合账本的 `occurrence_key VARBINARY(640)` 列；无法在界限内
+   编码的身份在 funnel 前被拒绝，而非截断成存储错误。run 记录其 trigger
+   kind，使账本区分外部 fire 与 manual 或 scheduled。
 4. **零改动路径是 manual run，如实标注。** ingress 切片落地前，适配器以
-   外部实例身份作 `Idempotency-Key` 驱动
-   `POST /v1/agent-automations/{id}/runs`。适配器把产品身份确定性地映射进
-   key 的 1–128 可见 ASCII 界限（`^[\x21-\x7e]{1,128}$`，超出时用稳定
-   digest），使同一实例的重试推导同一 key。适配器指向的 definition 以
-   `enabled: false` 创建：manual-run 路由只查 live 状态，而 scanner 的
-   `findArmed` 过滤 `is_enabled = TRUE`，因此内置 scanner 绝不会同时触发它
-   （决策 11 的过渡机制）。今天这就恰好一次且持久，但账本记为 `manual`——
-   适配器与运维绝不能把它读成「人跑的」。ingress 切片把同一流程升级为
-   `webhook` trigger；为保持切换期去重，ingress 先在已提交的
-   `manual:<eventId>` key 上准入，仅对未见事件铸造 `webhook:<eventId>`
-   （决策 8），使已准入实例的重试绝不跑两次。
+   `K`（决策 3 的共享编码）作 `Idempotency-Key` 驱动
+   `POST /v1/agent-automations/{id}/runs`，使同一实例的重试推导同一 key，
+   提交的 occurrence 是 `manual:K`。该路由要求调用者是 Session 的创建者且
+   Session 为 ACTIVE（`requireCreatorSession`：非创建者 403、非 ACTIVE
+   Session 409）；适配器的 tenant 作用域凭据必须同时满足两者。适配器指向的
+   definition 以 `enabled: false` 创建：manual-run 路由只查 live 状态，而
+   scanner 的 `findArmed` 过滤 `is_enabled = TRUE`，因此内置 scanner 绝不会
+   同时触发它（决策 11 的过渡机制）。今天这就恰好一次且持久，但账本记为
+   `manual`——适配器与运维绝不能把它读成「人跑的」。ingress 切片把同一流程
+   升级为以同一 `K` 为键的 `webhook` trigger（决策 8），使已准入实例的重试
+   绝不跑两次。
 5. **ingress 契约通用、经鉴权且有作用域。** 一次推送携带：稳定事件身份
    （`eventId`）、目标（run 所属的 definition 或 Session）、输入 payload
    （run 执行的 prompt/context）、以及 ingress 在准入前验证的鉴权证明。
    验证是 ingress 的职责——签名或 token 方案是切片决策——未验证事件绝不进
-   funnel。ingress 把 `target` 严格解析在经验证来源的 tenant/Workspace
-   绑定内并拒绝其他；来源凭据是 tenant 作用域的，因此正确签名但点名另一
-   tenant definition 的事件在 funnel 前被拒绝。输入 payload 在 claim 前
+   funnel。ingress 按 provenance 而非仅按包含关系授权 `target`：经验证的
+   来源凭据绑定到特定 owner/Session，目标 definition 或 Session 必须属于
+   该 owner——仅 Workspace 包含不够，因为 dispatch 执行事件的 payload 文本，
+   来源凭据绝不能在同一 Workspace 里另一用户的 Session 中运行任意文本
+   （manual 分支经 `requireCreatorSession` 拒绝的动作）。正确签名但点名另一
+   owner 目标的事件在 funnel 前被拒绝。输入 payload 在 claim 前
    发布为持久的按 occurrence `managed-input` 资源，fire 携带其引用：
    dispatch 与重放读该资源而非 definition 的 prompt，因此两个不同 context
    的事件执行不同文本，claim 后崩溃保留原始输入。契约与传输无关（先 HTTP
@@ -137,12 +146,15 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
    输入，以其 OpenAPI 暴露者为界。
 8. **恰好一次是继承的，不是重新实现的。** 重复事件身份的外部重试或补数据
    遇到已提交 occurrence 并重放它——与重复 manual key 获得的结构去重相同。
-   由于 run 身份哈希整个 occurrence key，`manual:` → `webhook:` 切换否则
-   会以新 key 重跑丢失响应的实例；因此 ingress 在其原始已提交的
-   `manual:<eventId>` occurrence 上准入重试，仅对两个入口都未准入的事件
-   铸造 `webhook:<eventId>`。错过外部事件的 catch-up 属于外部调度器：
-   ingress 执行到达的东西、去重，绝不合成错过的外部 slot。overlap 准入像
-   对任何 fire 一样适用；繁忙目标按 definition 策略排队或跳过。
+   由于 run 身份哈希整个 occurrence key 且两个入口用同一 `K`（决策 3），
+   ingress 探测已提交的 `manual:K` occurrence 并在其上准入重试，仅对两个
+   入口都未准入的事件铸造 `webhook:K`——因此升级后重试丢失响应的实例恰好
+   一个 run，包括 `K` 为 digest 的超长身份。切换按 definition 原子：服务
+   同一 definition 的适配器舰队一起切换入口（或 manual 路由也查
+   `webhook:K`），使重试不会落到只知另一前缀的滞后副本上而触发两次。错过
+   外部事件的 catch-up 属于外部调度器：ingress 执行到达的东西、去重，绝不
+   合成错过的外部 slot。overlap 准入像对任何 fire 一样适用；繁忙目标按
+   definition 策略排队或跳过。
 9. **结果消费保持开放。** 轮询 runs API 今天可用，是基线。推送回调（agent
    的已结算结果驱动下游节点）在 H5 落地时走它；本设计不把回调形状烧进
    ingress 契约，使该决定可按产品做出而无需契约变更。
@@ -203,9 +215,13 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
   实例收敛到一个 run。两个来源报同一原始实例 id 产生两个 run（`<source>:`
   命名空间）。
 - 切换去重：经 manual 桥提交、响应丢失的 run，再经 ingress 重试，恰好一个
-  run——ingress 在已提交的 `manual:<eventId>` key 上准入。
+  run——ingress 在已提交的 `manual:K` 上准入。覆盖短身份、`K` 为 digest 的
+  超长身份、来源命名空间身份；manual 与 ingress 入口推导完全相同的 `K`。
+- key 编码：无法在 1–128 可见 ASCII key 界限与 640 字节 occurrence 列内编码
+  的身份在 funnel 前被拒绝，而非截断成存储错误。
 - 验证与作用域：未验证或错误签名的事件在 funnel 前被拒绝；正确签名但点名
-  另一 tenant definition 的事件被拒绝；已验证且在作用域内的事件准入。
+  另一 owner 目标（即使在同一 Workspace）的事件被拒绝；目标属于来源 owner
+  的已验证事件准入。
 - 按 occurrence 输入：两个不同 context 的事件执行不同文本；claim 后崩溃在
   重驱动时保留原始输入。
 - manual 路径诚实：零改动路径记 `manual`、在实例 key 下恰好一次，且指向
@@ -225,11 +241,13 @@ DataWorks 或其他产品依赖，因此控制面只能暴露通用面。
 ## 验收标准
 
 - 一个外部调度器实例触发恰好一个 run，同一实例的重试重放它而非创建第二个
-  ——包括丢失响应后跨越 manual-to-webhook 切换的重试。
+  ——包括丢失响应后跨越 manual-to-webhook 切换的重试，短身份、超长
+  （digest）身份、来源命名空间身份皆然。
 - 账本区分外部触发与 manual 或 scheduled run。
 - 外部驱动的 definition 不推导 cron occurrence、绝不被内置 scanner 双重
   触发，而丢失中继的 claim 仍恢复。
-- 正确签名但点名另一 tenant definition 的事件在 funnel 前被拒绝。
+- 正确签名但点名另一 owner 目标的事件在 funnel 前被拒绝，即使在同一
+  Workspace 内。
 - 控制面不含任何产品特定字段或依赖；第二个调度器适配器复用同一 ingress 而
   无需控制面变更。
 - agent 在 Session 权限规则下经准入 MCP 工具操作外部调度器。

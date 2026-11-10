@@ -118,15 +118,18 @@ Managed Session 今天无法运行这条路径：
    `<<loop.md-dynamic>>`）逐字存入 envelope，在触发时而非安排时展开：
    funnel 在 pump 选取 input 时展开它们，对应本地的触发时展开。展开
    复用共享的 loop-task-file 读取器，因此携带本地守卫而非裸文件读取：
-   项目 `.qwen/loop.md` 仅在工作区受信任时读取（本地 `allowProjectFile`
-   门，每次 resolve 重新求值，默认 false），否则读 home 文件或 absent-file
-   tick；内容按 `LOOP_TASK_FILE_MAX_BYTES`（25 000）字节截断并带本地
-   截断警告；文件缺失收敛到 autonomous tick，瞬时读取失败收敛到 no-op
-   re-arm tick，因此抛错的 turn 绝不会永久终结 loop。由于安排时分类器
-   审查的是 sentinel 常量而非文件文本，展开是分类器可见的：当解析出的
-   内容与安排时审查的不同时，fire 在运行前被重新审查（deny 即拒绝），
-   `managed-admission` 记录点名 fire 将读取的内容。任务文件的变更因此在
-   下一次触发时被拾取，重启或压缩后重新提供完整指令。不产生 `schedule`
+   项目 `.qwen/loop.md` 仅在 Hosted 信任门判定工作区受信任时读取（该门的
+   求值模型由切片钉住；本地读取器的 `allowProjectFile` 默认 false），
+   否则读 home 文件（进程全局 `QWEN_HOME`）或 absent-file tick；内容按
+   `LOOP_TASK_FILE_MAX_BYTES`（25 000）字节截断并带本地截断警告；文件
+   缺失收敛到 autonomous tick，瞬时读取失败收敛到 no-op re-arm tick，
+   因此抛错的 turn 绝不会永久终结 loop。由于安排时分类器审查的是
+   sentinel 常量而非文件文本，展开是分类器可见的：`managed-admission`
+   记录持久化上次审查的内容，解析内容与该上次审查值不同的 fire 在运行前
+   被重新审查——稳态不变内容不在每个 tick 重审。被拒绝的重审把 input
+   settle 为 `cancelled`、stop reason `loop_admission_denied`（终结
+   loop），而非永远重新选取或静默丢弃。任务文件的变更因此在下一触发时
+   被拾取，重启或压缩后重新提供完整指令。不产生 `schedule`
    或 `automation_run` 记录、不产生控制面行、不涉及 scanner：journal 是
    唯一事实，与 monitor 通知完全一致。
 2. **`notBefore` 是 `input.accepted` 新增的可选 payload 字段**
@@ -185,9 +188,12 @@ Managed Session 今天无法运行这条路径：
    取消被拒绝。应答是幂等的——不 pending 的 id 应答「未取消」，对应
    `cancelWakeup` 的布尔值。`/loop clear` 走 skill 现有的
    `cron_list` + `cron_delete` 路由，取消那一个未触发的 pending 唤醒。
-   close 路径把 `loop` 加入其无模型 settle 的 source 集，并 settle 每一个
-   pending `loop` input——未触发的那个，以及它按先前尝试规则中止其 turn
-   的 firing 那个——关闭中的 Session 绝不会把唤醒遗留为下次打开时的
+   close 路径把 `loop` 加入其无模型 settle 的 source 集，settle 未触发的
+   pending `loop` input（`wakeHasPriorAttempt` 过滤排除 firing 那个）。
+   firing loop turn 不被无模型 settle：close 中止它，由现有 wake 恢复善后
+   settle 它，正像任何已启动的 wake turn——在已运行的 turn 上再写一条
+   `cancelled` 会与其固定的 `turn:<turnId>` settle 冲突（决策 4）。两者
+   合起来使下次打开时没有 pending `loop` input 遗留为
    `hosted_turn_recovery_required`。
 8. **工具面是 `loop_wakeup` 加共享的 cron list/cancel。** `loop_wakeup`
    由可写 profile 的新修订版声明，沿用添加 `todo_write` 的 `files/3`
@@ -204,8 +210,10 @@ Managed Session 今天无法运行这条路径：
    `QWEN_MANAGED_AGENT_LOOP_ENABLED`）在验收证据落地前默认 false，
    对应 automation 的 opt-in 历史。开关只门控安排：关闭时
    `loop_wakeup` 被拒绝，但已安排的唤醒存活——pump 投递 journal input
-   不看工具是否声明——且 `cron_list`/`cron_delete` 仍能列出并取消它，
-   关闭功能绝不遗留它已安排的东西。
+   不看工具是否声明——且 `cron_list`/`cron_delete` 仍能列出并取消它。
+   由于该取消是模型调用的工具，运维还有一条非模型路径：控制面的内部
+   Session 路由仅走 journal settle pending loop input，独立于工具面与
+   开关。因此关闭功能绝不遗留它已安排的东西。
 9. **安排时分类器审查取代交互对话框。** 本地工具返回 `'ask'`，让 AUTO
    分类器审查续跑 prompt；Hosted Session 没有交互审批，因此 funnel 在
    安排时把同样的分类器输入（`delaySeconds`、`prompt`、`reason`）经
@@ -218,7 +226,8 @@ Managed Session 今天无法运行这条路径：
     24 h 链（决策 4）、prompt 与 envelope 界限（决策 4）、部署开关
     （决策 8）就是全部预算。不消耗 definition 配额，因为不存在
     definition；Session 现有的 turn 与工具预算像对待任何其他 turn 一样
-    为每个触发的 tick 计价。
+    为每个触发的 tick 计价，包括触发时重审（决策 1）——它仅在解析内容
+    变更时运行，而非每个稳态 tick。
 
 ## 流水线，逐步
 
@@ -229,7 +238,7 @@ Managed Session 今天无法运行这条路径：
 | 3    | wake pump `runTurn`      | 在该 input 的 `turnId` 下的普通文本 turn；`turn.settled` 消费该 input                                                                                                                                                |
 | 4    | 被触发的 turn            | 另一个 `loop_wakeup`（回到步骤 1）或没有——loop 结束                                                                                                                                                                  |
 | 5    | `cron_delete`（loop id） | pending input 的 `cancelled` settle（`loop_cancelled`），无先前尝试；幂等                                                                                                                                            |
-| 6    | close 路径               | 对每一个 pending loop input 的无模型 `cancelled` settle（`session_closing`）——未触发的那个与它中止其 turn 的 firing 那个                                                                                             |
+| 6    | close 路径               | 对未触发 pending loop input 的无模型 `cancelled` settle（`session_closing`）；firing loop turn 被中止并由 wake 恢复善后 settle，而非无模型行                                                                         |
 | 7    | 重启后的加载             | 无提交；重新推导 pending 集，过期唤醒立即到期                                                                                                                                                                        |
 
 ## 契约触点
@@ -290,12 +299,15 @@ Managed Session 今天无法运行这条路径：
   `loop.md` 触发按 `LOOP_TASK_FILE_MAX_BYTES` 截断并带警告的输入。
   不受信任工作区的 `.qwen/loop.md` 产出 absent-file tick，而非其内容。
 - sentinel 准入：安排 `<<loop.md-dynamic>>` 后在触发前改文件，重新审查
-  解析出的内容（deny 即拒绝），而非未经审查执行。
+  解析出的内容，而非未经审查执行；被拒绝的重审把 input settle 为
+  `cancelled`（`loop_admission_denied`）；稳态不变内容不在每个 tick 重审。
 - 取消：`loop:<wakeupId>` id 经 `cron_delete` 路由；幂等；turn 有先前
   尝试后被拒绝；`/loop clear` 消费那一个未触发的 pending 唤醒。开关
-  关闭时，已安排的唤醒仍触发且仍可列出/取消，新安排被拒绝。
-- close：每一个 pending loop input 以无模型方式 settle（未触发的那个与
-  close 中止其 turn 的 firing 那个）；下次打开不被卡死。
+  关闭时，已安排的唤醒仍触发且仍可列出/取消（含运维内部路由），新安排
+  被拒绝。
+- close：未触发 pending loop input 以无模型方式 settle；firing loop turn
+  被中止并由 wake 恢复善后 settle（无第二条 `cancelled` 行）；下次打开
+  不被卡死。
 - 分类器：deny 规则拒绝安排；admission 资源记录裁决。
 - 变异检查：逐个禁用各决策的守卫都会使某个测试失败（延迟跳过、替换
   settle、先丢弃后检查、链锚点、取消与替换的先前尝试守卫、触发时展开、
@@ -328,8 +340,10 @@ Managed Session 今天无法运行这条路径：
    loop（既无未触发 pending input，也无 firing loop turn）时开启新链。
    显式说明其中的张力：这种重置是安排时开启新 loop 的属性，而非取消
    本身的属性，但终结 loop 的取消会让下一次安排开启新链——因此采纳它
-   会取代决策 4「取消不重置锚点」的读法。在实现前钉住该规则，以及它
-   取代哪种读法。
+   会取代决策 4「取消不重置锚点」的读法。该绕过还需要一个非 loop turn：
+   firing loop turn 内总存在存活 loop，重置在那里无法触发——模型驱动的
+   先取消再安排只能从普通 turn 重启 24 h 预算。在实现前钉住该规则，以及
+   它取代哪种读法。
 2. **profile 修订版号。** `loop_wakeup` 的修订版按落地顺序取
    [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)的
    cron 三件套修订版之后的一批；切片落地时与控制面的 profile 准入核对

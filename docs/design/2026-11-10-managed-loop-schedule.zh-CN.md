@@ -112,22 +112,25 @@ Session 内部的模型没有任何创建途径。
    `/internal/managed-session-store/v1/sessions/{sessionId}` 上的
    `automations:create`、`automations:list`、`automations:retire`——
    与 `memory:query` 完全相同地以 writer 绑定鉴权，从绑定 Session 的
-   创建者推导 actor，并委托 `ManagedAutomationService`。委托是 Session
+   创建者推导 actor，并委托 `ManagedAutomationService`。内部路由是 Session
    作用域而非 actor 作用域：`create` 的目标是绑定 Session；`list` 在
    分页前按绑定 Session 过滤——服务的 actor 作用域 `list` 读取创建者
    在整个 Workspace 可读的全部 definition，会让一个 Session 的 writer
    看到另一个的；`retire` 在执行或应答重放前验证目标 definition 属于
    绑定 Session。仅凭创建者 actor 不提供这种隔离：同一用户可以创建多个
-   Session。委托继承创建者检查、模式门、容量检查、command 账本与镜像
-   写入。Session 作用域落在服务/账本内部，过滤发生在分页 limit 之前、
-   `next` 游标从过滤后的流推导——controller 侧后置过滤会先切页再返回
-   错误游标。部署开关门控创建，同时也停掉 scanner
+   Session。此作用域是内部路由专属的 carve-out——公开 controller 以无
+   绑定 Session 调用同一服务、保留其 actor 作用域，因此变更绝不能回归
+   公开 API。作用域落在服务/账本内部，过滤发生在分页 limit 之前、`next`
+   游标从过滤后的流推导——controller 侧后置过滤会先切页再返回错误游标。
+   内部 `list` 用覆盖每 Session 容量的页大小（账本的 100 行上限），使满
+   Session 一页装下。委托继承创建者检查、模式门、容量检查、command 账本
+   与镜像写入。部署开关门控创建，同时也停掉 scanner
    （`AutomationScanner.scan` 在同一设置上提前返回），因此开关关闭期间
-   已武装的 definition 停止触发；`list` 与 `retire` 仍可用，使运维能
-   查看并退役开关停掉的东西。这是现有开关语义，不是「触发继续」的新
-   承诺。直接 funnel 调用被拒绝作为创建路径：仅存 journal 的 definition
-   没有镜像行，scanner 永远不会触发它——使 definition 可被发现的是
-   路由，不是 funnel。
+   已武装的 definition 停止触发。`list` 今天已解门控、保持可用；`retire`
+   今天调用 `requireEnabled`，因此切片为内部路由解门控（一处代码变更，
+   非现有行为），使运维能退役开关停掉的东西。直接 funnel 调用被拒绝作为
+   创建路径：仅存 journal 的 definition 没有镜像行，scanner 永远不会触发
+   它——使 definition 可被发现的是路由，不是 funnel。
 3. **Idempotency-Key 从工具执行的身份推导。** 每个变更使用从其
    `executionCallId` 与动词推导的 key（例如
    `loop:<executionCallId>:create`，符合 key 的 1–128 可打印 ASCII
@@ -154,10 +157,12 @@ Session 内部的模型没有任何创建途径。
 6. **list 与 delete 覆盖两个分支，与本地一致。** `cron_list` 应答并集：
    绑定 Session 的 definition 来自控制面账本——与 scanner 读取的同一批
    行——加上 wakeup 切片落地后来自 journal 的未触发 pending loop input。
-   公开 list 默认 20 行而一个 Session 可持有 32 个 definition，因此
-   `cron_list` 走完每一页再应答（单个 journal 唤醒随最后一页一起返回）；
-   未改动的 skill `clear` 配方——list 后 delete 每个返回 id——因此清空
-   整个 Session。`create` 在应答前完成镜像，因此创建后的 list 是一致的。
+   本设计拥有并集契约；wakeup 姊妹篇引用它而非复述。内部 `list` 一页返回
+   满 Session（决策 2 覆盖容量的页大小），但公开 list 默认 20 行而一个
+   Session 可持有 32 个 definition，因此 `cron_list` 无论如何走完每一页
+   再应答（单个 journal 唤醒随最后一页一起返回）；未改动的 skill `clear`
+   配方——list 后 delete 每个返回 id——因此清空整个 Session。`create` 在
+   应答前完成镜像，因此创建后的 list 是一致的。
    `cron_delete` 按 id 路由：definition id 走退役（中继提交终态 journal
    修订版，镜像随之退役；退役已退役的 definition 应答重放，非 ACTIVE 的
    Session 走继承的本地退役兜底）；`loop:<wakeupId>` id 经姊妹切片的仅
@@ -214,10 +219,11 @@ Session 内部的模型没有任何创建途径。
   三个动词，配 `SurfaceRegistry` 条目、OpenAPI 内部面、
   `ManagedAgentApiContractTest`、`SurfaceRegistryGateTest` 与
   `managed-surface.txt` fixture。
-- `ManagedAutomationService`：controller 推导创建者 actor 并委托；
-  list/retire 在服务/账本内部变为 Session 作用域（分页 limit 前过滤、
-  正确的 `next` 游标），并允许开关关闭时的 list/retire——创建仍受
-  门控。
+- `ManagedAutomationService`：controller 推导创建者 actor 并委托；内部
+  路由的 list/retire 在服务/账本内部变为 Session 作用域（分页 limit 前
+  过滤、正确的 `next` 游标、覆盖容量的页大小），作为保留公开 actor 作用域
+  路由不变的 carve-out。`retire` 为内部路由解门控（它今天调用
+  `requireEnabled`——一处代码变更）；`list` 已解门控；创建仍受门控。
 - `packages/cli/src/serve/hosted-workspace-profiles.ts` 与 Hosted 工具
   turn：新 profile 修订版（跳过已退役的 `shell/2`）、cron 三件套的声明
   与执行接线，经现有 store 通道（`baseUrl` + writer 绑定）调用内部

@@ -11,8 +11,10 @@ external-trigger contract. It consumes the
 [runtime](2026-10-07-managed-automation-runtime.md), the
 [Managed MCP runtime](2026-09-28-managed-mcp-runtime.md), and the
 channel adapter packaging precedent (`packages/channels/base`); it
-redesigns none of them. The self-paced and fixed-interval `/loop`
-[designs](2026-11-10-managed-loop-schedule.md) ride the built-in arm.
+redesigns none of them. The self-paced
+[`/loop` wakeup design](2026-11-10-managed-loop-wakeup.md) and the
+[fixed-interval `/loop` design](2026-11-10-managed-loop-schedule.md)
+ride the built-in arm.
 
 ## Problem
 
@@ -117,44 +119,54 @@ The facts below are from this repository at `41ffb223448`.
    untouched.
 3. **External triggers are first-class occurrences.** The webhook ingress
    slice activates the reserved `webhook:<eventId>` identity. The
-   `eventId` is the external scheduler's verified, stable instance
-   identity — the property every named scheduler has (a DataWorks
-   schedule instance, an Airflow DAG run / task instance, a
-   DolphinScheduler process / task instance). The ingress composes the
-   `eventId` from the verified source and the raw instance identity
-   (`<source>:<instanceId>`), so two products reporting the same raw id
-   never collide on one occurrence; the control plane never parses the
-   raw identity. A run records its trigger kind so the ledger
-   distinguishes an external fire from a manual or scheduled one.
+   `eventId` is one shared, stable key `K` derived from the verified
+   source and the raw instance identity — `encode(<source>:<instanceId>)`
+   — so two products reporting the same raw id never collide on one
+   occurrence and the control plane never parses the raw identity. The
+   same `K` is the adapter's `Idempotency-Key` on the manual bridge
+   (decision 4), so both entrances commit and probe the identical
+   occurrence key (decision 8). `encode` is deterministic and bounded:
+   it fits the key's 1–128 visible-ASCII bound
+   (`^[\x21-\x7e]{1,128}$`, a stable digest when the raw identity does
+   not fit) and the full occurrence key (`manual:`/`webhook:` prefix +
+   `K`) fits the ledger's `occurrence_key VARBINARY(640)` column; an
+   identity that cannot be encoded within the bound is refused before
+   the funnel, not truncated into a store error. A run records its
+   trigger kind so the ledger distinguishes an external fire from a
+   manual or scheduled one.
 4. **The zero-change path is manual run, honestly labeled.** Until the
    ingress slice lands, an adapter drives
-   `POST /v1/agent-automations/{id}/runs` with the external instance
-   identity as the `Idempotency-Key`. The adapter maps the product
-   identity deterministically into the key's 1–128 visible-ASCII bound
-   (`^[\x21-\x7e]{1,128}$`, a stable digest when it does not fit), so
-   retries of one instance derive one key. The definition the adapter
-   targets is created `enabled: false`: the manual-run route consults
-   only the live state, while the scanner's `findArmed` filters
-   `is_enabled = TRUE`, so the built-in scanner never also fires it
-   (decision 11's transitional mechanism). This is exactly-once and
-   durable today, but the ledger records it as `manual` — adapters and
-   operators must not read that as "a human ran it". The ingress slice
-   upgrades the same flow to a `webhook` trigger; to keep dedup across
-   the cutover, the ingress first admits on the committed
-   `manual:<eventId>` key and mints `webhook:<eventId>` only for unseen
-   events (decision 8), so a retry of an already-admitted instance never
-   runs twice.
+   `POST /v1/agent-automations/{id}/runs` with `K` (decision 3's shared
+   encoding) as the `Idempotency-Key`, so retries of one instance derive
+   one key and the committed occurrence is `manual:K`. The route
+   requires the caller to be the Session's creator and the Session to be
+   ACTIVE (`requireCreatorSession`: 403 for a non-creator, 409 for a
+   non-ACTIVE Session); the adapter's tenant-scoped credential must
+   satisfy both. The definition the adapter targets is created
+   `enabled: false`: the manual-run route consults only the live state,
+   while the scanner's `findArmed` filters `is_enabled = TRUE`, so the
+   built-in scanner never also fires it (decision 11's transitional
+   mechanism). This is exactly-once and durable today, but the ledger
+   records it as `manual` — adapters and operators must not read that as
+   "a human ran it". The ingress slice upgrades the same flow to a
+   `webhook` trigger keyed by the same `K` (decision 8), so a retry of an
+   already-admitted instance never runs twice.
 5. **The ingress contract is generic, authenticated, and scoped.** A push
    carries: a stable event identity (the `eventId`), a target (the
    definition or Session the run belongs to), an input payload (the
    prompt/context the run executes), and an authentication proof the
    ingress verifies before admission. Verification is the ingress's job
    — signature or token scheme is a slice decision — and an unverified
-   event never reaches the funnel. The ingress resolves `target` strictly
-   inside the verified source's tenant/Workspace binding and refuses
-   anything else; the source's credential is tenant-scoped, so a
-   correctly signed event naming another tenant's definition is refused
-   before the funnel. The input payload is published as a durable
+   event never reaches the funnel. The ingress authorizes `target` by
+   provenance, not merely by containment: the verified source credential
+   binds to a specific owner/Session, and the target definition or
+   Session must belong to that owner — Workspace containment alone is
+   insufficient, because dispatch executes the event's payload text and
+   a source credential must not run arbitrary text in another user's
+   Session in the same Workspace (an action the manual arm refuses via
+   `requireCreatorSession`). A correctly signed event naming another
+   owner's target is refused before the funnel. The input payload is
+   published as a durable
    per-occurrence `managed-input` resource before the claim, and the fire
    carries its reference: dispatch and replay read that resource, not the
    definition's prompt, so two events with different context execute
@@ -181,15 +193,20 @@ The facts below are from this repository at `41ffb223448`.
 8. **Exactly-once is inherited, not reimplemented.** An external retry or
    backfill that repeats an event identity meets the committed occurrence
    and replays it — the same structural dedup a repeated manual key gets.
-   Because the run identity hashes the full occurrence key, the
-   `manual:` → `webhook:` cutover would otherwise re-run a lost-response
-   instance under a new key; the ingress therefore admits a retry on its
-   original committed `manual:<eventId>` occurrence and only mints
-   `webhook:<eventId>` for an event never admitted on either entrance.
-   Catch-up for missed external events belongs to the external scheduler:
-   the ingress executes what arrives, deduplicated, and never synthesizes
-   a missed external slot. Overlap admission applies as it does for any
-   fire; a busy target queues or skips per the definition's policy.
+   Because the run identity hashes the full occurrence key and both
+   entrances use the same `K` (decision 3), the ingress probes the
+   committed `manual:K` occurrence and admits a retry on it, minting
+   `webhook:K` only for an event never admitted on either entrance — so a
+   lost-response instance retried after the upgrade yields one run,
+   including an over-length identity whose `K` is a digest. The cutover
+   is atomic per definition: an adapter fleet serving one definition
+   switches entrance together (or the manual route also consults
+   `webhook:K`), so a retry cannot land on a lagging replica that only
+   knows the other prefix and fire twice. Catch-up for missed external
+   events belongs to the external scheduler: the ingress executes what
+   arrives, deduplicated, and never synthesizes a missed external slot.
+   Overlap admission applies as it does for any fire; a busy target
+   queues or skips per the definition's policy.
 9. **Result consumption stays open.** Polling the runs API works today
    and is the baseline. A push callback (the agent's settled result
    driving a downstream node) rides H5 when it lands; this design does
@@ -269,10 +286,16 @@ The facts below are from this repository at `41ffb223448`.
   runs (the `<source>:` namespace).
 - Cutover dedup: a run committed through the manual bridge whose response
   was lost, then retried through the ingress, yields exactly one run — the
-  ingress admits on the committed `manual:<eventId>` key.
+  ingress admits on the committed `manual:K`. Covers a short identity, an
+  over-length identity whose `K` is a digest, and a source-namespaced
+  identity; the manual and ingress entrances derive the identical `K`.
+- Key encoding: an identity that cannot be encoded within the 1–128
+  visible-ASCII key bound and the 640-byte occurrence column is refused
+  before the funnel, not truncated into a store error.
 - Verification and scoping: an unverified or wrongly-signed event is
   refused before the funnel; a correctly signed event naming another
-  tenant's definition is refused; a verified, in-scope event admits.
+  owner's target (even in the same Workspace) is refused; a verified
+  event whose target belongs to the source's owner admits.
 - Per-occurrence input: two events with different context execute
   different text; a crash after the claim preserves the original input on
   redrive.
@@ -298,14 +321,15 @@ The facts below are from this repository at `41ffb223448`.
 - An external scheduler instance triggers exactly one run, and a retry of
   the same instance replays it rather than creating a second — including
   a retry that crosses the manual-to-webhook cutover after a lost
-  response.
+  response, for short, over-length (digest), and source-namespaced
+  identities alike.
 - The ledger distinguishes an external trigger from a manual or scheduled
   run.
 - An externally-driven definition derives no cron occurrence and is never
   double-fired by the built-in scanner, while a lost-relay claim still
   recovers.
-- A correctly signed event naming another tenant's definition is refused
-  before the funnel.
+- A correctly signed event naming another owner's target is refused
+  before the funnel, even within the same Workspace.
 - The control plane contains no product-specific field or dependency; a
   second scheduler adapter reuses the same ingress without a control-plane
   change.
