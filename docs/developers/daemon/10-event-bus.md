@@ -22,7 +22,7 @@
 | Constant                               | Value       | Purpose                                                                                            |
 | -------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------- |
 | `EVENT_SCHEMA_VERSION`                 | `1`         | Stamped on every `BridgeEvent.v`; bumped on breaking frame changes.                                |
-| `DEFAULT_RING_SIZE`                    | `8000`      | Per-session replay ring. Operator override via `--event-ring-size`.                                |
+| `DEFAULT_RING_SIZE`                    | `8000`      | Per-session replay ring count cap. Also bounded by `--event-ring-max-bytes`.                       |
 | `DEFAULT_MAX_QUEUED`                   | `256`       | Per-subscriber live frame backlog cap.                                                             |
 | `DEFAULT_MAX_QUEUED_BYTES`             | `2 MiB`     | Per-subscriber live serialized-byte backlog cap.                                                   |
 | `DEFAULT_MAX_SUBSCRIBERS`              | `64`        | Per-session subscriber cap.                                                                        |
@@ -195,7 +195,8 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 
 ## Configuration
 
-- `--event-ring-size <n>` — per-session ring depth; soft-capped at `MAX_EVENT_RING_SIZE = 1_000_000`.
+- `--event-ring-size <n>` — per-session ring count cap, default 8000; soft-capped at `MAX_EVENT_RING_SIZE = 1_000_000`.
+- `--event-ring-max-bytes <n>` — per-session serialized ring byte budget, including the latest full command snapshot. Defaults to `8388608` (8 MiB); positive safe integers up to `268435456` (256 MiB), with no unlimited sentinel. Retention stops at whichever limit binds first, except that at least the newest ring event survives an oversized event or snapshot. Increase both limits when both constrain the required reconnect window.
 - Subscriber `?maxQueued=N` query parameter on `GET /session/:id/events`, range `[16, 2048]`. SDK clients pre-flight `caps.features.slow_client_warning` before opting in.
 - `EventBus(..., { maxQueuedBytes })` constructor option exists only for tests / embedded callers. Default is 2 MiB and invalid values throw `TypeError`. There is deliberately no `?maxQueuedBytes` query parameter.
 - `BridgeOptions.eventRingSize` (overrides daemon default for embedded usage).
@@ -242,7 +243,7 @@ The daemon's `EventBus` replays all events from the ring buffer whose `id > Last
 | Scenario                                     | Behavior                                                                                                                                                                                                                                                                                                |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Last-Event-ID` absent                       | Live-only stream; no replay. Backward-compatible with pre-resume clients.                                                                                                                                                                                                                               |
-| `Last-Event-ID: 0`                           | Replay entire ring buffer from the beginning (bounded by `--event-ring-size`, default 8000).                                                                                                                                                                                                            |
+| `Last-Event-ID: 0`                           | Replay entire ring buffer from the beginning (up to `--event-ring-size`, default 8000, subject to `--event-ring-max-bytes`, default 8 MiB, and the single-newest-event/snapshot exception).                                                                                                             |
 | `Last-Event-ID: N` where `ring[0].id <= N+1` | Contiguous replay of events `id > N`, then live.                                                                                                                                                                                                                                                        |
 | `Last-Event-ID: N` where `ring[0].id > N+1`  | Gap detected — `state_resync_required` (`reason: 'ring_evicted'`) emitted before replay of surviving suffix. SDK must call `loadSession` to recover a bounded replay snapshot window; the returned `compactedReplay` may begin with `history_truncated` if older in-memory replay entries were dropped. |
 | `Last-Event-ID: N` where `N >= nextId`       | Epoch reset (daemon restart) — `state_resync_required` (`reason: 'epoch_reset'`) emitted, then full ring replay.                                                                                                                                                                                        |

@@ -126,25 +126,28 @@ this recovery exception.
 
 ## Supported subset
 
-| Surface    | Behavior                                                                                                                                                                                |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files        |
-| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
-| Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
-| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
-| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
-| Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
-| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
-| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
-| Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
-| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
-| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
-| Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
+| Surface    | Behavior                                                                                                                                                                                                               |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files                                       |
+| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                                                          |
+| Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                                                  |
+| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                                                           |
+| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                                 |
+| Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                                                              |
+| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                                                            |
+| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                                                           |
+| Store      | `$.store` keeps each plugin's JSON values between sessions, described in [The store](#the-store)                                                                                                                       |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                                                    |
+| Model      | `$.model.complete` runs one completion on the session's client, described in [Model calls](#model-calls)                                                                                                               |
+| Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                         |
+| Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                                |
+| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                               |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, and for reply rows in the Ink terminal, described in [The band above the prompt](#the-band-above-the-prompt) and [Reply rows](#reply-rows) |
+| Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                                |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, `$.state`, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt and reply rows, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -157,20 +160,21 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink and OpenTUI terminals, `ui.render`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, `prompt.submit`, in the Ink and OpenTUI terminals `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.310 also defines events that Qwen Code does not run yet, such as
-`prompt.submit` or `classic.Stop`, and `ui.render` runs only where a host draws
-it. A registration for one of them,
-or for a prefix such as `prompt.*` that matches none of the events above, loads
+Claude Code 2.1.318 also defines events that Qwen Code does not run yet, such as
+`prompt.fill` or `classic.Stop`. `ui.render` runs only where a host draws it. A registration for one of them,
+or for a prefix such as `classic.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
-`Hooks for unsupported events will not run: prompt.submit, ui.render`. A skipped
+`Hooks for unsupported events will not run: prompt.fill, ui.render`. A skipped
 hook never runs, including a guard and its `.catch`. Names that Claude Code does
-not define, such as `tool.calls`, still reject initialization.
+not define, such as `tool.calls`, still reject initialization. A prefix that
+covers a supported event, such as `prompt.*` or `*`, is not skipped: it hears
+that event.
 
 To refuse such a plugin instead, set its `unsupportedEvents` to `"reject"` in user
 or system settings. Initialization then fails if the plugin registers any skipped
@@ -200,8 +204,9 @@ registrations with matchers, including equal matchers. Each wildcard or negated
 pattern can be registered once. Within a plugin, registration order determines
 the chain; consumers run before their declared dependency providers. A handler
 can answer early, including at `session.start`, preventing later handlers from
-running. Only command `args` can be rewritten on `command.run`; lifecycle and
-command identity fields stay pinned.
+running. Only command `args` can be rewritten on `command.run`, and only a
+prompt's `text` and `context` on `prompt.submit`; lifecycle and command identity
+fields stay pinned.
 
 ## Tool interception
 
@@ -414,12 +419,13 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.310",
+    "claudeCode": "2.1.318",
     "events": [
       "clock.now",
       "clock.sleep",
       "command.register",
       "command.run",
+      "prompt.submit",
       "session.cwd",
       "session.end",
       "session.id",
@@ -431,6 +437,10 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "store.delete",
+      "store.get",
+      "store.keys",
+      "store.set",
       "tool.call",
       "tool.check",
       "turn.abort",
@@ -443,6 +453,7 @@ supports:
       "clock.now",
       "clock.sleep",
       "command.register",
+      "prompt.submit",
       "session.cwd",
       "session.id",
       "session.model",
@@ -452,6 +463,10 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "store.delete",
+      "store.get",
+      "store.keys",
+      "store.set",
       "turn.abort",
       "ui.invalidate",
       "ui.log",
@@ -468,12 +483,14 @@ call. A Mod can use it to choose a fallback, such as a command reply where a
 drawing hook would not run.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
-cross-plugin `next` or API calls other than `$.clock.sleep`. Pending void `ui.log` notifications do not pause
-the caller's budget. Catch recovery uses a one-second budget.
+cross-plugin `next` or API calls other than `$.clock.sleep` and `$.prompt.submit`. Pending void `ui.log` notifications do not pause
+the caller's budget. Neither does `$.prompt.submit`, whose call can outlive the
+hook that made it: the time the other Mods' `prompt.submit` hooks take while a
+hook awaits it counts as the hook's own. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
-uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
-trusted native waits described above; load and command roots retain continuous
-60-second limits. All `session.end` work shares 1.5 seconds. Native tool timeouts
+uninterrupted guest execution slice at 10 seconds. A dispatch waiting only on a
+host model request pauses its clock. Tool roots also exclude the trusted native
+waits described above. All `session.end` work shares 1.5 seconds. Native tool timeouts
 and permission decisions still apply. The scheduler's optional execution timeout
 defaults to disabled and does not impose an approval deadline; individual tools
 retain their own timeout policies.
@@ -511,7 +528,7 @@ Mod discovery. Mod manifests must be relative paths inside the extension.
 directory, the one that holds `qwen-extension.json` or
 `.claude-plugin/plugin.json`. They are plain properties.
 
-The other methods are API events that resolve to the shapes Claude Code 2.1.310
+The other methods are API events that resolve to the shapes Claude Code 2.1.318
 declares:
 
 | Method                                | Resolves to                                                                             |
@@ -546,6 +563,147 @@ budget, so a sleep longer than the remaining budget times the hook out. Its
 `signal` option rejects the wait at once when it aborts; pass `next.signal`,
 because the Mod environment has no `AbortController`. A sleep ends with the hook
 that started it, so a sleep the hook does not await cannot hold up the dispatch.
+
+## The store
+
+`$.store` keeps a plugin's own values between sessions, in every host that runs
+Mods:
+
+```javascript
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    const runs = Number((await $.store.get('runs')) ?? 0) + 1;
+    await $.store.set('runs', runs);
+    $.ui.log(`session ${runs} with this Mod`);
+    return next(e);
+  });
+}
+```
+
+| Method                    | Resolves to                                              |
+| ------------------------- | -------------------------------------------------------- |
+| `$.store.get(key)`        | the value under `key`, or `undefined` when it is not set |
+| `$.store.set(key, value)` | `undefined`, once the value is written                   |
+| `$.store.delete(key)`     | `undefined`, once the key is gone                        |
+| `$.store.keys()`          | every key set, in the order each was first set           |
+
+A value is JSON data, read back as `JSON.parse(JSON.stringify(value))`: a
+`Date` becomes its ISO string, an `undefined` field is dropped and a `Map` or
+`Set` becomes `{}`. `set` rejects `undefined`, a function and a value with a
+cycle. Keys are strings; `"10"` and `__proto__` are keys like any other.
+
+Each plugin has one JSON file under `~/.qwen/mods/store/` (or
+`$QWEN_HOME/mods/store/`), shared by all its sessions. The filename uses the
+lowercase plugin name for names of up to 128 characters and a stable hash for
+longer names.
+Concurrent writes to different keys preserve both updates. Each writer takes
+the store lock and re-reads the file before updating it. A read followed by a
+write can race with another session updating the same key. A value another
+session wrote shows up at the next `get`. Uninstalling the plugin leaves its
+store in place.
+
+- A plugin's store holds at most 4 MiB of JSON. A `set` that would take it
+  over rejects, and the store keeps what it had. One value is also bound by the
+  256 KiB limit on what a Mod passes to Qwen Code.
+- A new key must keep the serialized key list within the Mod reply budget of
+  256 KiB, including the reply envelope. Deleting an existing key can shrink
+  a list that already exceeds the budget.
+- A store path must point to a readable regular file. Calls reject symlinks,
+  named pipes, and invalid store data and leave the entry in place.
+- A paused process still holds its write lock. Acquiring the lock across
+  processes times out after eight seconds. A later writer can recover a lock
+  from a verified dead process. On Linux, within the same boot and PID
+  namespace, an absent PID or a zombie confirmed through a verified local
+  procfs view allows recovery, including for older lock formats. Detecting a
+  reused PID requires verified procfs PID views on both sides and a matching
+  time namespace. Recovery across boots requires matching machine, hostname,
+  and PID namespace identities and boot IDs verified through procfs.
+- The host limits concurrent file reads for `get` and `keys` per runtime.
+  Ending the requesting hook or its dispatch cancels queued reads and `set` or
+  `delete` calls that are waiting for a lock. An update already started under
+  the lock may still land, and the session waits for it before closing. A
+  process exit during the update leaves either the old file or the new one.
+
+The calls are API events, so another plugin's hooks hear them with `{key}` or
+`{key, value}`. A hook may pass on another `value` for `store.set`, answer with
+`{value}`, or `{deny}` the call. The key is pinned.
+
+## Model calls
+
+`$.model.complete(request, {signal})` runs one text completion on the session's
+own client, with no tools, no history and no system prompt but the request's
+`system`. Provider settings cannot replace those request fields or raise the
+output cap. `request` takes the fields Claude Code 2.1.319 declares:
+
+| Field       | Meaning                                                                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`     | `haiku` runs the fast model (the session's model when none is set); `sonnet` and `opus` run the session's model; any other name is a configured model id, or `authType:id` |
+| `prompt`    | the one user message: a string, or a list of `{text, cache?}` blocks sent in order                                                                                         |
+| `system`    | an optional system prompt, a string or blocks                                                                                                                              |
+| `maxTokens` | the reply's cap, default 1024; above 64000, or above a model's known output limit, the call rejects                                                                        |
+| `effort`    | `low`, `medium`, `high`, `xhigh` or `max`                                                                                                                                  |
+| `timeoutMs` | how long the whole call may take before it resolves `aborted`                                                                                                              |
+
+The call resolves to a result, never a bare string, and never rejects over what
+the provider did:
+
+- `{isAnswered: true, text, usage}` when the model answered;
+- `{isAnswered: false, reason: 'api-error', status, error, usage}` when the API
+  failed: `status` is the HTTP status or `null`, and `error` a kind such as
+  `rate_limit`, `overloaded`, `invalid_request` or `unknown`, never the error's
+  text;
+- `{isAnswered: false, reason: 'empty-reply', usage}` when the reply held no
+  text;
+- `{isAnswered: false, reason: 'aborted', usage}` when `signal` aborted,
+  `timeoutMs` elapsed or the dispatch that made the call ended.
+
+`usage` holds the four token counts in the API's spelling. Only a request Qwen
+Code will not send rejects: a wrong shape, a model that is not configured, or a
+cap over the limit.
+
+```js
+on('command.run', { command: 'summarize' }, async ($, e, next) => {
+  const r = await $.model.complete({
+    model: 'haiku',
+    prompt: `Summarize in one line:\n${e.args}`,
+    timeoutMs: 20000,
+  });
+  return { text: r.isAnswered ? r.text : `No summary (${r.reason})` };
+});
+```
+
+`model.complete` is an API event: another Mod's hook can rewrite the request,
+answer it with `{value: result}` without a request, or refuse it with `{deny}`.
+It reads the prompt as text with the caller's blocks beside it in `promptBlocks`
+and `systemBlocks`; passing `system: null` or `false` down sends no system
+prompt. The `signal` does not cross into the event.
+The caller's signal and deadline still apply while these hooks run. Cancelling
+the call also cancels model requests started by its hooks. For pending QuickJS
+promise jobs the deadline takes effect at the next hook or API boundary, with
+the VM execution budget still in effect.
+
+Qwen Code differs from Claude Code here:
+
+- Without `effort`, the client uses the provider's reasoning controls. On Gemini
+  it suppresses thought summaries and leaves thinking at the provider default.
+  With `effort`, the model uses the configured level. Qwen Code does not send
+  the named level yet.
+- `cache` marks are accepted and not sent; the cache counts in `usage` are what
+  the provider reports.
+- The call is tried once. Retry from `status` and `error` when a kind such as
+  `rate_limit` may clear.
+- The selected endpoint uses its own credentials. An OAuth model needs cached
+  credentials.
+- A reply too long for a Mod payload keeps its head and tail around a
+  truncation marker.
+
+A model call ends with its dispatch. If the host has already switched sessions,
+model calls from the old `session.end` resolve `aborted`. The hook's budget pauses
+while it awaits the call. The dispatch's 60-second budget pauses when the worker
+is waiting only on the host model request, including inside a `tool.check` hook. A session
+runs one Mod dispatch at a time, so other hooks in the session wait for it.
+Keep calls short, bound them with `timeoutMs`, and cache answers you will need
+again.
 
 ## Turn events
 
@@ -622,8 +780,196 @@ back in the composer. Queued prompts then run. The call rejects when no turn is
 running, when `turnId` is not the running turn's id, or when the turn is already
 ending. In a headless run the turn ends with the error result
 `A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
-its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
-prompt after it ends a turn.
+its next message. In a headless run a Mod can send a prompt of its own after it
+ends a turn, with [`$.prompt.submit`](#a-mods-own-prompt).
+
+## Submitted prompts
+
+In headless runs and in the Ink and OpenTUI terminals, `prompt.submit` fires for
+each prompt a person submits, and for each prompt a Mod submits
+([A Mod's own prompt](#a-mods-own-prompt)), before UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
+prompt, attach context the model reads beside it, or drop it:
+
+```javascript
+export function register(on) {
+  on('prompt.submit', ($, e, next) => {
+    if (/AKIA[0-9A-Z]{16}/.test(e.text))
+      return { drop: 'the prompt holds an AWS access key' };
+    return next({
+      ...e,
+      text: e.text.replace(/\bprod\b/g, 'production'),
+      context: [...(e.context ?? []), 'Answer in British English.'],
+    });
+  });
+}
+```
+
+The hook receives:
+
+| Field     | Value                                                                                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks                                          |
+| `context` | absent; each hook that attaches context passes the list on with its own entries added                                                   |
+| `wait`    | `false`                                                                                                                                 |
+| `origin`  | `{kind: 'sdk'}` in headless runs, `{kind: 'composer'}` in the terminals; `{kind: 'plugin', name, asUser?}` for a prompt a Mod submitted |
+
+`origin`, `wait` and `turnId` are pinned. The prompt that enters is the one that
+arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
+what a hook answers after its `next` resolved changes nothing. The rewritten text
+is what the model reads, what `turn.start` hears and what the transcript keeps.
+In a stream-json message with blocks other than text, the rewrite replaces its
+text blocks and the other blocks follow it.
+The context goes to the model after the prompt, in the block that holds
+UserPromptSubmit's context, ahead of it, and is never shown as part of the
+prompt.
+
+`{drop: reason}` stops the prompt before UserPromptSubmit and before any model
+request. The run ends with the error result `Prompt dropped by a hook: <reason>`
+and exit code 1; a stream-json session goes on to its next message. The reason
+is one line, kept to its first 4,096 characters. A hook that answers without
+calling `next` and without a drop also stops the prompt, with the result
+`Prompt not submitted: a hook answered without passing the prompt on`. A hook
+that calls `next` and then answers a drop fails, and its `next` stands.
+
+A hook that fails or times out is skipped, so a broken guard never blocks a
+prompt. Give a guard a `.catch` that drops instead:
+
+```javascript
+on('prompt.submit', guard).catch(($, e, next) =>
+  next.called ? next(e) : { drop: 'the guard failed' },
+);
+```
+
+In the Ink and OpenTUI terminals:
+
+- The hooks hear what the person typed, with pasted text expanded. A paste the
+  rewrite gives back whole stays collapsed, and the model is still told it was
+  pasted. A rewrite that edits inside a paste, removes it or repeats it is
+  refused with an error line, and the prompt comes back to the input box; a
+  hook keeps a paste out by dropping the prompt.
+- Images attached in OpenTUI stay attached to a rewritten prompt. In Ink,
+  attachment references and the notices Qwen Code adds to a prompt for the
+  model alone, such as a resumed worktree, stay ahead of it.
+- In OpenTUI, the prompt's row appears once the hooks let it through.
+- A prompt sent while the Mods are still loading waits for them, so their
+  hooks hear it too.
+- A rewrite also stands in the prompt's row and in the input history that the
+  Up key recalls.
+- A dropped prompt shows the reason as an error line. It is neither shown nor
+  kept in the input history, since it may hold what the hook kept out. It comes
+  back to the input box, ahead of anything typed since, to be edited and sent
+  again.
+- Esc while the hooks run cancels the prompt and hands it back the same way.
+- Slash commands, shell-mode commands, `/btw` questions and scheduled prompts
+  raise no `prompt.submit`. In OpenTUI, slash-form text sent with an attached
+  image goes to the model as a prompt, so the hooks hear it like any prompt.
+- A `?`-form command, such as a `?btw` question, is typed text, so the hooks
+  hear it. In OpenTUI a rewrite must keep the same command: one that leaves
+  `?`-form or names another command is refused with an error line. Context
+  they attach goes with the turn the command starts; a `?btw` question starts
+  none, so its context is not used.
+- In OpenTUI, a prompt typed during a turn shows in the queued-messages strip
+  until it is sent; the hooks hear it then.
+- While a Mod hooks `prompt.submit`, a prompt typed during a turn is not sent
+  into that turn when a tool finishes. It waits for the turn to end, and the
+  hooks hear it when it is sent.
+
+A prompt longer than 128 KiB as JSON reaches no hook, and the line
+`prompt.submit hook skipped: the prompt is too long for a Mod payload` appears
+where transcript logs do.
+
+### A Mod's own prompt
+
+In headless runs and the Ink and OpenTUI terminals, `$.prompt.submit({ text })`
+submits a prompt of the Mod's own. It starts a turn once the session is idle,
+after the turn that is running, and never joins a running turn:
+
+```javascript
+export function register(on) {
+  on('turn.complete', ($, e, next) => {
+    if (/TODO/.test(e.answer))
+      void $.prompt.submit({ text: 'List the TODOs you just mentioned.' });
+    return next(e);
+  });
+}
+```
+
+- The prompt raises `prompt.submit` through every hook but the calling one and
+  those it runs beneath, with `origin` `{ kind: 'plugin', name }`, `name` being
+  the Mod's. The Mod's other hooks hear it. They can rewrite it, attach context
+  or drop it, as for a typed prompt.
+- The call resolves once the hooks have answered and the prompt is queued, to
+  `{ text, context?, origin }`, or to `{ drop: reason }` when a hook dropped it
+  or Qwen Code refused it. A call the hook does not await, as above, still
+  queues after the hook returns.
+- What last arrives beneath the hooks is queued, once, even when a hook calls
+  `next(e)` more than once. A text that is empty or only whitespace, or longer
+  than 128 KiB as JSON, from the call or from a hook's rewrite, is not queued:
+  the call resolves to a drop. An input too large for any Mod call rejects.
+- The model is told the prompt came from the Mod and that the person did not
+  type it. With `asUser: true` the model reads the text as the person's own
+  words; `origin` still names the Mod.
+- The transcript records the prompt as the Mod's, with the Mod's name, not as
+  the person's. A stream-json client receives the text as a `user` message,
+  followed by a `system` message with the subtype `mod_prompt` and the data
+  `{ mod }`, before the turn's output.
+- UserPromptSubmit hooks hear the prompt, and its turn raises `turn.start` and
+  `turn.complete` like any other. It counts toward the session turn limit.
+- `@` references in the text are not read.
+- A Mod command that submits a prompt hands work on to the model: its reply is
+  shown, and the prompt's turn follows, in a headless run in the same run. The
+  command itself starts no turn.
+- In the Ink terminal the prompt's turn starts after the prompts the person
+  queued and the background notifications, and waits while a Goal is running.
+  A Monitor update that waits out the minimum interval between its turns does
+  not hold it.
+- In the OpenTUI terminal the prompt's turn starts after the prompts and
+  commands the person queued, and waits while a dialog is open, a `!` command
+  runs, something the person sent is still being routed or run as a command,
+  and while a Goal is active. OpenTUI runs no Goal continuation turns, so an
+  active Goal holds the prompt until a turn of the person's ends the Goal or
+  the person runs `/goal pause` or `/goal clear`.
+- In both terminals the transcript shows the prompt as the line
+  `Mod <name>: <text>`, live and when the session is resumed, with `asUser`
+  too, and it does not enter the input history.
+- The Mods' prompts start at most 8 turns before the person sends a prompt
+  again. Past that a call resolves to a drop, and the line
+  `$.prompt.submit refused: …` appears where transcript logs do. In a headless
+  run, the prompt the run was given is the person's, and in a stream-json
+  session each message the client sends is, a slash command too. In the Ink
+  and OpenTUI terminals, each prompt or command the person sends is; one
+  queued during a turn counts when it runs. In OpenTUI, text steered into a
+  running turn counts as soon as the turn takes it; in Ink it does not, and
+  the count and a stop hold until the person's next prompt runs.
+- `/clear` and `/resume` start the new session with no prompts queued and the
+  count at 0. A prompt submitted while the old session ends, from a
+  `session.end` hook for instance, resolves to
+  `{ drop: 'the session is ending' }`.
+- A prompt still queued when the run stops early, on an interrupt, a structured
+  result, a detected loop or a slash command that fails, does not run. In the
+  terminals, neither does one still queued when the person stops a turn,
+  with Esc or by declining every tool it asks to run. Until the person sends a
+  prompt again, a call then resolves to
+  `{ drop: 'the person stopped a turn and has not sent a prompt since' }`, so a
+  `turn.complete` hook of the stopped turn starts no turn. A turn a Mod ends
+  with `$.turn.abort` keeps them.
+
+These differ from Claude Code:
+
+- Slash commands, background notifications and the continuation of an
+  interrupted turn raise no `prompt.submit`, so `command` and `isMeta` never
+  appear. Slash-form text that OpenTUI sends as a prompt, as above, is heard
+  as a prompt.
+- `attachments` never appears, and `$.prompt.media` does not exist.
+- A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
+  into `{drop}`: the Mod hooks have settled by the time it runs.
+- `next(e)` resolves once the hooks beneath have answered, not once the turn
+  starts. In the same way, `$.prompt.submit` resolves once its prompt is
+  queued.
+- A context the conversation already holds word for word is not sent again.
+  Each Mod context and UserPromptSubmit's context count on their own, so a
+  context that changes every turn does not make the others repeat.
+- `$.prompt.submit` takes no `attachments`.
 
 ## Elements
 
@@ -643,7 +989,7 @@ its props and its children flattened into an array, and throws for a string tag 
 JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
 [TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
 
-A tree a hook returns is judged with Claude Code 2.1.310's rules for `Box` and
+A tree a hook returns is judged with Claude Code 2.1.318's rules for `Box` and
 `Text`, and any other element refuses it with
 `<Element> is not drawn by Qwen Code yet`.
 
@@ -745,6 +1091,65 @@ These differ from Claude Code:
   off at the right edge without a mark. Its borders have one stroke per axis,
   so the `arrow` border draws its top arrow on the bottom edge and its left
   arrow on the right edge.
+
+## Reply rows
+
+The Ink terminal raises `ui.render` for the `AssistantMessage` site once for
+each complete block of a reply in the main transcript, so a hook can change how
+the reply reads. A hook receives:
+
+```js
+{
+  surface: 'terminal',
+  component: 'AssistantMessage',
+  requestId: '42', // the transcript item's id
+  props: {
+    text: 'The worker runs one dispatch at a time.', // the block's markdown
+    isFirstOfReply: true, // the block that opens the reply
+  },
+}
+```
+
+To change what the row shows, pass rewritten props down:
+
+```js
+on('ui.render', { component: 'AssistantMessage' }, ($, e, next) =>
+  next({ ...e, props: { ...e.props, text: e.props.text.toUpperCase() } }),
+);
+```
+
+Only the drawing changes: the stored message, what the model reads, `/copy`
+and exports keep the original text. `isFirstOfReply` and the envelope are
+pinned. A rewritten `text` holds at most 100,000 characters and no control characters
+other than tabs and line breaks; otherwise the hook fails like a thrown error. A hook that answers a
+tree of its own instead of the engine node leaves the row as it was, and the
+debug log says so once.
+
+A row is raised when its block is complete, never while it streams. It shows
+its own text until its hooks answer, so a hook may await `$.model.complete`;
+answers are kept, and a row that scrolls back into view does not ask again. A
+row asked again with `$.ui.invalidate('ui.render')` shows its previous answer
+until the new one arrives; `/clear`, `/resume` and `/branch` forget every
+answer when switching sessions. The Mod sees rows from the new transcript once
+it is committed.
+Rows render one at a time, so while a row's hook waits, other Mod hooks wait for
+that row only. A render that takes more than 30 seconds is cancelled, including
+time spent waiting for a model call. A long reply is split into several blocks
+while it streams, and each block is its own row.
+
+In a rewritten row, a Mermaid or LaTeX block with one exact source match in the
+original row shows the original block's `/copy mermaid N` or `/copy latex N`
+hint. New, changed, or ambiguous blocks omit the hint.
+
+Reply rows are drawn only with the virtualized history (`ui.useTerminalBuffer`,
+on by default in interactive terminals). With history in the terminal
+scrollback, a printed row cannot change, so the site is not offered and its
+hooks are skipped. OpenTUI, subagent views and headless runs do not raise it
+yet. A row whose text is too large for a Mod payload is not raised.
+
+The host raises a site only when some hook may hear it: a hook that names a
+`component` in its matcher hears only the sites it names, and `ui.invalidate`
+re-runs only the sites the calling Mod may hear.
 
 ## TypeScript, JSX and relative imports
 
@@ -890,6 +1295,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API follows the Claude Code 2.1.310 declarations, event names
+The author API follows the Claude Code 2.1.318 declarations, event names
 included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).

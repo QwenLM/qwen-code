@@ -226,6 +226,12 @@ export interface CommandRouteSpec {
  * command tree.
  */
 export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
+  { name: 'upgrade', results: ['message'] },
+  {
+    name: 'logout',
+    results: ['message', 'dialog'],
+    dialogs: ['auth'],
+  },
   { name: 'status', altNames: ['about'], results: ['none', 'message'] },
   {
     name: 'agents',

@@ -7,6 +7,7 @@ import {
   McpAppGeneratedUiContext,
   type McpAppGeneratedUi,
   McpAppMessagesContext,
+  McpAppModelContextContext,
   McpAppSessionContext,
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
@@ -21,6 +22,9 @@ const appBridgeMocks = vi.hoisted(() => ({
     onsandboxready?: () => void;
     oninitialized?: () => void;
     onsizechange?: (params: { height?: number; width?: number }) => void;
+    onupdatemodelcontext?: (params: {
+      content?: Array<{ type: string; text?: string }>;
+    }) => Promise<unknown>;
     onmessage?: (
       params: { role: string; content: Array<Record<string, unknown>> },
       extra: { signal: AbortSignal },
@@ -1432,6 +1436,88 @@ describe('built-in Generated UI admission', () => {
     expect(appBridgeMocks.lastOptions).toMatchObject({
       hostContext: { containerDimensions: { maxHeight: 960 } },
     });
+  });
+
+  it('attaches the card values to the owning session composer', async () => {
+    const attach = vi.fn();
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const card = {
+      ...display,
+      toolResult: {
+        content: [{ type: 'text', text: 'Bill' }],
+        structuredContent: {
+          schemaVersion: 1,
+          documentId: 'g1_doc',
+          title: 'Bill',
+          summary: 'Each pays 154.',
+        },
+      },
+    };
+    const { rerender } = renderApp(card);
+    const wrap = (contextSession: string) => (
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpAppMessagesContext.Provider
+            value={{ sessionId: 'owner', requestMessage }}
+          >
+            <McpAppModelContextContext.Provider
+              value={{ sessionId: contextSession, attach }}
+            >
+              <McpApp display={card} />
+            </McpAppModelContextContext.Provider>
+          </McpAppMessagesContext.Provider>
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>
+    );
+    rerender(wrap('owner'));
+    expect(appBridgeMocks.lastCapabilities).toMatchObject({
+      updateModelContext: { text: {} },
+    });
+    const update = appBridgeMocks.last!.onupdatemodelcontext!;
+    await act(async () => {
+      await update({ content: [{ type: 'text', text: 'people: 7' }] });
+    });
+    expect(attach).toHaveBeenCalledWith({
+      id: 'generated-ui:g1_doc',
+      title: 'Bill',
+      text: 'people: 7',
+    });
+    attach.mockClear();
+    await act(async () => {
+      await update({ content: [{ type: 'text', text: 'x'.repeat(17000) }] });
+    });
+    expect(attach).not.toHaveBeenCalled();
+    // A composer that now belongs to another session never receives it.
+    rerender(wrap('other'));
+    await act(async () => {
+      await appBridgeMocks.last!.onupdatemodelcontext!({
+        content: [{ type: 'text', text: 'people: 8' }],
+      });
+    });
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it('does not offer model context to other MCP Apps', () => {
+    const { rerender } = renderApp(appDisplay());
+    rerender(
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 'live', requestMessage: vi.fn() }}
+      >
+        <McpAppSessionContext.Provider value="live">
+          <McpAppModelContextContext.Provider
+            value={{ sessionId: 'live', attach: vi.fn() }}
+          >
+            <McpApp display={appDisplay()} />
+          </McpAppModelContextContext.Provider>
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>,
+    );
+    expect(appBridgeMocks.lastCapabilities).not.toHaveProperty(
+      'updateModelContext',
+    );
+    expect(appBridgeMocks.last?.onupdatemodelcontext).toBeUndefined();
   });
 
   it('retains manually installed legacy Generated UI behavior', () => {

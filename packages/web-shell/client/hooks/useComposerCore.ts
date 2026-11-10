@@ -82,7 +82,7 @@ import {
   inputHighlight,
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
-import { isEditableTarget } from '../utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
@@ -1457,27 +1457,39 @@ function shallowEqualSlashMenu(
 
 type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
 
+// Arrow paging needs both the browse flag (cleared on edits) and an armed index.
 function handleMultilineHistoryBoundary(
   view: EditorView,
   direction: 'up' | 'down',
+  isPagingHistory: boolean,
 ): MultilineHistoryBoundary {
   const doc = view.state.doc;
-  if (doc.lines <= 1) return 'history';
-
   const selection = view.state.selection.main;
   if (!selection.empty) return 'editor';
+  if (isPagingHistory && doc.lines === 1) return 'history';
 
   const head = selection.head;
-  const line = doc.lineAt(head);
+  const caret = view.coordsAtPos(head, selection.assoc < 0 ? -1 : 1);
+  // Bidi visual sides may lie inside the logical line; compare vertical rows.
+  const sharesRowWith = (edge: number) => {
+    if (!caret) return doc.lineAt(head).number === doc.lineAt(edge).number;
+    const bounds = view.coordsAtPos(edge);
+    return (
+      bounds !== null && caret.top < bounds.bottom && bounds.top < caret.bottom
+    );
+  };
+  const onFirstRow = sharesRowWith(0);
+  const onLastRow = sharesRowWith(doc.length);
+  if (doc.lines === 1 && onFirstRow && onLastRow) return 'history';
 
-  // Let CodeMirror handle normal multi-line cursor movement first. Once the
-  // cursor is on the edge line, one more arrow key snaps to the true edge;
+  // Let CodeMirror move between visual rows, including soft wraps. Once the
+  // cursor is on the edge row, one more arrow key snaps to the true edge;
   // the next press can browse prompt history instead of feeling stuck.
   if (direction === 'up') {
-    if (line.number > 1) return 'editor';
-    if (head > line.from) {
+    if (!onFirstRow) return 'editor';
+    if (head > 0) {
       view.dispatch({
-        selection: { anchor: line.from },
+        selection: { anchor: 0 },
         scrollIntoView: true,
       });
       return 'handled';
@@ -1485,10 +1497,10 @@ function handleMultilineHistoryBoundary(
     return 'history';
   }
 
-  if (line.number < doc.lines) return 'editor';
-  if (head < line.to) {
+  if (!onLastRow) return 'editor';
+  if (head < doc.length) {
     view.dispatch({
-      selection: { anchor: line.to },
+      selection: { anchor: doc.length },
       scrollIntoView: true,
     });
     return 'handled';
@@ -2393,13 +2405,38 @@ export function useComposerCore(
       onPasteCapture: (event) => {
         const pastedText = event.clipboardData.getData('text/plain');
         if (pastedText) {
+          const isEditorPaste =
+            pastedInEditor(event.target) ||
+            (event.target === event.currentTarget &&
+              event.currentTarget instanceof HTMLTextAreaElement);
+          if (
+            isEditorPaste &&
+            !disabledRef.current &&
+            !shellModeRef.current &&
+            attachmentsEnabledRef.current &&
+            /^https?:\/\/\S+$/iu.test(pastedText.trim())
+          ) {
+            const draft =
+              viewRef.current?.state.doc.toString() ?? mobileTextRef.current;
+            if (/^[!/]/.test(draft.trimStart())) return;
+            const transfer = extractFileTransfer(event.clipboardData, 'paste');
+            // A copied image can carry its source URL alongside the bitmap.
+            if (
+              transfer.imageCandidates.length === 1 &&
+              transfer.fileCandidates.length === 0 &&
+              transfer.rejected.length === 0 &&
+              enqueueExtractedTransfer(transfer)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+          }
           // These handlers live on the composer surface, which also contains
           // controls that take text of their own (the history search box), so
           // only a paste aimed at the editor may be folded.
           if (
-            (pastedInEditor(event.target) ||
-              (event.target === event.currentTarget &&
-                event.currentTarget instanceof HTMLTextAreaElement)) &&
+            isEditorPaste &&
             foldPastedTextIntoCard(
               pastedText,
               event.target instanceof HTMLTextAreaElement
@@ -2474,6 +2511,7 @@ export function useComposerCore(
     }),
     [
       clearImageDragState,
+      enqueueExtractedTransfer,
       enqueueImageTransfer,
       foldPastedTextIntoCard,
       isTouchComposer,
@@ -2651,6 +2689,11 @@ export function useComposerCore(
       // flag and re-arms persistence (handleMobileChange or a programmatic
       // write on touch, the CodeMirror update listener on desktop).
       historyBrowseActiveRef.current = true;
+      (shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current
+      ).reset();
+      if (!shellModeRef.current) clearPromptHistoryDraftTags();
       if (!view) {
         if (isTouchComposer) {
           // Plain-text restore: inline tag chips are not recreated on the
@@ -2661,7 +2704,12 @@ export function useComposerCore(
       }
       restoreHistoryEntry(view, text);
     },
-    [isTouchComposer, restoreHistoryEntry, setMobileText],
+    [
+      clearPromptHistoryDraftTags,
+      isTouchComposer,
+      restoreHistoryEntry,
+      setMobileText,
+    ],
   );
   const composerInputRef = useRef(composerInput);
   composerInputRef.current = composerInput;
@@ -3783,7 +3831,11 @@ export function useComposerCore(
             closeSlashMenu();
             closeAtMenu();
           }
-          const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
+          const multilineBoundary = handleMultilineHistoryBoundary(
+            view,
+            'up',
+            isBrowsingHistory && history.isNavigating(),
+          );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
@@ -3841,6 +3893,7 @@ export function useComposerCore(
           const multilineBoundary = handleMultilineHistoryBoundary(
             view,
             'down',
+            isBrowsingHistory && history.isNavigating(),
           );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
@@ -3853,6 +3906,7 @@ export function useComposerCore(
           }
           const next = history.navigateDown();
           if (next === null) {
+            if (isBrowsingHistory) return true;
             return onFocusFooterRef.current?.() ?? false;
           }
           const returningToPromptDraft = !history.isNavigating();
@@ -4090,6 +4144,7 @@ export function useComposerCore(
         inputHighlight(
           () => commandsRef.current,
           () => languageRef.current,
+          () => skillsRef.current ?? [],
         ),
         inputHighlightTheme,
         inlineComposerTagField,
@@ -4538,10 +4593,24 @@ export function useComposerCore(
       if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
       // Only capture keystrokes if the target is within the web-shell container
-      // or if no specific element has focus (document.body is active)
+      // or if no specific element has focus (document.body is active). A
+      // marked focus region (the managed page's non-interactive tabindex=-1
+      // wrapper) parks focus without intent to interact, so it counts as
+      // body focus too — otherwise clicking the pane silences "type anywhere".
       const target = event.target as Node;
       const isWithinContainer = containerRef.current?.contains(target);
-      const isBodyFocused = document.activeElement === document.body;
+      // The focused element must be read from the container's own root: in a
+      // shadow-root mount `document.activeElement` and `event.target` both
+      // retarget to the host, which would make a parked focus region look
+      // unfocused and silence "type anywhere". The region must also wrap this
+      // composer: two managed shells can share one shadow root, and their
+      // parked wrappers are then siblings, so the attribute alone would let
+      // one shell capture the keystrokes aimed at the other.
+      const activeRegion = getShadowAwareActiveElement(containerRef.current);
+      const isBodyFocused =
+        document.activeElement === document.body ||
+        (activeRegion?.hasAttribute('data-web-shell-focus-region') === true &&
+          activeRegion.contains(containerRef.current));
       if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;

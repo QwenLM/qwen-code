@@ -37,8 +37,8 @@ describe('bundled Generated UI candidate', () => {
   });
   afterEach(() => rmSync(fixture, { recursive: true, force: true }));
 
-  it.each([undefined, false, 'true', 1, {}, null])(
-    'requires a strict boolean opt-in: %j',
+  it.each([false, 'true', 1, {}, null])(
+    'turns off for false or an invalid value: %j',
     (value) => {
       expect(prepareBundledGeneratedUi(value, true)).toEqual({
         enabled: false,
@@ -47,10 +47,25 @@ describe('bundled Generated UI candidate', () => {
     },
   );
 
+  it('is on by default and marks only an explicit opt-in', () => {
+    populate(join(fixture, 'generated-ui'));
+    expect(prepareBundledGeneratedUi(undefined, true)).toMatchObject({
+      enabled: true,
+    });
+    expect(prepareBundledGeneratedUi(undefined, true)).not.toHaveProperty(
+      'explicit',
+    );
+    expect(prepareBundledGeneratedUi(undefined, false)).toEqual({
+      enabled: true,
+      unavailableReason: 'unsupported-runtime',
+    });
+  });
+
   it('does not search assets for an unsupported runtime', () => {
     expect(prepareBundledGeneratedUi(true, false)).toEqual({
       enabled: true,
       unavailableReason: 'unsupported-runtime',
+      explicit: true,
     });
     expect(resolveBundleDir).not.toHaveBeenCalled();
   });
@@ -60,6 +75,7 @@ describe('bundled Generated UI candidate', () => {
     populate(assets);
     expect(prepareBundledGeneratedUi(true, true)).toEqual({
       enabled: true,
+      explicit: true,
       skillsDir: join(assets, 'skills'),
       server: {
         command: process.execPath,
@@ -69,6 +85,26 @@ describe('bundled Generated UI candidate', () => {
         alwaysLoadTools: true,
       },
     });
+  });
+
+  it('forces Node mode when the CLI runs as the Electron binary', () => {
+    const assets = join(fixture, 'generated-ui');
+    populate(assets);
+    const originalElectron = process.versions['electron'];
+    Object.defineProperty(process.versions, 'electron', {
+      value: '43.8.3',
+      configurable: true,
+    });
+    try {
+      expect(prepareBundledGeneratedUi(true, true).server?.env).toEqual({
+        ELECTRON_RUN_AS_NODE: '1',
+      });
+    } finally {
+      Object.defineProperty(process.versions, 'electron', {
+        value: originalElectron,
+        configurable: true,
+      });
+    }
   });
 
   it.each(files)(
@@ -81,6 +117,7 @@ describe('bundled Generated UI candidate', () => {
       expect(prepareBundledGeneratedUi(true, true)).toEqual({
         enabled: true,
         unavailableReason: 'assets-missing',
+        explicit: true,
       });
     },
   );

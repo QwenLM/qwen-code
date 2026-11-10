@@ -35,6 +35,7 @@ import { promisify } from 'node:util';
 import {
   CONTRACT_DOCUMENT,
   CONTRACT_DOCUMENT_PREDECESSOR,
+  CONTRACT_DOCUMENT_MONOLITH,
   compareVersions,
   documentVersion,
 } from './contract-version-utils.js';
@@ -189,6 +190,7 @@ async function claims(repo, prs, main, budget, gh) {
   for (const pr of prs) {
     const touched =
       pr.files.find((file) => file.path === CONTRACT_DOCUMENT) ??
+      pr.files.find((file) => file.path === CONTRACT_DOCUMENT_MONOLITH) ??
       pr.files.find((file) => file.path === CONTRACT_DOCUMENT_PREDECESSOR);
     if (!touched) continue;
     if (touched.changeType === 'DELETED') {

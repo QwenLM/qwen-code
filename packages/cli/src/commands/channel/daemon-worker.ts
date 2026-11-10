@@ -19,16 +19,23 @@ import { loadSettings } from '../../config/settings.js';
 import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
   ChannelLoopScheduler,
   ChannelLoopStore,
   DaemonChannelBridge,
   isChannelProactiveDeliveryError,
+  PR_BINDING_ROLES,
   sanitizeLogText,
   SessionRouter,
 } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelBoundSessions,
   ChannelLoopRunner,
   ChannelWebhookRunOptions,
   ChannelWebhookTask,
@@ -36,6 +43,9 @@ import type {
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
+  PrBindingRole,
+  PrBindingsSnapshot,
+  PrBindingSummary,
 } from '@qwen-code/channel-base';
 import type { ServeFeature } from '../../serve/capabilities.js';
 import type { ServeChannelSelection } from '../../serve/types.js';
@@ -63,6 +73,7 @@ import {
   type ChannelDeliveryRequest,
 } from '../../runtime/channel-delivery-ipc.js';
 import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
+import { CHANNEL_BOUND_RELAY_META_KEY } from '../../serve/channel-worker-prompt-authorization.js';
 import {
   isChannelStartupReportAckMessage,
   MAX_CHANNEL_STARTUP_FAILURES,
@@ -154,6 +165,7 @@ interface DaemonCapabilitiesLike {
 
 interface DaemonClientLike {
   capabilities(): Promise<DaemonCapabilitiesLike>;
+  requestRest(path: string, init?: RequestInit): Promise<Response>;
   workspaceByCwd?(cwd: string): {
     deleteSessionsData(sessionIds: string[]): Promise<{
       removed: string[];
@@ -296,6 +308,451 @@ export function createDaemonSessionFactory({
   };
 }
 
+/**
+ * Upper bound on the accessor's session→cwd wake cache. Complete snapshots
+ * rebuild it and Gone verdicts evict entries, but a permanent partial never
+ * clears it; the cap bounds churn-driven growth during such a window.
+ */
+const MAX_WAKE_CWD_CACHE = 1024;
+
+/**
+ * Daemon-backed delivery into PR-bound sessions the channel does not own.
+ * Acceptance into the session's prompt queue counts as delivery; the turn
+ * itself runs independently of the channel worker.
+ *
+ * `wake` restores a dormant (persisted but not live) session, which the
+ * prompt route rejects with 404, and returns a release callback for the
+ * client registration the restore minted. The accessor invokes that
+ * release once the retried prompt settles: a non-empty client registration
+ * blocks the daemon's prompt-settled idle close, so discarding it without
+ * detaching would pin the woken session live until the TTL reaper.
+ *
+ * Error classification: a 404 (session or workspace truly gone) becomes
+ * `BoundSessionGoneError` so the adapter falls back to the channel path —
+ * except a 404 on the retry AFTER a successful wake, which is reversible
+ * backpressure (the owner may have begun draining) and defers one cycle;
+ * queue-full and temporarily-unavailable conditions (503, 429, other 5xx,
+ * restore conflicts, session limits, draining workspaces) are backpressure
+ * that defers the event without consuming the failure budget; everything
+ * else propagates as a transient delivery error for the adapter to retry.
+ *
+ * Every POST carries the caller's idempotency key (a stable event identity
+ * derived from the source chat and message id) and the bound-relay marker:
+ * the daemon deduplicates repeated admissions of the same key (a lost
+ * acceptance mark or a lost 202 must not re-inject the event), and
+ * cross-workspace channel classification requires the marker in addition to
+ * the worker token.
+ */
+export function createBoundSessionsAccessor(
+  client: DaemonClientLike,
+  wake?: (
+    sessionId: string,
+    workspaceCwd: string,
+  ) => Promise<(() => Promise<void>) | undefined>,
+  promptAuthorization?: string,
+): ChannelBoundSessions {
+  const cwdBySession = new Map<string, string>();
+  // Consecutive answers the worker itself downgraded to partial (rows or PR
+  // entries that failed shape validation). Such an answer has no daemon
+  // I/O failure behind it, so without this line the cause would be logged
+  // nowhere; throttled because the route is polled every channel cycle.
+  let workerDowngradeStreak = 0;
+  // Consecutive authorship lookups that failed with a non-200 or a thrown
+  // request. Each fail-open empty set makes the bound session receive its own
+  // comments (the self-delivery loop the watch exists to prevent), so the
+  // cause must not be silent; throttled like the sibling downgrade line
+  // because the lookup runs on every comment-watch pass. A 200 empty set is
+  // NOT a failure (it is indistinguishable from a quiet PR by design).
+  let attributionFailureStreak = 0;
+  const noteAttributionFailure = (cause: string): void => {
+    attributionFailureStreak += 1;
+    if (attributionFailureStreak === 1 || attributionFailureStreak % 60 === 0) {
+      process.stderr.write(
+        `[channel-worker] posted-comment authorship lookup failed (${cause}); delivering without authorship exclusion (${attributionFailureStreak} consecutive failures); check that the worker and the daemon run the same version\n`,
+      );
+    }
+  };
+  // requestRest's timer covers the connection through response headers
+  // only; the signal also bounds body consumption so a half-open connection
+  // cannot hang the poll loop indefinitely.
+  const requestSignal = (): AbortSignal => AbortSignal.timeout(30_000);
+  const discardBody = (res: Response): Promise<void> =>
+    res.body?.cancel().catch(() => {}) ?? Promise.resolve();
+  const postPrompt = (
+    sessionId: string,
+    prompt: string,
+    idempotencyKey?: string,
+  ): Promise<Response> =>
+    client.requestRest(`/session/${encodeURIComponent(sessionId)}/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: requestSignal(),
+      // Same classification the channel bridge rides: without the marker
+      // and worker authorization the daemon treats the relay as an
+      // interactive user prompt (loop-detected rejection instead of the
+      // graceful channel end-turn, and live PR-binding backfill on relayed
+      // external text). Admission strips the marker for unauthorized
+      // callers, so both keys must ride together. The bound-relay marker
+      // additionally scopes the process-level worker credential to its
+      // reason: cross-workspace channel classification requires it.
+      body: JSON.stringify({
+        prompt: [{ type: 'text', text: prompt }],
+        // The stable event identity (source chat + message id): the daemon
+        // deduplicates repeated admissions of the same key, so a retry
+        // after a lost acceptance mark or a lost 202 response does not
+        // re-inject the event.
+        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_BOUND_RELAY_META_KEY]: true,
+          ...(promptAuthorization
+            ? { [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: promptAuthorization }
+            : {}),
+        },
+      }),
+    });
+  const listPrBindings = async (): Promise<PrBindingsSnapshot> => {
+    const res = await client.requestRest('/sessions/pr-bindings', {
+      signal: requestSignal(),
+    });
+    if (!res.ok) {
+      await discardBody(res);
+      throw new Error(`GET /sessions/pr-bindings failed: HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as {
+      bindings?: unknown;
+      partial?: unknown;
+    };
+    let partial = body.partial === true;
+    let dropped = 0;
+    // A malformed 200 is not an authoritative empty snapshot: throwing
+    // routes it into the adapter's fail-closed refresh handling (keep the
+    // previous map, skip the watch pass) instead of wiping watch state.
+    if (!Array.isArray(body.bindings)) {
+      throw new Error(
+        'GET /sessions/pr-bindings returned malformed bindings (HTTP 200)',
+      );
+    }
+    const summaries: PrBindingSummary[] = [];
+    const validatedCwds = new Map<string, string>();
+    for (const entry of body.bindings) {
+      if (entry === null || typeof entry !== 'object') {
+        // A dropped session row is a degraded answer too: its bindings
+        // are unknown, so the snapshot must not claim completeness.
+        partial = true;
+        dropped += 1;
+        continue;
+      }
+      const record = entry as Record<string, unknown>;
+      const { sessionId, workspaceCwd, prs } = record;
+      if (
+        typeof sessionId !== 'string' ||
+        typeof workspaceCwd !== 'string' ||
+        !Array.isArray(prs)
+      ) {
+        partial = true;
+        dropped += 1;
+        continue;
+      }
+      const entries: PrBindingSummary['prs'] = [];
+      for (const pr of prs) {
+        if (pr === null || typeof pr !== 'object') continue;
+        const { number, url, state, role } = pr as Record<string, unknown>;
+        if (
+          typeof number !== 'number' ||
+          !Number.isSafeInteger(number) ||
+          number <= 0 ||
+          typeof url !== 'string' ||
+          // An unknown role is a degraded entry, not a silently untyped
+          // one: dropping it to the untyped group could misroute delivery
+          // under a version skew. The count check below flags the answer
+          // partial so the adapter retains known bindings. The vocabulary
+          // is the shared constant so a later addition cannot silently
+          // degrade every snapshot here.
+          (role !== undefined &&
+            !(PR_BINDING_ROLES as readonly string[]).includes(role as string))
+        ) {
+          continue;
+        }
+        entries.push({
+          number,
+          url,
+          ...(state === 'open' || state === 'merged' || state === 'closed'
+            ? { state }
+            : {}),
+          // The vocabulary check above proved the value; includes() does
+          // not narrow unknown, so assert the validated type here.
+          ...(role !== undefined ? { role: role as PrBindingRole } : {}),
+        });
+      }
+      if (entries.length < prs.length) {
+        // ANY malformed PR entry makes this a degraded answer: a partial
+        // projection must not masquerade as a complete one, or the adapter
+        // would trust its absence semantics for the dropped PRs.
+        partial = true;
+        dropped += prs.length - entries.length;
+      }
+      if (entries.length === 0 && prs.length > 0) {
+        // A listed session whose PR entries ALL failed shape validation is
+        // a degraded answer, not an unbind: skip the empty projection so
+        // the adapter retains known bindings instead of trusting it.
+        continue;
+      }
+      // An empty prs row is a TOMBSTONE and must pass through: the adapter
+      // keys retention on the listed session set, so "scanned, no bindings"
+      // (an observed unbind) has to reach it even on a partial answer.
+      const { sourceType, updatedAt } = record;
+      validatedCwds.set(sessionId, workspaceCwd);
+      summaries.push({
+        sessionId,
+        workspaceCwd,
+        ...(typeof sourceType === 'string' ? { sourceType } : {}),
+        ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
+        prs: entries,
+      });
+    }
+    if (dropped > 0) {
+      workerDowngradeStreak += 1;
+      if (workerDowngradeStreak === 1 || workerDowngradeStreak % 60 === 0) {
+        process.stderr.write(
+          `[channel-worker] PR bindings answer downgraded to partial by the worker: ${dropped} binding row(s) or PR entries failed shape validation (${workerDowngradeStreak} consecutive answers); check that the worker and the daemon run the same version\n`,
+        );
+      }
+    } else {
+      workerDowngradeStreak = 0;
+    }
+    // Rebuild (not accumulate) on complete answers so sessions that left
+    // the bindings drop out of the wake cache. On a partial answer keep
+    // the known cwds: an incomplete enumeration must not turn a queued
+    // dormant delivery into a gone-session public fallback. The decision
+    // uses the FINAL partial verdict: row-level degradation upgrades a
+    // nominally complete answer, and must not have cleared the cache first.
+    if (!partial) cwdBySession.clear();
+    for (const [sessionId, workspaceCwd] of validatedCwds) {
+      // Bounded: under a permanent partial the cache is never cleared, so
+      // session churn during the partial window must not grow it without
+      // limit. FIFO eviction only drops the oldest wake hints; a dropped
+      // entry is re-fetched from the bindings route on the next 404.
+      if (
+        cwdBySession.size >= MAX_WAKE_CWD_CACHE &&
+        !cwdBySession.has(sessionId)
+      ) {
+        const oldest = cwdBySession.keys().next().value;
+        if (oldest !== undefined) cwdBySession.delete(oldest);
+      }
+      cwdBySession.set(sessionId, workspaceCwd);
+    }
+    return { bindings: summaries, partial };
+  };
+  return {
+    listPrBindings,
+    deliverPrompt: async (sessionId, prompt, idempotencyKey) => {
+      let res = await postPrompt(sessionId, prompt, idempotencyKey);
+      let releaseWake: (() => Promise<void>) | undefined;
+      let wokeSession = false;
+      try {
+        if (res.status === 404 && wake) {
+          // Dormant session: the bindings route lists persisted active
+          // sessions, but the prompt route only serves live ones. Wake it
+          // and retry once. A refresh failure here is transient and must
+          // propagate, not degrade into a gone-session public fallback.
+          let cwd = cwdBySession.get(sessionId);
+          if (cwd === undefined) {
+            const snapshot = await listPrBindings();
+            // Read the target's cwd from the FRESH FULL snapshot, not the
+            // capped hint cache: a complete snapshot with more than
+            // MAX_WAKE_CWD_CACHE rows truncates the cache (FIFO), so a
+            // listed, live, dormant session beyond the cap is still present
+            // in snapshot.bindings and must be woken — reading the capped
+            // cache here would miss it and misreport it as gone (an
+            // irreversible public reply on a complete snapshot). The hint
+            // cache stays the pre-refresh fast path above; the cap still
+            // bounds it.
+            cwd = snapshot.bindings.find(
+              (binding) => binding.sessionId === sessionId,
+            )?.workspaceCwd;
+            if (cwd === undefined && snapshot.partial) {
+              // Cold cache meets an incomplete enumeration: absence from a
+              // partial snapshot is not evidence of deletion. Defer to the
+              // adapter's backpressure retry instead of the public
+              // gone-session fallback — and instead of the failure budget,
+              // which a generic Error would consume (the message promises
+              // deferral; the class must match).
+              throw new BoundSessionUnavailableError(
+                sessionId,
+                'absent from a partial bindings snapshot; deferring delivery',
+              );
+            }
+          }
+          if (cwd !== undefined) {
+            releaseWake = await wake(sessionId, cwd);
+            wokeSession = true;
+            await discardBody(res);
+            // Same idempotency key: the first POST was a 404 (never
+            // admitted), and a response-loss retry must dedupe too.
+            res = await postPrompt(sessionId, prompt, idempotencyKey);
+          }
+        }
+        if (res.status === 404) {
+          if (wokeSession) {
+            // A 404 AFTER a successful wake is more likely a reversible
+            // lifecycle transition — the owning workspace began draining
+            // between the resume and this retry, and the prompt route answers
+            // this same 404 for a non-active owner — than permanent deletion.
+            // Defer one cycle: the next wake's resume reports a permanent
+            // 404/409 if the session is truly gone, so the fallback is only
+            // delayed, never lost to the failure budget.
+            throw new BoundSessionUnavailableError(
+              sessionId,
+              'post-wake retry 404 (reversible lifecycle state)',
+            );
+          }
+          throw new BoundSessionGoneError(sessionId);
+        }
+        if (res.status === 503) {
+          const body = (await res.json().catch(() => ({}))) as {
+            code?: unknown;
+          };
+          if (body.code === 'prompt_queue_full') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+          // Every other 503 (workspace draining/restarting, session limit,
+          // runtime starting) is a retry-later condition — the daemon even
+          // sends Retry-After. Burning the attempt budget on these
+          // steady states would silently lose the event after three polls.
+          throw new BoundSessionUnavailableError(
+            sessionId,
+            `HTTP 503 (${String(body.code)})`,
+          );
+        }
+        if (res.status === 409) {
+          const body = (await res.json().catch(() => ({}))) as {
+            code?: unknown;
+          };
+          if (
+            body.code === 'session_archived' ||
+            body.code === 'worktree_session_superseded'
+          ) {
+            // Permanent states: an archived or superseded session is never
+            // restored (same classification as the wake path). Fall back to
+            // the channel path rather than burning the failure budget.
+            throw new BoundSessionGoneError(sessionId);
+          }
+          if (
+            body.code === 'restore_in_progress' ||
+            body.code === 'session_busy' ||
+            body.code === 'worktree_reset_active' ||
+            body.code === 'working_directory_missing'
+          ) {
+            // Reversible barriers: a restore in flight, a busy session, an
+            // armed worktree-reset prompt barrier (the reset flow tells
+            // channel-worker callers to retry), or a reserved standalone
+            // session whose managed conversation binding has not released
+            // yet (the daemon marks it retryable with Retry-After). Defer,
+            // don't burn the budget.
+            throw new BoundSessionUnavailableError(
+              sessionId,
+              `HTTP 409 (${String(body.code)})`,
+            );
+          }
+          throw new Error(
+            `POST /session/:id/prompt failed: HTTP 409 (${String(body.code)})`,
+          );
+        }
+        if (res.status === 429 || res.status >= 500) {
+          // The daemon's own rate limiter answers 429 rate_limit_exceeded
+          // (prompt tier, keyed on the worker's client id — one bucket for
+          // every bound delivery of the channel), and other 5xx are daemon
+          // transient states. Both are daemon-signalled backpressure: like
+          // the sibling 503s they must defer, not consume the failure budget
+          // (three consecutive 429s would otherwise dead-letter a watch
+          // event irrecoverably). The retries themselves keep the bucket
+          // saturated, so the deferral horizon is the escape.
+          throw new BoundSessionUnavailableError(
+            sessionId,
+            `HTTP ${res.status} (daemon backpressure)`,
+          );
+        }
+        if (!res.ok) {
+          throw new Error(
+            `POST /session/:id/prompt failed: HTTP ${res.status}`,
+          );
+        }
+      } catch (err) {
+        // An authoritative Gone is durable evidence: evict the dead session's
+        // cached cwd so a permanent partial snapshot cannot make every later
+        // delivery pay a doomed resume round-trip (and the map grow without
+        // bound). A post-wake retry 404 is NOT Gone (it classifies as
+        // Unavailable), so a possibly-reversible lifecycle state never
+        // evicts a live session's wake cwd.
+        if (err instanceof BoundSessionGoneError) {
+          cwdBySession.delete(sessionId);
+        }
+        throw err;
+      } finally {
+        // Never leave a response body unconsumed: an unread undici body
+        // holds its connection until GC, leaking sockets in this
+        // long-lived worker on every delivery, probe and failure.
+        await discardBody(res);
+        // Release the wake registration once the retried prompt settled
+        // (accepted or not). Detaching before the retry could close the
+        // session ahead of the POST and misclassify the 404 as gone.
+        if (releaseWake) {
+          await releaseWake().catch(() => {});
+        }
+      }
+    },
+    postedCommentIds: async (sessionId) => {
+      // Fail-open: a non-200 or a malformed body resolves to an empty set so
+      // the comment watch never suppresses delivery on missing authorship
+      // evidence. The cwd hint cache is capped (FIFO): a listed session beyond
+      // the cap is evicted, so on a cold miss re-read the fresh snapshot like
+      // the delivery path does — otherwise an evicted author is credited with
+      // nothing and receives its own comments. Absence from the snapshot stays
+      // fail-open (unknown, not evidence of having posted nothing).
+      let cwd = cwdBySession.get(sessionId);
+      if (cwd === undefined) {
+        try {
+          const snapshot = await listPrBindings();
+          cwd = snapshot.bindings.find(
+            (binding) => binding.sessionId === sessionId,
+          )?.workspaceCwd;
+        } catch {
+          return new Set<string>();
+        }
+        if (cwd === undefined) return new Set<string>();
+      }
+      let res: Response | undefined;
+      try {
+        res = await client.requestRest(
+          `/sessions/${encodeURIComponent(sessionId)}/posted-comments?workspaceCwd=${encodeURIComponent(cwd)}`,
+          { signal: requestSignal() },
+        );
+        if (!res.ok) {
+          noteAttributionFailure(`HTTP ${res.status}`);
+          return new Set<string>();
+        }
+        const body = (await res.json()) as { ids?: unknown };
+        const ids = new Set<string>();
+        if (Array.isArray(body.ids)) {
+          for (const id of body.ids) {
+            if (typeof id === 'string') ids.add(id);
+          }
+        }
+        attributionFailureStreak = 0;
+        return ids;
+      } catch (err) {
+        noteAttributionFailure(
+          (err instanceof Error ? err.message : String(err)).slice(0, 200),
+        );
+        return new Set<string>();
+      } finally {
+        if (res) await discardBody(res);
+      }
+    },
+  };
+}
+
 export function createDaemonChannelBridgeFacade(
   bridge: ChannelAgentBridge,
   opts: { exposeBtw: boolean; exposeShellCommand: boolean },
@@ -347,6 +804,10 @@ export function createDaemonChannelBridgeFacade(
   if (bridge.registerChannelLoopToolHandler) {
     facade.registerChannelLoopToolHandler =
       bridge.registerChannelLoopToolHandler.bind(bridge);
+  }
+
+  if (bridge.registerChannelTool) {
+    facade.registerChannelTool = bridge.registerChannelTool.bind(bridge);
   }
 
   return facade;
@@ -654,6 +1115,69 @@ export async function runChannelDaemonWorker(
         SESSION_SHELL_COMMAND_FEATURE,
       ),
     });
+    const boundSessions = createBoundSessionsAccessor(
+      client,
+      async (sessionId, workspaceCwd) => {
+        // Same restore path the channel bridge uses for its own dormant
+        // sessions. The restore mints a client registration; return its
+        // release so the accessor can detach once the retried prompt
+        // settles — a non-empty registration blocks the daemon's
+        // prompt-settled idle close and would pin the session live until
+        // the TTL reaper (or forever with the reaper disabled).
+        try {
+          const restored = await sdk.DaemonSessionClient.resume(
+            client,
+            sessionId,
+            { workspaceCwd, sessionScope: 'thread' },
+            `qwen-channel-worker:${process.pid}`,
+          );
+          return restored.detach?.bind(restored);
+        } catch (err) {
+          const status = (err as { status?: unknown }).status;
+          const code = (err as { body?: { code?: unknown } }).body?.code;
+          // A missing session (404) is gone. An archived session is not
+          // restorable either (409 session_archived) and is excluded from
+          // the candidate set by contract, so it takes the same fallback.
+          // A superseded session (409 worktree_session_superseded) is never
+          // restored again — the worktree reset severed it permanently. The
+          // interrupted-worktree shapes (409 worktree_marker_missing /
+          // worktree_reset_interrupted) do not converge under a RESUME retry
+          // — the repair is a worktree-reset retry — so deferring them would
+          // dead-letter after the horizon without ever falling back. All of
+          // them are gone for delivery purposes, not retry-later backpressure.
+          if (
+            status === 404 ||
+            (status === 409 &&
+              (code === 'session_archived' ||
+                code === 'worktree_session_superseded' ||
+                code === 'worktree_marker_missing' ||
+                code === 'worktree_reset_interrupted'))
+          ) {
+            throw new BoundSessionGoneError(sessionId);
+          }
+          // Draining/transitioning workspaces (400 workspace_mismatch,
+          // 503 unavailable), restore conflicts and session limits are
+          // retry-later backpressure, not delivery failures: burning the
+          // attempt budget on them would silently lose the event. The
+          // mutation rate limit (429) and spawn/handshake jitter (any
+          // 5xx) are equally transient — a poll waking many dormant
+          // sessions can hit the resume rate limit in one burst.
+          if (
+            status === 429 ||
+            (typeof status === 'number' && status >= 500) ||
+            status === 409 ||
+            (status === 400 && code === 'workspace_mismatch')
+          ) {
+            throw new BoundSessionUnavailableError(
+              sessionId,
+              `wake HTTP ${String(status)} (${String(code)})`,
+            );
+          }
+          throw err;
+        }
+      },
+      opts.promptAuthorization,
+    );
     const createdRouter = new SessionRouter(
       bridgeFacade,
       daemonWorkspace,
@@ -685,6 +1209,7 @@ export async function runChannelDaemonWorker(
             ...(proxy ? { proxy } : {}),
             ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
+            boundSessions,
             stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
               readChannelMemory,
