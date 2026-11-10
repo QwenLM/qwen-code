@@ -61,28 +61,32 @@ describe('ModStore', () => {
   const heldLock = (
     dir: string,
     pid: number,
-    recovery?: {
-      boot: string;
-      machine: string;
+    identity?: {
+      boot?: string;
+      machine?: string;
       namespace?: number;
       legacy?: boolean;
+      start?: string;
     },
   ) => {
     const scope = createHash('sha256')
       .update(
         JSON.stringify([
           hostname(),
-          recovery?.namespace ?? pidNamespace,
-          recovery?.boot ?? bootId,
+          identity?.namespace ?? pidNamespace,
+          identity?.boot ?? bootId,
         ]),
       )
       .digest('hex')
       .slice(0, 16);
     const lock = join(dir, 'mod.json.lock');
-    const suffix = recovery
-      ? `${recovery.legacy ? '' : '.k'}.${recovery.machine}.${recovery.boot}`
+    const suffix = identity?.machine
+      ? `${identity.legacy ? '' : '.k'}.${identity.machine}.${identity.boot}`
       : '';
-    const owner = join(lock, `${scope}.${pid}.-.${randomUUID()}${suffix}`);
+    const owner = join(
+      lock,
+      `${scope}.${pid}.${identity?.start ?? '-'}.${randomUUID()}${suffix}`,
+    );
     mkdirSync(owner, { recursive: true });
     return { lock, owner };
   };
@@ -196,6 +200,68 @@ describe('ModStore', () => {
         expect(checkedBootFile).toHaveBeenCalled();
         await expectLockRetained(new VirtualBootStore(dir), lock);
       } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+      }
+    },
+  );
+
+  const fixtureBoot = '1e0d09fd-4d0b-4b9d-9d1b-2f0c1a3b4c5d';
+  const fixturePidNamespace = 4026531836;
+  const fixtureTimeNamespace = 4026531834;
+  const recorded = Buffer.from(`${fixtureBoot}:1000`).toString('base64url');
+  const scopedStart = `${fixtureTimeNamespace}~${recorded}`;
+
+  it.each([
+    ['an ancestor procfs view', scopedStart, 'Z', false, false],
+    ['a different time namespace', `4026531900~${recorded}`, 'S', true, false],
+    ['a legacy start token', recorded, 'S', true, false],
+    ['a reused PID in the same time namespace', scopedStart, 'S', true, true],
+    ['a verified zombie', recorded, 'Z', true, true],
+  ] as const)(
+    'checks same-boot ownership with %s',
+    async (_case, start, state, localProc, recover) => {
+      const dir = storeDir();
+      const lock = heldLock(dir, process.pid, {
+        boot: fixtureBoot,
+        namespace: fixturePidNamespace,
+        start,
+      });
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        return {
+          ...actual,
+          readFileSync(file: string | number) {
+            if (file === '/proc/sys/kernel/random/boot_id') return fixtureBoot;
+            if (file === '/proc/self/status')
+              return `NStgid:\t${process.pid}${localProc ? '' : `\t${process.pid}`}\n`;
+            if (file === `/proc/${process.pid}/stat`)
+              return `${process.pid} (mod) ${state} ${'0 '.repeat(18)}2000`;
+            return actual.readFileSync(file, 'utf8');
+          },
+          statSync(file: string) {
+            if (file === '/proc/self/ns/pid')
+              return { ino: fixturePidNamespace };
+            if (file === '/proc/self/ns/time')
+              return { ino: fixtureTimeNamespace };
+            return actual.statSync(file);
+          },
+        };
+      });
+      const platform = vi
+        .spyOn(process, 'platform', 'get')
+        .mockReturnValue('linux');
+      try {
+        const { ModStore: LinuxStore } = await import('./store.js');
+        const store = new LinuxStore(dir);
+        if (recover) {
+          await store.set('mod', 'kept', 1, AbortSignal.timeout(2000));
+          expect(await store.keys('mod')).toEqual(['kept']);
+          expect(await readdir(dir)).toEqual(['mod.json']);
+        } else await expectLockRetained(store, lock);
+      } finally {
+        platform.mockRestore();
         vi.doUnmock('node:fs');
         vi.resetModules();
       }
@@ -372,6 +438,24 @@ describe('ModStore', () => {
       await expect(store.get(name, 'k')).rejects.toThrow(
         /no store for the plugin name/,
       );
+  });
+
+  it('maps long plugin names to separate compact files without case', async () => {
+    const dir = storeDir();
+    const first = 'a'.repeat(129);
+    const second = 'a'.repeat(128) + 'b';
+    const store = new ModStore(dir);
+    await store.set(first.toUpperCase(), 'k', 1);
+    await store.set(second, 'k', 2);
+
+    const reopened = new ModStore(dir);
+    expect(await reopened.get(first, 'k')).toBe(1);
+    expect(await reopened.get(second, 'k')).toBe(2);
+    const files = await readdir(dir);
+    expect(files).toHaveLength(2);
+    expect(files.every((file) => /^~[a-f0-9]{64}\.json$/.test(file))).toBe(
+      true,
+    );
   });
 
   it('reads an absent store as empty and writes nothing for a delete of nothing', async () => {

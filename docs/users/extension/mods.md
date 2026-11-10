@@ -592,8 +592,10 @@ A value is JSON data, read back as `JSON.parse(JSON.stringify(value))`: a
 `Set` becomes `{}`. `set` rejects `undefined`, a function and a value with a
 cycle. Keys are strings; `"10"` and `__proto__` are keys like any other.
 
-Each plugin has one store, a JSON file named after the plugin under
-`~/.qwen/mods/store/` (or `$QWEN_HOME/mods/store/`), shared by all its sessions.
+Each plugin has one JSON file under `~/.qwen/mods/store/` (or
+`$QWEN_HOME/mods/store/`), shared by all its sessions. The filename uses the
+lowercase plugin name for names of up to 128 characters and a stable hash for
+longer names.
 Concurrent writes to different keys preserve both updates. Each writer takes
 the store lock and re-reads the file before updating it. A read followed by a
 write can race with another session updating the same key. A value another
@@ -610,12 +612,16 @@ store in place.
   named pipes, and invalid store data and leave the entry in place.
 - A paused process still holds its write lock. Acquiring the lock across
   processes times out after eight seconds. A later writer can recover a lock
-  from a verified dead process. On Linux, recovery across boots requires
-  matching machine, hostname, and PID namespace identities and boot IDs
-  verified through procfs. Older locks support recovery within the same boot.
-- Ending a dispatch cancels `set` and `delete` calls that are waiting for a
-  lock. An update already started under the lock may still land, and the
-  session waits for it before closing. A process exit during the update
+  from a verified dead process. On Linux, within the same boot and PID
+  namespace, an absent PID or a zombie confirmed through a verified local
+  procfs view allows recovery, including for older lock formats. Detecting a
+  reused PID requires verified procfs PID views on both sides and a matching
+  time namespace. Recovery across boots requires matching machine, hostname,
+  and PID namespace identities and boot IDs verified through procfs.
+- The host limits concurrent file reads for `get` and `keys` per runtime.
+  Ending a dispatch cancels queued reads and `set` or `delete` calls that are
+  waiting for a lock. An update already started under the lock may still land,
+  and the session waits for it before closing. A process exit during the update
   leaves either the old file or the new one.
 
 The calls are API events, so another plugin's hooks hear them with `{key}` or

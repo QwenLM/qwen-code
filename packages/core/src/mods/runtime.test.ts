@@ -2546,6 +2546,75 @@ describe('ModRuntime with the real QuickJS worker', () => {
       );
     });
 
+    it('bounds store reads across dispatches and cancels queued reads', async () => {
+      const started: string[] = [];
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      class PausedStore extends ModStore {
+        override async get(_plugin: string, key: string) {
+          started.push(key);
+          await gate;
+          return key;
+        }
+
+        override async keys(_plugin: string) {
+          started.push('keys');
+          await gate;
+          return [];
+        }
+      }
+      const runtime = await createStore(
+        [
+          command(`
+            const reads = Promise.all([
+              $.store.keys(),
+              ...[1, 2, 3, 4, 5].map(n => $.store.get(e.args + n)),
+            ]);
+            $.ui.log('reads posted: ' + e.args);
+            return reads;
+          `),
+        ],
+        new PausedStore(storeDir()),
+      );
+      const waitForReads = (args: string) =>
+        vi.waitFor(() => {
+          expect(logs.some((log) => log.text === `reads posted: ${args}`)).toBe(
+            true,
+          );
+        });
+      const dispatch = new AbortController();
+      const first = runtime.runCommand('go-mod-0', 'first', dispatch.signal);
+      void first.catch(() => {});
+      try {
+        await waitForReads('first');
+        const initialReads = ['keys', 'first1', 'first2', 'first3'];
+        expect(started).toEqual(initialReads);
+        expect(runtime['storeCalls'].size).toBe(6);
+        dispatch.abort();
+        await expect(first).rejects.toThrow('Mod dispatch cancelled.');
+        expect(runtime['storeCalls'].size).toBe(4);
+
+        const second = runtime.runCommand('go-mod-0', 'second', signal());
+        void second.catch(() => {});
+        await waitForReads('second');
+        expect(started).toEqual(initialReads);
+
+        release();
+        const secondKeys = [
+          'second1',
+          'second2',
+          'second3',
+          'second4',
+          'second5',
+        ];
+        expect(JSON.parse(await second)).toEqual([[], ...secondKeys]);
+        expect(started).toEqual([...initialReads, 'keys', ...secondKeys]);
+      } finally {
+        dispatch.abort();
+        release();
+      }
+    });
+
     it('cancels waiting store writes with their dispatch', async () => {
       const cleanup = new AbortController();
       let started: (signal?: AbortSignal) => void = () => {};

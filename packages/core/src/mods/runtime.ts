@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { Semaphore } from 'async-mutex';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { ModStore } from './store.js';
@@ -91,6 +92,7 @@ export class ModRuntime {
   private readonly worker: Worker;
   // The $.store calls the host is answering.
   private readonly storeCalls = new Set<Promise<void>>();
+  private readonly storeReadSlots = new Semaphore(4);
   private failure?: Error;
   private pending?: (reply: ModReply) => void;
   private commands: Array<ModCommand & { plugin: string }> = [];
@@ -116,7 +118,7 @@ export class ModRuntime {
     refresh: () => void;
     // `$.model.complete` calls the host is running for the root.
     models: Map<number, AbortController>;
-    storeWrites: AbortController;
+    storeAbort: AbortController;
   };
   private tool?: {
     next: ModToolNext;
@@ -168,7 +170,7 @@ export class ModRuntime {
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
       else if (reply.type === 'store') {
-        const task = this.answerStore(reply, root.id, root.storeWrites.signal);
+        const task = this.answerStore(reply, root.id, root.storeAbort.signal);
         this.storeCalls.add(task);
         void task.finally(() => this.storeCalls.delete(task));
       } else if (reply.type === 'invalidate') {
@@ -756,19 +758,26 @@ export class ModRuntime {
     let error: string | undefined;
     try {
       signal.throwIfAborted();
-      if (!this.store) throw new Error('This host keeps no Mod store.');
-      if (operation.method === 'store.get')
-        value = await this.store.get(operation.plugin, operation.key);
-      else if (operation.method === 'store.keys')
-        value = await this.store.keys(operation.plugin);
-      else if (operation.method === 'store.set')
-        await this.store.set(
+      const store = this.store;
+      if (!store) throw new Error('This host keeps no Mod store.');
+      if (
+        operation.method === 'store.get' ||
+        operation.method === 'store.keys'
+      ) {
+        value = await this.storeReadSlots.runExclusive(() => {
+          signal.throwIfAborted();
+          return operation.method === 'store.get'
+            ? store.get(operation.plugin, operation.key)
+            : store.keys(operation.plugin);
+        });
+      } else if (operation.method === 'store.set')
+        await store.set(
           operation.plugin,
           operation.key,
           operation.value,
           signal,
         );
-      else await this.store.delete(operation.plugin, operation.key, signal);
+      else await store.delete(operation.plugin, operation.key, signal);
     } catch (caught) {
       error = (caught instanceof Error ? caught.message : String(caught)).slice(
         0,
@@ -821,7 +830,7 @@ export class ModRuntime {
   private fail(error: Error): void {
     this.failure ??= error;
     this.tool?.controller.abort();
-    this.root?.storeWrites.abort();
+    this.root?.storeAbort.abort();
     this.pending?.({ type: 'error', message: this.failure.message });
   }
 
@@ -858,7 +867,7 @@ export class ModRuntime {
       revision: 0,
       phase: 0,
       models: new Map(),
-      storeWrites: new AbortController(),
+      storeAbort: new AbortController(),
       refresh: () => {
         if (aborted || this.root !== root) return;
         const lending =
@@ -876,13 +885,19 @@ export class ModRuntime {
         if (!budget.lending) timer = setTimeout(stop, budget.remainingMs);
       },
     };
+    // Roots run sequentially, so only this root can have queued reads.
+    root.storeAbort.signal.addEventListener(
+      'abort',
+      () => this.storeReadSlots.cancel(),
+      { once: true },
+    );
     this.root = root;
     const onAbort = () => {
       aborted = true;
       Atomics.store(this.cancelled, 0, 1);
       this.tool?.controller.abort();
       for (const model of root.models.values()) model.abort();
-      root.storeWrites.abort();
+      root.storeAbort.abort();
       if (timer) clearTimeout(timer);
       cancelTimer = setTimeout(stop, 250);
     };
@@ -913,7 +928,7 @@ export class ModRuntime {
       });
     } finally {
       this.root = undefined;
-      root.storeWrites.abort();
+      root.storeAbort.abort();
       for (const model of root.models.values()) model.abort();
       root.models.clear();
       if (timer) clearTimeout(timer);

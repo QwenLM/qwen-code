@@ -11,6 +11,7 @@ import {
   openSync,
   readFileSync,
   statfsSync,
+  statSync,
 } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { hostname } from 'node:os';
@@ -21,6 +22,7 @@ import { renameWithRetry } from '../utils/atomicFileWrite.js';
 import { isNodeError } from '../utils/errors.js';
 import { openNoFollow } from '../utils/no-follow-open.js';
 import {
+  isZombie,
   readLocalBootId,
   readPidNamespaceId,
   readProcStartToken,
@@ -38,6 +40,7 @@ const BOOT_ID_PATH = '/proc/sys/kernel/random/boot_id';
 const lockHost = hostname();
 const pidNamespace = readPidNamespaceId();
 const bootId = process.platform === 'linux' ? readLocalBootId() : null;
+const startPrefix = pidNamespace === null ? null : readStartPrefix();
 const lockScope = scopeForBoot(bootId);
 const machineScope =
   bootId !== null && pidNamespace !== null && hasKernelBootId(bootId)
@@ -85,14 +88,40 @@ function readMachineScope(): string | null {
   }
 }
 
+function hasLocalProcPids(): boolean {
+  if (pidNamespace === null) return false;
+  try {
+    const status = readFileSync('/proc/self/status', 'utf8');
+    // A procfs mounted in an ancestor PID namespace lists multiple IDs.
+    return (
+      /^NStgid:[ \t]+(\d+)[ \t]*$/m.exec(status)?.[1] === String(process.pid)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function readStartPrefix(): string | null {
+  try {
+    // Procfs reports starttime in the reader's time namespace. The separator
+    // also keeps older reapers from interpreting this as a bare start token.
+    return `${statSync('/proc/self/ns/time').ino}~`;
+  } catch {
+    return null;
+  }
+}
+
 function processStart(pid: number): string {
+  if (startPrefix === null) return '-';
   const token = readProcStartToken(pid);
-  return token === null ? '-' : Buffer.from(token).toString('base64url');
+  return token === null
+    ? '-'
+    : `${startPrefix}${Buffer.from(token).toString('base64url')}`;
 }
 
 function deadOwner(owner: string): boolean {
   const identity =
-    /^(?<scope>[a-f0-9]{16})\.(?<pid>[1-9]\d{0,9})\.(?<start>[\w-]+)\.[a-f0-9-]{36}(?:(?<kernel>\.k)?\.(?<machine>[a-f0-9]{32})\.(?<boot>[a-f0-9-]+))?$/.exec(
+    /^(?<scope>[a-f0-9]{16})\.(?<pid>[1-9]\d{0,9})\.(?<start>(?:\d+~)?[\w-]+)\.[a-f0-9-]{36}(?:(?<kernel>\.k)?\.(?<machine>[a-f0-9]{32})\.(?<boot>[a-f0-9-]+))?$/.exec(
       owner,
     )?.groups;
   if (!identity) return false;
@@ -126,8 +155,12 @@ function deadOwner(owner: string): boolean {
   } catch (error) {
     return isNodeError(error) && error.code === 'ESRCH';
   }
+  if (!hasLocalProcPids()) return false;
+  if (isZombie(pid)) return true;
+  if (startPrefix === null || !recordedStart.startsWith(startPrefix))
+    return false;
   const start = processStart(pid);
-  return recordedStart !== '-' && start !== '-' && recordedStart !== start;
+  return start !== '-' && recordedStart !== start;
 }
 
 async function removeLock(lock: string, owner?: string): Promise<void> {
@@ -153,7 +186,8 @@ async function acquireLock(
   const nonce = randomUUID();
   const staging = `${lock}.${nonce}`;
   const recovery = machineScope && bootId ? `.k.${machineScope}.${bootId}` : '';
-  const owner = `${lockScope}.${process.pid}.${processStart(process.pid)}.${nonce}${recovery}`;
+  const start = hasLocalProcPids() ? processStart(process.pid) : '-';
+  const owner = `${lockScope}.${process.pid}.${start}.${nonce}${recovery}`;
   await fs.mkdir(staging, { mode: 0o700 });
   let acquired = false;
   try {
@@ -274,9 +308,14 @@ export class ModStore {
     // Extension names are letters, digits, `-`, `_` and `.`, and match
     // without case; one of dots alone would leave the directory.
     const name = plugin.toLowerCase();
-    if (!/^[a-z0-9_.-]{1,128}$/.test(name) || /^\.+$/.test(name))
+    if (!/^[a-z0-9_.-]+$/.test(name) || /^\.+$/.test(name))
       throw new Error(`Mod store: no store for the plugin name "${plugin}".`);
-    return path.join(this.dir, `${name}.json`);
+    // The hash prefix cannot collide with a short extension name.
+    const stem =
+      name.length > 128
+        ? `~${createHash('sha256').update(name).digest('hex')}`
+        : name;
+    return path.join(this.dir, `${stem}.json`);
   }
 
   private async read(file: string): Promise<Map<string, unknown>> {
