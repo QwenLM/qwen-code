@@ -328,19 +328,23 @@ class GrepToolInvocation extends BaseToolInvocation<
       const permissionManager = this.config.getPermissionManager?.();
       if (permissionManager) {
         const permittedLines: RipgrepMatchLine[] = [];
+        const evaluatedPaths = new Map<string, boolean>();
         for (const line of allLines) {
           const absolutePath = toAbsoluteResultPath(
             line.filePath,
             searchPaths,
             resolvedPathCache,
           );
-          if (
-            !(await isPathDeniedByReadRule(
+          let denied = evaluatedPaths.get(absolutePath);
+          if (denied === undefined) {
+            denied = await isPathDeniedByReadRule(
               permissionManager,
               absolutePath,
               this.config.getTargetDir(),
-            ))
-          ) {
+            );
+            evaluatedPaths.set(absolutePath, denied);
+          }
+          if (!denied) {
             permittedLines.push(line);
           }
         }
