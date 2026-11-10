@@ -191,6 +191,13 @@ export const MOD_GUEST_FACTORY = String.raw`
       // Async, so an input too large for the bridge rejects like a wrong shape.
       prompt: { submit: async input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },
+      // Async, so a value that is no JSON (a cycle) rejects as a wrong shape does.
+      store: {
+        get: async key => invoke('store.get', { key }),
+        set: async (key, value) => invoke('store.set', { key, value }),
+        delete: async key => invoke('store.delete', { key }),
+        keys: async () => invoke('store.keys', {})
+      },
       ui: {
         log: (text, options = {}) => {
           if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');

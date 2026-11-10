@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime, type ModPromptQueue } from './runtime.js';
+import { ModStore } from './store.js';
 import {
   MOD_MAX_BYTES,
   type ModLog,
@@ -1609,5 +1614,232 @@ describe('ModRuntime with the real QuickJS worker', () => {
       /timed out/,
     );
     expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  describe('$.store', () => {
+    const dirs: string[] = [];
+    afterEach(async () => {
+      await Promise.all(
+        dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+      );
+    });
+    const storeDir = () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-mod-store-'));
+      dirs.push(dir);
+      return dir;
+    };
+    // Each plugin's `go` command runs `body` and answers with what it returns.
+    const command = (body: string) => `export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name: 'go-' + $.plugin.name, description: 'Go'});
+        return next(e);
+      });
+      on('command.run', async ($, e, next) => {
+        if (e.command !== 'go-' + $.plugin.name) return next(e);
+        try { return {text: JSON.stringify(await (async () => { ${body} })())}; }
+        catch (error) { return {text: JSON.stringify('rejected: ' + String(error))}; }
+      });
+    }`;
+    const createStore = async (sources: string[], dir?: string) => {
+      const runtime = await ModRuntime.createGroup(
+        sources.map((source, index) => ({
+          id: `mod-${index}`,
+          name: `mod-${index}`,
+          source: { root: '/fixture', entry: '/fixture/mod.js', source },
+          options: {},
+        })),
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        null,
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        dir === undefined ? undefined : new ModStore(dir),
+      );
+      runtimes.push(runtime);
+      return runtime;
+    };
+    const go = async (runtime: ModRuntime, plugin = 'mod-0') =>
+      JSON.parse(await runtime.runCommand(`go-${plugin}`, '', signal()));
+
+    it('keeps JSON values in the order their keys were first set, between sessions', async () => {
+      const dir = storeDir();
+      const writer = await createStore(
+        [
+          command(`
+            await $.store.set('10', 'ten');
+            await $.store.set('2', 'two');
+            await $.store.set('__proto__', {own: true});
+            await $.store.set('when', {at: new Date(0), gone: undefined, map: new Map([[1, 2]])});
+            await $.store.set('10', 'ten again');
+            await $.store.delete('2');
+            await $.store.delete('never set');
+            return [await $.store.keys(), await $.store.get('10'), await $.store.get('nothing') === undefined];
+          `),
+        ],
+        dir,
+      );
+      expect(await go(writer)).toEqual([
+        ['10', '__proto__', 'when'],
+        'ten again',
+        true,
+      ]);
+      // Another session, later, reads what this one kept.
+      const reader = await createStore(
+        [
+          command(
+            `return [await $.store.keys(), await $.store.get('__proto__'), await $.store.get('when')];`,
+          ),
+        ],
+        dir,
+      );
+      expect(await go(reader)).toEqual([
+        ['10', '__proto__', 'when'],
+        { own: true },
+        { at: '1970-01-01T00:00:00.000Z', map: {} },
+      ]);
+    });
+
+    it('keeps one store per plugin', async () => {
+      const runtime = await createStore(
+        [
+          command(
+            `await $.store.set('k', $.plugin.name); return $.store.keys();`,
+          ),
+          command(
+            `return [await $.store.keys(), await $.store.get('k') === undefined];`,
+          ),
+        ],
+        storeDir(),
+      );
+      expect(await go(runtime, 'mod-0')).toEqual(['k']);
+      expect(await go(runtime, 'mod-1')).toEqual([[], true]);
+    });
+
+    it.each([
+      [
+        'undefined',
+        `await $.store.set('k', undefined)`,
+        /takes a string key and a JSON value/,
+      ],
+      [
+        'a function',
+        `await $.store.set('k', () => 1)`,
+        /takes a string key and a JSON value/,
+      ],
+      [
+        'a cycle',
+        `const a = {}; a.a = a; await $.store.set('k', a)`,
+        /circular|cyclic/i,
+      ],
+      [
+        'a key that is not a string',
+        `await $.store.get(7)`,
+        /takes a string key/,
+      ],
+      [
+        'a store over 4 MiB',
+        `const big = 'x'.repeat(200000); for (let i = 0; i < 25; i++) await $.store.set('k' + i, big)`,
+        /over 4194304 bytes/,
+      ],
+    ])('rejects %s and keeps what was stored', async (_name, body, error) => {
+      const runtime = await createStore(
+        [
+          command(`
+            await $.store.set('kept', 1);
+            try { ${body}; return 'no rejection'; }
+            catch (error) { return [String(error), await $.store.get('kept')]; }
+          `),
+        ],
+        storeDir(),
+      );
+      const [message, kept] = await go(runtime);
+      expect(message).toMatch(error);
+      expect(kept).toBe(1);
+    });
+
+    it('fails the call on a store file it cannot read, and leaves the file as it is', async () => {
+      const dir = storeDir();
+      writeFileSync(join(dir, 'mod-0.json'), '{"not": "a store"}');
+      const runtime = await createStore(
+        [
+          command(`
+            const results = [];
+            for (const run of [() => $.store.get('k'), () => $.store.set('k', 1)])
+              try { await run(); results.push('ok'); } catch (error) { results.push(String(error)); }
+            return results;
+          `),
+        ],
+        dir,
+      );
+      const results = await go(runtime);
+      expect(results).toHaveLength(2);
+      for (const result of results)
+        expect(result).toMatch(/is not a store this version reads/);
+      expect(readFileSync(join(dir, 'mod-0.json'), 'utf8')).toBe(
+        '{"not": "a store"}',
+      );
+    });
+
+    it("runs the store calls through the other plugins' hooks", async () => {
+      const runtime = await createStore(
+        [
+          command(`
+            await $.store.set('note', 'draft');
+            const results = [await $.store.get('note')];
+            try { await $.store.delete('note'); } catch (error) { results.push(String(error)); }
+            try { await $.store.set('moved', 1); results.push('set'); } catch (error) { results.push(String(error)); }
+            results.push(await $.store.keys());
+            return results;
+          `),
+          `export function register(on) {
+            on('store.set', {key: 'note'}, ($, e, next) => next({...e, value: e.value + ' (seen by ' + $.plugin.name + ')'}));
+            on('store.delete', () => ({deny: 'kept by mod-1'}));
+            on('store.set', {key: 'moved'}, ($, e, next) => next({...e, key: 'elsewhere'}));
+          }`,
+        ],
+        storeDir(),
+      );
+      const [note, denied, moved, keys] = await go(runtime);
+      expect(note).toBe('draft (seen by mod-1)');
+      expect(denied).toContain('kept by mod-1');
+      // A hook cannot move a write to another key: it is skipped, and the
+      // write lands where it was asked.
+      expect(moved).toBe('set');
+      expect(keys).toEqual(['note', 'moved']);
+    });
+
+    it('rejects every call, and lists no store methods, where the host keeps no store', async () => {
+      const runtime = await createStore([
+        command(`
+          const methods = (await $.session.version()).qwen.methods;
+          try { await $.store.get('k'); return 'no rejection'; }
+          catch (error) { return [String(error), methods.filter((m) => m.startsWith('store.'))]; }
+        `),
+      ]);
+      expect(await go(runtime)).toEqual([
+        expect.stringContaining('This host keeps no Mod store.'),
+        [],
+      ]);
+      const kept = await createStore(
+        [
+          command(
+            `return (await $.session.version()).qwen.methods.filter((m) => m.startsWith('store.'));`,
+          ),
+        ],
+        storeDir(),
+      );
+      expect(await go(kept)).toEqual([
+        'store.delete',
+        'store.get',
+        'store.keys',
+        'store.set',
+      ]);
+    });
   });
 });

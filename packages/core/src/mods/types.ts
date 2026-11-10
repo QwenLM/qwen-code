@@ -148,6 +148,12 @@ export interface ModTurnComplete {
   isAnswerTruncated?: true;
 }
 
+/** A `$.store` call the host answers for the plugin that made it. */
+export type ModStoreOperation =
+  | { method: 'store.get' | 'store.delete'; plugin: string; key: string }
+  | { method: 'store.set'; plugin: string; key: string; value: unknown }
+  | { method: 'store.keys'; plugin: string };
+
 export type ModRequest =
   | {
       type: 'load';
@@ -161,6 +167,8 @@ export type ModRequest =
       prompts?: boolean;
       /** Whether the host runs the prompts `$.prompt.submit` submits. */
       submits?: boolean;
+      /** Whether the host keeps each plugin's `$.store`. */
+      stores?: boolean;
     }
   | {
       type: 'command';
@@ -184,7 +192,8 @@ export type ModRequest =
   | { type: 'turn-complete'; input: ModTurnComplete }
   | { type: 'render'; input: ModRenderInput }
   | { type: 'turn-abort-result'; id: number; error?: string }
-  | { type: 'prompt-queue-result'; id: number; refused?: string };
+  | { type: 'prompt-queue-result'; id: number; refused?: string }
+  | { type: 'store-result'; id: number; value?: unknown; error?: string };
 
 export type ModReply =
   | { type: 'result'; json: string }
@@ -200,6 +209,7 @@ export type ModReply =
     }
   | { type: 'turn-abort'; id: number; turnId: string }
   | { type: 'prompt-queue'; id: number; prompt: ModQueuedPrompt }
+  | { type: 'store'; id: number; operation: ModStoreOperation }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 

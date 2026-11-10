@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import {
@@ -21,6 +22,8 @@ import {
   resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import { ModStore } from '@qwen-code/qwen-code-core/mods/store.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   ENGINE_NODE,
   type ModRenderElement,
@@ -434,6 +437,7 @@ export class ModSession implements ICommandLoader {
           this.terminal && this.terminal.runsPrompts?.() !== true
             ? undefined
             : (prompt) => this.queuePrompt(prompt),
+          new ModStore(path.join(Storage.getGlobalQwenDir(), 'mods', 'store')),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({

@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { ModStore } from './store.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import {
   ModBudget,
@@ -133,6 +134,7 @@ export class ModRuntime {
     private readonly abortTurn?: (turnId: string) => void,
     private readonly renderHost?: ModRenderHost,
     private readonly queuePrompt?: ModPromptQueue,
+    private readonly store?: ModStore,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -154,6 +156,7 @@ export class ModRuntime {
         this.answerTurnAbort(reply, root.id);
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
+      else if (reply.type === 'store') void this.answerStore(reply, root.id);
       else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
@@ -215,6 +218,8 @@ export class ModRuntime {
     prompts = false,
     // Where `$.prompt.submit` queues a prompt; absent, the host runs none.
     queuePrompt?: ModPromptQueue,
+    // Where each plugin's `$.store` is kept; absent, the host keeps none.
+    store?: ModStore,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -244,6 +249,7 @@ export class ModRuntime {
       abortTurn,
       render,
       queuePrompt,
+      store,
     );
     try {
       const result = await runtime.request(
@@ -256,6 +262,7 @@ export class ModRuntime {
           sites: render?.sites ?? [],
           prompts,
           submits: queuePrompt !== undefined,
+          stores: store !== undefined,
         },
         signal,
         60_000,
@@ -654,6 +661,48 @@ export class ModRuntime {
       ).slice(0, 4000);
     }
     this.post({ type: 'prompt-queue-result', id: reply.id, refused }, root);
+  }
+
+  // The file is the host's: a call runs to its end even when the dispatch
+  // that made it ends first, and the answer then goes nowhere.
+  private async answerStore(
+    reply: Extract<ModReply, { type: 'store' }>,
+    root: number,
+  ): Promise<void> {
+    const { operation } = reply;
+    let value: unknown;
+    let error: string | undefined;
+    try {
+      if (!this.store) throw new Error('This host keeps no Mod store.');
+      if (operation.method === 'store.get')
+        value = await this.store.get(operation.plugin, operation.key);
+      else if (operation.method === 'store.keys')
+        value = await this.store.keys(operation.plugin);
+      else if (operation.method === 'store.set')
+        await this.store.set(operation.plugin, operation.key, operation.value);
+      else await this.store.delete(operation.plugin, operation.key);
+    } catch (caught) {
+      error = (caught instanceof Error ? caught.message : String(caught)).slice(
+        0,
+        4000,
+      );
+    }
+    try {
+      this.post({ type: 'store-result', id: reply.id, value, error }, root);
+    } catch (caught) {
+      // A value too large to hand back fails the call, not the session.
+      this.post(
+        {
+          type: 'store-result',
+          id: reply.id,
+          error: (caught instanceof Error
+            ? caught.message
+            : String(caught)
+          ).slice(0, 4000),
+        },
+        root,
+      );
+    }
   }
 
   async end(

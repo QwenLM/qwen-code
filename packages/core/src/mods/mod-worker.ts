@@ -24,12 +24,14 @@ import {
   type ModQueuedPrompt,
   type ModReply,
   type ModSessionFacts,
+  type ModStoreOperation,
   type ModWorkerRequest,
 } from './types.js';
 import { ENGINE_NODE, type ModRenderSite } from './render-tree.js';
 import {
   MOD_EVENTS,
   MOD_HOST_EVENTS,
+  MOD_STORE_EVENTS,
   MOD_METHODS,
   MOD_READS,
   ModBudget,
@@ -76,6 +78,11 @@ const promptQueues = new Map<
   number,
   { resolve: (refused?: string) => void; reject: (error: Error) => void }
 >();
+// $.store calls the host is answering, by id.
+const storeCalls = new Map<
+  number,
+  { resolve: (value: unknown) => void; reject: (error: Error) => void }
+>();
 let serial = 0;
 let epoch = 0;
 let rootId = 0;
@@ -100,6 +107,8 @@ let sites: readonly ModRenderSite[] = [];
 let version = 'unknown';
 // Whether the host runs what `$.prompt.submit` submits.
 let submitsPrompts = false;
+// Whether the host keeps each plugin's `$.store`.
+let keepsStore = false;
 // The events this host runs: those it raises only where it draws need a site.
 let supported: readonly ModEvent[] = MOD_EVENTS;
 // A render hook that keeps failing the same way is said once per load.
@@ -717,6 +726,11 @@ async function hostCall(
                 events: supported,
                 methods: [...MOD_METHODS, ...MOD_READS]
                   .filter((name) => name !== 'prompt.submit' || submitsPrompts)
+                  .filter(
+                    (name) =>
+                      keepsStore ||
+                      !MOD_STORE_EVENTS.includes(name as ModEvent),
+                  )
                   .sort(),
               },
             },
@@ -737,6 +751,23 @@ async function hostCall(
         if (method === 'turn.abort') {
           await abortTurn(String(e['turnId']));
           return { value: undefined };
+        }
+        if (MOD_STORE_EVENTS.includes(method)) {
+          if (!keepsStore) throw new Error('This host keeps no Mod store.');
+          const key = String(e['key']);
+          return {
+            value: await storeCall(
+              method === 'store.keys'
+                ? { method, plugin: plugin.name }
+                : method === 'store.set'
+                  ? { method, plugin: plugin.name, key, value: e['value'] }
+                  : {
+                      method: method as 'store.get' | 'store.delete',
+                      plugin: plugin.name,
+                      key,
+                    },
+            ),
+          };
         }
         if (submits) {
           arrived = {
@@ -846,6 +877,15 @@ async function queueArrived(
   return refused === undefined ? arrived : { drop: refused };
 }
 
+// The host owns the store's file, so a call outlives a worker cut short.
+function storeCall(operation: ModStoreOperation): Promise<unknown> {
+  const id = ++serial;
+  return new Promise<unknown>((resolve, reject) => {
+    storeCalls.set(id, { resolve, reject });
+    send({ type: 'store', id, operation });
+  }).finally(() => storeCalls.delete(id));
+}
+
 function queuePrompt(prompt: ModQueuedPrompt): Promise<string | undefined> {
   const id = ++serial;
   return new Promise<string | undefined>((resolve, reject) => {
@@ -926,6 +966,13 @@ port.on('message', async (request: ModWorkerRequest) => {
     promptQueues.get(request.id)?.resolve(request.refused);
     return;
   }
+  if (request.type === 'store-result') {
+    if (!busy || request.root !== rootId) return;
+    const pending = storeCalls.get(request.id);
+    if (request.error !== undefined) pending?.reject(new Error(request.error));
+    else pending?.resolve(request.value);
+    return;
+  }
   if (request.type === 'tool-check') {
     if (request.id <= lastCheck) return;
     lastCheck = request.id;
@@ -998,12 +1045,15 @@ port.on('message', async (request: ModWorkerRequest) => {
       version = request.version;
       sites = request.sites ?? [];
       submitsPrompts = request.submits === true;
+      keepsStore = request.stores === true;
       supported = MOD_EVENTS.filter(
         (event) =>
           !MOD_HOST_EVENTS.includes(event) ||
           (event === 'prompt.submit'
             ? request.prompts === true
-            : sites.length > 0),
+            : MOD_STORE_EVENTS.includes(event)
+              ? keepsStore
+              : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();
@@ -1177,12 +1227,14 @@ port.on('message', async (request: ModWorkerRequest) => {
       ...hostOperations.values(),
       ...turnAborts.values(),
       ...promptQueues.values(),
+      ...storeCalls.values(),
     ]) {
       operation.reject(new Error('Mod root dispatch has ended.'));
     }
     hostOperations.clear();
     turnAborts.clear();
     promptQueues.clear();
+    storeCalls.clear();
     starting = false;
     builtinTool = undefined;
     rootBudget = undefined;

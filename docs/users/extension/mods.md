@@ -136,6 +136,7 @@ this recovery exception.
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
+| Store      | `$.store` keeps each plugin's JSON values between sessions, described in [The store](#the-store)                                                                                        |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                     |
 | Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                          |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
@@ -145,7 +146,7 @@ this recovery exception.
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, `$.state`, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -435,6 +436,10 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "store.delete",
+      "store.get",
+      "store.keys",
+      "store.set",
       "tool.call",
       "tool.check",
       "turn.abort",
@@ -457,6 +462,10 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "store.delete",
+      "store.get",
+      "store.keys",
+      "store.set",
       "turn.abort",
       "ui.invalidate",
       "ui.log",
@@ -553,6 +562,53 @@ budget, so a sleep longer than the remaining budget times the hook out. Its
 `signal` option rejects the wait at once when it aborts; pass `next.signal`,
 because the Mod environment has no `AbortController`. A sleep ends with the hook
 that started it, so a sleep the hook does not await cannot hold up the dispatch.
+
+## The store
+
+`$.store` keeps a plugin's own values between sessions, in every host that runs
+Mods:
+
+```javascript
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    const runs = Number((await $.store.get('runs')) ?? 0) + 1;
+    await $.store.set('runs', runs);
+    $.ui.log(`session ${runs} with this Mod`);
+    return next(e);
+  });
+}
+```
+
+| Method                    | Resolves to                                              |
+| ------------------------- | -------------------------------------------------------- |
+| `$.store.get(key)`        | the value under `key`, or `undefined` when it is not set |
+| `$.store.set(key, value)` | `undefined`, once the value is written                   |
+| `$.store.delete(key)`     | `undefined`, once the key is gone                        |
+| `$.store.keys()`          | every key set, in the order each was first set           |
+
+A value is JSON data, read back as `JSON.parse(JSON.stringify(value))`: a
+`Date` becomes its ISO string, an `undefined` field is dropped and a `Map` or
+`Set` becomes `{}`. `set` rejects `undefined`, a function and a value with a
+cycle. Keys are strings; `"10"` and `__proto__` are keys like any other.
+
+Each plugin has one store, a JSON file named after the plugin under
+`~/.qwen/mods/store/` (or `$QWEN_HOME/mods/store/`), shared by all its sessions.
+Two sessions writing at once both land, since a write takes a lock on the file
+and re-reads it first. A read sees the store as it is at that moment, so a
+value another session wrote shows up at the next `get`. Uninstalling the plugin
+leaves its store in place.
+
+- A plugin's store holds at most 4 MiB of JSON. A `set` that would take it
+  over rejects, and the store keeps what it had. One value is also bound by the
+  256 KiB limit on what a Mod passes to Qwen Code.
+- A store file Qwen Code cannot read fails every call on that store, and the
+  file is left as it is.
+- A `set` or `delete` whose dispatch ends while it runs still finishes, but its
+  promise rejects, so the caller cannot tell whether it landed.
+
+The calls are API events, so another plugin's hooks hear them with `{key}` or
+`{key, value}`. A hook may pass on another `value` for `store.set`, answer with
+`{value}`, or `{deny}` the call. The key is pinned.
 
 ## Turn events
 
