@@ -196,7 +196,7 @@ public class ManagedExtensionManagementService {
 
     private JsonNode read(String tenant, String sessionId, JsonNode ref) {
         var resource = records.readCommittedResource(tenant, sessionId, ref);
-        JsonNode value = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
+        JsonNode value = ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
         if (value == null) {
             throw corrupt();
         }

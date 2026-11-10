@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -27,7 +28,7 @@ final class ManagedSessionRetirementStore {
         if (roots.size() != 1 || roots.getFirst().get("retired_at") == null) {
             throw new IllegalStateException("Session has not been permanently retired");
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         var nativeSnapshots = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key FROM ma_resource_ref"
                 + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT'"
                 + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", scope, limit);
@@ -37,6 +38,36 @@ final class ManagedSessionRetirementStore {
                     scope, row.get("owner_key"), row.get("owner_revision"), row.get("resource_key"));
         }
         if (!nativeSnapshots.isEmpty()) {
+            return true;
+        }
+        var sideRefs = jdbc.queryForList("SELECT owner_key,owner_revision,resource_key FROM ma_resource_ref"
+                + " WHERE session_scope_key=? AND owner_kind='SIDE_QUERY' ORDER BY owner_key,owner_revision,resource_key LIMIT ? FOR UPDATE",
+                scope, limit);
+        for (var row : sideRefs) {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SIDE_QUERY'"
+                            + " AND owner_key=? AND owner_revision=? AND resource_key=?", scope, row.get("owner_key"),
+                    row.get("owner_revision"), row.get("resource_key"));
+        }
+        if (!sideRefs.isEmpty()) {
+            return true;
+        }
+        var queries = jdbc.queryForList("SELECT query_key,read_lease_id FROM ma_side_query WHERE session_scope_key=?"
+                + " ORDER BY query_key LIMIT ? FOR UPDATE", scope, limit);
+        for (var row : queries) {
+            if (row.get("read_lease_id") != null) {
+                jdbc.update("DELETE FROM ma_read_lease WHERE lease_id=?", row.get("read_lease_id"));
+            }
+            jdbc.update("DELETE FROM ma_side_query WHERE session_scope_key=? AND query_key=?", scope, row.get("query_key"));
+        }
+        if (!queries.isEmpty()) {
+            return true;
+        }
+        var receipts = jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt WHERE tenant_id=? AND session_id=?"
+                + " AND namespace='SIDE_QUERY' ORDER BY receipt_key LIMIT ? FOR UPDATE", tenant, session, limit);
+        for (var row : receipts) {
+            jdbc.update("DELETE FROM ma_request_receipt WHERE receipt_key=? AND namespace='SIDE_QUERY'", row.get("receipt_key"));
+        }
+        if (!receipts.isEmpty()) {
             return true;
         }
         var messages =
@@ -258,7 +289,7 @@ final class ManagedSessionRetirementStore {
             throw new IllegalStateException("Session journal collection is incomplete");
         }
         if (!jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key = ?"
-                + " AND owner_kind = 'NATIVE_SNAPSHOT' LIMIT 1", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+                + " AND owner_kind = 'NATIVE_SNAPSHOT' LIMIT 1", ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             throw new IllegalStateException("Native snapshot collection is incomplete");
         }
         var operations =
@@ -270,7 +301,7 @@ final class ManagedSessionRetirementStore {
         if (operations.size() != 1
                 || !tenant.equals(operations.getFirst().get("tenant_id"))
                 || !session.equals(operations.getFirst().get("session_id"))
-                || !com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)
+                || !ManagedSessionStore.sessionScopeKey(tenant, session)
                         .equals(operations.getFirst().get("session_scope_key"))
                 || !"SUCCEEDED".equals(operations.getFirst().get("state"))) {
             throw new IllegalStateException("Session collection is not settled");
