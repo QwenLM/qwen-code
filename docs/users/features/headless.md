@@ -41,7 +41,7 @@ Read from files and process with Qwen Code:
 cat README.md | qwen --prompt "Summarize this documentation"
 ```
 
-When `--prompt` is combined with non-TTY `stdin` and no input arrives within 500ms, Qwen Code writes a warning to `stderr` (`Warning: no stdin input received within 500ms; proceeding without stdin.`) and continues with the `--prompt` argument.
+When `--prompt` is combined with non-TTY `stdin` and no input arrives within 500ms, Qwen Code writes a warning to `stderr` (`Warning: no stdin input received within 500ms; proceeding without stdin.`) and continues with the `--prompt` argument. Note: on Windows Git Bash / mintty (where `stdin.isTTY` is `false` even in an interactive shell), this warning also appears when running `-p` without piped input.
 
 ### Resume Previous Sessions (Headless)
 
