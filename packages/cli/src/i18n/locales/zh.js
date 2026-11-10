@@ -376,6 +376,8 @@ export default {
   'Open the skills panel (browse, search, toggle, pick).':
     '打开技能面板（浏览、搜索、启停、选择）。',
   'Move this session to a new working directory': '将此会话移动到新的工作目录',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    '请等待后台智能体完成，或在 /tasks 中停止它们后再切换目录。',
   // SkillsManagerDialog (`/skills` 弹出的面板)
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能配置已保存。',

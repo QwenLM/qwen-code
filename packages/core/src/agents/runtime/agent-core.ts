@@ -2290,6 +2290,12 @@ export class AgentCore {
         clearTimeout(state.retryTimer);
         state.retryTimer = undefined;
       }
+      this.eventEmitter.emit(AgentEventType.TOOL_APPROVAL_RESOLVED, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId: state.callId,
+        timestamp: Date.now(),
+      });
     };
     const clearApprovalDeliveries = () => {
       for (const state of currentApprovalDeliveries.values()) {

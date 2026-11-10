@@ -10,6 +10,7 @@ import {
   githubEventNumber,
   githubEventWebUrl,
   isChannelPlatformAvailable,
+  isPrivateOnlyChannelType,
   isSupportedChannelType,
 } from './channel-platform';
 
@@ -26,20 +27,63 @@ describe('Channel platform availability', () => {
       [
         descriptor('dingtalk'),
         descriptor('dws'),
+        descriptor('weixin'),
         descriptor('wecom'),
         descriptor('wecom-callback'),
         descriptor('feishu'),
         descriptor('github'),
         descriptor('gitlab'),
+        descriptor('email'),
         descriptor('telegram'),
-        descriptor('weixin'),
+        descriptor('qq'),
         descriptor('dingtalk', false),
+        descriptor('weixin', false),
         descriptor('github', false),
         descriptor('gitlab', false),
+        descriptor('email', false),
       ]
         .filter(isChannelPlatformAvailable)
         .map((item) => item.type),
     ).toEqual([
+      'dingtalk',
+      'dws',
+      'weixin',
+      'wecom',
+      'wecom-callback',
+      'feishu',
+      'github',
+      'gitlab',
+      'email',
+    ]);
+  });
+
+  it('uses the same allowlist for configured Channel instances', () => {
+    expect(isSupportedChannelType('dingtalk')).toBe(true);
+    expect(isSupportedChannelType('dws')).toBe(true);
+    expect(isSupportedChannelType('weixin')).toBe(true);
+    expect(isSupportedChannelType('wecom')).toBe(true);
+    expect(isSupportedChannelType('wecom-callback')).toBe(true);
+    expect(isSupportedChannelType('feishu')).toBe(true);
+    expect(isSupportedChannelType('github')).toBe(true);
+    expect(isSupportedChannelType('gitlab')).toBe(true);
+    expect(isSupportedChannelType('email')).toBe(true);
+    expect(isSupportedChannelType('telegram')).toBe(false);
+    // The QQ plugin's channelType is 'qq'; 'qqbot' is only the loader name, so
+    // asserting it would guard a string no descriptor can carry.
+    expect(isSupportedChannelType('qq')).toBe(false);
+    expect(isSupportedChannelType(undefined)).toBe(false);
+  });
+});
+
+describe('Private-only channel types', () => {
+  it('classifies Email as private-only', () => {
+    expect(isPrivateOnlyChannelType('email')).toBe(true);
+  });
+
+  it('leaves every group-capable platform outside the set', () => {
+    // A leak here would hide the group controls on a platform that needs them,
+    // which is the same defect in the opposite direction.
+    for (const type of [
       'dingtalk',
       'dws',
       'wecom',
@@ -47,19 +91,14 @@ describe('Channel platform availability', () => {
       'feishu',
       'github',
       'gitlab',
-    ]);
-  });
-
-  it('uses the same allowlist for configured Channel instances', () => {
-    expect(isSupportedChannelType('dingtalk')).toBe(true);
-    expect(isSupportedChannelType('dws')).toBe(true);
-    expect(isSupportedChannelType('wecom')).toBe(true);
-    expect(isSupportedChannelType('wecom-callback')).toBe(true);
-    expect(isSupportedChannelType('feishu')).toBe(true);
-    expect(isSupportedChannelType('github')).toBe(true);
-    expect(isSupportedChannelType('gitlab')).toBe(true);
-    expect(isSupportedChannelType('telegram')).toBe(false);
-    expect(isSupportedChannelType(undefined)).toBe(false);
+      'telegram',
+      'weixin',
+      'qq',
+    ]) {
+      expect(isPrivateOnlyChannelType(type)).toBe(false);
+    }
+    expect(isPrivateOnlyChannelType(undefined)).toBe(false);
+    expect(isPrivateOnlyChannelType(42)).toBe(false);
   });
 });
 
