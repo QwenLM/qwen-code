@@ -113,8 +113,13 @@ Bullets below correspond 1:1 with `TITLE_SYSTEM_PROMPT`:
 
 - 3-7 words, sentence case (only first word and proper nouns capitalized).
 - No trailing punctuation, no markdown, no quotes.
-- Match the dominant language of the conversation; for Chinese, budget
-  roughly 12-20 characters.
+- Language: when the output-language preference is `auto` or there is no
+  preference file, the prompt adds rules to write the title in the main
+  language of the user's messages (CJK titles budgeted at about 8-20
+  characters, sentence case only for languages with letter case) and to
+  keep names, identifiers and paths as written. A fixed language, or a
+  hand-written rule file without the `auto` marker, keeps the prompt
+  unchanged; `runSideQuery` appends that preference as usual (#16793).
 - Be specific about the user's actual goal — name the feature, bug, or
   subject area. Avoid vague catch-alls like "Code changes" or "Help
   request".
