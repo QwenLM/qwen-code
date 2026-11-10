@@ -17,6 +17,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryR
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.DeliveryPage;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository.ChannelRoute;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger;
 import com.alibaba.qwen.code.managedagent.contracts.session.HarnessConflictCodes;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -84,6 +86,7 @@ public class ManagedChannelService {
     private final ChannelInstanceStore instances;
     private final ChannelRouteRepository routes;
     private final ChannelDeliveryRepository deliveries;
+    private final ChannelSegmentRepository segments;
     private final ManagedAgentService sessions;
     private final ManagedWorkspaceRegistry workspaces;
     private final HarnessConnector harness;
@@ -93,22 +96,25 @@ public class ManagedChannelService {
 
     @org.springframework.beans.factory.annotation.Autowired
     public ManagedChannelService(ChannelInstanceStore instances,
-            ChannelRouteRepository routes, ChannelDeliveryRepository deliveries, ManagedAgentService sessions,
+            ChannelRouteRepository routes, ChannelDeliveryRepository deliveries,
+            ChannelSegmentRepository segments, ManagedAgentService sessions,
             ManagedWorkspaceRegistry workspaces, HarnessConnector harness,
             @Qualifier("managedAgentObjectMapper") ObjectMapper mapper, ManagedAgentSettings properties) {
-        this(instances, routes, deliveries, sessions, workspaces,
+        this(instances, routes, deliveries, segments, sessions, workspaces,
                 harness, mapper, properties.getChannels().getClaimLease(),
                 System::currentTimeMillis);
     }
 
     ManagedChannelService(ChannelInstanceStore instances,
             ChannelRouteRepository routes,
-            ChannelDeliveryRepository deliveries, ManagedAgentService sessions,
+            ChannelDeliveryRepository deliveries, ChannelSegmentRepository segments,
+            ManagedAgentService sessions,
             ManagedWorkspaceRegistry workspaces, HarnessConnector harness,
             ObjectMapper mapper, Duration claimLease, Supplier<Long> clock) {
         this.instances = instances;
         this.routes = routes;
         this.deliveries = deliveries;
+        this.segments = segments;
         this.sessions = sessions;
         this.workspaces = workspaces;
         this.harness = harness;
@@ -295,6 +301,33 @@ public class ManagedChannelService {
             throw translate(error);
         }
         String state = deliveryState(result);
+        // Persist the segment receipt before the delivery line can reach a
+        // terminal state: the reconciler skips terminal deliveries, so a
+        // receipt written after stepLedger closed the delivery would leave a
+        // gap no recovery entry can reach.
+        if ("accepted".equals(request.outcome())) {
+            boolean stored = segments.receipt(tenantId, channelId, deliveryId,
+                    request.ordinal(), request.providerMessageId());
+            // A false is either a benign replay (the row already holds a
+            // receipt) or a row that was never planned — a delivery claimed
+            // before the segment ledger existed. Only the missing row needs
+            // convergence: plan it from the committed record and retry, so the
+            // receipt is durable before the line closes.
+            if (!stored && segments.list(tenantId, channelId, deliveryId).stream()
+                    .noneMatch(segment -> segment.ordinal() == request.ordinal())) {
+                instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
+                        .ifPresent(record -> {
+                            String json = instances.readResource(tenantId,
+                                    claim.sessionId(), record.recordResourceId());
+                            if (json != null) {
+                                planSegments(tenantId, channelId, deliveryId,
+                                        readJson(json, "channel delivery record"));
+                            }
+                        });
+                segments.receipt(tenantId, channelId, deliveryId,
+                        request.ordinal(), request.providerMessageId());
+            }
+        }
         ChannelDelivery row = stepLedger(tenantId, channelId, deliveryId,
                 state, providerReceipt);
         return view(row, claim.sessionId());
@@ -317,13 +350,22 @@ public class ManagedChannelService {
         }
         Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
         String resentId = String.valueOf(delivery.get("deliveryId"));
-        List<?> segments = (List<?>) delivery.get("segments");
-        Map<?, ?> first = (Map<?, ?>) segments.getFirst();
+        List<?> resentSegments = (List<?>) delivery.get("segments");
+        Map<?, ?> first = (Map<?, ?>) resentSegments.getFirst();
         ChannelDelivery row = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, resentId,
                 String.valueOf(first.get("segmentId")),
                 ((Number) first.get("ordinal")).intValue(), "planned", null,
                 0, 0));
+        // The new chain carries only the segments proven unsent, so none of
+        // them holds a receipt yet.
+        List<SegmentLedger> plan = new ArrayList<>();
+        for (Object entry : resentSegments) {
+            Map<?, ?> segment = (Map<?, ?>) entry;
+            plan.add(new SegmentLedger(String.valueOf(segment.get("segmentId")),
+                    ((Number) segment.get("ordinal")).intValue(), null));
+        }
+        segments.plan(tenantId, channelId, resentId, plan);
         instances.claim(tenantId, channelId, resentId, claim.sessionId());
         return new ResendResponse(resentId, deliveryId, true,
                 view(row, claim.sessionId()));
@@ -367,13 +409,19 @@ public class ManagedChannelService {
         // the ledger never saw still moved the record to sending.
         instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
                 .ifPresent(record -> {
+                    String json = instances.readResource(tenantId,
+                            claim.sessionId(), record.recordResourceId());
+                    JsonNode tree = json == null ? null
+                            : readJson(json, "channel delivery record");
+                    if (tree != null) {
+                        planSegments(tenantId, channelId, deliveryId, tree);
+                    }
                     String state = record.deliveryState();
                     if (!"planned".equals(state)) {
                         stepLedger(tenantId, channelId, deliveryId, state,
-                                "delivered".equals(state)
-                                        ? committedProviderReceipt(tenantId, claim.sessionId(),
-                                                record)
-                                        : null, claim.claimGeneration());
+                                "delivered".equals(state) && tree != null
+                                        ? lastSegmentReceipt(tree) : null,
+                                claim.claimGeneration());
                     }
                 });
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
@@ -411,19 +459,12 @@ public class ManagedChannelService {
     }
 
     /** The last provider receipt the committed record holds, when any. */
-    private String committedProviderReceipt(String tenantId, String sessionId,
-            ChannelInstanceStore.DeliveryRecordState record) {
-        String json = instances.readResource(tenantId, sessionId,
-                record.recordResourceId());
-        if (json == null) {
-            return null;
-        }
-        JsonNode tree = readJson(json, "channel delivery record");
+    private static String lastSegmentReceipt(JsonNode tree) {
         String receipt = null;
         for (JsonNode segment : tree.path("segments")) {
-            JsonNode node = segment.path("receipt");
-            if (node.isObject() && node.path("providerMessageId").isTextual()) {
-                receipt = node.path("providerMessageId").asText();
+            String candidate = segmentReceipt(segment);
+            if (candidate != null) {
+                receipt = candidate;
             }
         }
         return receipt;
@@ -532,8 +573,12 @@ public class ManagedChannelService {
             PendingDelivery pending) {
         JsonNode record = readJson(instances.readResource(tenantId, pending.sessionId(),
                 pending.recordResourceId()), "channel delivery record");
+        JsonNode firstSegment = null;
         JsonNode firstUnsent = null;
         for (JsonNode segment : record.required("segments")) {
+            if (firstSegment == null) {
+                firstSegment = segment;
+            }
             if (segment.get("receipt").isNull()) {
                 firstUnsent = segment;
                 break;
@@ -542,10 +587,26 @@ public class ManagedChannelService {
         if (firstUnsent == null) {
             throw new IllegalStateException("delivery has no unsent segment");
         }
+        String firstSegmentId = firstSegment.required("segmentId").asText();
+        int firstOrdinal = firstSegment.required("ordinal").asInt();
+        // Identity pre-check before planning: a pending record whose first
+        // segment differs from a stored delivery row is a conflicting chain;
+        // refuse it before any segment row is written, so no orphan rows
+        // persist under the key for the public projection to publish.
+        Optional<ChannelDelivery> stored = deliveries.find(tenantId, channelId,
+                pending.deliveryId());
+        if (stored.isPresent() && (!stored.get().segmentId().equals(firstSegmentId)
+                || stored.get().ordinal() != firstOrdinal)) {
+            throw new IllegalStateException(
+                    "delivery id already belongs to another segment");
+        }
+        planSegments(tenantId, channelId, pending.deliveryId(), record);
+        // The delivery-level identity is the record's first segment, stable
+        // across a resumed partial: naming the first unsent segment here
+        // would make findOrCreate reject the row the first claim wrote.
         ChannelDelivery ledger = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, pending.deliveryId(),
-                firstUnsent.required("segmentId").asText(),
-                firstUnsent.required("ordinal").asInt(), "planned", null,
+                firstSegmentId, firstOrdinal, "planned", null,
                 0, 0));
         Optional<ChannelClaim> existing = instances.findClaim(tenantId,
                 channelId, pending.deliveryId());
@@ -562,10 +623,10 @@ public class ManagedChannelService {
                 null, observed.claimGeneration());
         Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
         Map<?, ?> reply = (Map<?, ?>) result.get("reply");
-        List<ClaimedSegment> segments = new ArrayList<>();
+        List<ClaimedSegment> claimedSegments = new ArrayList<>();
         for (Object entry : (List<?>) result.get("segments")) {
             Map<?, ?> segment = (Map<?, ?>) entry;
-            segments.add(new ClaimedSegment(
+            claimedSegments.add(new ClaimedSegment(
                     ((Number) segment.get("ordinal")).intValue(),
                     String.valueOf(segment.get("segmentId")),
                     String.valueOf(segment.get("text"))));
@@ -575,7 +636,36 @@ public class ManagedChannelService {
                 ((Number) delivery.get("routeRevision")).longValue(),
                 String.valueOf(delivery.get("state")),
                 String.valueOf(reply.get("text")),
-                mapper.valueToTree(reply.get("replyContext")), segments);
+                mapper.valueToTree(reply.get("replyContext")), claimedSegments);
+    }
+
+    /**
+     * Plans every segment of the record into the segment ledger, carrying any
+     * receipt the record already holds (a resumed partial). Idempotent: a
+     * re-claim never overwrites a stored receipt. This is also the reconciler's
+     * convergence step: the write-once backfill lands any receipt whose answer
+     * was lost, leaving an already-stored receipt intact.
+     */
+    private void planSegments(String tenantId, String channelId,
+            String deliveryId, JsonNode record) {
+        List<SegmentLedger> plan = new ArrayList<>();
+        for (JsonNode segment : record.required("segments")) {
+            plan.add(new SegmentLedger(
+                    segment.required("segmentId").asText(),
+                    segment.required("ordinal").asInt(),
+                    segmentReceipt(segment)));
+        }
+        segments.plan(tenantId, channelId, deliveryId, plan);
+    }
+
+    /** The provider message id a record segment's receipt holds, when any. */
+    private static String segmentReceipt(JsonNode segment) {
+        JsonNode receipt = segment.path("receipt");
+        if (!receipt.isObject()) {
+            return null;
+        }
+        JsonNode providerMessageId = receipt.path("providerMessageId");
+        return providerMessageId.isTextual() ? providerMessageId.asText() : null;
     }
 
     /**

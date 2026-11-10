@@ -1309,7 +1309,11 @@ message it accepted or skipped (with the machine reason: `reason_filter`,
 before the poll window that mentions the bot, was edited after the window
 opened and is not in the channel's dedupe record; the channel does not answer
 it, and `actor` names the comment's author, who need not be the editor), a sender-gate rejection, `github_api_error`,
-`no_role_matched`),
+`no_role_matched`, `bound_watch_required` (the GitHub channel's
+`requireBoundWatch` gate excluded every bound `review`/`verify` follower of the
+PR — none holds an active watch on it — so the event retired privately instead
+of taking the public path; also used for a same-account comment watch skip and
+a plain comment whose mention waiver the gate removed)),
 a GitHub thread whose handling failed and that it will read again (`failed`
 with `github_api_error`: a GitHub error, or a local error while the channel
 cannot read or write its own state or one of the thread's tasks is unfinished),
@@ -1420,6 +1424,91 @@ group requests also retain the sender who initiated the request. Approval
 snapshots contain `senderIds` and `groupIds` because allowlists do not persist
 display names. Revoking an unknown user or group returns
 `404 channel_pairing_approval_not_found`.
+
+#### WeChat login
+
+The WeChat (`weixin`) channel authenticates by QR scan rather than by a config
+token, and its credential is a single process-global `account.json` in the
+daemon's home shared by every WeChat channel in every workspace. Its login
+routes therefore sit outside the workspace-scoped Channel management surface,
+alongside the subscription auth routes, and carry no `/workspaces/:workspace`
+variant:
+
+- `GET /auth/weixin`
+- `POST /auth/weixin/flows`
+- `GET /auth/weixin/flows/:id`
+- `DELETE /auth/weixin/flows/:id`
+- `POST /auth/weixin/revoke`
+
+`GET /auth/weixin` reads local state only and returns
+`{ "enabled": boolean, "configured": boolean, "userId"?: string, "savedAt"?: string }`.
+It never calls the upstream platform. A state directory that cannot be created
+answers `502 { "code": "credentials_error" }`, the same code the write paths use
+— not `404`, which clients read as "this daemon has no WeChat support". An
+`account.json` that exists but cannot be read or parsed is **not** that failure:
+it reads as `configured: false`, and re-login is the recovery for it.
+
+`POST /auth/weixin/flows` requires the strict mutation gate, mints a QR upstream,
+and returns `201` with `{ "id": string, "status": "waiting", "qrText"?: string,
+"qrcodeUrl": string }`. A mint that yields no scannable URL is reported as a
+failure rather than a live flow — the operator would have nothing to scan, and a
+live flow renders no retry action — so `502 { "code": "qr_unavailable" }` covers
+both an upstream error and a response carrying an id but no URL, and either way
+the slot is released. The scan loop then runs in the daemon; clients poll
+`GET /auth/weixin/flows/:id`, whose `status` is `waiting`, `scanned`, or one of
+the terminals `ready`, `expired`, `error`. **`ready` carries no `errorCode`** —
+only the failure terminals do: `qr_expired` (the refresh budget ran out) or
+`login_failed` (the upstream poll failed, or the login deadline elapsed). A
+credential that could not be written yields `error` with
+`errorCode: credentials_error`, because the operator has to fix the daemon's
+home directory and a generic `login_failed` would hide that.
+
+The status is not monotonic: after `scanned` the QR can still expire, and the
+view returns to `waiting` with a replacement QR. While that replacement is
+being minted the view carries neither `qrText` nor `qrcodeUrl`, so a dead code
+is never presented as scannable. **A live status is therefore not the same as a
+scannable one** — clients must derive the scan prompt from the QR fields, not
+from the status, and show a "preparing" state with a way out while both are
+absent. **Clients must re-render on every poll, not only when the status
+changes.** `qrText` is a best-effort block-glyph rendering and is absent when
+the encoder cannot render the URL; `qrcodeUrl` is present whenever a live QR is
+available, so the operator can open it directly. At most four _live_ flows run
+concurrently; a further start returns `429 too_many_flows`. A terminal view is
+retained for 60 seconds so a polling client can still read it — it does not
+count against that cap — and is then dropped, after which the poll returns
+`404 flow_not_found`.
+`DELETE /auth/weixin/flows/:id` aborts a flow and returns `204`; clients are
+expected to call it when they stop watching a live flow, because the daemon
+keeps polling the upstream whether or not anyone is. A live flow that goes
+**unpolled for 120 seconds** is cancelled as abandoned, so a client that reloads
+without sending `DELETE` cannot hold a slot for the whole login deadline; every
+poll re-arms that bound. It is sized against the worst gap between two
+_serviced_ polls, not against the poll cadence: a client that schedules its next
+poll only after the previous one settles can be silent for its whole request
+budget, and a backgrounded tab is throttled to roughly one timer per minute.
+Clients must keep their interval plus request budget well under it. Daemon
+shutdown aborts every in-flight flow, including a QR mint still in flight.
+
+On `ready` the daemon persists the credential itself. **No response on any of
+these routes carries the bot token**, and no request field can redirect the
+upstream API root.
+
+`POST /auth/weixin/revoke` requires the strict mutation gate, cancels every
+in-flight flow, removes the stored account, and returns `204`. If the credential
+file cannot be removed it answers `502 { "code": "credentials_error" }` instead.
+The flows are cancelled either way, but **the stored account may survive**: a
+502 leaves the removal outcome unknown, so do not assume either state. Re-read
+`GET /auth/weixin` for the daemon's view, but note that it reports
+`configured: false` for a credential it cannot read as well as for one it
+removed — when the removal itself matters, confirm it on the host. Channels
+already running keep the account they read at connect time until they are
+restarted.
+
+These routes are gated by the daemon's bearer authentication, not by workspace
+trust, because the credential they manage has no workspace scope. Clients that
+predate them receive `404`; the Web Shell treats that as "this daemon does not
+support WeChat login" rather than as an error. No separate capability tag is
+advertised — the panel lives behind the existing `channel_management` UI gate.
 
 ### Channel delivery and Notify
 
