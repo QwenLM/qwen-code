@@ -549,6 +549,26 @@ describe('isDestructiveCommand — git commit --amend', () => {
     ).toBe(true);
   });
 
+  it('joins a backslash-newline the way bash does', () => {
+    // Bash removes `\\<newline>` before parsing, so `$` + newline + `(` is a
+    // command substitution, not a literal.
+    expect(amendNeedsApproval('git commit -m "$\\\n(git commit --$x)"')).toBe(
+      true,
+    );
+    expect(
+      amendNeedsApproval('git commit --author="$\\\n(git commit --$x)"'),
+    ).toBe(true);
+    // The join also reassembles a flag name and the `commit` word itself.
+    expect(amendNeedsApproval('git commit --am\\\nend')).toBe(true);
+    expect(amendNeedsApproval('git com\\\nmit --amend')).toBe(true);
+    // A plain continuation changes nothing.
+    expect(amendNeedsApproval('git commit -m "hello\\\nworld"')).toBe(false);
+    // An unquoted heredoc body expands; a continuation in it is unprovable.
+    expect(
+      amendNeedsApproval('git commit -m x <<EOF\n$\\\n(git commit --$x)\nEOF'),
+    ).toBe(true);
+  });
+
   it('keeps a substitution that becomes a flag from being skipped', () => {
     // The skeleton leaves a marker there, so the word scan still treats the
     // argument as an unprovable expansion.

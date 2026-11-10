@@ -382,6 +382,14 @@ function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
       index++;
       continue;
     }
+    if (char === '\\' && text[index + 1] === '\n') {
+      // Bash removes a backslash-newline before parsing, gluing the two sides:
+      // `$\` + newline + `(` is a command substitution. Drop both characters
+      // from the skeleton so the sides stay adjacent.
+      edits.push({ start: index, end: index + 2, replacement: '' });
+      index += 2;
+      continue;
+    }
     if (char === '\\') {
       // Outside quotes any character can be escaped; inside double quotes only
       // `$`, `` ` ``, `"` and `\` are.
@@ -423,7 +431,14 @@ function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
         }
         const bodyText = text.slice(position, body.bodyEnd);
         // An unquoted delimiter expands its body, so a substitution there runs.
-        if (!heredoc.quoted && /\$\(|`/.test(bodyText)) unprovable = true;
+        // An unquoted delimiter expands its body: a substitution there runs,
+        // and a backslash-newline makes the body's own layout unprovable.
+        if (
+          !heredoc.quoted &&
+          (/\$\(|`/.test(bodyText) || /\\\n/.test(bodyText))
+        ) {
+          unprovable = true;
+        }
         edits.push({ start: position, end: body.end, replacement: '' });
         position = body.end;
       }
@@ -469,20 +484,30 @@ function scanExecutedSubstitutions(text: string): ScannedSubstitutions {
       continue;
     }
 
-    if (char === '$' && text[index + 1] === '(' && text[index + 2] !== '(') {
-      const result = findCommandSubstitutionEnd(text, index + 2);
-      if (result.unprovable || result.end === -1) {
-        unprovable = true;
-        break;
+    if (char === '$') {
+      const paren =
+        text[index + 1] === '('
+          ? index + 1
+          : text[index + 1] === '\\' &&
+              text[index + 2] === '\n' &&
+              text[index + 3] === '('
+            ? index + 3
+            : -1;
+      if (paren !== -1 && text[paren + 1] !== '(') {
+        const result = findCommandSubstitutionEnd(text, paren + 1);
+        if (result.unprovable || result.end === -1) {
+          unprovable = true;
+          break;
+        }
+        bodies.push(text.slice(paren + 1, result.end));
+        edits.push({
+          start: index,
+          end: result.end + 1,
+          replacement: SUBSTITUTION_MARKER,
+        });
+        index = result.end + 1;
+        continue;
       }
-      bodies.push(text.slice(index + 2, result.end));
-      edits.push({
-        start: index,
-        end: result.end + 1,
-        replacement: SUBSTITUTION_MARKER,
-      });
-      index = result.end + 1;
-      continue;
     }
     index++;
   }
