@@ -265,17 +265,18 @@ describe('SessionService', () => {
   beforeEach(async () => {
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
     vi.mocked(path.join).mockImplementation((...args) => args.join('/'));
-    // Storage.getProjectDir bounds the identifier it gets from sanitizeCwd;
-    // the file-level automock would otherwise hand it undefined.
+    // Storage.getProjectDir bounds the identifier it gets from
+    // boundProjectIdentifier; the file-level automock would otherwise hand it
+    // undefined.
     const actualPaths =
       await vi.importActual<typeof import('../utils/paths.js')>(
         '../utils/paths.js',
       );
     (
       (await import('../utils/paths.js')) as unknown as {
-        sanitizeCwd: (cwd: string) => string;
+        boundProjectIdentifier: (projectRoot: string) => string;
       }
-    ).sanitizeCwd = actualPaths.sanitizeCwd;
+    ).boundProjectIdentifier = actualPaths.boundProjectIdentifier;
     vi.mocked(path.dirname).mockImplementation((p) => {
       const parts = p.split('/');
       parts.pop();
@@ -589,12 +590,13 @@ describe('SessionService', () => {
         vi.mocked(path[name]).mockImplementation(realPath[name] as never);
       }
       vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
-      // Storage.getProjectDir calls sanitizeCwd via a non-spied namespace
-      // import; restore it module-globally so getChatsDir() is a real path.
+      // Storage.getProjectDir calls boundProjectIdentifier via a non-spied
+      // namespace import; restore it module-globally so getChatsDir() is a real
+      // path.
       const mockedPaths = (await import('../utils/paths.js')) as unknown as {
-        sanitizeCwd: (cwd: string) => string;
+        boundProjectIdentifier: (projectRoot: string) => string;
       };
-      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      mockedPaths.boundProjectIdentifier = actualPaths.boundProjectIdentifier;
       vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
       vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
       if (mode === 'fork') {
