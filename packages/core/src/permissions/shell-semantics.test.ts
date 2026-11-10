@@ -770,6 +770,21 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write(REPO_SETTINGS)],
     ],
     [
+      // C1: a `<<` inside double quotes is data, not a heredoc opener; the
+      // settings write on the next line must still be reported.
+      'does not read a heredoc opener inside double quotes',
+      'git commit -m "note: use <<EOF here"\nprintf \'{}\' > .qwen/settings.json',
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      // C1: an apostrophe inside double quotes is data and must not flip the
+      // quote state, or the real `cat <<EOF` is missed and its body's
+      // `cd /tmp` relocates the write.
+      'keeps an apostrophe inside double quotes from flipping quote state',
+      'echo "it\'s fine"\ncat <<EOF\ncd /tmp\nEOF\necho {} > .qwen/settings.json',
+      [write(REPO_SETTINGS)],
+    ],
+    [
       'handles `cd --` and other POSIX flag forms before the target',
       "cd -- .qwen && printf '{}' > settings.local.json",
       [write('/repo/.qwen/settings.local.json')],

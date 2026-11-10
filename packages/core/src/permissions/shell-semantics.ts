@@ -2604,11 +2604,20 @@ class HeredocLexer {
         continue;
       }
       if (this.quote === "'") {
+        // Inside single quotes everything is data, `"` included.
         if (char === "'") this.quote = '';
         continue;
       }
+      if (this.quote === '"') {
+        // Inside double quotes `'` is an ordinary character and `<<` is data;
+        // only `"` closes the state (C1). An unterminated quote therefore
+        // keeps this conservative reading across lines, as it did before this
+        // change — a known limitation, not a heredoc decision.
+        if (char === '"') this.quote = '';
+        continue;
+      }
       if (char === '"' || char === "'") {
-        this.quote = this.quote === char ? '' : char;
+        this.quote = char;
         continue;
       }
       if (char === '$' && line[index + 1] === '{') {
