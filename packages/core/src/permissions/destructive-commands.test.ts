@@ -376,6 +376,23 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expect(performance.now() - start).toBeLessThan(500);
   });
 
+  it('does not ask for shell commands whose dollar signs are data', () => {
+    // B1 regression: rule 3 must be gated on a git mention that also spells
+    // `commit`; `$` alone cannot mean an amend.
+    for (const command of [
+      "awk '{print $1}' data.csv",
+      "perl -e 'print $_' /tmp/file",
+      'echo $HOME',
+      'ls -la $PWD',
+      'git push origin $BRANCH',
+      'git commit -m "fix: $issue"',
+      'git commit --author="$a"',
+      'npm run $SCRIPT',
+    ]) {
+      expect(amendNeedsApproval(command)).toBe(false);
+    }
+  });
+
   it('does not ask for an amend whose only dollar sign is an argument value', () => {
     // Rule 3 keys on `$` positions that can restructure the command, not on
     // the presence of `$`: a variable commit message is the most common

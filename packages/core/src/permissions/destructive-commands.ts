@@ -190,6 +190,13 @@ function mentionsGitCommitAmend(command: string): boolean {
   let seenGit = false;
   let inCommit = false;
   let previousWord: string | undefined;
+  // The previous raw token, used to recognise a mandatory flag's value at
+  // token granularity (its internal spaces must not re-open the scan).
+  let previousToken: string | undefined;
+  // Any word that spells `commit`, including one an expansion split
+  // (`${x}commit`); without it a `$` before it is just another command's
+  // variable (`git push origin $BRANCH`).
+  let commitText = false;
   // Rule 3 (R25-2): a `$` that can change the command's *structure* keeps the
   // mention unprovable. Three positions qualify: before the first `commit`
   // word (program/subcommand/flag assembly), a flag built from an expansion,
@@ -202,24 +209,37 @@ function mentionsGitCommitAmend(command: string): boolean {
   // text; treat the expansion as whitespace so the words are seen (R25-2).
   for (const token of shellWords(command)) {
     const expanded = token.replace(/\$(?:\{IFS\}|IFS)/g, ' ');
+    // A whole token that is the value of a mandatory-value flag is an argument
+    // value: its internal `$` and spaces cannot change the command structure
+    // (`-m "fix: $issue"`, `--author="$a"`).
+    const valueToken =
+      isGitCommitValueFlag(previousToken) || isValueFlagToken(token);
+    let tokenBare: string | undefined;
     // A redirect glued to a word still splits it in bash (`git>|/dev/null`),
     // so split it here too before deciding what the word is (R25-2).
     for (const piece of expanded.split(/[<>|]/)) {
       for (const word of piece.split(/\s+/).filter(Boolean)) {
         const bare = bareShellWord(word);
         if (!bare) continue;
+        tokenBare ??= bare;
+        if (bare.toLowerCase().includes('commit')) commitText = true;
         if (inCommit) {
           if (isAmendFlag(bare)) return true;
-          // A flag assembled by an expansion cannot be proven inert; ask.
-          // The escalation stays gated on a seen `git` + `commit` prefix.
-          if (isUnprovableFlag(bare)) return true;
-          // A bare expansion can become `--amend` at run time. It is only
-          // provably an argument value when it immediately follows a flag
-          // whose next word is consumed as that flag's value.
-          if (isLeadingExpansion(word) && !isGitCommitValueFlag(previousWord)) {
-            return true;
+          if (!valueToken) {
+            // A flag assembled by an expansion cannot be proven inert; ask.
+            // The escalation stays gated on a seen `git` + `commit` prefix.
+            if (isUnprovableFlag(bare)) return true;
+            // A bare expansion can become `--amend` at run time. It is only
+            // provably an argument value when it immediately follows a flag
+            // whose next word is consumed as that flag's value.
+            if (
+              isLeadingExpansion(word) &&
+              !isGitCommitValueFlag(previousWord)
+            ) {
+              return true;
+            }
           }
-        } else if (bare.includes('$')) {
+        } else if (!valueToken && bare.includes('$')) {
           dollarBeforeCommit = true;
         }
         if (isGitWord(bare)) seenGit = true;
@@ -227,8 +247,11 @@ function mentionsGitCommitAmend(command: string): boolean {
         previousWord = bare;
       }
     }
+    previousToken = tokenBare;
   }
-  return dollarBeforeCommit;
+  // Only a `$` in a git command that also spells `commit` can affect an amend;
+  // `awk '{print $1}'`, `echo $HOME` and `git push origin $BRANCH` cannot.
+  return seenGit && commitText && dollarBeforeCommit;
 }
 
 /** A word that expands at run time and starts like a flag (R25-2). */
@@ -261,6 +284,16 @@ function isLeadingExpansion(word: string): boolean {
 
 function isGitCommitValueFlag(word: string | undefined): boolean {
   return word !== undefined && GIT_COMMIT_VALUE_FLAGS.has(word);
+}
+
+/** `--author=$a` or `-m$msg`: a value flag carrying its value inline. */
+function isValueFlagToken(token: string): boolean {
+  const equals = token.indexOf('=');
+  if (equals > 0 && isGitCommitValueFlag(token.slice(0, equals))) return true;
+  for (const flag of GIT_COMMIT_VALUE_FLAGS) {
+    if (token.startsWith(flag) && token[flag.length] === '$') return true;
+  }
+  return false;
 }
 
 function bareShellWord(word: string): string {
