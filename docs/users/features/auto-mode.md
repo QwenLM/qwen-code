@@ -1,8 +1,9 @@
 # Auto Mode
 
 Auto Mode uses an LLM classifier to evaluate each tool call and decide
-whether to auto-approve it. It sits between Auto-Edit (which only
-auto-approves file edits) and YOLO (which auto-approves everything).
+whether to auto-approve it. It sits between Auto-Edit (which auto-approves
+file edits unless a `permissions.ask` rule matches) and YOLO (which
+auto-approves everything).
 
 This page is the reference for configuring and troubleshooting Auto Mode.
 For an introduction, see the
@@ -360,8 +361,9 @@ It only shows once per user-settings file. After dismissal,
 
 **How is this different from Auto-Edit?**
 
-Auto-Edit auto-approves file edits and nothing else — shell commands
-still ask. Auto Mode uses a classifier to also auto-approve safe shell
+Auto-Edit auto-approves file edits (unless a `permissions.ask` rule
+matches) and nothing else — shell commands still ask. Auto Mode uses a
+classifier to also auto-approve safe shell
 commands and other tool calls while still blocking risky ones.
 
 **How is this different from YOLO?**
