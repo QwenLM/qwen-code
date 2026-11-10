@@ -18,7 +18,15 @@
  * workspace root whose own branch has no PR.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  beforeAll,
+  vi,
+} from 'vitest';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -94,6 +102,14 @@ describe.skipIf(process.platform === 'win32')(
     let stubBin: string;
     let originalPath: string | undefined;
     let originalStubState: string | undefined;
+
+    // The polling helpers below give up at 10s; keep every test's budget above
+    // that on ALL lanes (the package default is 15s, 60s on ecs-qwen) so a
+    // missed completion edge surfaces as the helper's diagnostic, not a bare
+    // vitest timeout or a vacuous pass.
+    beforeAll(() => {
+      vi.setConfig({ testTimeout: 30_000 });
+    });
 
     beforeEach(() => {
       tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pr-bind-')));
@@ -203,7 +219,7 @@ describe.skipIf(process.platform === 'win32')(
      * hook is fire-and-forget, so without this edge a "nothing bound" check
      * could pass simply because the write has not landed yet.
      */
-    const waitForAttributionLegs = async (timeoutMs = 15_000) => {
+    const waitForAttributionLegs = async (timeoutMs = 10_000) => {
       const deadline = Date.now() + timeoutMs;
       const logPath = path.join(tmp, 'gh-state', 'calls.log');
       for (;;) {
@@ -213,18 +229,30 @@ describe.skipIf(process.platform === 'win32')(
         const views = raw
           .split('\n')
           .filter((line) => line.includes('\tpr view')).length;
-        if (views >= 2 || Date.now() > deadline) return;
+        if (views >= 2) return;
+        // Give up LOUDLY: a silent return would let a negative assertion pass
+        // while the binding hook is still in flight (a false green).
+        if (Date.now() > deadline) {
+          throw new Error(
+            `attribution legs did not both run within ${timeoutMs}ms; gh calls so far:\n${raw}`,
+          );
+        }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
     };
 
-    const waitForSidecar = async (timeoutMs = 15_000) => {
+    const waitForSidecar = async (timeoutMs = 10_000) => {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
         // null means "no sidecar yet" (or an empty list, which the reader
-        // rejects by shape) — keep polling until the bind lands or we time out.
+        // rejects by shape) — keep polling until the bind lands.
         const prs = (await readSessionPrs(sidecar)) ?? [];
-        if (prs.length > 0 || Date.now() > deadline) return prs;
+        if (prs.length > 0) return prs;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `no PR bound within ${timeoutMs}ms; sidecar=${sidecar}`,
+          );
+        }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
     };

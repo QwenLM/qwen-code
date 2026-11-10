@@ -911,8 +911,10 @@ describe('ShellTool', () => {
       // auto-mocks fs, so prove git identity through the primitive findGitRoot
       // actually consumes. A gh flake in a real checkout must still hit the
       // errored-snapshot gate, not bind an existing launch-branch PR.
+      // findGitRoot resolves before it joins, so the key must be drive-qualified
+      // on Windows — path.resolve, not a drive-less path.join.
       vi.mocked(fs.existsSync).mockImplementation(
-        (candidate) => candidate === path.join('/test/dir', '.git'),
+        (candidate) => candidate === path.resolve('/test/dir', '.git'),
       );
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
         status: 'error',
@@ -930,8 +932,12 @@ describe('ShellTool', () => {
       // parent commit bound the launch repo's PR. With a same-repo flag the
       // resolver would instead keep the worktree (pinned by the quoted-title
       // case).
+      // The resolver hands the helper path.resolve(launchDir, target), so the
+      // stub key must be derived the same way — a POSIX literal would not match
+      // the drive-qualified path on the Windows workspace lane.
+      const otherCheckout = path.resolve('/other/checkout');
       fetchAttributionRepoKeysMock.mockImplementation((dir) =>
-        dir === '/other/checkout'
+        dir === otherCheckout
           ? Promise.resolve({ resolved: 'github.com/other/checkout' })
           : Promise.resolve({ resolved: 'github.com/o/r' }),
       );
@@ -947,6 +953,31 @@ describe('ShellTool', () => {
 
       expectBound(77);
     });
+
+    it.each(['-R o/r', '-R=o/r', '-Ro/r'])(
+      're-points on the short repo flag %s naming a different repository',
+      async (repoArg) => {
+        // R3-1: gh's short -R flag (separated, equals, attached) must trigger
+        // the same launch re-point as --repo when it names another repository.
+        const otherCheckout = path.resolve('/other/checkout');
+        fetchAttributionRepoKeysMock.mockImplementation((dir) =>
+          dir === otherCheckout
+            ? Promise.resolve({ resolved: 'github.com/other/checkout' })
+            : Promise.resolve({ resolved: 'github.com/o/r' }),
+        );
+        fetchCurrentBranchPullRequestMock
+          .mockResolvedValueOnce({ status: 'none' })
+          .mockResolvedValueOnce({ status: 'none' })
+          .mockResolvedValueOnce({ ...branchPr(77), headRefName: 'main' });
+
+        await runShell(
+          `cd /other/checkout && gh pr create ${repoArg} --head main --title t --body b`,
+          PR_77,
+        );
+
+        expectBound(77);
+      },
+    );
 
     it('does not re-emit when the resolved PR is already bound', async () => {
       // The pre-run snapshot missed the PR (a gh flake), so the resolution
@@ -1309,6 +1340,97 @@ describe('ShellTool', () => {
         await expectAttributedIn(resolved('/test/dir/nested'));
       });
 
+      it.each(['/usr/bin/cd', './cd', 'bin/cd', '"/usr/bin/cd"'])(
+        'fails closed for an external path-qualified cd: %s',
+        async (prog) => {
+          // R1-1: a path-qualified program named cd is an external executable
+          // running in a child; it cannot move this shell, so the walk must not
+          // grant it builtin cwd semantics and resolve a directory the create
+          // never ran in.
+          mockCreatedPr(77);
+          const result = await runShell(
+            `${prog} /test/dir/nested && gh pr create --fill`,
+            PR_77,
+          );
+          expectOpaqueFallback(result);
+        },
+      );
+
+      it('keeps a short -R flag naming the worktree repo in the worktree', async () => {
+        // R3-1: -R naming the derived directory's own repo must keep attributing
+        // there (the same-identity rule), not re-point to launch.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create -R o/r --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('fails closed when an explicit repo value cannot be decoded', async () => {
+        // R3-1: `--repo "$R"` is unprovable, not absent — fall back with a notice
+        // instead of silently attributing to the derived directory.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir/nested && gh pr create --repo "$R" --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('resolves a path-qualified gh create', async () => {
+        // R3-5: the command_name sanitiser keeps / and \ so a path-qualified gh
+        // still matches the execution gate; pin that it resolves the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && /usr/bin/gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('lifts a function shadow after unset -f', async () => {
+        // R3-7: `unset -f cd` restores the builtin, so the later cd is provable
+        // again; a stale shadow would wrongly fall back to launch.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('binds from launch without a notice when only a subshell cds', async () => {
+        // R3-8: a subshell's cd cannot leak to this shell, so the create
+        // provably runs at launch and binds there — no false "fell back" notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(cd /test/dir/nested && true) && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it.each([
+        'git "worktree" add /test/dir/new -b fix/w',
+        "git worktree 'add' /test/dir/new -b fix/w",
+        '{ git worktree add /test/dir/new -b fix/w; }',
+        'if true; then git worktree add /test/dir/new -b fix/w; fi',
+        '( git worktree add /test/dir/new -b fix/w )',
+      ])('fails closed for a worktree creation spelled %s', async (prefix) => {
+        // R3-4: quoted subcommands and wrapped (compound/if/subshell) worktree
+        // creation must reach the same fail-closed guard as the plain spelling.
+        mockCreatedPr(77);
+        const result = await runShell(
+          `${prefix} && cd /test/dir/new && gh pr create --fill`,
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
       it('does not stop on a quoted executable that merely names gh pr create', async () => {
         // `'gh; gh pr create'` is a nonexistent quoted program, not gh. Copying
         // the command_name verbatim let the quote-blind gate find a create
@@ -1580,7 +1702,6 @@ describe('ShellTool', () => {
           'a pushd stack rotation',
           'cd /test/dir/nested && pushd +1 && gh pr create --fill',
         ],
-        ['a subshell cd', '(cd /elsewhere) && gh pr create --fill'],
         ['a || branch', 'cd /elsewhere || gh pr create --fill'],
         ['an env --chdir wrapper', 'env -C /elsewhere gh pr create --fill'],
         ['a sudo --chdir wrapper', 'sudo -D /elsewhere gh pr create --fill'],

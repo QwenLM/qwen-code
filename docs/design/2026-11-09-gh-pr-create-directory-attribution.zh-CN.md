@@ -97,7 +97,7 @@ const attributionDir =
 
 `attributionDir` 替换三份 pre-run fetch 与 `bindGhPrCreate` 调用里的 `cwd`。两条腿因此问的是同一个目录，这正是 pre-run/post-run 比较已经假设的前提。
 
-目录不存在无需特判：那里 `findGitRoot` 返回 null，快照为 `{status: 'error'}`，既有闸门自然拒绝。
+尚不存在的目录需要特判，而非无操作：`findGitRoot` 会从不存在的目标**向上**走到外围的启动仓库，于是 pre-run 快照记录的是启动分支，而 post-run 那一段问的是新建 worktree 的分支。这正是同命令内的 `git worktree add` 被视为会影响目录、须失败关闭的原因（见第四/七轮记录），而不是依赖 `findGitRoot` 返回 null。
 
 ### 可见的兜底 notice
 
@@ -246,6 +246,23 @@ const attributionDir =
 2. **R1-1 残留见证——引号的目录变更命令。** `"cd" <worktree> && gh pr create` 在 worktree 分支上创建，而两条腿都查启动目录：`commandNodeProgram` 读的是带引号的原始名字，目录变更检查认不出这个字面内建。现在它在取 basename 前剥掉一层匹配的外围引号，因此 `"cd"`/`'cd'` 与 `cd` 一样被解析。
 
 第六轮验证：**479 passed**（465 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AB（去大小写规范化）、AC（去引号剥离）各自杀掉点名用例且小写/非引号对照绿；每次从字节级备份还原（最终 `shell.ts` SHA-256 `1a1a4c45458f056eccb47813901632ee9e8e987154c20e62f27b19a0dd3e1b41`）。
+
+### 第七轮评审（2026-11-09，复评 `525f144933`）
+
+复评确认第六轮修复，并报出一条新 P2（维护者）与 bot 的一批 5 Critical + 4 Suggestion。反复出现的根因是：走查必须区分**真正执行的 shell** 实际做了什么，而不是形似的拼写。按根因修，而非逐条枚举拼写：
+
+1. **内建 vs 外部程序（P2 + R1-1，Critical）。** 路径限定、名为 `cd`/`pushd`/`popd`/`eval`/`source`/`.` 的程序（`/usr/bin/cd`、`./cd`、`bin/cd`、`"/usr/bin/cd"`）是跑在子进程里的外部可执行文件，不能移动本 shell。`commandNodeProgram` 拆为 `commandNodeProgramName`（去引号）+ basename；新增 `commandIsBuiltinDirectoryChanger` 只把 cwd 语义授予非路径限定的内建，路径限定的目录命令判 `opaque`。command 分支与 `subtreeMayChangeDirectory` 都适用。
+2. **短旗标 `-R`（R3-1，Critical）。** 显式仓库扫描现在像 `--repo` 一样读取 `-R o/r`、`-R=o/r`、粘连 `-Ro/r`，与 `GH_GLOBAL_FLAGS_TAKES_VALUE` 一致。显式仓库旗标的值无法解码（`--repo "$R"`）时判 `opaque`（无法证明），而非「不存在」。
+3. **Windows 测试字面量（R3-2 / R3-3，Critical）。** 仓库身份桩与 `findGitRoot` 的 `.git` mock 改用 `path.resolve(...)` 作键，以匹配 resolver/`findGitRoot` 在 Windows lane 上产生的带盘符路径。
+4. **worktree 守卫旁路（R3-4，Critical）。** `commandCreatesWorktree` 解码带引号子命令（`git "worktree" add`、`git worktree 'add'`），并被 `subtreeMayChangeDirectory` 一并查询，因此花括号/if/子 shell 包装的 worktree 创建与裸写法一样失败关闭。
+5. **路径限定 create 钉子（R3-5，Suggestion）。** 新增用例断言 `/usr/bin/gh pr create` 仍可解析，钉住净化器保留 `/`/`\`。
+6. **轮询 helper（R3-6，Suggestion）。** `waitForAttributionLegs` / `waitForSidecar` 到期抛错（不再静默/空过返回），轮询 10s；整套件设 `testTimeout: 30_000`，使预算在每个 lane 都高于轮询。
+7. **`unset -f`（R3-7，Suggestion）。** 新增 `unset_command` 分支，对字面量 `unset -f NAME` 解除阴影；带展开的名字保持 `opaque`。
+8. **假回退 notice（R3-8，Suggestion）。** 子 shell / 命令替换 / 进程替换跑在子进程，其 `cd` 可证不会泄漏：目录不变、不发 notice（其内创建的 worktree 仍失败关闭）。此前「子 shell cd → opaque」的行为与对应用例被取代。
+
+第七轮验证：**495 passed**（481 单测 + 14 真实文件系统），core typecheck exit 0，ESLint 与 Prettier 干净。变异见证 AD（路径限定守卫）、AE（`-R` 读取）、AF（worktree 子树判定）、AG（`unset` 解除）、AH（subshell 透明化）各自杀掉点名用例且对照绿；每次从字节级备份还原（最终 `shell.ts` SHA-256 `f5caee1084e7a17af43a43ce61e5b34918cf44128f1a0cabf1cfcde72327f8e0`）。
+
+bot 还在其收敛姿态下记录了一份 deferred 清单（本轮不要求修改）。上文事实错误的 `findGitRoot` 返回 null 前提已在此更正；其余 deferred 条目（如 `git clone` / `gh repo clone` 建仓、`expand_aliases`、`cd -L/-P/--` 选项钉子、`command gh pr create` 过度保守、空字符串仓库 spec、以及更多文档措辞对齐）作为已记录的局限如实承认，而非悄悄丢弃，以免每轮重复推导同一簇兄弟发现。
 
 ## 验收标准
 

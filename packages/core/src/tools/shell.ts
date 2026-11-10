@@ -973,8 +973,8 @@ const DIRECTORY_CHANGING_COMMANDS = new Set([
   '.',
 ]);
 
-/** The program a command node invokes, basename'd like the textual walks. */
-function commandNodeProgram(node: ShellSyntaxNode): string {
+/** The program a command node invokes, with one layer of quotes stripped. */
+function commandNodeProgramName(node: ShellSyntaxNode): string {
   let name = node.childForFieldName('name')?.text ?? '';
   // A quoted builtin such as `"cd"` is still cd in Bash; strip one layer of
   // matching surrounding quotes so the directory-changing check recognises it
@@ -986,7 +986,45 @@ function commandNodeProgram(node: ShellSyntaxNode): string {
   ) {
     name = name.slice(1, -1);
   }
-  return programBasename(name);
+  return name;
+}
+
+/** The program a command node invokes, basename'd like the textual walks. */
+function commandNodeProgram(node: ShellSyntaxNode): string {
+  return programBasename(commandNodeProgramName(node));
+}
+
+/**
+ * Whether a command invokes a directory-changing BUILTIN. A path-qualified
+ * program named `cd`/`pushd`/… (e.g. `/usr/bin/cd`, `./cd`) is an external
+ * executable that runs in a child process and cannot move this shell, so it
+ * must not be granted builtin cwd-changing semantics.
+ */
+function commandIsBuiltinDirectoryChanger(node: ShellSyntaxNode): boolean {
+  if (node.type !== 'command') return false;
+  const name = commandNodeProgramName(node);
+  return (
+    !/[/\\]/.test(name) &&
+    DIRECTORY_CHANGING_COMMANDS.has(programBasename(name))
+  );
+}
+
+/**
+ * Whether a command creates a git worktree (`git worktree add …`). The
+ * snapshot precedes spawn, so a worktree created by this very command does not
+ * exist yet and a later `cd` into it would snapshot the wrong branch. Decodes
+ * quoted subcommands so `git "worktree" add` / `git worktree 'add'` match too.
+ */
+function commandCreatesWorktree(node: ShellSyntaxNode): boolean {
+  if (node.type !== 'command' || commandNodeProgram(node) !== 'git') {
+    return false;
+  }
+  const words = node.namedChildren
+    .filter(
+      (c) => c.type !== 'command_name' && c.type !== 'variable_assignment',
+    )
+    .map((c) => literalShellValue(c) ?? c.text);
+  return words.some((word, i) => word === 'worktree' && words[i + 1] === 'add');
 }
 
 /**
@@ -1060,8 +1098,8 @@ function subtreeMayChangeDirectory(node: ShellSyntaxNode): boolean {
   while (stack.length > 0) {
     const current = stack.pop()!;
     if (
-      current.type === 'command' &&
-      DIRECTORY_CHANGING_COMMANDS.has(commandNodeProgram(current))
+      commandIsBuiltinDirectoryChanger(current) ||
+      commandCreatesWorktree(current)
     ) {
       return true;
     }
@@ -1278,6 +1316,22 @@ async function resolveGhPrCreateDirectory(
           if (subtreeMayChangeDirectory(node)) opaque = true;
           return dir;
         }
+        case 'unset_command': {
+          // `unset -f cd` restores the builtin, lifting the shadow. Only literal
+          // function names can be removed; an expanded name stays conservative.
+          const hasFunctionFlag = node.namedChildren.some(
+            (c) => c.type === 'word' && c.text === '-f',
+          );
+          if (hasFunctionFlag) {
+            const targets = node.namedChildren.filter((c) => c.type !== 'word');
+            if (targets.every((c) => c.type === 'variable_name')) {
+              for (const t of targets) shadowed.delete(t.text);
+            } else {
+              opaque = true;
+            }
+          }
+          return dir;
+        }
         case 'command': {
           const program = commandNodeProgram(node);
           // A same-named function shadows the builtin, so `cd()` / `pushd()` /
@@ -1320,22 +1374,13 @@ async function resolveGhPrCreateDirectory(
             opaque = true;
             return dir;
           }
-          if (program === 'git') {
+          if (commandCreatesWorktree(node)) {
             // The snapshot precedes spawn, so a worktree created by this very
             // command does not exist yet. findGitRoot on its future path would
             // find the launch repo and snapshot the wrong branch. Fail closed
             // for any worktree creation before the create.
-            const words = node.namedChildren
-              .filter((c) => c.type === 'word')
-              .map((c) => c.text);
-            if (
-              words.some(
-                (word, i) => word === 'worktree' && words[i + 1] === 'add',
-              )
-            ) {
-              opaque = true;
-              return dir;
-            }
+            opaque = true;
+            return dir;
           }
           if (
             program === 'shopt' &&
@@ -1362,26 +1407,59 @@ async function resolveGhPrCreateDirectory(
               opaque = true;
             } else {
               const args = node.namedChildren;
+              let repoFlagSeen = false;
               for (let i = 0; i < args.length; i++) {
                 const arg = args[i]!;
-                if (arg.type === 'word' && arg.text === '--repo') {
+                const text = arg.text;
+                if (
+                  arg.type === 'word' &&
+                  (text === '--repo' || text === '-R')
+                ) {
+                  repoFlagSeen = true;
                   createRepo = literalShellValue(args[i + 1]);
-                } else if (arg.text.startsWith('--repo=')) {
+                } else if (
+                  text.startsWith('--repo=') ||
+                  text.startsWith('-R=')
+                ) {
                   // `--repo=o/r` is one word; `--repo='o/r'` is a concatenation
                   // of the `--repo=` word and a quoted value. Decode the whole
                   // node, then drop the prefix, so quotes are not kept.
+                  repoFlagSeen = true;
+                  const prefix = text.startsWith('--repo=') ? '--repo=' : '-R=';
                   const decoded = literalShellValue(arg);
                   createRepo =
                     decoded === undefined
                       ? undefined
-                      : decoded.slice('--repo='.length);
+                      : decoded.slice(prefix.length);
+                } else if (
+                  arg.type === 'word' &&
+                  text.startsWith('-R') &&
+                  text.length > 2
+                ) {
+                  // Attached short form `-Ro/r`.
+                  repoFlagSeen = true;
+                  createRepo = text.slice(2);
                 } else {
                   continue;
                 }
                 break;
               }
               found = dir;
+              // An explicit repo flag whose value cannot be decoded is
+              // unprovable, not absent: fail closed instead of silently
+              // attributing to the derived directory.
+              if (repoFlagSeen && createRepo === undefined) opaque = true;
             }
+            return dir;
+          }
+          // A path-qualified program named cd/pushd/popd/eval/source/. is an
+          // external executable running in a child; it cannot move this shell,
+          // so the directory is unprovable rather than the builtin's target.
+          if (
+            DIRECTORY_CHANGING_COMMANDS.has(program) &&
+            /[/\\]/.test(commandNodeProgramName(node))
+          ) {
+            opaque = true;
             return dir;
           }
           // `eval`/`source`/`.` run code in this shell that can move it
@@ -1428,27 +1506,40 @@ async function resolveGhPrCreateDirectory(
           return dir;
         }
         default: {
-          // Subshells, compound statements and control flow: a directory
-          // change inside them is not attributable from here, but a subtree
-          // that never moves the directory cannot cost us a binding either.
-          // A function definition inside a CURRENT-shell subtree (compound
-          // statement, control flow) can still shadow a later builtin even
-          // when its body contains no cd; register it conservatively. A real
-          // subshell's definitions die with it and must not leak.
+          // A subshell / command substitution / process substitution runs in a
+          // child: its cd cannot leak to this shell, so the directory is
+          // provably unchanged and no fallback notice is warranted. A worktree
+          // created inside it still lands on disk before spawn, though, so a
+          // later cd into it would snapshot the wrong branch — stay fail-closed.
           if (
-            node.type !== 'subshell' &&
-            node.type !== 'command_substitution' &&
-            node.type !== 'process_substitution'
+            node.type === 'subshell' ||
+            node.type === 'command_substitution' ||
+            node.type === 'process_substitution'
           ) {
             const stack = [node];
             while (stack.length > 0) {
               const current = stack.pop()!;
-              if (current.type === 'function_definition') {
-                const name = current.childForFieldName('name')?.text;
-                if (name) shadowed.add(name);
+              if (commandCreatesWorktree(current)) {
+                opaque = true;
+                break;
               }
               stack.push(...current.namedChildren);
             }
+            return dir;
+          }
+          // Compound statements and control flow run in THIS shell: a directory
+          // change inside them is not attributable from here, but a subtree
+          // that never moves the directory cannot cost us a binding either.
+          // A function definition inside can still shadow a later builtin even
+          // when its body contains no cd; register it conservatively.
+          const stack = [node];
+          while (stack.length > 0) {
+            const current = stack.pop()!;
+            if (current.type === 'function_definition') {
+              const name = current.childForFieldName('name')?.text;
+              if (name) shadowed.add(name);
+            }
+            stack.push(...current.namedChildren);
           }
           if (subtreeMayChangeDirectory(node)) opaque = true;
           return dir;

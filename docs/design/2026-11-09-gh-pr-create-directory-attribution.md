@@ -142,8 +142,13 @@ const attributionDir =
 `bindGhPrCreate` call. Both legs therefore ask gh about the same directory,
 which is what the pre-run/post-run comparison already assumes.
 
-A directory that does not exist needs no special case: `findGitRoot` returns
-null there, the snapshot is `{status: 'error'}`, and the existing gate declines.
+A directory that does not exist YET is a special case, not a no-op:
+`findGitRoot` walks UP from a non-existent path and finds the enclosing launch
+repository, so the pre-run snapshot would record the launch branch while the
+post-run leg queries the newly created worktree's branch. That is why a
+`git worktree add` in the same command is treated as directory-affecting and
+fails closed (see the round-4/round-7 records) rather than relying on
+`findGitRoot` returning null.
 
 ### Visible fallback notice
 
@@ -562,6 +567,61 @@ case normalisation) and AC (drop the quote stripping) each red their named cases
 with the lower-case / unquoted controls green; every mutation restored from a
 byte-level backup (final `shell.ts` SHA-256
 `1a1a4c45458f056eccb47813901632ee9e8e987154c20e62f27b19a0dd3e1b41`).
+
+### Review round 7 (2026-11-09, re-review of `525f144933`)
+
+The re-review confirmed the round-6 fixes and reported one new P2 (maintainer)
+plus a bot batch of 5 Critical + 4 Suggestion. The recurring root cause is that
+the walk must distinguish what the _executing shell_ actually does from a
+look-alike spelling. Fixed by root cause, not by enumerating spellings:
+
+1. **Builtin vs external program (P2 + R1-1, Critical).** A path-qualified
+   program named `cd`/`pushd`/`popd`/`eval`/`source`/`.` (`/usr/bin/cd`, `./cd`,
+   `bin/cd`, `"/usr/bin/cd"`) is an external executable running in a child; it
+   cannot move this shell. `commandNodeProgram` was split into
+   `commandNodeProgramName` (quote-stripped) + basename, and a new
+   `commandIsBuiltinDirectoryChanger` grants cwd semantics only to unqualified
+   builtins; a path-qualified directory command is `opaque`. This applies both
+   in the command arm and in `subtreeMayChangeDirectory`.
+2. **Short `-R` repo flag (R3-1, Critical).** The explicit-repo scan now reads
+   `-R o/r`, `-R=o/r` and attached `-Ro/r` like `--repo`, agreeing with
+   `GH_GLOBAL_FLAGS_TAKES_VALUE`. An explicit repo flag whose value cannot be
+   decoded (`--repo "$R"`) is `opaque` (unprovable), not "absent".
+3. **Windows test literals (R3-2 / R3-3, Critical).** The repo-identity stub and
+   the `findGitRoot` `.git` mock now key on `path.resolve(...)` so they match the
+   drive-qualified paths the resolver/`findGitRoot` produce on the Windows lane.
+4. **Worktree guard bypasses (R3-4, Critical).** `commandCreatesWorktree` decodes
+   quoted subcommands (`git "worktree" add`, `git worktree 'add'`) and is also
+   consulted by `subtreeMayChangeDirectory`, so brace/if/subshell-wrapped
+   worktree creation fails closed like the plain spelling.
+5. **Path-qualified create pin (R3-5, Suggestion).** Added a case asserting
+   `/usr/bin/gh pr create` still resolves, pinning the sanitiser's `/`/`\` keep.
+6. **Polling helpers (R3-6, Suggestion).** `waitForAttributionLegs` /
+   `waitForSidecar` now throw on deadline (no silent/vacuous return) at a 10s
+   poll, and the suite sets `testTimeout: 30_000` so the budget sits above the
+   poll on every lane.
+7. **`unset -f` (R3-7, Suggestion).** An `unset_command` arm lifts the shadow for
+   literal `unset -f NAME`; an expanded name stays `opaque`.
+8. **False fallback notice (R3-8, Suggestion).** A subshell / command
+   substitution / process substitution runs in a child, so its `cd` provably
+   cannot leak: the directory is unchanged and no notice is emitted (a worktree
+   created inside it still fails closed). The earlier "subshell cd → opaque"
+   behaviour and its test were superseded.
+
+Round-7 verification: **495 passed** (481 unit + 14 real-filesystem), core
+typecheck exit 0, ESLint and Prettier clean. Mutation witnesses AD (path-qualified
+guard), AE (`-R` read), AF (worktree subtree detection), AG (`unset` lift) and
+AH (subshell transparency) each red their named cases with controls green; every
+mutation restored from a byte-level backup (final `shell.ts` SHA-256
+`f5caee1084e7a17af43a43ce61e5b34918cf44128f1a0cabf1cfcde72327f8e0`).
+
+The bot also recorded a deferred list under its convergence posture (not
+requested this round). The factually-wrong `findGitRoot` returns-null premise
+above is corrected here; the remaining deferred entries (e.g. `git clone` /
+`gh repo clone` creating a repo, `expand_aliases`, `cd -L/-P/--` option pins,
+`command gh pr create` over-conservatism, empty-string repo spec, and further
+doc-wording reconciliations) are acknowledged as recorded limitations rather
+than silently dropped, to avoid re-deriving the same sibling cluster each round.
 
 ## Acceptance criteria
 
