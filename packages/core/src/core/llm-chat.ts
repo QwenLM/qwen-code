@@ -171,6 +171,8 @@ import {
   type ChatCompressionInfo,
   CompressionStatus,
   isCompressionFailureStatus,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
 } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
@@ -197,6 +199,7 @@ import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
   normalizeModelToolCallIds,
+  PROVIDER_TOOL_CALL_ID_METADATA,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
 import {
@@ -422,21 +425,22 @@ export function redactApprovedPlansInHistory(
 export function redactStructuredOutputArgsForRecording(part: Part): {
   functionCall: NonNullable<Part['functionCall']>;
   thoughtSignature?: string;
+  partMetadata?: Part['partMetadata'];
 } | null {
   if (!part.functionCall) return null;
-  const signed = part.thoughtSignature !== undefined;
-  if (part.functionCall.name !== ToolNames.STRUCTURED_OUTPUT) {
-    return {
-      functionCall: part.functionCall,
-      ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
-    };
-  }
+  const functionCall =
+    part.functionCall.name === ToolNames.STRUCTURED_OUTPUT
+      ? { ...part.functionCall, args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS } }
+      : part.functionCall;
+  const providerId = part.partMetadata?.[PROVIDER_TOOL_CALL_ID_METADATA];
   return {
-    functionCall: {
-      ...part.functionCall,
-      args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
-    },
-    ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
+    functionCall,
+    ...(part.thoughtSignature !== undefined
+      ? { thoughtSignature: part.thoughtSignature }
+      : {}),
+    ...(typeof providerId === 'string'
+      ? { partMetadata: { [PROVIDER_TOOL_CALL_ID_METADATA]: providerId } }
+      : {}),
   };
 }
 
@@ -2095,6 +2099,14 @@ export function isSynthesizedRepairPart(part: Part): boolean {
   return (
     keys.length === 1 &&
     (response as { error?: unknown }).error === ORPHAN_TOOL_USE_REPAIR_REASON
+  );
+}
+
+function isLegacyLoopSkippedResponse(part: Part | undefined): boolean {
+  const response = part?.functionResponse?.response;
+  return (
+    response?.['error'] === TOOL_LOOP_SKIPPED_MESSAGE &&
+    Object.keys(response).length === 1
   );
 }
 
@@ -6467,35 +6479,71 @@ export class LlmChat {
   /**
    * Map of handled tool-call id → (name, args) fingerprint for duplicate
    * provider-id replay detection: model-turn `functionCall`s whose id has a
-   * matching user-turn `functionResponse`. Walk-only, no clone, same
-   * rationale as {@link getHistoryFunctionResponseIds}; fingerprints of
-   * large args are cached per part object (see getFunctionCallFingerprint).
+   * matching user-turn `functionResponse`. Loop-skipped results pair with
+   * calls on the wire without making them count as handled.
+   * Filtering by result ids includes their provider-id aliases.
    */
-  getHistoryToolCallFingerprints(): Map<string, string> {
-    const fingerprintsById = new Map<string, string>();
-    const respondedIds = new Set<string>();
+  getHistoryToolCallFingerprints(
+    onlyCallIds?: ReadonlySet<string>,
+  ): Map<string, string> {
+    const responses = new Map<string, Part>();
     for (const entry of this.history) {
-      if (entry.role === 'user') {
-        for (const part of entry.parts ?? []) {
-          const id = part.functionResponse?.id;
-          if (id) respondedIds.add(id);
-        }
-        continue;
-      }
+      if (entry.role !== 'user') continue;
       for (const part of entry.parts ?? []) {
-        const functionCall = part.functionCall;
-        if (functionCall?.id && !fingerprintsById.has(functionCall.id)) {
-          fingerprintsById.set(
-            functionCall.id,
-            getFunctionCallFingerprint(functionCall),
-          );
+        const id = part.functionResponse?.id;
+        if (id && !responses.has(id)) responses.set(id, part);
+      }
+    }
+    // Older transcripts only marked the last result of the stopped batch.
+    // Scope the legacy error text to that batch so tool failures cannot
+    // opt out of replay detection by returning the same text.
+    const legacyLoopEnds = new Set(
+      this.completedToolCallIds.filter((id) =>
+        isLegacyLoopSkippedResponse(responses.get(id)),
+      ),
+    );
+    const skippedIds = new Set<string>();
+    const handled = new Map<string, string>();
+    const aliasSources = onlyCallIds ? new Map<string, string>() : undefined;
+    for (const entry of this.history) {
+      if (entry.role === 'user') continue;
+      const parts = entry.parts ?? [];
+      const legacyStoppedBatch =
+        legacyLoopEnds.size > 0 &&
+        parts.some(
+          ({ functionCall }) =>
+            functionCall?.id && legacyLoopEnds.has(functionCall.id),
+        );
+      for (const { functionCall, partMetadata } of parts) {
+        if (!functionCall?.id || handled.has(functionCall.id)) continue;
+        const response = responses.get(functionCall.id);
+        if (!response) continue;
+        if (
+          response.partMetadata?.[TOOL_LOOP_SKIPPED_METADATA] === true ||
+          (legacyStoppedBatch && isLegacyLoopSkippedResponse(response))
+        ) {
+          skippedIds.add(functionCall.id);
+          continue;
+        }
+        const fingerprint = getFunctionCallFingerprint(functionCall);
+        handled.set(functionCall.id, fingerprint);
+        const providerId = partMetadata?.[PROVIDER_TOOL_CALL_ID_METADATA];
+        if (
+          typeof providerId === 'string' &&
+          skippedIds.has(providerId) &&
+          !handled.has(providerId)
+        ) {
+          // The original id is still reserved by its skipped pair. Let the
+          // first handled call under that id also answer provider replays.
+          handled.set(providerId, fingerprint);
+          aliasSources?.set(providerId, functionCall.id);
         }
       }
     }
-    const handled = new Map<string, string>();
-    for (const id of respondedIds) {
-      const fingerprint = fingerprintsById.get(id);
-      if (fingerprint !== undefined) handled.set(id, fingerprint);
+    if (onlyCallIds) {
+      for (const id of handled.keys()) {
+        if (!onlyCallIds.has(aliasSources?.get(id) ?? id)) handled.delete(id);
+      }
     }
     return handled;
   }

@@ -35,6 +35,8 @@ import {
 import {
   createNotStartedToolErrorResponse,
   LlmEventType,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   GOAL_PAUSE_REASON_USER_INTERRUPT,
@@ -50,6 +52,7 @@ import {
   getActiveInteractionSpan,
 } from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
 import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { clearLoadedSkillTracking } from '@qwen-code/qwen-code-core/tools/skill-utils.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
@@ -1184,13 +1187,13 @@ export async function* livePromptEvents(
       );
       if (retryIds.length > 0) {
         // A retried continuation can pair a tool result the pre-send snapshot
-        // did not yet see. Only import the real results it carried.
-        const fingerprints = client.getHistoryToolCallFingerprints();
+        // did not yet see. Only import its real results and their aliases.
         const repaired = client.getSynthesizedRepairCallIds();
-        for (const id of retryIds) {
-          const fingerprint = fingerprints.get(id);
-          if (fingerprint !== undefined && !repaired.has(id))
-            handled.set(id, fingerprint);
+        const fingerprints = client.getHistoryToolCallFingerprints(
+          new Set(retryIds.filter((id) => !repaired.has(id))),
+        );
+        for (const [id, fingerprint] of fingerprints) {
+          if (!handled.has(id)) handled.set(id, fingerprint);
         }
       }
     }
@@ -1667,8 +1670,15 @@ export async function* livePromptEvents(
       });
       if (!isCurrentSession()) return;
 
-      const message = 'Tool skipped because the model repeated a tool-call id.';
-      const skipped = skippedCalls('cancelled', message);
+      const skipped = skippedCalls('cancelled', TOOL_LOOP_SKIPPED_MESSAGE);
+      for (const { response } of skipped) {
+        for (const part of response.responseParts) {
+          part.partMetadata = {
+            ...part.partMetadata,
+            [TOOL_LOOP_SKIPPED_METADATA]: true,
+          };
+        }
+      }
       const last = skipped.at(-1)!;
       const chat = client.getChat();
       chat.addHistory({
@@ -1722,28 +1732,29 @@ export async function* livePromptEvents(
     const sharedParts = new Map(
       (shared?.responses ?? []).map(({ callId, parts }) => [callId, parts]),
     );
-    if (
-      shared &&
-      isCurrentSession() &&
-      completed.some(
-        ({ request, response, tool }) =>
-          canonicalToolName(tool?.name ?? request.name) ===
-            ToolNames.READ_FILE &&
-          sharedParts.get(request.callId)?.some((part, index) => {
-            const output =
-              response.responseParts[index]?.functionResponse?.response?.[
-                'output'
-              ];
-            return (
-              typeof output === 'string' &&
-              output !== part.functionResponse?.response?.['output']
-            );
-          }),
-      )
-    ) {
-      // A batch cut can hide bytes from a read the cache marked as resident.
-      // Mods can relabel that result after the read. Keep prior-read rights.
-      config.getFileReadCache().markAllReadsEvictedFromHistory();
+    if (shared && isCurrentSession()) {
+      const clippedTools = new Set<string>();
+      for (const { request, response, tool } of completed) {
+        // The finalizer only replaces parts whose text it shortens, including
+        // error payloads a Mod may have used to return a native result.
+        if (
+          sharedParts
+            .get(request.callId)
+            ?.some((part, index) => part !== response.responseParts[index])
+        ) {
+          clippedTools.add(canonicalToolName(tool?.name ?? request.name));
+        }
+      }
+      if (clippedTools.has(ToolNames.READ_FILE)) {
+        // Keep prior-read rights while letting the model get the full body.
+        config.getFileReadCache().markAllReadsEvictedFromHistory();
+      }
+      if (clippedTools.has(ToolNames.SKILL)) {
+        clearLoadedSkillTracking(
+          config.getToolRegistry(),
+          'OpenTUI shared tool-output shrink',
+        );
+      }
     }
 
     const usesMods = completed.some((call) => call.nativeAttemptsObserved);

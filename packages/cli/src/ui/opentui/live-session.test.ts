@@ -4373,28 +4373,45 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
   it('suppresses replays of tool results admitted by a retry', async () => {
     const history = new Map<string, string>();
     const ids = ['retried', 'repaired', 'unrelated'];
+    const retryResultId = 'retried__qwen_dup_2';
+    const incomingCallIds = [
+      'retried__qwen_dup_3',
+      'repaired__qwen_dup_2',
+      'unrelated__qwen_dup_2',
+    ];
     let sends = 0;
     const send = vi.fn(function* () {
       if (++sends > 1) return;
       // Only the retried real result should seed replay detection, even
       // when the new history also contains repaired or unrelated pairs.
-      for (const id of ids)
+      for (const id of [...ids, retryResultId])
         history.set(id, getToolCallFingerprint('test_tool', {}));
-      for (const id of ids) {
+      for (const [index, id] of ids.entries()) {
         yield {
           type: 'tool_call_request',
-          value: { ...call(`${id}__qwen_dup_2`).value, providerCallId: id },
+          value: { ...call(incomingCallIds[index]).value, providerCallId: id },
         };
       }
     });
     const config = shared(createFakeConfig(send), history);
+    const getHistoryToolCallFingerprints = vi.fn(
+      (onlyCallIds?: ReadonlySet<string>) =>
+        onlyCallIds
+          ? new Map(
+              [...history].filter(([id]) =>
+                onlyCallIds.has(id === 'retried' ? retryResultId : id),
+              ),
+            )
+          : history,
+    );
     Object.assign(config.getGeminiClient(), {
+      getHistoryToolCallFingerprints,
       getSynthesizedRepairCallIds: () => new Set(['repaired']),
     });
     await drain(
       livePromptEvents(config, '', undefined, {
         retry: {
-          content: ids.slice(0, 2).map((id) => ({
+          content: [retryResultId, 'repaired'].map((id) => ({
             functionResponse: {
               id,
               name: 'test_tool',
@@ -4405,7 +4422,10 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
         },
       }),
     );
-    expect(sentResponses(send)).toEqual([ids.map((id) => `${id}__qwen_dup_2`)]);
+    expect(getHistoryToolCallFingerprints).toHaveBeenLastCalledWith(
+      new Set([retryResultId]),
+    );
+    expect(sentResponses(send)).toEqual([incomingCallIds]);
     const parts = (send.mock.calls[1] as unknown[])[0] as Part[];
     expect(JSON.stringify(parts[0].functionResponse?.response)).toContain(
       'was already handled',
@@ -4581,12 +4601,14 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
   });
 
   it.each([
-    { clipped: true, cancelled: false },
-    { clipped: true, cancelled: true },
-    { clipped: false, cancelled: false },
+    { field: 'output', clipped: true, cancelled: false },
+    { field: 'output', clipped: true, cancelled: true },
+    { field: 'output', clipped: false, cancelled: false },
+    { field: 'error', clipped: true, cancelled: false },
+    { field: 'error', clipped: false, cancelled: false },
   ])(
-    'updates residency for retained reads (clipped: $clipped, cancelled: $cancelled)',
-    async ({ clipped, cancelled }) => {
+    'updates residency for retained read $field (clipped: $clipped, cancelled: $cancelled)',
+    async ({ field, clipped, cancelled }) => {
       const directory = await mkdtemp(
         path.join(tmpdir(), 'qwen-opentui-read-'),
       );
@@ -4605,7 +4627,7 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
             args: {
               file_path: filePath,
               __cancelled: cancelled,
-              __restoreResult: { output },
+              __restoreResult: { [field]: output },
             },
           },
         ]);
@@ -4619,7 +4641,7 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
         });
         await drain(livePromptEvents(config, 'read'));
         const parts = (send.mock.calls[1] as unknown[])[0] as Part[];
-        const sentOutput = parts[1].functionResponse?.response?.['output'];
+        const sentOutput = parts[1].functionResponse?.response?.[field];
         expect(typeof sentOutput).toBe('string');
         expect(sentOutput === output).toBe(!clipped);
         expect(cache.check(stats)).toMatchObject({
@@ -4633,6 +4655,40 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
+    },
+  );
+
+  it.each([true, false])(
+    'keeps loaded-skill tracking in sync with its retained body (clipped: %s)',
+    async (clipped) => {
+      const output = 'skill instructions\n'.repeat(80);
+      const send = batchStream([
+        { ...call('replay').value, providerCallId: 'old' },
+        {
+          callId: 'skill',
+          name: 'skill',
+          args: { __restoreResult: { output } },
+        },
+      ]);
+      const config = shared(
+        createFakeConfig(send),
+        new Map([['old', getToolCallFingerprint('test_tool', {})]]),
+      );
+      const clearLoadedSkills = vi.fn();
+      Object.assign(config, {
+        getToolOutputBatchBudget: () => (clipped ? 1600 : Infinity),
+        getToolRegistry: () => ({
+          getTool: (name: string) =>
+            name === 'skill' ? { clearLoadedSkills } : undefined,
+        }),
+      });
+
+      await drain(livePromptEvents(config, 'load skill'));
+      const parts = (send.mock.calls[1] as unknown[])[0] as Part[];
+      const sentOutput = parts[1].functionResponse?.response?.['output'];
+      expect(typeof sentOutput).toBe('string');
+      expect(sentOutput === output).toBe(!clipped);
+      expect(clearLoadedSkills).toHaveBeenCalledTimes(clipped ? 1 : 0);
     },
   );
 

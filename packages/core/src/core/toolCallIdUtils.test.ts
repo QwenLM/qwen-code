@@ -15,6 +15,7 @@ import {
   getToolCallFingerprint,
   isReplayOfHandledToolCall,
   normalizeModelToolCallIds,
+  PROVIDER_TOOL_CALL_ID_METADATA,
   recordHandledToolCall,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
@@ -80,6 +81,7 @@ describe('toolCallIdUtils', () => {
           name: 'read_file',
           args: { file_path: 'b.ts' },
         },
+        partMetadata: { [PROVIDER_TOOL_CALL_ID_METADATA]: 'dup_id_0001' },
       },
       { text: 'done' },
     ]);

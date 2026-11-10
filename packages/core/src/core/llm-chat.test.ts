@@ -56,7 +56,10 @@ import {
   ResponsesStreamState,
 } from './openaiResponsesContentGenerator/responses-converter.js';
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
-import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import {
+  getToolCallFingerprint,
+  normalizeModelToolCallIds,
+} from './toolCallIdUtils.js';
 import {
   buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
@@ -83,7 +86,12 @@ import {
 } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
+import {
+  CompressionStatus,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
+  type ChatCompressionInfo,
+} from './turn.js';
 import {
   ChatCompressionService,
   MAX_CONSECUTIVE_FAILURES,
@@ -7010,6 +7018,71 @@ describe('LlmChat', async () => {
         getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
       );
     });
+
+    it.each(['marked', 'legacy'])(
+      'excludes %s loop-stopped calls until the provider id is handled',
+      (format) => {
+        const stoppedResponse = (id: string): Part => ({
+          ...fnResponse('read_file', { error: TOOL_LOOP_SKIPPED_MESSAGE }, id),
+          ...(format === 'marked'
+            ? { partMetadata: { [TOOL_LOOP_SKIPPED_METADATA]: true } }
+            : {}),
+        });
+        const stoppedHistory = [
+          content('model', readCall('handled', 'handled.ts')),
+          content(
+            'user',
+            fnResponse(
+              'read_file',
+              { error: TOOL_LOOP_SKIPPED_MESSAGE },
+              'handled',
+            ),
+          ),
+          content(
+            'model',
+            readCall('fresh', 'fresh.ts'),
+            readCall('loop-end', 'handled.ts'),
+          ),
+          content('user', stoppedResponse('fresh')),
+          content('user', stoppedResponse('loop-end')),
+        ];
+        const endIds = format === 'legacy' ? ['loop-end'] : [];
+        chat.setHistory(stoppedHistory, endIds);
+        expect(chat.getHistoryFunctionResponseIds()).toContain('fresh');
+        expect([...chat.getHistoryToolCallFingerprints().keys()]).toEqual([
+          'handled',
+        ]);
+
+        const [retried] = normalizeModelToolCallIds(
+          [readCall('fresh', 'retry.ts')],
+          new Set(['fresh']),
+          new Set(),
+        );
+        const id = retried.functionCall!.id!;
+        const history = [
+          ...stoppedHistory,
+          content('model', redactStructuredOutputArgsForRecording(retried)!),
+          content('user', fnResponse('read_file', { output: 'retried' }, id)),
+        ];
+        chat.setHistory(JSON.parse(JSON.stringify(history)), endIds);
+        const fingerprints = chat.getHistoryToolCallFingerprints();
+        const fingerprint = getToolCallFingerprint('read_file', {
+          file_path: 'retry.ts',
+        });
+        expect(fingerprints.get('fresh')).toBe(fingerprint);
+        expect(fingerprints.get(id)).toBe(fingerprint);
+        expect(fingerprints.has('loop-end')).toBe(false);
+        expect(chat.getHistoryToolCallFingerprints(new Set([id]))).toEqual(
+          new Map([
+            [id, fingerprint],
+            ['fresh', fingerprint],
+          ]),
+        );
+        expect(
+          chat.getHistoryToolCallFingerprints(new Set(['fresh', 'loop-end'])),
+        ).toEqual(new Map());
+      },
+    );
 
     it('keeps the first answered call for an id reused across turns and skips orphan response ids', () => {
       // The fingerprint is the replay oracle: a reused id keeps naming the

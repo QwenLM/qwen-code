@@ -12,6 +12,7 @@ import { carryIncompleteArgumentsMarker } from './incomplete-tool-call-args.js';
 const DUPLICATE_ID_SUFFIX = '__qwen_dup_';
 const GENERATED_ID_PREFIX = 'call_qwen_';
 const PROVIDER_TOOL_CALL_ID = Symbol('providerToolCallId');
+export const PROVIDER_TOOL_CALL_ID_METADATA = 'providerToolCallId';
 const debugLogger = createDebugLogger('TOOL_CALL_IDS');
 
 // Fingerprints are cached against the stable carrier object — a history or
@@ -194,6 +195,14 @@ export function normalizeModelToolCallIds(
     normalized.push({
       ...part,
       functionCall: normalizedFunctionCall,
+      ...(rawId && rawId !== id
+        ? {
+            partMetadata: {
+              ...part.partMetadata,
+              [PROVIDER_TOOL_CALL_ID_METADATA]: rawId,
+            },
+          }
+        : {}),
     });
   }
 
