@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -28,14 +29,20 @@ import java.util.UUID;
 @Service
 public class JdbcSessionResourceObjects {
     private final JdbcTemplate jdbc;
-    private final ObjectProvider<ToolPublicationObjectStore> objects;
+    private final ToolPublicationObjectStore objects;
     private final ManagedAgentSettings settings;
 
-    public JdbcSessionResourceObjects(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            ObjectProvider<ToolPublicationObjectStore> objects, ManagedAgentSettings settings) {
+    public JdbcSessionResourceObjects(JdbcTemplate jdbc, ToolPublicationObjectStore objects,
+            ManagedAgentSettings settings) {
         this.jdbc = jdbc;
         this.objects = objects;
         this.settings = settings;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public JdbcSessionResourceObjects(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            ObjectProvider<ToolPublicationObjectStore> objects, ManagedAgentSettings settings) {
+        this(jdbc, objects.getIfAvailable(), settings);
     }
 
     public record AllocateRequest(String workspaceId, String writerId, long writerGeneration,
@@ -53,12 +60,42 @@ public class JdbcSessionResourceObjects {
     }
 
     private ToolPublicationObjectStore store() {
-        ToolPublicationObjectStore store = objects.getIfAvailable();
-        if (store == null) {
+        if (objects == null) {
             throw new ManagedAgentException(501, ManagedSessionStoreModels.ERROR_OSS_DISABLED,
                     "Session resource OSS storage requires a configured object store.");
         }
-        return store;
+        return objects;
+    }
+
+    /** Body resolution for external reads; the caller has already authorized the writer. */
+    public ManagedSessionStoreModels.StoredResource readExternal(String tenantId,
+            String workspaceId, String sessionId, String resourceId) {
+        config();
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT kind, schema_version, byte_length, sha256, object_key FROM ma_resource"
+                        + " WHERE session_scope_key = ? AND resource_id = ? AND storage_kind ="
+                        + " 'OSS_OBJECT' AND state IN ('PUBLISHED', 'REFERENCED')",
+                scope, resourceId);
+        if (rows.isEmpty()) {
+            throw new ManagedAgentException(404, ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
+                    "The Managed Session resource does not exist.");
+        }
+        Map<String, Object> row = rows.getFirst();
+        byte[] bytes;
+        try (InputStream stream = store().open(text(row.get("object_key")), () -> { })) {
+            bytes = stream.readAllBytes();
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException("Session resource read failed", error);
+        }
+        if (bytes.length != ((Number) row.get("byte_length")).longValue()
+                || !JournalStoreRows.sha256(bytes).equals(row.get("sha256"))) {
+            throw JournalStoreRows.conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                    "The external resource object is missing or corrupt.");
+        }
+        return new ManagedSessionStoreModels.StoredResource(resourceId,
+                text(row.get("kind")), ((Number) row.get("schema_version")).intValue(),
+                bytes.length, text(row.get("sha256")), bytes);
     }
 
     @Transactional
@@ -88,7 +125,7 @@ public class JdbcSessionResourceObjects {
             if ("OSS_OBJECT".equals(row.get("storage_kind"))
                     && ((Number) row.get("byte_length")).longValue() == request.byteLength()
                     && request.digest().equals(row.get("sha256"))) {
-                return new Allocation(request.resourceId(), (String) row.get("object_key"),
+                return new Allocation(request.resourceId(), text(row.get("object_key")),
                         request.byteLength(), request.digest());
             }
             throw JournalStoreRows.conflict("managed_session_resource_conflict",
@@ -119,7 +156,7 @@ public class JdbcSessionResourceObjects {
         if (bytes.length != ((Number) row.get("byte_length")).longValue()) {
             throw JournalStoreRows.invalid("Uploaded bytes do not match the allocated length.");
         }
-        store().putIfAbsent((String) row.get("object_key"), bytes);
+        store().putIfAbsent(text(row.get("object_key")), bytes);
     }
 
     @Transactional
@@ -133,7 +170,7 @@ public class JdbcSessionResourceObjects {
             throw JournalStoreRows.conflict("managed_session_resource_conflict",
                     "The resource allocation is no longer finalizable.");
         }
-        String objectKey = (String) row.get("object_key");
+        String objectKey = text(row.get("object_key"));
         byte[] bytes;
         try (InputStream stream = store().open(objectKey, () -> { })) {
             bytes = stream.readAllBytes();
@@ -152,6 +189,11 @@ public class JdbcSessionResourceObjects {
         jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED', last_verified_at = ?"
                         + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'ALLOCATED'",
                 now, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), resourceId);
+    }
+
+    private static String text(Object value) {
+        return value instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8)
+                : (String) value;
     }
 
     private Map<String, Object> lockAllocation(String tenantId, String sessionId,

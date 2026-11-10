@@ -150,8 +150,9 @@ public class JdbcJournalPacks {
         int published = jdbc.update("UPDATE ma_session_head SET packed_through_revision = ?,"
                         + " gmt_modified = " + ManagedSchemaTime.SQL_NOW
                         + " WHERE tenant_id = ? AND session_id = ? AND head_kind ="
-                        + " 'MANAGED_SESSION' AND state = 'ACTIVE' AND compacted_through_revision"
-                        + " = 0 AND packed_through_revision = ? AND journal_revision >= ?",
+                        + " 'MANAGED_SESSION' AND state = 'ACTIVE' AND"
+                        + " COALESCE(compacted_through_revision, 0) = 0 AND"
+                        + " packed_through_revision = ? AND journal_revision >= ?",
                 through, tenant, session, from - 1, through);
         if (published != 1) {
             throw JournalStoreRows.conflict("managed_journal_pack_conflict",
@@ -197,7 +198,7 @@ public class JdbcJournalPacks {
         Map<String, Object> pack = packs.getFirst();
         ToolPublicationObjectStore store = store();
         long size = ((Number) pack.get("byte_length")).longValue();
-        byte[] trailer = readFully(store.openRange((String) pack.get("object_key"), size - 12, 12,
+        byte[] trailer = readFully(store.openRange(text(pack.get("object_key")), size - 12, 12,
                 () -> { }));
         if (trailer[8] != MAGIC[0] || trailer[9] != MAGIC[1] || trailer[10] != MAGIC[2]
                 || trailer[11] != MAGIC[3]) {
@@ -205,10 +206,10 @@ public class JdbcJournalPacks {
                     "The pack object trailer is invalid.");
         }
         long indexLength = ByteBuffer.wrap(trailer, 0, 8).getLong();
-        byte[] indexBytes = readFully(store.openRange((String) pack.get("object_key"),
+        byte[] indexBytes = readFully(store.openRange(text(pack.get("object_key")),
                 size - 12 - indexLength, indexLength, () -> { }));
         long[] entry = findEntry(new String(indexBytes, StandardCharsets.UTF_8), revision);
-        byte[] chunk = readFully(store.openRange((String) pack.get("object_key"), entry[0],
+        byte[] chunk = readFully(store.openRange(text(pack.get("object_key")), entry[0],
                 entry[1], () -> { }));
         byte[] bytes = gunzip(chunk);
         if (bytes.length != byteLength || !JournalStoreRows.sha256(bytes).equals(digest)) {
@@ -254,7 +255,7 @@ public class JdbcJournalPacks {
                 cutoff);
         ToolPublicationObjectStore store = store();
         for (Map<String, Object> pack : packs) {
-            store.deleteIfPresent((String) pack.get("object_key"));
+            store.deleteIfPresent(text(pack.get("object_key")));
             String scope = (String) pack.get("session_scope_key");
             String manifestKey = (String) pack.get("manifest_resource_key");
             if (manifestKey != null && !manifestKey.isEmpty()) {
@@ -291,6 +292,11 @@ public class JdbcJournalPacks {
             deleteCoveredBlobs();
         }
         collectOrphans();
+    }
+
+    private static String text(Object value) {
+        return value instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8)
+                : (String) value;
     }
 
     private Map<String, Object> headSnapshot(String tenant, String session) {
