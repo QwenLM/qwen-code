@@ -35,7 +35,11 @@ import {
   managedRuntimeLedgerFromEnvironment,
 } from './managed-runtime-ledger.js';
 import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
-import { isWorkspaceToolCapability } from './managed-workspace-activation.js';
+import {
+  isWorkspaceToolCapability,
+  MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
+import { ManagedRuntimeTerminals } from './managed-runtime-terminal.js';
 import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { resolveManagedRuntimeWorkerRoutePlan } from './managed-runtime-worker-routes.js';
@@ -380,6 +384,15 @@ export async function startManagedRuntimeAttestationWorker(
   server.headersTimeout = 5_000;
   server.requestTimeout = 5_000;
   server.keepAliveTimeout = 1_000;
+  const terminals =
+    boot.capabilityDigest === MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST
+      ? new ManagedRuntimeTerminals(
+          boot,
+          boot.version === 2 ? boot.mountRoot : boot.workspaceCwd,
+          process.env,
+        )
+      : undefined;
+  terminals?.register(server);
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -473,6 +486,7 @@ export async function startManagedRuntimeAttestationWorker(
     close: () => {
       closing ??= (async () => {
         const errors: unknown[] = [];
+        terminals?.dispose();
         try {
           await executor.close();
         } catch (error) {

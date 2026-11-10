@@ -534,7 +534,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         body.put("contextDigest", binding.getContextDigest());
         body.put("contextConfigRef", binding.getContextConfigRef());
         body.put("profile", ResidentWorkspaceProfile.selects(request)
-                ? ResidentWorkspaceProfile.PROFILE : WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+                ? ResidentWorkspaceProfile.PROFILE : WorkspaceExecutionProfile.isMeasured(
                                         session.getScope().getCapabilityDigest())
                                 ? WorkspaceExecutionProfile.MEASURED_PROFILE
                                 : WorkspaceExecutionProfile.PROFILE);

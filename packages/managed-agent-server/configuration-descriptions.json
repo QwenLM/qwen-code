@@ -861,6 +861,10 @@
     "qwen.managed-agent.runtime-broker.tool-measurements": {
       "en": "Whether newly resolved ordinary Workspace bindings select the attested managed-workspace-execution/2 profile and Tool v4 numeric execution/file measurements. Defaults to false; existing bindings, extension/MCP owners, resident and CSI profiles retain their contracts. Deploy compatible Worker/Broker readers first. Measurement commits reuse existing activity evidence and require a storage-version-5 grant; no separate collector flag is introduced. See the [execution diagnostics design](../design/2026-11-07-managed-execution-diagnostics.md).",
       "zh": "是否让新解析的普通 Workspace binding 选择经过 attestation 的 managed-workspace-execution/2 profile 和 Tool v4 数值执行/文件测量。默认 false；已有 binding、extension/MCP owner、resident 和 CSI profile 保留原契约。先部署兼容 Worker/Broker reader。测量提交复用现有 activity evidence，并要求 storage grant 支持 version 5；不引入独立 collector 开关。参见[执行诊断设计](../design/2026-11-07-managed-execution-diagnostics.zh-CN.md)。"
+    },
+    "qwen.managed-agent.runtime-broker.web-terminal": {
+      "en": "Whether newly resolved ordinary local Workspace bindings select the terminal-capable measured profile (managed-workspace-execution/2 plus web-terminal/1), whose worker serves the interactive user-terminal upgrade route. Defaults to false and requires tool-measurements. The capability digest is a frozen binding input: deploy matching control-plane, Harness and Runtime artifacts together before enabling. SSH, extension, resident, CSI and external-scratch placements keep their existing profiles. See the [Managed Web Terminal design](../design/2026-11-10-managed-web-terminal.md).",
+      "zh": "是否让新解析的普通本地 Workspace binding 选择带终端能力的测量 profile（managed-workspace-execution/2 加 web-terminal/1），其 worker 提供交互式用户终端 upgrade 路由。默认 false，且要求开启 tool-measurements。capability digest 是冻结的 binding 输入：启用前先协同部署配套的控制平面、Harness 与 Runtime 制品。SSH、extension、resident、CSI 与 external-scratch 放置保留现有 profile。参见 [Managed Web 终端设计](../design/2026-11-10-managed-web-terminal.zh-CN.md)。"
     }
   }
 }

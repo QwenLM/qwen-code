@@ -28,6 +28,7 @@ public final class WorkspaceRuntimeResolver {
     private final String boundSessionIsolationClass;
     private final boolean local;
     private final boolean measuredTools;
+    private final boolean webTerminal;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
 
     public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
@@ -40,8 +41,12 @@ public final class WorkspaceRuntimeResolver {
         this.ssh = ssh;
         this.managedExtensions = properties.getManagedExtensions();
         this.measuredTools = properties.getRuntimeBroker().isToolMeasurements();
+        this.webTerminal = properties.getRuntimeBroker().isWebTerminal();
         if (managedExtensions.isEnabled() && !properties.getExtensions().isEnabled()) {
             throw new IllegalStateException("Managed extension execution requires extensions to be enabled");
+        }
+        if (webTerminal && !measuredTools) {
+            throw new IllegalStateException("The Managed web terminal requires tool measurements");
         }
         this.sessions = sessions;
         this.authority = authority;
@@ -50,6 +55,8 @@ public final class WorkspaceRuntimeResolver {
         this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
         this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());
         if (WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())
+                || WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())
                 || WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
                 properties.getHarness().getCapabilityDigest())
@@ -130,9 +137,13 @@ public final class WorkspaceRuntimeResolver {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
+        String digest = extensionDigest(System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT));
+        if (webTerminal && WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(digest)) {
+            digest = WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST;
+        }
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                 Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                extensionDigest(System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT)), boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
+                digest, boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
     }
 
     private String extensionDigest(String platform) {

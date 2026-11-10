@@ -23,7 +23,7 @@ import {
 import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import {
-  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+  isMeasuredWorkspaceCapability,
   resolveManagedShellPublisherMode,
 } from './managed-workspace-activation.js';
 
@@ -71,8 +71,7 @@ export function resolveManagedRuntimeWorkerRoutePlan(
     capturePublisher: input.capturePublisher || input.publication,
     remotePublishers: input.remotePublishers,
   });
-  const toolV4 =
-    input.capabilityDigest === MEASURED_WORKSPACE_CAPABILITY_DIGEST;
+  const toolV4 = isMeasuredWorkspaceCapability(input.capabilityDigest);
   return {
     routes: [
       ...MANAGED_CONTEXT_WORKER_ROUTES,

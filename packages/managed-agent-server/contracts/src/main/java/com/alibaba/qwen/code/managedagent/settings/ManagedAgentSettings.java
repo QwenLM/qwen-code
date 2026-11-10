@@ -166,6 +166,11 @@ public interface ManagedAgentSettings {
             return false;
         }
 
+        /** Whether placed Workspaces gain the user-terminal surface. */
+        public default boolean isWebTerminal() {
+            return false;
+        }
+
         public boolean isSessionCreateWarm();
         public List<? extends WorkspaceMount> getWorkspaceMounts();
         public String getWorkspaceCreationRoot();
