@@ -4,36 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type ZodRawShape, type ZodType } from 'zod';
-
-function makeListableField<Schema extends ZodType>(schema: Schema): Schema {
-  try {
-    schema.toJSONSchema({ target: 'draft-07', io: 'input' });
-    return schema;
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !error.message.includes('cannot be represented in JSON Schema')
-    ) {
-      throw error;
-    }
-  }
-
-  const clone = schema.clone(schema._zod.def);
-  // MCP uses Zod's strict JSON Schema conversion for discovery. Preserve the
-  // runtime parser while advertising an unconstrained field for types such as
-  // z.custom(), which have no JSON Schema equivalent.
-  clone._zod.toJSONSchema = () => ({});
-  return clone;
-}
+import { toJSONSchema, z, type ZodObject, type ZodRawShape } from 'zod';
 
 export function makeListableToolSchema<Schema extends ZodRawShape>(
   schema: Schema,
-): Schema {
-  return Object.fromEntries(
-    Object.entries(schema).map(([name, field]) => [
-      name,
-      makeListableField(field as ZodType),
-    ]),
-  ) as unknown as Schema;
+): ZodObject<Schema> {
+  const objectSchema = z.object(schema);
+  const listableSchema = z.object(schema);
+
+  // Keep runtime validation unchanged while allowing discovery to represent
+  // unrepresentable fields as unconstrained JSON Schema nodes.
+  listableSchema._zod.toJSONSchema = () => {
+    const jsonSchema = toJSONSchema(objectSchema, {
+      target: 'draft-07',
+      io: 'input',
+      unrepresentable: 'any',
+    });
+    delete jsonSchema.$schema;
+    return jsonSchema;
+  };
+
+  return listableSchema;
 }

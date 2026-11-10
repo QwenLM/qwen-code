@@ -95,10 +95,12 @@ export function createSdkMcpServer(
 
   if (tools) {
     tools.forEach((toolDef) => {
-      server.tool(
+      server.registerTool(
         toolDef.name,
-        toolDef.description,
-        makeListableToolSchema(toolDef.inputSchema),
+        {
+          description: toolDef.description,
+          inputSchema: makeListableToolSchema(toolDef.inputSchema),
+        },
         toolDef.handler,
       );
     });
