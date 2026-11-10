@@ -846,7 +846,7 @@ test('edits GitHub bound-session action templates on demand and toggles fullscre
   expect(secondBody.config['boundSessionActions']).toBeUndefined();
 });
 
-test('configures a DingTalk webhook method and test-sends through the selected workspace', async ({
+test('configures and starts a DingTalk webhook method in the selected workspace', async ({
   page,
 }, testInfo) => {
   const workspaceCwd = '/tmp/qwen-outbound-webhook-secondary';
@@ -916,8 +916,6 @@ test('configures a DingTalk webhook method and test-sends through the selected w
   await page.addInitScript(() => {
     window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
   });
-  const notificationRequests: Array<{ path: string; body: unknown }> = [];
-  let rejectNotification = false;
   await page.route(
     /\/workspaces\/[^/]+\/channels\/notices\/start$/,
     async (route) => {
@@ -929,20 +927,6 @@ test('configures a DingTalk webhook method and test-sends through the selected w
       await route.fulfill({ json: { snapshot: scenario.channels, instance } });
     },
   );
-  await page.route(/\/workspaces\/[^/]+\/notify$/, async (route) => {
-    notificationRequests.push({
-      path: new URL(route.request().url()).pathname,
-      body: route.request().postDataJSON(),
-    });
-    await route.fulfill(
-      rejectNotification
-        ? {
-            status: 502,
-            json: { error: 'DingTalk rejected the message (310000).' },
-          }
-        : { json: { delivered: true, deliveryId: 'test-delivery' } },
-    );
-  });
 
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
   await expect(
@@ -979,9 +963,6 @@ test('configures a DingTalk webhook method and test-sends through the selected w
     editor.getByText('Conversation management', { exact: true }),
   ).toHaveCount(0);
   await expect(editor.getByText('Pairing', { exact: true })).toHaveCount(0);
-  await expect(
-    editor.getByRole('button', { name: 'Send test message' }),
-  ).toHaveCount(0);
   await editor.getByLabel('Workspace').click();
   await page.getByRole('option', { name: 'Notification workspace' }).click();
   await expect(editor.getByLabel('Workspace')).toContainText(
@@ -1020,29 +1001,8 @@ test('configures a DingTalk webhook method and test-sends through the selected w
   const card = page
     .locator('[data-slot="card"]')
     .filter({ has: page.getByText('notices', { exact: true }) });
-  await expect(
-    card.getByRole('button', { name: 'Send test message' }),
-  ).toHaveCount(0);
   await card.getByRole('button', { name: 'Start', exact: true }).click();
   await expect(card.getByText('Ready to send', { exact: true })).toBeVisible();
-  await card
-    .getByRole('button', { name: 'Send test message', exact: true })
-    .click();
-  await expect(
-    card.getByText('Test message accepted by the platform API.'),
-  ).toBeVisible();
-  expect(notificationRequests).toEqual([
-    {
-      path: `/workspaces/${encodeURIComponent(workspaceCwd)}/notify`,
-      body: {
-        text: 'Test message from Qwen Code.',
-        delivery: {
-          kind: 'channel',
-          target: { channelName: 'notices', type: 'chat', id: 'default' },
-        },
-      },
-    },
-  ]);
   expect(
     daemon.requests.filter(
       (request) =>
@@ -1050,18 +1010,8 @@ test('configures a DingTalk webhook method and test-sends through the selected w
     ),
   ).toHaveLength(0);
   await page.screenshot({
-    path: testInfo.outputPath('outbound-channel-test-send.png'),
+    path: testInfo.outputPath('outbound-channel-ready.png'),
   });
-  rejectNotification = true;
-  await card
-    .getByRole('button', { name: 'Send test message', exact: true })
-    .click();
-  await expect(
-    card.getByText('DingTalk rejected the message (310000).'),
-  ).toBeVisible();
-  await expect(
-    card.getByText('Test message accepted by the platform API.'),
-  ).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await card.scrollIntoViewIfNeeded();
   await page.screenshot({

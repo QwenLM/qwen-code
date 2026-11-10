@@ -19,8 +19,6 @@ import type {
   DaemonChannelEventsQuery,
   DaemonChannelEventsSnapshot,
   DaemonChannelMutationResult,
-  DaemonChannelNotifyRequest,
-  DaemonChannelNotifyResult,
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
@@ -604,10 +602,6 @@ export interface DaemonWorkspaceActions
 
   // Channels
   loadChannels(): Promise<DaemonChannelsResource>;
-  notifyChannel(
-    request: DaemonChannelNotifyRequest,
-    workspaceCwd?: string,
-  ): Promise<DaemonChannelNotifyResult>;
   listChannelObservedContacts(
     workspaceId?: string,
   ): Promise<DaemonChannelObservedContacts>;

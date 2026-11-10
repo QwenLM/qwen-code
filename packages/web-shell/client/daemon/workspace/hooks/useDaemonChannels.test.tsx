@@ -37,7 +37,6 @@ const { actions, client, context, qualifiedWorkspace } = vi.hoisted(() => {
       startChannel: vi.fn(),
       stopChannel: vi.fn(),
       restartChannel: vi.fn(),
-      notifyChannel: vi.fn(),
       channelPairing: {
         list: vi.fn(),
         approve: vi.fn(),
@@ -111,7 +110,6 @@ describe('useDaemonChannels', () => {
       actions.startChannel,
       actions.stopChannel,
       actions.restartChannel,
-      actions.notifyChannel,
       actions.channelPairing.list,
       actions.channelPairing.approve,
       actions.channelPairing.approvals,
@@ -192,29 +190,6 @@ describe('useDaemonChannels', () => {
     );
     expect(qualifiedWorkspace.workspaceChannels).toHaveBeenCalledTimes(2);
     expect(Object.keys(result?.channels ?? {})).toEqual(['bot-b']);
-  });
-
-  it('sends notifications to the explicitly selected workspace through the shared action', async () => {
-    let result: ReturnType<typeof useDaemonChannels> | undefined;
-    function TestComponent() {
-      result = useDaemonChannels({ workspaceCwd: '/workspace-b' });
-      return null;
-    }
-    await act(async () => root.render(<TestComponent />));
-    const request = {
-      text: 'Test',
-      delivery: {
-        kind: 'channel' as const,
-        target: {
-          channelName: 'notices',
-          type: 'chat' as const,
-          id: 'default',
-        },
-      },
-    };
-    await result?.notify(request);
-    expect(actions.notifyChannel).toHaveBeenCalledWith(request, '/workspace-b');
-    expect(actions.loadChannels).not.toHaveBeenCalled();
   });
 
   it('reports errors when loading Channel data fails', async () => {

@@ -52,10 +52,8 @@ In Channels, choose DingTalk and its webhook sending method. Save the webhook
 URL and optional signing secret, then start the Channel. Receiving, pairing and
 agent-session settings do not apply to this method.
 
-Use the test-send action on the saved, running Channel to send a real test
-notification. A ready/connected status means local sending resources are ready;
-it does not verify remote credentials. A successful test means DingTalk accepted
-the API request, not that a group member has read the message.
+A ready/connected status means local sending resources are ready;
+it does not verify remote credentials.
 
 In Scheduled Tasks, choose a persistent task and select this Channel as the
 delivery destination. Web Shell fills the configured destination automatically;

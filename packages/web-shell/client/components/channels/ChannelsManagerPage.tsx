@@ -15,14 +15,12 @@ import {
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
-  CheckCircle2Icon,
   EllipsisVerticalIcon,
   PencilIcon,
   PlusIcon,
   RadioTowerIcon,
   RefreshCwIcon,
   RotateCwIcon,
-  SendIcon,
   Trash2Icon,
 } from 'lucide-react';
 import type {
@@ -105,7 +103,7 @@ interface ChannelsManagerPageProps {
   initialFocusRef?: Ref<HTMLHeadingElement>;
 }
 
-type ChannelAction = 'start' | 'stop' | 'restart' | 'startup' | 'test-send';
+type ChannelAction = 'start' | 'stop' | 'restart' | 'startup';
 
 function actionErrorKey(workspaceCwd: string | undefined, name: string) {
   return `${workspaceCwd ?? ''}\0${name}`;
@@ -146,8 +144,6 @@ export function ChannelsManagerPage({
   const workspace = useWorkspace();
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
-  const supportsDelivery =
-    workspace.capabilities?.features.includes('channel_delivery') === true;
   const bearerConfigured = Boolean(workspace.token);
   const { report: statusReport, loading: statusLoading } = useStatusReport({
     autoLoad: supportsManagement && !bearerConfigured,
@@ -213,7 +209,6 @@ export function ChannelsManagerPage({
     start,
     stop,
     restart,
-    notify,
     pairing,
   } = useChannels({
     autoLoad: supportsManagement,
@@ -239,9 +234,6 @@ export function ChannelsManagerPage({
     ? (busyByWorkspace[activeWorkspaceCwd] ?? null)
     : null;
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
-  const [testSuccesses, setTestSuccesses] = useState<Record<string, boolean>>(
-    {},
-  );
   const [deleteTarget, setDeleteTarget] = useState<{
     workspaceCwd?: string;
     instance: DaemonChannelInstanceSnapshot;
@@ -386,12 +378,8 @@ export function ChannelsManagerPage({
         delete next[errorKey];
         return next;
       });
-      setTestSuccesses((current) => ({ ...current, [errorKey]: false }));
       try {
         await operation();
-        if (action === 'test-send') {
-          setTestSuccesses((current) => ({ ...current, [errorKey]: true }));
-        }
       } catch (actionError) {
         setActionErrors((current) => ({
           ...current,
@@ -628,15 +616,6 @@ export function ChannelsManagerPage({
             <div className={styles.channelGrid}>
               {instances.map((channel) => {
                 const descriptor = descriptorFor(channel);
-                const defaultTarget = descriptor?.defaultDeliveryTarget;
-                const canTestSend =
-                  supportsDelivery &&
-                  defaultTarget !== undefined &&
-                  channel.runtime.state === 'connected';
-                const testSucceeded =
-                  testSuccesses[
-                    actionErrorKey(activeWorkspaceCwd, channel.name)
-                  ];
                 const runtimeError =
                   actionErrors[
                     actionErrorKey(activeWorkspaceCwd, channel.name)
@@ -784,50 +763,6 @@ export function ChannelsManagerPage({
                           <AlertTitle>{t('channels.runtimeError')}</AlertTitle>
                           <AlertDescription>{runtimeError}</AlertDescription>
                         </Alert>
-                      </CardContent>
-                    ) : null}
-                    {canTestSend ? (
-                      <CardContent className="flex flex-col gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="w-fit"
-                          disabled={!canManage || busy !== null}
-                          onClick={() =>
-                            void runAction(channel, 'test-send', () =>
-                              notify({
-                                text: t('channels.test.message'),
-                                delivery: {
-                                  kind: 'channel',
-                                  target: {
-                                    channelName: channel.name,
-                                    type: defaultTarget.type,
-                                    id: defaultTarget.id,
-                                  },
-                                },
-                              }),
-                            )
-                          }
-                        >
-                          {busy?.name === channel.name &&
-                          busy.action === 'test-send' ? (
-                            <Spinner />
-                          ) : (
-                            <SendIcon />
-                          )}
-                          {t('channels.action.testSend')}
-                        </Button>
-                        <p className="text-xs text-muted-foreground">
-                          {t('channels.test.description')}
-                        </p>
-                        {testSucceeded ? (
-                          <Alert role="status">
-                            <CheckCircle2Icon />
-                            <AlertTitle>
-                              {t('channels.test.accepted')}
-                            </AlertTitle>
-                          </Alert>
-                        ) : null}
                       </CardContent>
                     ) : null}
                     <CardFooter className={styles.channelFooter}>

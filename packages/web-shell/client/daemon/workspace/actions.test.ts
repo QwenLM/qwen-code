@@ -10,66 +10,6 @@ import { createDaemonWorkspaceActions } from './actions.js';
 import type { DaemonScheduledTask } from './types.js';
 
 describe('workspace actions', () => {
-  it('preflights delivery and notifies the selected workspace without a model session', async () => {
-    const request = {
-      text: 'Test',
-      delivery: {
-        kind: 'channel' as const,
-        target: {
-          channelName: 'notices',
-          type: 'chat' as const,
-          id: 'default',
-        },
-      },
-    };
-    const notify = vi
-      .fn()
-      .mockResolvedValue({ delivered: true, deliveryId: '1' });
-    const requireCapability = vi.fn().mockResolvedValue(undefined);
-    const workspaceByCwd = vi.fn(() => ({ notify }));
-    const actions = createDaemonWorkspaceActions({
-      getClient: () =>
-        ({ requireCapability, workspaceByCwd }) as unknown as DaemonClient,
-      getWorkspaceCwd: () => '/provider-workspace',
-      baseUrl: 'http://daemon',
-    });
-    await expect(
-      actions.notifyChannel(request, '/selected-workspace'),
-    ).resolves.toEqual({ delivered: true, deliveryId: '1' });
-    expect(requireCapability).toHaveBeenCalledWith('channel_delivery');
-    expect(workspaceByCwd).toHaveBeenCalledWith('/selected-workspace');
-    expect(notify).toHaveBeenCalledWith(request);
-    requireCapability.mockRejectedValueOnce(
-      new Error('Unsupported channel_delivery'),
-    );
-    await expect(
-      actions.notifyChannel(request, '/selected-workspace'),
-    ).rejects.toThrow('Unsupported channel_delivery');
-    expect(notify).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects test notification when there is no selected workspace', async () => {
-    const requireCapability = vi.fn();
-    const workspaceByCwd = vi.fn();
-    const actions = createDaemonWorkspaceActions({
-      getClient: () =>
-        ({ requireCapability, workspaceByCwd }) as unknown as DaemonClient,
-      getWorkspaceCwd: () => undefined,
-      baseUrl: 'http://daemon',
-    });
-    await expect(
-      actions.notifyChannel({
-        text: 'Test',
-        delivery: {
-          kind: 'channel',
-          target: { channelName: 'notices', type: 'chat', id: 'default' },
-        },
-      }),
-    ).rejects.toThrow();
-    expect(requireCapability).not.toHaveBeenCalled();
-    expect(workspaceByCwd).not.toHaveBeenCalled();
-  });
-
   it('loads authenticated observed contacts from the task workspace without ambient fallback', async () => {
     const contacts = {
       users: [],

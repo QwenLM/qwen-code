@@ -4679,11 +4679,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.method.webhook': 'Webhook (send only)',
   'channels.method.webhook.description':
     'Send notifications to the group configured by a custom robot webhook.',
-  'channels.action.testSend': 'Send test message',
-  'channels.test.message': 'Test message from Qwen Code.',
-  'channels.test.description':
-    'Sends a real test message to the configured destination. The robot’s keyword rules still apply.',
-  'channels.test.accepted': 'Test message accepted by the platform API.',
   'channels.status.readyToSend': 'Ready to send',
   'channels.statusDescription.readyToSend':
     'Ready locally. Remote credentials are checked when sending.',
@@ -9512,11 +9507,6 @@ const ZH: Messages = {
   'channels.method.webhook': 'Webhook（仅发送）',
   'channels.method.webhook.description':
     '通过自定义机器人 Webhook，向配置的群发送通知。',
-  'channels.action.testSend': '发送测试消息',
-  'channels.test.message': '来自 Qwen Code 的测试消息。',
-  'channels.test.description':
-    '向配置的目标发送真实测试消息，仍需满足机器人的关键词规则。',
-  'channels.test.accepted': '平台 API 已接受测试消息。',
   'channels.status.readyToSend': '可发送',
   'channels.statusDescription.readyToSend':
     '本地已就绪，远程凭证会在发送时验证。',

@@ -26,11 +26,6 @@ const {
         displayName: string;
         manageable: boolean;
         outboundOnly?: boolean;
-        defaultDeliveryTarget?: {
-          type: 'user' | 'chat';
-          id: string;
-          label?: string;
-        };
         fields: Array<{
           key: string;
           label: string;
@@ -72,7 +67,6 @@ const {
       start: vi.fn(),
       stop: vi.fn(),
       restart: vi.fn(),
-      notify: vi.fn(),
       pairing: {
         list: vi.fn(),
         approve: vi.fn(),
@@ -244,9 +238,6 @@ beforeEach(() => {
   channelState.current.start.mockReset().mockResolvedValue(undefined);
   channelState.current.stop.mockReset().mockResolvedValue(undefined);
   channelState.current.restart.mockReset().mockResolvedValue(undefined);
-  channelState.current.notify
-    .mockReset()
-    .mockResolvedValue({ delivered: true, deliveryId: 'test-1' });
   channelState.current.pairing.list
     .mockReset()
     .mockResolvedValue({ requests: [] });
@@ -273,7 +264,6 @@ describe('ChannelsManagerPage', () => {
     displayName: 'DingTalk Webhook',
     manageable: true,
     outboundOnly: true,
-    defaultDeliveryTarget: { type: 'chat' as const, id: 'default' },
     fields: [
       {
         key: 'webhookUrl',
@@ -314,59 +304,16 @@ describe('ChannelsManagerPage', () => {
     ).not.toContain('Conversation management');
   });
 
-  it('sends a real test message only to a saved running configured destination', async () => {
+  it('describes outbound readiness without claiming remote credential validation', async () => {
     channelState.current.catalog.push(webhookType);
     channelState.current.channels = {
       webhook: channel('webhook', 'dingtalk-webhook', 'connected'),
     };
-    workspaceState.current.capabilities.features.push('channel_delivery');
     await renderPage();
     expect(container.textContent).toContain('Ready to send');
     expect(container.textContent).toContain(
       'Remote credentials are checked when sending',
     );
-    const send = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === 'Send test message',
-    );
-    expect(send).toBeDefined();
-    await act(async () => {
-      send?.click();
-    });
-    expect(channelState.current.notify).toHaveBeenCalledWith({
-      text: 'Test message from Qwen Code.',
-      delivery: {
-        kind: 'channel',
-        target: { channelName: 'webhook', type: 'chat', id: 'default' },
-      },
-    });
-    expect(container.textContent).toContain(
-      'Test message accepted by the platform API.',
-    );
-    channelState.current.notify.mockRejectedValueOnce(
-      new Error('DingTalk rejected the message (310000).'),
-    );
-    await act(async () => {
-      send?.click();
-    });
-    expect(container.textContent).toContain(
-      'DingTalk rejected the message (310000).',
-    );
-    expect(container.textContent).not.toContain(
-      'Test message accepted by the platform API.',
-    );
-  });
-
-  it('does not offer test sending without delivery support or a running instance', async () => {
-    channelState.current.catalog.push(webhookType);
-    channelState.current.channels = {
-      webhook: channel('webhook', 'dingtalk-webhook', 'connected'),
-    };
-    await renderPage();
-    expect(container.textContent).not.toContain('Send test message');
-    workspaceState.current.capabilities.features.push('channel_delivery');
-    channelState.current.channels.webhook.runtime.state = 'stopped';
-    await renderPage();
-    expect(container.textContent).not.toContain('Send test message');
   });
 
   it('shows only the three enabled platforms and configured instances', async () => {
