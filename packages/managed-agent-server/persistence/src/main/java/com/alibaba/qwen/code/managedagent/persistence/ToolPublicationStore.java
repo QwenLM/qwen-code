@@ -239,7 +239,7 @@ public final class ToolPublicationStore {
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
         var head = jdbc.query(
-                                "SELECT workspace_id, state, storage_version, writer_id, writer_generation, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                                "SELECT workspace_id, state, storage_version, writer_id, writer_generation, writer_lease_until, CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS writer_live, recovery_status, activation_epoch, journal_revision, activation_id, activation_phase, activation_event_epoch, activation_expires_at, activation_head_revision FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session()).getFirst();
         require(((Number) head.get("storage_version")).intValue() >= 1
                 && ((Number) head.get("storage_version")).intValue() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED,
@@ -291,9 +291,11 @@ public final class ToolPublicationStore {
                 ((Number) head.get("activation_expires_at")).longValue(), nowEpoch,
                 deferActivationLapse);
         nowEpoch = ToolPublicationRetentionStore.now(jdbc);
-        Integer writerLive = jdbc.queryForObject(
-                        "SELECT CASE WHEN writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, ManagedSchemaKeys.key(row.tenant()), ManagedSchemaKeys.key(row.session()), row.tenant(), row.session());
-        if (writerLive == null || writerLive != 1) {
+        // The head row is already locked FOR UPDATE above and the earlier
+        // fence required a live writer, so its lease deadline is non-null and
+        // cannot change here; only the clock advances. Re-check it against the
+        // fresh clock without a second lock read of the same row.
+        if (((Number) head.get("writer_lease_until")).longValue() <= nowEpoch) {
             require(false, "Original Session or activation expired");
         }
         if (activationUntil <= nowEpoch) {
