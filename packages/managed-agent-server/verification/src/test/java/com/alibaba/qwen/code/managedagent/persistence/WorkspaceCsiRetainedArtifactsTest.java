@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExten
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,12 +57,12 @@ class WorkspaceCsiRetainedArtifactsTest {
         expected = fixture.historicalKeys();
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
         clock.advance(Duration.between(clock.instant(), Instant.now()));
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, clock, ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         accepted();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,display_name,config_ref,policy_ref,state)"
                 + " VALUES ('foreign','workspace',1,'ordinary-storage','Fixture',?,?,'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES ('foreign','workspace',?,'OPERATOR')",
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("foreign", "actor"));
+                ManagedWorkspaceRegistry.actorKey("foreign", "actor"));
         session = tx.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId("foreign")
                 .actorId("actor")
@@ -83,7 +85,7 @@ class WorkspaceCsiRetainedArtifactsTest {
     void acceptsEmptyMessagesAndActualAgentResourcesIncludingEmptyAndLiteralText() throws Exception {
         materialize();
         assertThat(tx.execute(status -> store.findMessagePage("foreign", session, null, 100, true)).items()).isEmpty();
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String literal = "Unicode 指令 {\"sessionId\":\"" + expected.table("ma_session").rows().getFirst().text("session_id") + "\"}";
         for (String text : List.of("", literal)) {
             tx.execute(status -> resources.publishAgentInstructions("foreign", "workspace", session, text));
@@ -221,7 +223,7 @@ class WorkspaceCsiRetainedArtifactsTest {
                     default -> throw new AssertionError(fault);
                 }
                 String id = String.join(":", identity);
-                String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey((String) original.get("session_scope_key"), id);
+                String key = ManagedSessionStore.resourceKey((String) original.get("session_scope_key"), id);
                 assertThat(jdbc.update("UPDATE ma_resource SET resource_key=?,resource_id=? WHERE resource_key=?",
                         key, id, oldBody)).isEqualTo(1);
             }
@@ -233,7 +235,7 @@ class WorkspaceCsiRetainedArtifactsTest {
     @ParameterizedTest
     @ValueSource(strings = {"instructions-utf8", "skills-shape", "skills-path", "skills-field", "publish-command", "agent-scope"})
     void refusesMalformedAgentArtifactsWithOtherwiseCorrectDigests(String fault) throws Exception {
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.execute(status -> resources.publishAgentInstructions("foreign", "workspace", session, "valid"));
         tx.execute(status -> resources.publishAgentSkills("foreign", "workspace", session, List.of(Map.of("name", "review", "description", "description", "body", "body"))));
         accepted();
@@ -293,7 +295,7 @@ class WorkspaceCsiRetainedArtifactsTest {
             String oldId = (String) original.get("resource_id");
             String digest = WorkspaceEvidenceResources.digest(bytes);
             String id = oldId.substring(0, oldId.lastIndexOf(':') + 1) + digest;
-            String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey((String) original.get("session_scope_key"), id);
+            String key = ManagedSessionStore.resourceKey((String) original.get("session_scope_key"), id);
             assertThat(jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                     + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create,last_verified_at,retention_until)"
                     + " SELECT ?,session_scope_key,tenant_id,workspace_id,session_id,?,kind,schema_version,?,?,storage_kind,?,state,"
@@ -308,9 +310,9 @@ class WorkspaceCsiRetainedArtifactsTest {
     private void replaceAgent(String kind, byte[] bytes) {
         String digest = WorkspaceEvidenceResources.digest(bytes);
         String id = (kind.equals("managed-agent-instructions") ? "agent-instructions-" : "agent-skills-") + digest;
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("foreign", session);
+        String scope = ManagedSessionStore.sessionScopeKey("foreign", session);
         jdbc.update("UPDATE ma_resource SET resource_key=?,resource_id=?,publish_command_id=?,inline_bytes=?,byte_length=?,sha256=? WHERE kind=?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id), id, id, bytes, bytes.length, digest, kind);
+                ManagedSessionStore.resourceKey(scope, id), id, id, bytes, bytes.length, digest, kind);
     }
 
     private List<String> artifactBytes() {

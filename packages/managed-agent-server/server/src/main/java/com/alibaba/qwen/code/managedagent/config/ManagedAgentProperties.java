@@ -1,9 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import jakarta.annotation.PostConstruct;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -24,7 +22,6 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -67,6 +64,7 @@ public class ManagedAgentProperties
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
@@ -80,12 +78,14 @@ public class ManagedAgentProperties
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
+    private boolean sideQueriesEnabled;
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
     private List<String> definitionToolProfiles =
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
     private List<ModelOption> modelCatalog = List.of();
+    private List<String> modelConfigBaseUrls = List.of();
     private String trustedActorHeader = "";
     // The account the server runs as; preflight checks file access as it.
     private String serviceUser = "";
@@ -99,6 +99,19 @@ public class ManagedAgentProperties
     // Null on a plain `new`; the sweep then falls back to magnitude bands.
     @Getter(AccessLevel.NONE)
     private Environment environment;
+
+    @Getter
+    @Setter
+    public static class Memory {
+        private boolean enabled;
+        private String endpoint;
+        private String apiKey;
+    }
+
+    @Override
+    public boolean isMemoryEnabled() {
+        return memory.isEnabled();
+    }
 
     public boolean admitsPublicChildAgents() {
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
@@ -131,6 +144,8 @@ public class ManagedAgentProperties
 
     /** Runs the startup validation without a Spring context. */
     public void validateForPreflight() {
+        applyHarnessCredentialsFile();
+        validateRuntimeProvider();
         validateWorkspaceFiles();
     }
 
@@ -322,7 +337,6 @@ public class ManagedAgentProperties
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
-        validateExternalRuntime();
         if (runtimeBroker.getSsh().isEnabled() && (!harness.isWorkspaceFilesEnabled()
                 || runtimeBroker.getSsh().getNodes().isEmpty())) {
             throw new IllegalStateException("SSH Runtime requires Workspace files and configured nodes");
@@ -334,6 +348,11 @@ public class ManagedAgentProperties
                     + " a suffix-less number binds as seconds, so write 300s rather than 300000");
         }
         String mode = harness.getApprovalMode();
+        boolean sshFiles = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS
+                .equals(runtimeBroker.getProvisioner())
+                && !runtimeBroker.getSsh().getNodes().isEmpty()
+                && "session".equals(runtimeBroker.getIsolationClass())
+                && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
         boolean residentFiles = "kubernetes-workspace".equals(runtimeBroker.getProvisioner())
                 && "workspace".equals(runtimeBroker.getIsolationClass())
                 && !runtimeBroker.getResidentWorkspaces().isEmpty() && runtimeBroker.getWorkspaceMounts().isEmpty()
@@ -359,7 +378,7 @@ public class ManagedAgentProperties
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !residentFiles && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                        || !residentFiles && !sshFiles && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
@@ -372,7 +391,7 @@ public class ManagedAgentProperties
             throw new IllegalStateException(
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
-                            + " local-process Broker with Workspace mounts");
+                            + " local-process Broker with Workspace mounts or an SSH-only Broker");
         }
         String boundSessionIsolation = runtimeBroker.getBoundSessionIsolationClass();
         if (!"session".equals(boundSessionIsolation) && !"workspace".equals(boundSessionIsolation)) {
@@ -472,86 +491,10 @@ public class ManagedAgentProperties
         }
     }
 
-    /**
-     * Shared startup and preflight validation for every external worker kind.
-     *
-     * <p>{@code external-workspace} is a provisioning prerequisite in this
-     * increment: it binds registered EXTERNAL storage, but Hosted files, Shell and
-     * Session close stay unimplemented, so it must keep the managed Workspace
-     * features disabled exactly as the scratch profile does.
-     */
-    public void validateExternalRuntime() {
-        String provisioner = runtimeBroker.getProvisioner();
-        if (!ExternalRuntimeKinds.isExternal(provisioner)) {
-            return;
-        }
-        if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
-                || !runtimeBroker.getWorkspaceMounts().isEmpty()
-                || !runtimeBroker.getResidentWorkspaces().isEmpty()
-                || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
-                || runtimeBroker.isLocalDirectoryImportEnabled()
-                || runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
-                || runtimeBroker.isOperatorRecoveryEnabled()
-                || runtimeBroker.isChildWorkspacesEnabled() || runtimeBroker.isChildSnapshotsEnabled()
-                || runtimeBroker.getSsh().isEnabled() || !runtimeBroker.getSsh().getNodes().isEmpty()) {
-            throw new IllegalStateException(ExternalRuntimeKinds.isWorkspace(provisioner)
-                    ? "External Workspace Runtime is a storage provisioning prerequisite;"
-                            + " managed Workspace files, Shell and recovery features must stay"
-                            + " disabled until files execution and Session close are verified"
-                    : "External Runtime supports scratch Sessions only;"
-                            + " managed Workspace features must be disabled");
-        }
-        if (!"session".equals(runtimeBroker.getIsolationClass())
-                || !"session".equals(runtimeBroker.getBoundSessionIsolationClass())
-                || runtimeBroker.isSessionCreateWarm()) {
-            throw new IllegalStateException("External Runtime requires session isolation without Session-create warm");
-        }
-        if (runtimeBroker.isTrustedLocalRebootRecovery()) {
-            throw new IllegalStateException("External Runtime requires"
-                    + " QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false");
-        }
-        URI provider;
-        try {
-            provider = URI.create(runtimeBroker.getExternalProviderUrl());
-        } catch (IllegalArgumentException | NullPointerException error) {
-            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL");
-        }
-        if ((!"http".equals(provider.getScheme()) && !"https".equals(provider.getScheme()))
-                || provider.getHost() == null || provider.getUserInfo() != null
-                || provider.getQuery() != null || provider.getFragment() != null) {
-            throw new IllegalStateException("External Runtime provider URL must be an HTTP(S) URL"
-                    + " without credentials, query or fragment");
-        }
-        String token = runtimeBroker.getExternalProviderToken();
-        if (token == null || !token.matches("[A-Za-z0-9._~+/=-]{16,4096}")) {
-            throw new IllegalStateException("External Runtime provider token must be 16-4096 safe characters");
-        }
-        // The shipped templates' placeholder satisfies the format rule, but
-        // anyone can read it in the distribution (preflight refuses the same
-        // shape for the Harness token).
-        if (token.startsWith("replace-")) {
-            throw new IllegalStateException("External Runtime provider token is still"
-                    + " the shipped template placeholder");
-        }
-        String digest = harness.getCapabilityDigest();
-        if (StringUtils.isNotBlank(digest) && !digest.matches("sha256:[0-9a-f]{64}")) {
-            throw new IllegalStateException("External Runtime Harness capability digest"
-                    + " must be sha256:<64 lowercase hex>");
-        }
-        BrokerValues.requireId(runtimeBroker.getExternalProviderId(), "External Runtime provider ID");
-        BrokerValues.requireId(runtimeBroker.getWorkspaceId(), "External Runtime workspace ID");
-        String cwd = runtimeBroker.getWorkspaceCwd();
-        if (cwd == null || !cwd.startsWith("/")
-                || java.util.Arrays.stream(cwd.substring(1).split("/", -1))
-                        .anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."))) {
-            throw new IllegalStateException("External Runtime workspace cwd must be an absolute normalized"
-                    + " worker path other than the filesystem root");
-        }
-        Duration request = runtimeBroker.getExternalRequestTimeout();
-        Duration startup = runtimeBroker.getExternalStartupTimeout();
-        if (request == null || request.compareTo(Duration.ofMillis(1)) < 0
-                || startup == null || startup.compareTo(Duration.ofMillis(1)) < 0) {
-            throw new IllegalStateException("External Runtime request and startup timeouts must be at least 1ms");
+    public void validateRuntimeProvider() {
+        if (runtimeBroker.isEnabled()) {
+            new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+                    .validateSelected(this);
         }
     }
 
@@ -835,6 +778,8 @@ public class ManagedAgentProperties
     public static class Extensions
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Extensions {
         private boolean enabled;
+        private boolean selfServiceEnabled;
+        private boolean runtimeSkillImportEnabled;
         private String artifactDirectory = "";
         private List<String> allowedActors = List.of();
 
@@ -927,6 +872,7 @@ public class ManagedAgentProperties
         private int port = 4182;
         private boolean allowNonLoopback;
         private String token = "";
+        private Map<String, String> providerOptions = Map.of();
         private String provisioner = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration v3ResultWindow = Duration.ofMinutes(30);
@@ -942,6 +888,7 @@ public class ManagedAgentProperties
         private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
+        private boolean toolMeasurements;
         private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
@@ -1046,7 +993,7 @@ public class ManagedAgentProperties
     @Setter
     public static class Automation
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Automation {
-        private boolean enabled;
+        private boolean enabled = true;
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration scanDelay = Duration.ofSeconds(10);
         @DurationUnit(ChronoUnit.MILLIS)

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -22,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGua
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -59,11 +61,12 @@ class WorkspaceCsiNativeActivationGateTest {
     private static final ObjectMapper JSON = new ObjectMapper()
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private TransactionTemplate transaction;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
     private JdbcToolExecutionRepository executions;
-    private ManagedSessionStore journal;
+    private JdbcManagedSessionStore journal;
     private RuntimeProvisionRequest request;
     private RuntimeBindingRecord binding;
     private WorkspaceCsiReservationStore reservations;
@@ -73,12 +76,15 @@ class WorkspaceCsiNativeActivationGateTest {
     private JsonNode nativeFixture;
     private String writerId;
     private String token;
+    private boolean activityDiagnostics;
     @TempDir
     Path directory;
 
     @BeforeEach
     void setUp(TestInfo info) throws Exception {
-        var source = dataSource();
+        String method = info.getTestMethod().orElseThrow().getName();
+        var source = new StoreLockTrace(dataSource());
+        trace = source;
         Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
@@ -95,19 +101,28 @@ class WorkspaceCsiNativeActivationGateTest {
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         sessionId = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, JSON, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
+        if (method.contains("LegacyProfile")) {
+            var legacy = CsiFilesRetirementProfile.request(new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                    "tenant", "workspace", 3, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
+                    "/workspace", sessionId, CsiFilesRetirementProfile.PROFILE);
+            jdbc.update("UPDATE ma_session SET tool_profile=?, runtime_request_key=? WHERE tenant_id=? AND session_id=?",
+                    CsiFilesRetirementProfile.PROFILE, legacy.requestKey(),
+                    ManagedSchemaKeys.identity("tenant"), ManagedSchemaKeys.identity(sessionId));
+            request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
+        }
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source, bindings);
-        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         binding = bindings.findOrCreate(request);
         binding = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
         reservation = reservations.reserve(registration, bindings, binding, UUID.randomUUID().toString());
@@ -117,9 +132,9 @@ class WorkspaceCsiNativeActivationGateTest {
         binding = bindings.compareAndSet(binding, binding.withAttestation(lease,
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
-        String method = info.getTestMethod().orElseThrow().getName();
+        activityDiagnostics = method.contains("ActivityDiagnostics");
         boolean extracted = method.startsWith("hostedTextConversation");
-        generate(method.startsWith("textConversation") || extracted, extracted, method.contains("LegacyTerminal"));
+        generate(method.startsWith("textConversation") || extracted, extracted, method.contains("LegacyTerminal"), method.contains("Diagnostics"));
         writerId = nativeFixture.path("writerId").textValue();
         token = nativeFixture.path("writerToken").textValue();
         transaction.execute(status -> journal.acquireWriter("tenant", sessionId, token,
@@ -129,6 +144,29 @@ class WorkspaceCsiNativeActivationGateTest {
     protected DataSource dataSource() {
         return new DriverManagerDataSource("jdbc:h2:mem:csi-native-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+    }
+
+    @Test
+    void csiCommitAndReplayKeepOneJournalHeadAndOrderedAuthorityChecks() throws Exception {
+        trace.clear();
+        ready();
+        trace.assertRootBeforeHead("tenant", sessionId);
+        var heads = trace.successful("tenant", sessionId).stream().filter(StoreLockTrace.Event::mappedHead).toList();
+        assertThat(heads).hasSize(2);
+        assertThat(heads.stream().map(event -> event.connection() + ":" + event.transaction()).distinct()).hasSize(2);
+        trace.clear();
+        assertThat(commit(1).replayed()).isTrue();
+        trace.assertRootBeforeHead("tenant", sessionId);
+        trace.assertOneTransaction("tenant", sessionId);
+        var replayHeads = trace.successful("tenant", sessionId).stream().filter(StoreLockTrace.Event::head).toList();
+        assertThat(replayHeads).hasSize(4);
+        assertThat(replayHeads.getFirst().mappedHead()).isTrue();
+        assertThat(replayHeads.stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(1);
+        assertThat(replayHeads.get(1).sql()).isEqualTo(replayHeads.getLast().sql())
+                .startsWith("select latest_checkpoint_resource_id, harness_session_id from ma_session_head ");
+        assertThat(replayHeads.get(2).sql()).contains("and harness_session_id = ? for update");
+        assertThat(trace.successful("tenant", sessionId).stream().filter(event -> event.sql()
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(1);
     }
 
     @Test
@@ -294,7 +332,7 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(39);
+        assertThat(rows).hasSize(42);
         return rows;
     }
 
@@ -764,6 +802,49 @@ class WorkspaceCsiNativeActivationGateTest {
     }
 
     @Test
+    void hostedTextConversationDiagnosticsCommitsPromoteStorageAndKeepExactReplay() throws Exception {
+        ready();
+        int terminalRelease = nativeFixture.path("commits").size() - 1;
+        for (int index = 2; index < terminalRelease; index++) {
+            assertThat(commit(index).replayed()).isFalse();
+        }
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(3);
+        var diagnostics = new JdbcManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
+        assertThat(diagnostics.statistics()).isNotNull();
+        assertThat(diagnostics.statistics().at("/totals/requests/total").asInt()).isEqualTo(2);
+        var before = allRows();
+        for (int index = 0; index < terminalRelease; index++) {
+            assertThat(commit(index).replayed()).isTrue();
+        }
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    @Test
+    void textConversationLegacyProfileRefusesDiagnosticsStoragePromotion() throws Exception {
+        ready();
+        for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
+            JsonNode candidate = nativeFixture.path("commits").get(index).path("request");
+            boolean diagnostics = false;
+            for (JsonNode resource : candidate.path("resources")) {
+                diagnostics |= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS
+                        .contains(resource.path("kind").asText());
+            }
+            if (!diagnostics) {
+                commit(index);
+                continue;
+            }
+            assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(1);
+            var before = allRows();
+            var value = JSON.treeToValue(candidate, ManagedSessionStoreModels.CommitTransactionRequest.class);
+            assertThatThrownBy(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, value)))
+                    .isInstanceOf(ManagedAgentException.class).hasMessageContaining("does not admit the requested storage format");
+            assertThat(allRows()).isEqualTo(before);
+            return;
+        }
+        throw new AssertionError("The native producer must emit a diagnostics carrier");
+    }
+
+    @Test
     void hostedTextConversationRetirementRetainsTheExactMainModelUsageProjection() throws Exception {
         ready();
         for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
@@ -783,6 +864,28 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(reference.text("resource_id")).isEqualTo(projection.text("record_resource_id"));
         assertThat(reference.number("owner_revision")).isEqualTo(projection.number("revision"));
         assertThat(reference.number("journal_revision")).isNull();
+        assertThat(applicationInventory(intent).bytes()).isEqualTo(baseline.bytes());
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    @Test
+    void hostedTextConversationActivityDiagnosticsRetireWithVerifiedDerivedRows() throws Exception {
+        ready();
+        for (int index = 2; index < nativeFixture.path("commits").size() - 1; index++) {
+            commit(index);
+        }
+        var head = journal.restore("tenant", "workspace", sessionId, token);
+        assertThat(head.storageVersion()).isEqualTo(4);
+        var intent = retire();
+        var baseline = applicationInventory(intent);
+        assertThat(baseline.blockers()).isEmpty();
+        assertThat(baseline.table("ma_session_record").rows().stream().map(row -> row.text("domain")))
+                .contains("hosted_activity_statistics");
+        var edges = CsiActivityDiagnosticProjection.references(baseline.table("ma_session_journal_tx").rows(),
+                baseline.table("ma_session_record").rows(), baseline.table("ma_resource").rows(),
+                baseline.table("ma_resource_ref").rows(), request, Long.MAX_VALUE);
+        assertThat(edges).hasSize(1);
+        var before = allRows();
         assertThat(applicationInventory(intent).bytes()).isEqualTo(baseline.bytes());
         assertThat(allRows()).isEqualTo(before);
     }
@@ -879,11 +982,13 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(allRows()).isEqualTo(before);
     }
 
-    private void generate(boolean conversation, boolean extracted, boolean legacyTerminal) throws Exception {
+    private void generate(boolean conversation, boolean extracted, boolean legacyTerminal, boolean diagnostics) throws Exception {
         Path root = VerificationFixtures.repositoryRoot().toRealPath();
         Path input = directory.resolve("input.json");
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
-                .put("capabilityDigest", CsiFilesRetirementProfile.CAPABILITY_DIGEST);
+                .put("capabilityDigest", request.getScope().getCapabilityDigest())
+                .put("toolProfile", CsiFilesRetirementProfile.profile(request.getScope())).put("diagnostics", diagnostics);
+        value.put("activityDiagnostics", activityDiagnostics);
         if (conversation) {
             value.put("conversation", true);
         }

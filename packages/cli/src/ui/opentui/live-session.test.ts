@@ -59,8 +59,10 @@ import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/ch
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import type { Part } from '@google/genai';
 
 function steering(...texts: string[]): OpenTuiSteeringSubmission[] {
   return texts.map((text) => ({ text, content: text }));
@@ -922,8 +924,12 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band above the prompt.
-    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt']);
+    // OpenTUI offers the band above the prompt, raises prompt.submit and
+    // runs the prompts the Mods submit.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt'], {
+      prompts: true,
+      runsPrompts: true,
+    });
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -1749,6 +1755,127 @@ describe('livePromptEvents', () => {
       submittedPrompt: '@file.txt raw composer text',
     });
     expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it("rides the Mods' prompt context on the first send only", async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'ctx-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    await drain(
+      livePromptEvents(config, 'payload', undefined, {
+        submittedPrompt: 'payload',
+        promptContext: ['Mod context'],
+      }),
+    );
+    const [first, second] = sendMessageStream.mock.calls.map(
+      (call) => (call as unknown[])[3],
+    );
+    expect(first).toEqual({
+      type: SendMessageType.UserQuery,
+      submittedPrompt: 'payload',
+      promptContext: ['Mod context'],
+    });
+    expect(second).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it.each([false, true])(
+    "sends a Mod's prompt as the Mod's, reading no @path in it (asUser %s)",
+    async (asUser) => {
+      const sendMessageStream = oneToolBatchStream({
+        callId: 'mod-tool',
+        name: 'test_tool',
+        args: {},
+      });
+      const config = createFakeConfig(sendMessageStream);
+      const calls = new Map<string, ReturnType<typeof vi.fn>>();
+      const dualOutput = new Proxy(
+        {},
+        {
+          get: (_target, key: string) => {
+            if (key === 'isConnected') return true;
+            if (!calls.has(key)) calls.set(key, vi.fn());
+            return calls.get(key);
+          },
+        },
+      ) as Record<string, ReturnType<typeof vi.fn>>;
+      const modPrompt = {
+        plugin: 'followup-mod',
+        text: 'Summarize @src/a.ts',
+        ...(asUser && { asUser: true as const }),
+      };
+      await drain(
+        livePromptEvents(config, 'framed @src/a.ts', undefined, {
+          submittedPrompt: modPrompt.text,
+          modPrompt,
+          dualOutput: dualOutput as unknown as DualOutputBridge,
+        }),
+      );
+      expect(atMocks.calls).toEqual([]);
+      const [first, second] = sendMessageStream.mock.calls.map(
+        (call) => call as unknown[],
+      );
+      expect(first[0]).toBe('framed @src/a.ts');
+      expect(first[3]).toEqual({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'Summarize @src/a.ts',
+        submittedByMod: 'followup-mod',
+        ...(asUser && { submittedAsUser: true }),
+        memoryRecallQuery: 'Summarize @src/a.ts',
+      });
+      expect(second[3]).toEqual({ type: SendMessageType.ToolResult });
+      // The sidecar sees the Mod's text, not the frame, and who sent it.
+      expect(dualOutput['emitUserMessage']).toHaveBeenCalledTimes(1);
+      expect(dualOutput['emitUserMessage']).toHaveBeenCalledWith([
+        { text: 'Summarize @src/a.ts' },
+      ]);
+      expect(dualOutput['emitSystemMessage']).toHaveBeenCalledWith(
+        'mod_prompt',
+        {
+          mod: 'followup-mod',
+        },
+      );
+    },
+  );
+
+  it("tells the sidecar a retried Mod's prompt is the Mod's, not the frame", async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'mod-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const calls = new Map<string, ReturnType<typeof vi.fn>>();
+    const dualOutput = new Proxy(
+      {},
+      {
+        get: (_target, key: string) => {
+          if (key === 'isConnected') return true;
+          if (!calls.has(key)) calls.set(key, vi.fn());
+          return calls.get(key);
+        },
+      },
+    ) as Record<string, ReturnType<typeof vi.fn>>;
+    const modPrompt = { plugin: 'followup-mod', text: 'Summarize it' };
+    await drain(
+      livePromptEvents(config, 'unused', undefined, {
+        submittedPrompt: modPrompt.text,
+        modPrompt,
+        dualOutput: dualOutput as unknown as DualOutputBridge,
+        retry: {
+          content: 'framed: Summarize it',
+          inlineModelOverride: false,
+        },
+      }),
+    );
+    expect(dualOutput['emitUserMessage']).toHaveBeenCalledExactlyOnceWith([
+      { text: 'Summarize it' },
+    ]);
+    expect(dualOutput['emitSystemMessage']).toHaveBeenCalledWith('mod_prompt', {
+      mod: 'followup-mod',
+    });
   });
 
   it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {
@@ -4148,4 +4275,168 @@ describe('live checkpoint producer and approval ownership', () => {
     'does not publish after async temporary write when %s',
     (invalidate) => scenario({ invalidate }),
   );
+});
+
+describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLoop)', () => {
+  const shared = (config: Config) =>
+    ({ ...config, isUnifiedAgentLoopEnabled: () => true }) as unknown as Config;
+  const call = (callId: string) => ({
+    type: 'tool_call_request',
+    value: { callId, name: 'test_tool', args: {} },
+  });
+  /** The ids of the function responses each continuation sent. */
+  const sentResponses = (send: ReturnType<typeof vi.fn>) =>
+    send.mock.calls
+      .slice(1)
+      .map((args) =>
+        (args[0] as Part[]).map((part) => part.functionResponse?.id),
+      );
+
+  it('sends the same requests and yields the same events as the current path', async () => {
+    const runs = [];
+    for (const onShared of [false, true]) {
+      const send = oneToolBatchStream({
+        callId: 't1',
+        name: 'test_tool',
+        args: {},
+      });
+      const config = createFakeConfig(send);
+      const events = await drain(
+        livePromptEvents(
+          onShared ? shared(config) : config,
+          'start',
+          undefined,
+          {
+            promptId: 'p1',
+          },
+        ),
+      );
+      runs.push({
+        events,
+        requests: send.mock.calls.map(([parts, , promptId, options]) => ({
+          parts,
+          promptId,
+          options,
+        })),
+      });
+    }
+    expect(runs[1].requests).toHaveLength(2);
+    expect(runs[1]).toEqual(runs[0]);
+  });
+
+  it.each(['retry', 'model_fallback'])(
+    'runs only the calls of the attempt a %s replaced them with',
+    async (type) => {
+      let sends = 0;
+      const send = vi.fn(function* () {
+        if (++sends > 1) return;
+        yield call('stale');
+        yield { type };
+        yield call('fresh');
+      });
+      await drain(livePromptEvents(shared(createFakeConfig(send)), 'start'));
+      expect(sentResponses(send)).toEqual([['fresh']]);
+    },
+  );
+
+  it('settles tool cards when a round detects a loop', async () => {
+    const runs = [];
+    for (const onShared of [false, true]) {
+      let sends = 0;
+      const send = vi.fn(function* () {
+        if (++sends > 1) return;
+        yield call('t1');
+        yield { type: 'loop_detected' };
+      });
+      const config = createFakeConfig(send);
+      const events = await drain(
+        livePromptEvents(onShared ? shared(config) : config, 'start'),
+      );
+      const items = events.reduce<readonly LiveHistoryItem[]>(
+        foldLiveEvent,
+        [],
+      );
+      runs.push({
+        sends: send.mock.calls.length,
+        card: items.find((item) => item.kind === 'tool' && item.id === 't1'),
+      });
+    }
+    expect(runs).toMatchObject([
+      { sends: 2, card: { done: true, success: true } },
+      { sends: 1, card: { done: true, success: false, summary: 'cancelled' } },
+    ]);
+  });
+
+  it('pairs sidecar tool uses before yielding cancelled cards', async () => {
+    const send = vi.fn(function* () {
+      yield call('t1');
+      yield call('t2');
+      yield { type: 'loop_detected' };
+    });
+    const order: string[] = [];
+    const dualOutput = {
+      emitUserMessage: vi.fn(),
+      startAssistantMessage: vi.fn(),
+      processEvent: vi.fn(),
+      finalizeAssistantMessage: () => order.push('assistant'),
+      emitToolResult: vi.fn<DualOutputBridge['emitToolResult']>((request) => {
+        order.push(`result:${request.callId}`);
+      }),
+    };
+    for await (const event of livePromptEvents(
+      shared(createFakeConfig(send)),
+      'start',
+      undefined,
+      { dualOutput: dualOutput as unknown as DualOutputBridge },
+    )) {
+      if (event.type === 'tool-end') {
+        order.push(`card:${event.id}`);
+        break;
+      }
+    }
+    expect(order).toEqual(['assistant', 'result:t1', 'result:t2', 'card:t1']);
+    expect(
+      dualOutput.emitToolResult.mock.calls.map(([request, response]) => [
+        request.callId,
+        response.callId,
+        response.executionStatus,
+      ]),
+    ).toEqual([
+      ['t1', 't1', 'not_started'],
+      ['t2', 't2', 'not_started'],
+    ]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("closes the round's stream when the turn is no longer current", async () => {
+    let current = true;
+    let closed = false;
+    const send = vi.fn(function* () {
+      try {
+        yield { type: 'content', value: 'a' };
+        current = false;
+        yield call('t1');
+        yield { type: 'content', value: 'b' };
+      } finally {
+        closed = true;
+      }
+    });
+    await drain(
+      livePromptEvents(shared(createFakeConfig(send)), 'start', undefined, {
+        isCurrentTurn: () => current,
+      }),
+    );
+    expect(closed).toBe(true);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("rethrows the round's stream failure", async () => {
+    const send = vi.fn(function* () {
+      yield { type: 'content', value: 'a' };
+      throw new Error('provider failed');
+    });
+    await expect(
+      drain(livePromptEvents(shared(createFakeConfig(send)), 'start')),
+    ).rejects.toThrow('provider failed');
+  });
 });

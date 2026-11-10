@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -31,7 +32,7 @@ class ManagedSessionPhysicalFenceTest {
     private static final String STORAGE = "second-alias";
     protected ManagedSchemaJdbcTemplate jdbc;
     protected TransactionTemplate transactions;
-    protected ManagedSessionStore sessions;
+    protected JdbcManagedSessionStore sessions;
     protected long generation;
     protected final String physical = ManagedSchemaKeys.key("same-native-device");
 
@@ -50,7 +51,7 @@ class ManagedSessionPhysicalFenceTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         generation =
                 transactions
                         .execute(
@@ -318,15 +319,15 @@ class ManagedSessionPhysicalFenceTest {
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
                         + " (?, 'workspace', ?, 'OPERATOR')",
                 TENANT,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "actor"));
+                ManagedWorkspaceRegistry.actorKey(TENANT, "actor"));
         var publicStore =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         jdbc,
                         new com.fasterxml.jackson.databind.ObjectMapper(),
                         java.time.Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
-                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new JdbcManagedWorkspaceRegistry(jdbc),
+                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var selection =
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("workspace", ".");
         var parent =

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -62,8 +63,8 @@ final class WorkspaceRecoveryReader {
     JsonNode resource(JsonNode source, JsonNode ref) {
         validateRef(ref);
         JsonNode head = head(source);
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
-        String resourceKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
+        String sessionScope = ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
+        String resourceKey = ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
         var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ? AND resource_id = ?",
                 resourceKey, sessionScope, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
@@ -100,7 +101,7 @@ final class WorkspaceRecoveryReader {
                         && row.get("object_version_id") == null && row.get("encryption_key_id") == null,
                         "resource_layout_unsupported");
                 bytes = (byte[]) row.get("inline_bytes");
-                var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref USE INDEX (ix_ma_ref_resource)"
+                var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref USE INDEX (idx_ma_ref_resource)"
                         + " WHERE resource_key = ? AND session_scope_key = ? AND owner_kind IN ('JOURNAL','SESSION_RECORD')"
                         + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND journal_revision <= ? LIMIT 1", String.class, resourceKey, sessionScope,
@@ -138,7 +139,7 @@ final class WorkspaceRecoveryReader {
         JsonNode head = head(source);
         var rows = WorkspaceOperations.rows(jdbc, "SELECT publication_id, slot_key FROM ma_resource"
                 + " WHERE resource_key = ? AND scope_key = ? AND resource_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId")), text(ref, "resourceId")),
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId")), text(ref, "resourceId")),
                 scope(head), text(ref, "resourceId"));
         check(rows.size() == 1, "resource_missing");
         var row = rows.getFirst();
@@ -298,7 +299,7 @@ final class WorkspaceRecoveryReader {
         check(rows.size() == 1, "publication_scope_conflict");
         var row = rows.getFirst();
         check(!"DELETING".equals(row.get("retention_state")), "source_drift");
-        check("REFERENCED".equals(row.get("producer_phase")) && Boolean.FALSE.equals(row.get("quarantined"))
+        check("REFERENCED".equals(row.get("producer_phase")) && Boolean.FALSE.equals(row.get("is_quarantined"))
                 && row.get("receipt_revision") instanceof Number && row.get("receipt_sequence") instanceof Number
                 && number(row, "receipt_revision") > 0 && number(row, "receipt_revision") <= head.path("journalRevision").asLong()
                 && number(row, "receipt_sequence") > 0 && number(row, "receipt_sequence") <= head.path("committedSequence").asLong(),

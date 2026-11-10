@@ -26,7 +26,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
@@ -266,8 +267,8 @@ class HarnessCoordinatorTest {
         verify(harness, never()).createOrLoad(anyString(), anyString(), anyBoolean());
     }
 
-    private static SessionWorktreeStore.Descriptor worktree(String state) {
-        return new SessionWorktreeStore.Descriptor("worktree", "session", "workspace", state,
+    private static JdbcSessionWorktreeStore.Descriptor worktree(String state) {
+        return new JdbcSessionWorktreeStore.Descriptor("worktree", "session", "workspace", state,
                 "qwen/session", "a".repeat(40), ".qwen-managed-worktrees/worktree", "operation", 1, null);
     }
 
@@ -441,7 +442,7 @@ class HarnessCoordinatorTest {
     }
 
     // Before submission, the only RuntimeBrokerException that reaches the
-    // coordinator is com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable() (409,
+    // coordinator is WorkspaceExecutionStore.unavailable() (409,
     // workspace_unavailable, not retryable), raised by the connector's
     // authorization in createOrLoad. Broker lease contention (workspace_busy)
     // is raised inside the Broker's tool-execution transport and is consumed
@@ -449,7 +450,7 @@ class HarnessCoordinatorTest {
     @ParameterizedTest
     @ValueSource(ints = {0, 5})
     void failsOnWorkspaceAuthorizationRefusalBeforeSubmission(int retryCount) {
-        RuntimeBrokerException refusal = com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
                 false, retryCount,
                 boundSessionRecord());
@@ -543,7 +544,7 @@ class HarnessCoordinatorTest {
     @Test
     void retriesWorkspaceAuthorizationRefusalAfterARecordedSubmission() {
         AgentStateStore store = dispatchWithCreateOrLoadFailure(
-                com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(), true, 5,
+                WorkspaceExecutionStore.unavailable(), true, 5,
                 boundSessionRecord());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong(), eq(false));
@@ -3661,6 +3662,7 @@ class HarnessCoordinatorTest {
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), mock(RuntimeWarmer.class), executor,
                 Clock.systemUTC(), new ManagedAgentProperties());
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         try {
             coordinator.dispatch("tenant", "session", "turn");
             if (terminalAtProbe) {
@@ -3673,6 +3675,8 @@ class HarnessCoordinatorTest {
                 verify(store, timeout(20_000)).markTurnRecoveryBlocked(eq("tenant"), eq("session"),
                         eq("turn"), anyString(), eq(AgentStateStore.HARNESS_RECOVERY_BLOCKED), anyString());
             }
+            assertThat(closed.await(Math.max(0, deadline - System.nanoTime()),
+                    TimeUnit.NANOSECONDS)).isTrue();
         } finally {
             coordinator.close();
             executor.shutdownNow();
@@ -4175,7 +4179,7 @@ class HarnessCoordinatorTest {
                 .thenReturn(new Attachment("boot-new", null, null, null));
         when(harness.submit(eq(tenantId), eq(sessionId), eq(promptId), any(),
                 anyString())).thenThrow(
-                        workspaceRefusal ? com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()
+                        workspaceRefusal ? WorkspaceExecutionStore.unavailable()
                                 : new IllegalStateException("response lost"));
         when(runtimeWarmer.isEnabled()).thenReturn(false);
 

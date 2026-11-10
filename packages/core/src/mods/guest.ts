@@ -152,10 +152,13 @@ export const MOD_GUEST_FACTORY = String.raw`
       hook.caught = handler;
     }});
   };
-  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(json => {
+  let modelTokens = 0;
+  const abortedModel = frozen({ isAnswered: false, reason: 'aborted', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+  const unpack = json => {
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
-  });
+  };
+  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(unpack);
   const api = (id, frames) => {
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
@@ -188,6 +191,36 @@ export const MOD_GUEST_FACTORY = String.raw`
           });
         }
       },
+      model: {
+        // The signal stays here, as a sleep's does; aborting it cuts the
+        // call, which then resolves aborted. No hook reads it.
+        complete: async (request, options = {}) => {
+          if (!object(options) || keys(options).some(k => k !== 'signal')) throw new Error('Invalid Mod model.complete options');
+          const { signal } = options;
+          if (signal !== undefined && (!object(signal) || typeof signal.addEventListener !== 'function')) throw new Error('Invalid Mod model.complete signal');
+          if (signal?.aborted) return abortedModel;
+          const token = ++modelTokens;
+          let aborted = false;
+          let published = false;
+          const abort = () => {
+            aborted = true;
+            if (published) bridge(id, 'model.abort', token);
+          };
+          try {
+            signal?.addEventListener('abort', abort);
+            if (signal?.aborted || aborted) return abortedModel;
+            const json = encode({ value: request, frames });
+            if (signal?.aborted || aborted) return abortedModel;
+            const pending = bridge(id, 'model.complete', json, token);
+            published = true;
+            return await pending.then(unpack);
+          } finally {
+            signal?.removeEventListener?.('abort', abort);
+          }
+        }
+      },
+      // Async, so an input too large for the bridge rejects like a wrong shape.
+      prompt: { submit: async input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },
       ui: {
         log: (text, options = {}) => {
@@ -254,21 +287,39 @@ export const MOD_GUEST_FACTORY = String.raw`
       run.signal = signalFor(run);
       runs.set(run.id, run);
       run.selected = hooks.filter(h => patternMatches(h.event, run.event) && !run.leftOut.includes(h.id));
+      // A caught late-drop error must not leave a stale plugin fallback.
+      const promptFallbacks = new Map();
       const invoke = async (index, input, frames) => {
         const hook = run.selected[index];
         if (!hook) return call(run.id, frames, 'next', input);
         run.inputs.set(hook.id, input);
         if (hook.matcher !== undefined && !matches(hook.matcher, input)) return invoke(index + 1, input, frames);
         const nested = [...frames, hook.id];
+        let last;
         const next = nextFor(run, async e => {
           status(run.id, 'validate', encode(e));
-          const result = await invoke(index + 1, frozen(e), nested);
+          last = invoke(index + 1, frozen(e), nested);
+          const result = await last;
           if (!result) throw new Error('Mod hook returned no result');
           return result;
         });
-        return hook.handler(api(run.id, nested), frozen(input), next);
+        const answer = await hook.handler(api(run.id, nested), frozen(input), next);
+        if (run.event !== 'prompt.submit' || !last) return answer;
+        // What a hook answers after its next is not checked: only a drop counts.
+        const below = await last;
+        if (object(answer) && 'drop' in answer && (!object(below) || answer.drop !== below.drop)) {
+          const error = new Error('a drop after its next(e) was answered');
+          promptFallbacks.set(error, below);
+          throw error;
+        }
+        return below;
       };
-      return encode(await invoke(0, run.input, []));
+      try {
+        return encode(await invoke(0, run.input, []));
+      } catch (error) {
+        if (promptFallbacks.has(error)) status(run.id, 'promptFallback', encode(promptFallbacks.get(error)));
+        throw error;
+      }
     },
     recover: async json => {
       const recovery = parse(json);

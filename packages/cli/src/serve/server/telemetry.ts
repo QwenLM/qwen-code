@@ -762,6 +762,9 @@ export function resolveDaemonTelemetryRoute(
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
   if (pluralWorkspacePrefix.test(path)) {
     const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
+    if (req.method === 'POST' && suffix === '/workspace/language') {
+      return { route: 'POST /workspaces/:workspace/language' };
+    }
     if (req.method === 'GET') {
       if (
         suffix === '/workspace/mcp' ||

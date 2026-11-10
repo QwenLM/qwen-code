@@ -1149,6 +1149,8 @@ export default {
   'disabled (bare mode)': 'desativado (modo mínimo)',
   'disabled (safe mode)': 'desativado (modo seguro)',
   'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
+  'disabled (not approved)': 'desativado (não aprovado)',
+  'disabled (rejected)': 'desativado (rejeitado)',
   'disabled (folder not trusted)': 'desativado (pasta não confiável)',
   'disabled (turned off for this session)':
     'desativado (desligado nesta sessão)',
@@ -1524,6 +1526,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Tokens de Entrada',
   'Output Tokens': 'Tokens de Saída',
+  'Output (incl. Reasoning)': 'Saída (com raciocínio)',
   'Savings Highlight:': 'Destaque de Economia:',
   'of input tokens were served from the cache, reducing costs.':
     'de tokens de entrada foram servidos do cache, reduzindo custos.',
@@ -2030,6 +2033,8 @@ export default {
   'Advisor review failed: {{error}}': 'Falha na revisão do assessor: {{error}}',
   'No conversation context available for /advisor':
     'Nenhum contexto de conversa disponível para /advisor',
+  'No conversation context available for /btw':
+    'Nenhum contexto de conversa disponível para /btw',
   'Focus too long (max {{max}} chars)':
     'Foco muito longo (máx. {{max}} caracteres)',
   'Another operation is in progress, wait for it to complete before running /advisor':

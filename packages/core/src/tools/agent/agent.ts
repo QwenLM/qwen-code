@@ -413,7 +413,7 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
  * three cases where an explicit value is rejected.
  */
 const RUN_IN_BACKGROUND_DESCRIPTION =
-  'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true.';
+  'Top-level regular subagents: explicit value > definition background > agents.defaultBackground (true: background, false: foreground; default: true). Set to false for foreground execution with an inline result. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true.';
 
 /**
  * The teammate half, appended only when `isAgentTeamEnabled()`. It is about
@@ -944,7 +944,6 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         },
         run_in_background: {
           type: 'boolean',
-          default: true,
           description: runInBackgroundDescription(config.isAgentTeamEnabled()),
         },
         ...(config.isAgentTeamEnabled()
@@ -1074,7 +1073,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents use \`agents.defaultBackground\` unless the call or definition overrides it: \`true\` runs in the background with completion notifications; \`false\` waits and returns the result inline. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -1097,7 +1096,7 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches${teammateWorktreeTail}
+- For top-level regular subagents, explicit \`run_in_background\` overrides definition \`background\`, which overrides \`agents.defaultBackground\` (\`true\`: background, \`false\`: foreground; default: \`true\`). Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches${teammateWorktreeTail}
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 
 ## Working with background agents
@@ -3156,7 +3155,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // short-lived non-interactive process must hold open until the inherited
       // work completes. Otherwise, an explicit tool parameter wins. An
       // agent-level background flag retains its existing meaning, and safe
-      // ordinary one-shot launches default to background.
+      // ordinary one-shot launches use agents.defaultBackground (default true).
       //
       // Background delegation is top-level-only in v1. A nested launcher would
       // be handed a completion contract it cannot honor — the success guidance
@@ -3175,9 +3174,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // The desktop client (forked out of this repo with OpenWork and no
       // longer vendored here) does not receive this projection and replicates
       // the rule in its own copy — keep the fork informed if this rule
-      // changes. The web-shell fallback in toolClassification.ts covers every
-      // frame lacking executionMode (including blocked-spawn result frames and
-      // pre-feature recordings) and must stay frozen at the legacy rule.
+      // changes. That replica cannot honor agents.defaultBackground without
+      // receiving the setting. The web-shell fallback in toolClassification.ts
+      // covers every frame lacking executionMode (including blocked-spawn result
+      // frames and pre-feature recordings) and must stay frozen at the legacy
+      // rule, so it may classify a foreground launch as background when the
+      // setting is false.
       const backgroundRequested =
         isFork && !this.config.isInteractive()
           ? true
@@ -3188,7 +3190,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // A `name` passed without an active team falls through to a regular
               // one-shot agent above; keep it foreground so legacy UI fallbacks
               // (which exclude `name`) stay consistent with core dispatch.
-              this.params.name === undefined));
+              this.params.name === undefined &&
+              this.config.getAgentsSettings().defaultBackground !== false));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
 
       // The fix agent of a watch whose fixes run unattended may: the launch
@@ -3924,6 +3927,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const registerOptions = backgroundSlotReservation
             ? { slotReservation: backgroundSlotReservation }
             : {};
+          signal?.throwIfAborted();
           registry.register(
             {
               agentId: hookOpts.agentId,
@@ -3933,6 +3937,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // slot reservation above was taken against this same model.
               model: subagentModelId,
               isBackgrounded: true,
+              workspacePinned: Boolean(
+                worktreeIsolation || executionEnvironment,
+              ),
               status: 'running',
               startTime: Date.now(),
               abortController: bgAbortController,

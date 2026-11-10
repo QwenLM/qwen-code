@@ -37,9 +37,32 @@ import {
   type SessionArchiveCoordinator,
 } from './session-archive.js';
 import { invalidateWorkspaceSessionListCache } from './session-list.js';
+import { pullRequestKey, samePullRequest } from './session-pr-url.js';
+import {
+  runPrWatchObservationTick,
+  type PrWatchObservationTickDeps,
+} from './pr-watch-observation.js';
+import {
+  createPrWatchDrainState,
+  runPrWatchDrainTick,
+  stopPrWatch,
+  type PrWatchDrainDeps,
+} from './pr-watch-drain.js';
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
+
+/**
+ * Internal switch for the daemon PR-state watch observation (master design
+ * §7, PR A). It stays off: the refresh runs no `gh pr view`, writes no watch
+ * file and claims no ownership, and the `sessionPrWatch` setting is not read.
+ * A later increment turns it on; tests exercise the observation functions
+ * directly rather than through this gated timer hook. The explicit `boolean`
+ * annotation keeps the literal `false` from narrowing the gated block to
+ * unreachable dead code (hence the no-inferrable-types exemption).
+ */
+// eslint-disable-next-line @typescript-eslint/no-inferrable-types
+export const SESSION_PR_WATCH_OBSERVATION_ENABLED: boolean = false;
 
 /**
  * Aggregate deadline for one workspace's capped `mr view` loop. The
@@ -51,46 +74,6 @@ const FIRST_RUN_DELAY_MS = 60_000;
  * rotating window retries it on later sweeps.
  */
 export const AONE_SWEEP_VIEW_BUDGET_MS = 60_000;
-
-/**
- * Identity of a PR url as `host/owner/repo` plus number, tolerant of the
- * spellings the bind path accepts (`www.`, `http:`, a `/files` suffix,
- * case). Wider than `canonicalSessionPrUrl` on purpose and local to this
- * sweep's lookup matching: same-PR identity everywhere else (re-binds, the
- * sidecar's write gate, the session-list merge) keeps the canonical rule.
- */
-function pullRequestKey(
-  url: string,
-): { repo: string; number: number } | undefined {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return undefined;
-  }
-  // GitHub also serves `/pull/N.diff` and `/pull/N.patch`.
-  const match =
-    /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/.exec(
-      parsed.pathname,
-    );
-  if (!match) return undefined;
-  const host = parsed.hostname.replace(/^www\./, '');
-  return {
-    repo: `${host}/${match[1]}/${match[2]}`.toLowerCase(),
-    number: Number(match[3]),
-  };
-}
-
-function samePullRequest(left: string, right: string): boolean {
-  const a = pullRequestKey(left);
-  const b = pullRequestKey(right);
-  return (
-    a !== undefined &&
-    b !== undefined &&
-    a.repo === b.repo &&
-    a.number === b.number
-  );
-}
 
 /**
  * The slice of {@link SessionArchiveCoordinator} the sweep needs: the
@@ -514,7 +497,26 @@ export function startSessionPrRefreshTimer(deps: {
    * controllable clock to drive budget truncation at the timer level.
    */
   now?: () => number;
-}): { dispose(): void } | undefined {
+  /**
+   * Resolved per tick for the daemon PR-state watch observation. Only read
+   * when the observation switch is on; the daemon parks the watch dir, lock
+   * registry and allowed hosts on the serve app.
+   */
+  getPrWatchDeps?: () => PrWatchObservationTickDeps | undefined;
+  /**
+   * Resolved per tick for the daemon PR-state watch delivery drain (master
+   * §4/§5). Only read when the observation switch is on; the daemon parks the
+   * admission, restore, bindings-scan and self-push access on the serve app
+   * with the enablement increment. Unpopulated, the drain is inert.
+   */
+  getPrDrainDeps?: () => PrWatchDrainDeps | undefined;
+  /**
+   * Test seam overriding {@link SESSION_PR_WATCH_OBSERVATION_ENABLED} so a
+   * fixture can exercise the on path. The daemon omits it, so production
+   * stays governed by the internal constant (off).
+   */
+  observationEnabled?: boolean;
+}): { dispose(): void; stopWatch(): Promise<void> } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
   // Rotating Aone view-window offset per workspace: each sweep advances the
@@ -525,13 +527,108 @@ export function startSessionPrRefreshTimer(deps: {
   // windows. Kept monotonic (not mod'd here) — the sweep reduces it modulo
   // the live set size itself, so a shrinking set never skews the rotation.
   const aoneSweepOffsets = new Map<string, number>();
+  // Rotating GitHub view-window offset per workspace for the PR-state watch
+  // observation, and a tick counter that rotates the workspace order so a
+  // persistent deadline overrun starves no workspace (master design §1).
+  const githubSweepOffsets = new Map<string, number>();
+  let watchTickCount = 0;
+  // Retained binding rows, in-flight marks and restore slots for the delivery
+  // drain, kept across ticks (master §4/§5).
+  const prDrainState = createPrWatchDrainState();
+  // Set only once the gated block actually ran, so shutdown never reads a
+  // watch seam while the switch is off (switch-off parity).
+  let activeWatchDir: string | undefined;
   let running = false;
+  // The observation holds the owner record for the whole tick, and the drain
+  // state cannot see that phase, so shutdown waits on the tick itself too.
+  const tickWaiters = new Set<() => void>();
+  const tickIdle = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      if (!running) {
+        resolve();
+        return;
+      }
+      tickWaiters.add(resolve);
+    });
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
     try {
+      // Anchor the watch deadline at the tick start (master §1).
+      const tickStart = (deps.now ?? Date.now)();
       const archiveCoordinator = deps.getArchiveCoordinator?.();
       const live = deps.workspaceRegistry.listAll();
+      const liveCwds = new Set(live.map((r) => r.workspaceCwd));
+      // Daemon PR-state watch observation (master design §1), gated off in
+      // this increment. It runs BEFORE the state refresh so the observation
+      // gets the tick-start deadline window even when the refresh is slow:
+      // a refresh that outruns half the interval would otherwise leave the
+      // observation no time and starve every workspace's views. With the
+      // switch off this block is inert — no gh pr view, no watch-file write,
+      // no ownership claim — and the refresh below is unchanged. The
+      // workspace order rotates per tick so a persistent deadline overrun
+      // starves no workspace; the untrusted primary is included for views
+      // only (its env resolver runs no gh in the checkout).
+      if (deps.observationEnabled ?? SESSION_PR_WATCH_OBSERVATION_ENABLED) {
+        const watchDeps = deps.getPrWatchDeps?.();
+        if (watchDeps) {
+          activeWatchDir = watchDeps.watchDir;
+          const watchWorkspaces = live.filter((r) => r.trusted || r.primary);
+          const rotation = watchTickCount % Math.max(watchWorkspaces.length, 1);
+          const ordered = [
+            ...watchWorkspaces.slice(rotation),
+            ...watchWorkspaces.slice(0, rotation),
+          ];
+          watchTickCount += 1;
+          try {
+            await runPrWatchObservationTick(ordered, watchDeps, {
+              intervalMs,
+              sweepOffsets: githubSweepOffsets,
+              deadline: tickStart + intervalMs / 2,
+            });
+          } catch (error) {
+            if (error instanceof DaemonDrainingError) return;
+            // A failed observation tick must not starve the state refresh,
+            // but log it: every other failure path in the watch logs, and a
+            // tick that throws every tick would otherwise be invisible while
+            // the switch is on.
+            process.stderr.write(
+              `[serve] PR watch observation tick failed: ${String(error)}\n`,
+            );
+          }
+          for (const cwd of [...githubSweepOffsets.keys()]) {
+            if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
+          }
+          // Delivery drain (master §4/§5): runs after the observation so it
+          // can deliver the transitions this tick detected. Behind the same
+          // off switch and its own unpopulated deps seam, so it is inert until
+          // the enablement increment. Restores run off-tick inside the drain.
+          const drainDeps = deps.getPrDrainDeps?.();
+          if (drainDeps) {
+            // `listAll()` omits every non-active entry, so a draining or
+            // transitioning workspace's bindings are unknown, not absent.
+            // Tell the drain before it makes a complete-scan deletion.
+            const coveragePartial = deps.workspaceRegistry
+              .listAllEntries()
+              .some(
+                (entry) => entry.state !== 'active' || !entry.current?.runtime,
+              );
+            try {
+              await runPrWatchDrainTick(
+                ordered,
+                drainDeps,
+                prDrainState,
+                coveragePartial,
+              );
+            } catch (error) {
+              if (error instanceof DaemonDrainingError) return;
+              process.stderr.write(
+                `[serve] PR watch drain tick failed: ${String(error)}\n`,
+              );
+            }
+          }
+        }
+      }
       for (const runtime of live) {
         if (!runtime.trusted) continue;
         const sweepStart = aoneSweepOffsets.get(runtime.workspaceCwd) ?? 0;
@@ -565,22 +662,43 @@ export function startSessionPrRefreshTimer(deps: {
       // Prune offsets for workspaces no longer in the registry (removed or
       // never Aone): the daemon runs indefinitely, so an entry per
       // ever-seen cwd would grow without bound.
-      const liveCwds = new Set(live.map((r) => r.workspaceCwd));
       for (const cwd of [...aoneSweepOffsets.keys()]) {
         if (!liveCwds.has(cwd)) aoneSweepOffsets.delete(cwd);
       }
     } finally {
       running = false;
+      for (const resolve of tickWaiters) resolve();
+      tickWaiters.clear();
     }
   };
   const first = setTimeout(() => void tick(), FIRST_RUN_DELAY_MS);
   first.unref();
   const timer = setInterval(() => void tick(), intervalMs);
   timer.unref();
+  const dispose = (): void => {
+    clearTimeout(first);
+    clearInterval(timer);
+  };
   return {
-    dispose(): void {
-      clearTimeout(first);
-      clearInterval(timer);
+    dispose,
+    /**
+     * Stop the PR watch in the order master §2 requires: stop the timer, let
+     * the in-flight observation, restores and admissions settle, then release
+     * the owner record. A daemon that never ran the gated block has nothing to
+     * stop and reads no seam, so the off state stays inert through shutdown too.
+     */
+    async stopWatch(): Promise<void> {
+      if (activeWatchDir === undefined) {
+        dispose();
+        return;
+      }
+      await stopPrWatch({
+        state: prDrainState,
+        watchDir: activeWatchDir,
+        stopTimer: dispose,
+        waitForTick: tickIdle,
+        log: (message) => process.stderr.write(`[serve] ${message}\n`),
+      });
     },
   };
 }

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -68,8 +69,8 @@ class ManagedContextCompressionMySqlIT extends ManagedContextCompressionOperatio
 
     @Test
     void projectionBackfillAndNativeCompactionCommitRemainMonotonic() throws Exception {
-        var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc, store);
-        var nativeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore(jdbc, records));
+        var records = new JdbcManagedExtensionRecordStore(jdbc, store);
+        var nativeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, records);
         var journal = tx(() -> new ExtensionRecordJournal(nativeStore, "tenant", "workspace", session).open());
         var summary = "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         var resource = ManagedExtensionRecordStoreTest.hookResource("race-summary", "managed-message", summary);

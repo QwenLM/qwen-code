@@ -30,7 +30,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -50,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 // FG7 (issue #13802): multi-process fault gates for the channel domains.
@@ -217,12 +217,12 @@ class HostedChannelFaultGatesIT {
         temporary = temporary.toRealPath();
         modelMarkers.clear();
         startModel();
-        int internal = freePort();
+        int internal = reservePort();
         // The harness pins its port so the control plane can name it in
         // base-url before the packaged process exists; the harness opens
         // Workspace sessions only after the broker URL it carries is live.
-        harnessPort = freePort();
-        int brokerPort = freePort();
+        harnessPort = reservePort();
+        int brokerPort = reservePort();
         startSpring(tenant, internal, brokerPort);
         support = new HostedChannelGateSupport(jdbc,
                 System.getProperty("node.executable"), repoRoot());
@@ -230,13 +230,6 @@ class HostedChannelFaultGatesIT {
     }
 
     // --- fixture ---
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0, 0,
-                java.net.InetAddress.getLoopbackAddress())) {
-            return socket.getLocalPort();
-        }
-    }
 
     private void startModel() throws IOException {
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -1332,12 +1325,12 @@ class HostedChannelFaultGatesIT {
                     assertThat(support.inputAcceptedCount(tenant, sessionId))
                             .as("the replay never commits a second input")
                             .isEqualTo(1);
-                    assertThat(modelCallsFor(fault))
-                            .as("the replay never re-runs the turn")
-                            .isEqualTo(1);
                     JsonNode replayed = support.drive(caseDir, "pull", base);
                     assertThat(replayed.path("sends")).hasSize(1);
                     HostedChannelGateSupport.assertSendsTo(replayed);
+                    assertThat(modelCallsFor(fault))
+                            .as("the replay never re-runs the turn")
+                            .isEqualTo(1);
                     assertThat(((Number) support.routeProjection(tenant,
                             sessionId).get("revision")).intValue())
                             .isEqualTo(1);

@@ -5,7 +5,12 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
-import { MOD_TIMEOUT_MS, MOD_MAX_BYTES, MOD_MAX_DEPTH } from './types.js';
+import {
+  MOD_TIMEOUT_MS,
+  MOD_MAX_BYTES,
+  MOD_MAX_DEPTH,
+  MOD_MODEL_EFFORTS,
+} from './types.js';
 import {
   validateToolInput,
   validToolResult,
@@ -17,6 +22,8 @@ export const MOD_METHODS = [
   'clock.now',
   'clock.sleep',
   'command.register',
+  'model.complete',
+  'prompt.submit',
   'session.cwd',
   'session.id',
   'session.model',
@@ -35,6 +42,8 @@ export const MOD_EVENTS = [
   'clock.sleep',
   'command.register',
   'command.run',
+  'model.complete',
+  'prompt.submit',
   'session.cwd',
   'session.end',
   'session.id',
@@ -55,8 +64,12 @@ export const MOD_EVENTS = [
   'ui.log',
   'ui.render',
 ] as const;
-// Events a host raises only where it draws: the load request names the sites.
-export const MOD_HOST_EVENTS: readonly ModEvent[] = ['ui.render'];
+// Events only some hosts raise: the load request names the sites a host
+// draws, and whether it raises `prompt.submit`.
+export const MOD_HOST_EVENTS: readonly ModEvent[] = [
+  'prompt.submit',
+  'ui.render',
+];
 // `$` methods that read rather than dispatch, so no hook hears them.
 export const MOD_READS = ['ui.resolve'] as const;
 export type ModEvent = (typeof MOD_EVENTS)[number];
@@ -113,6 +126,200 @@ export function assertModDepth(json: string, label: string): void {
     throw new Error(`${label} nests deeper than ${MOD_MAX_DEPTH} levels.`);
 }
 
+/**
+ * The event input a `$.prompt.submit({ text, asUser? })` call raises: the
+ * caller's own name as its origin, and no wait, since it runs once idle.
+ */
+export function promptSubmitCall(value: unknown, plugin: string): ModInput {
+  if (
+    !record(value) ||
+    !only(value, ['text', 'asUser']) ||
+    !text(value['text']) ||
+    (value['asUser'] !== undefined && value['asUser'] !== true)
+  )
+    throw new Error(
+      record(value) && 'attachments' in value
+        ? 'Mod prompt.submit does not take attachments.'
+        : 'Mod prompt.submit takes { text, asUser? } with asUser true when given.',
+    );
+  return {
+    text: value['text'],
+    wait: false,
+    origin: {
+      kind: 'plugin',
+      name: plugin,
+      ...(value['asUser'] === true && { asUser: true }),
+    },
+  };
+}
+
+// Claude Code's ceilings: a reply's tokens (the model's own limit may be
+// lower, which the host judges) and a timer's longest wait.
+export const MOD_MODEL_MAX_TOKENS = 64_000;
+const MAX_TIMER_MS = 2_147_483_647;
+const MODEL_REQUEST_KEYS = [
+  'model',
+  'prompt',
+  'system',
+  'maxTokens',
+  'effort',
+  'timeoutMs',
+] as const;
+
+// A string, or blocks of `{ text, cache? }` with `cache` true when given.
+function textBlocks(value: unknown): value is Array<Record<string, unknown>> {
+  return (
+    Array.isArray(value) &&
+    value.length <= 1000 &&
+    value.every(
+      (block) =>
+        record(block) &&
+        only(block, ['text', 'cache']) &&
+        text(block['text']) &&
+        (block['cache'] === undefined || block['cache'] === true),
+    )
+  );
+}
+
+function modelText(
+  value: unknown,
+  key: string,
+): { text: string; blocks?: Array<{ text: string; cache?: true }> } {
+  if (text(value)) return { text: value };
+  if (!textBlocks(value))
+    throw new Error(
+      `Mod model.complete takes ${key} as a string or a list of { text, cache? } blocks.`,
+    );
+  const blocks = value.map((block) => ({
+    text: block['text'] as string,
+    ...(block['cache'] === true && { cache: true as const }),
+  }));
+  return { text: blocks.map((block) => block.text).join(''), blocks };
+}
+
+function modelLimits(value: ModInput): void {
+  const maxTokens = value['maxTokens'];
+  if (
+    maxTokens !== undefined &&
+    !(Number.isSafeInteger(maxTokens) && Number(maxTokens) > 0)
+  )
+    throw new Error(
+      'Mod model.complete takes maxTokens as a positive whole number.',
+    );
+  if (Number(maxTokens) > MOD_MODEL_MAX_TOKENS)
+    throw new Error(
+      `Mod model.complete maxTokens ${maxTokens} is over the limit of ${MOD_MODEL_MAX_TOKENS}.`,
+    );
+  if (
+    value['effort'] !== undefined &&
+    !(MOD_MODEL_EFFORTS as readonly unknown[]).includes(value['effort'])
+  )
+    throw new Error(
+      `Mod model.complete takes effort as one of ${MOD_MODEL_EFFORTS.join(', ')}.`,
+    );
+  const timeoutMs = value['timeoutMs'];
+  if (
+    timeoutMs !== undefined &&
+    !(
+      Number.isSafeInteger(timeoutMs) &&
+      Number(timeoutMs) > 0 &&
+      Number(timeoutMs) <= MAX_TIMER_MS
+    )
+  )
+    throw new Error(
+      `Mod model.complete takes timeoutMs as a whole number from 1 to ${MAX_TIMER_MS}.`,
+    );
+}
+
+/**
+ * The event input a `$.model.complete(request)` call raises, in Claude Code's
+ * `ModelCompleteInput`: the caller's blocks joined into `prompt` and `system`
+ * and kept beside them as given.
+ */
+export function modelCompleteCall(value: unknown): ModInput {
+  if (!record(value) || !only(value, MODEL_REQUEST_KEYS))
+    throw new Error(
+      'Mod model.complete takes { model, prompt, system?, maxTokens?, effort?, timeoutMs? }.',
+    );
+  if (!text(value['model']) || !value['model'].trim())
+    throw new Error('Mod model.complete needs a model.');
+  modelLimits(value);
+  const prompt = modelText(value['prompt'], 'prompt');
+  const system =
+    value['system'] === undefined
+      ? undefined
+      : modelText(value['system'], 'system');
+  return {
+    model: value['model'],
+    prompt: prompt.text,
+    ...(system && { system: system.text }),
+    ...(prompt.blocks && { promptBlocks: prompt.blocks }),
+    ...(system?.blocks && { systemBlocks: system.blocks }),
+    ...(value['maxTokens'] !== undefined && { maxTokens: value['maxTokens'] }),
+    ...(value['effort'] !== undefined && { effort: value['effort'] }),
+    ...(value['timeoutMs'] !== undefined && { timeoutMs: value['timeoutMs'] }),
+  };
+}
+
+// What a hook passes down: the request as text, its blocks beside it.
+function validateModelInput(value: ModInput): void {
+  if (
+    !only(value, [
+      'model',
+      'prompt',
+      'system',
+      'promptBlocks',
+      'systemBlocks',
+      'maxTokens',
+      'effort',
+      'timeoutMs',
+    ]) ||
+    !text(value['model']) ||
+    !value['model'].trim() ||
+    !text(value['prompt']) ||
+    !(
+      value['system'] === undefined ||
+      value['system'] === null ||
+      value['system'] === false ||
+      text(value['system'])
+    ) ||
+    (value['promptBlocks'] !== undefined &&
+      !textBlocks(value['promptBlocks'])) ||
+    (value['systemBlocks'] !== undefined && !textBlocks(value['systemBlocks']))
+  )
+    throw new Error(
+      'Mod model.complete takes { model, prompt, system?, promptBlocks?, systemBlocks?, maxTokens?, effort?, timeoutMs? } with prompt and system as text.',
+    );
+  modelLimits(value);
+}
+
+// Claude Code's `ModelCompleteResult`, answered by a hook or by the host.
+export function validModelResult(value: unknown): boolean {
+  if (
+    !record(value) ||
+    !record(value['usage']) ||
+    !only(value['usage'], TURN_TOKENS) ||
+    !TURN_TOKENS.every((key) => count((value['usage'] as ModInput)[key]))
+  )
+    return false;
+  if (value['isAnswered'] === true)
+    return only(value, ['isAnswered', 'text', 'usage']) && text(value['text']);
+  if (value['isAnswered'] !== false) return false;
+  if (value['reason'] === 'api-error')
+    return (
+      only(value, ['isAnswered', 'reason', 'status', 'error', 'usage']) &&
+      (value['status'] === null ||
+        (Number.isInteger(value['status']) &&
+          Number(value['status']) >= 100 &&
+          Number(value['status']) <= 599)) &&
+      text(value['error'])
+    );
+  return (
+    only(value, ['isAnswered', 'reason', 'usage']) &&
+    (value['reason'] === 'empty-reply' || value['reason'] === 'aborted')
+  );
+}
+
 export function validateInput(
   event: ModEvent,
   value: unknown,
@@ -127,6 +334,18 @@ export function validateInput(
       !isDeepStrictEqual({ ...value, args: '' }, { ...original, args: '' })
     )
       throw new Error('Mod hook changed pinned event fields.');
+  } else if (event === 'prompt.submit') {
+    if (
+      !only(value, ['text', 'context', 'origin', 'wait', 'turnId']) ||
+      !text(value['text']) ||
+      !validContext(value['context']) ||
+      ['origin', 'wait', 'turnId'].some(
+        (key) => !isDeepStrictEqual(value[key], original[key]),
+      )
+    )
+      throw new Error(
+        'Mod prompt.submit takes { text, context } as a list of texts; origin, wait and turnId are pinned.',
+      );
   } else if (event === 'command.register') {
     if (
       Object.keys(value).some(
@@ -177,6 +396,8 @@ export function validateInput(
       throw new Error(
         'Mod ui.invalidate takes ui.render or a cached-answer event.',
       );
+  } else if (event === 'model.complete') {
+    validateModelInput(value);
   } else if (event === 'ui.render') {
     validateRenderInput(value, original);
   } else if (!isDeepStrictEqual(value, original))
@@ -252,6 +473,16 @@ export function validateResult(
     valid =
       Object.keys(value).every((key) => key === echoed) &&
       typeof value[echoed] === 'string';
+  else if (event === 'prompt.submit')
+    valid =
+      'drop' in value
+        ? only(value, ['drop']) && text(value['drop'])
+        : only(value, ['text', 'context', 'origin']) &&
+          text(value['text']) &&
+          validContext(value['context']) &&
+          // An answer may leave the origin out, never set another.
+          (value['origin'] === undefined ||
+            isDeepStrictEqual(value['origin'], input?.['origin']));
   else if (event === 'turn.complete')
     valid =
       only(value, ['text', 'usage']) &&
@@ -267,6 +498,10 @@ export function validateResult(
   }
   if (!valid) throw new Error('Unsupported ' + event + ' result fields.');
 }
+
+// What the model reads beside a prompt: a list of texts.
+const validContext = (value: unknown) =>
+  value === undefined || (Array.isArray(value) && value.every(text));
 
 function validUsage(value: unknown): boolean {
   if (
@@ -336,6 +571,7 @@ const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
     record(value) && typeof value['version'] === 'string',
   'turn.abort': (value) => value === undefined,
   'ui.invalidate': (value) => value === undefined,
+  'model.complete': validModelResult,
 };
 
 export class ModTimeoutError extends Error {
@@ -379,10 +615,16 @@ export class ModBudget {
   }
 }
 
+export interface ModModelScope {
+  signal: AbortSignal;
+  deadline: number;
+}
+
 export interface ModInvocation {
   id: number;
   epoch: number;
   parent?: ModInvocation;
+  modelScope?: ModModelScope;
   closed: boolean;
   plugin: number;
   event: ModEvent;
@@ -395,5 +637,7 @@ export interface ModInvocation {
   recovering: boolean;
   aborted: boolean;
   last?: Promise<unknown>;
+  // A local late-drop fallback does not count as a host continuation.
+  promptFallback?: Promise<unknown>;
   next: (input: ModInput, frames: ModFrame[]) => Promise<unknown>;
 }

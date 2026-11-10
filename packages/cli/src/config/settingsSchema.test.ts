@@ -33,6 +33,17 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('defaults regular subagents to background execution and requires a restart', () => {
+    expect(
+      getSettingsSchema().agents.properties.defaultBackground,
+    ).toMatchObject({
+      type: 'boolean',
+      default: true,
+      requiresRestart: true,
+      showInDialog: false,
+    });
+  });
+
   it('exposes a default-on Generated UI setting that requires restarting its owner', () => {
     expect(
       getSettingsSchema().experimental.properties.generatedUi,
@@ -68,6 +79,24 @@ describe('SettingsSchema', () => {
   });
 
   describe('getSettingsSchema', () => {
+    it('declares the operator-scoped model catalog refresh switch', () => {
+      expect(getSettingsSchema().model.properties.catalogRefresh).toMatchObject(
+        {
+          type: 'boolean',
+          default: true,
+          requiresRestart: true,
+          showInDialog: false,
+        },
+      );
+      expect(
+        getSettingsSchema().model.properties.catalogRefresh.description,
+      ).toMatch(/values set in Workspace settings are ignored/);
+      expect(
+        getSettingsSchema().privacy.properties.usageStatisticsEnabled
+          .description,
+      ).toMatch(/also stops the models.dev catalog refresh/);
+    });
+
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =
         getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
@@ -266,6 +295,14 @@ describe('SettingsSchema', () => {
         showInDialog: true,
         category: 'Tools',
       });
+    });
+
+    it('should warn that an execution sandbox refuses the LSP setting', () => {
+      const description =
+        getSettingsSchema().tools.properties.lspEnabled?.description ?? '';
+
+      expect(description).toContain('tools.executionSandbox');
+      expect(description).toContain('--safe-mode');
     });
 
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {

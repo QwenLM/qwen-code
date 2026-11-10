@@ -10,10 +10,11 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
@@ -52,7 +53,7 @@ import static org.mockito.Mockito.when;
 class ManagedAgentWorkspaceReplayTest {
     private JdbcTemplate jdbc;
     private TransactionTemplate transaction;
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
     private ManagedAgentStore store;
     private ManagedAgentProperties properties;
     private HarnessCoordinator coordinator;
@@ -165,11 +166,11 @@ class ManagedAgentWorkspaceReplayTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transaction = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
+                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     // The recorded submit must answer through a Workspace-files outage, like
@@ -241,12 +242,12 @@ class ManagedAgentWorkspaceReplayTest {
         // A non-yolo approval mode keeps the actions capability live before
         // the delete; the store snapshots it at construction.
         properties.getHarness().setApprovalMode("default");
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
+                Clock.systemUTC(), events -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = service(new AtomicBoolean(true));
-        ManagedArtifactReader reader = mock(ManagedArtifactReader.class);
+        ToolPublicationArtifactReader reader = mock(ToolPublicationArtifactReader.class);
         when(reader.supported()).thenReturn(true);
         service.configureArtifacts(properties, reader);
 
@@ -885,7 +886,7 @@ class ManagedAgentWorkspaceReplayTest {
     // then the Session row as a tombstone.
     private void recordDelete(String tenant, String sessionId,
             String statusBefore) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
                         + " session_scope_key, operation_id, operation_kind,"

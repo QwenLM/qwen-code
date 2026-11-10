@@ -1,11 +1,10 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
-import com.alibaba.qwen.code.managedagent.adapters.runtime.WorkspaceCsiResourceGuard;
-import com.alibaba.qwen.code.managedagent.adapters.runtime.WorkspaceCsiRuntimeProvisioner;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeAccess;
@@ -15,7 +14,6 @@ import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiFilesProtocol;
 import com.fasterxml.jackson.core.StreamReadFeature;
@@ -89,6 +87,7 @@ public final class WorkspaceCsiRuntimeMain {
                 .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                 .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
         var request = readRequest(Path.of(args[1]), json);
+        var support = new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry().kubernetes();
         String token = required("K2_RUNTIME_BROKER_TOKEN");
         String authorityOrigin = required("K2_RUNTIME_BROKER_ORIGIN");
         ManagedCsiFilesProtocol.authority(authorityOrigin);
@@ -103,19 +102,22 @@ public final class WorkspaceCsiRuntimeMain {
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var sessions = new JdbcRuntimeSessionRepository(source);
         var http = new HttpRuntimeTransport();
-        var nativeStore = new ManagedSessionStore(jdbc);
-        nativeStore.setCsiBindings(bindings);
+        var nativeStore = new JdbcManagedSessionStore(jdbc,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
+                null, null, null, null, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
         var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
                 request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         access.resolve(request.sessionId()).toCompletableFuture().join();
-        var api = new KubernetesHttpRuntimeClient(URI.create(required("K2_KUBERNETES_API_URL")),
+        var api = support.createClient(URI.create(required("K2_KUBERNETES_API_URL")),
                 Path.of(required("K2_KUBERNETES_TOKEN_FILE")), Path.of(required("K2_KUBERNETES_CA_FILE")));
-        var guard = new WorkspaceCsiResourceGuard(api, required("K2_CLUSTER_DOMAIN"), request.registration(),
-                request.protection());
         var storage = new WorkspaceCsiReservationStore(jdbc, manager, json);
-        var provider = new WorkspaceCsiRuntimeProvisioner(storage, bindings, request.registration(), api,
-                guard, request.image(), request.command(), Duration.ofSeconds(30), request.artifacts(), authorityOrigin);
+        var spec = new com.alibaba.qwen.code.runtimebroker.spi.WorkspaceCsiRuntimeSpec(request.registration(),
+                request.protection(), required("K2_CLUSTER_DOMAIN"), request.image(), request.command(), request.artifacts(),
+                Duration.ofSeconds(30), authorityOrigin);
+        var provider = support.createWorkspaceRuntime(spec, api, storage, bindings);
         try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
                 new JdbcToolExecutionRepository(source, bindings), UUID.randomUUID().toString(),
                 Duration.ofSeconds(30), Duration.ofSeconds(30));

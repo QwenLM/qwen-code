@@ -3,16 +3,25 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -32,9 +41,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.lang.Nullable;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -68,12 +79,12 @@ class WorkspaceSessionRetentionTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
-    @Autowired ManagedSessionStore journal;
+    @Autowired JdbcManagedSessionStore journal;
     @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired OnceCloseRuntime runtime;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SessionLifecycleCoordinator lifecycle;
-    @Autowired ManagedWorkspaceRegistry registry;
+    @Autowired JdbcManagedWorkspaceRegistry registry;
     @Autowired HarnessConnector harness;
     @Autowired com.alibaba.qwen.code.managedagent.session.HarnessCoordinator coordinator;
 
@@ -92,7 +103,7 @@ class WorkspaceSessionRetentionTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
-        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var projection = new com.alibaba.qwen.code.managedagent.session.ManagedAgentService(enabled,
                 new com.alibaba.qwen.code.managedagent.model.RequestDigests(), coordinator, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         org.springframework.test.util.ReflectionTestUtils.setField(projection, "runtimeWarmer", runtime);
@@ -419,7 +430,7 @@ class WorkspaceSessionRetentionTest {
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
                 + " session_status_before, available_at, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'SESSION', ?, ?, '{}', 'RECOVERY_BLOCKED', ?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
-                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
+                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
         web("archive", tenant, session, "owner", "fresh").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("session_operation_active"));
         web("delete", tenant, session, "owner", "fresh").andExpect(status().isConflict())
@@ -513,10 +524,16 @@ class WorkspaceSessionRetentionTest {
         }
         @Bean @Primary OnceCloseRuntime retentionRuntime() { return new OnceCloseRuntime(); }
         @Bean @Primary ManagedAgentStore retentionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-                ObjectMapper mapper, ManagedWorkspaceRegistry registry) {
+                ObjectMapper mapper, JdbcManagedWorkspaceRegistry registry,
+                WorktreeFiles worktreeFiles, JdbcManagedSessionSkills skills, ExtensionPackages extensions,
+                @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
+                @Nullable JdbcSessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
+                @Lazy @Nullable JdbcManagedExtensionRecordStore records) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            return new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry,
+                    properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), worktreeFiles,
+                    skills, extensions, lifecycle, definitions, worktrees, transport, records);
         }
     }
 

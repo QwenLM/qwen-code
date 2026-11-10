@@ -209,8 +209,10 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
+import { useProgramStatus } from './hooks/use-program-status.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
+import { useProjectHooksApproval } from './hooks/use-project-hooks-approval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
@@ -269,6 +271,7 @@ import { useAttentionNotifications } from './hooks/useAttentionNotifications.js'
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { shouldShowBtwTip } from './utils/btw-tip.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
@@ -1269,7 +1272,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'])
+        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1633,6 +1636,25 @@ export const AppContainer = (props: AppContainerProps) => {
   });
   const setBufferText = buffer.setText;
   setBufferTextRef.current = setBufferText;
+  const bufferRef = useRef(buffer);
+  bufferRef.current = buffer;
+  const pendingPastesRef = useRef(pendingPastes);
+  pendingPastesRef.current = pendingPastes;
+  // A typed prompt the Mods did not let in comes back to the composer with
+  // its pastes collapsed, ahead of anything typed since, as typed text whose
+  // provenance is gone.
+  const returnPrompt = useCallback(
+    (text: string, pastes: ReadonlyMap<string, string> = new Map()) => {
+      const draft = restorePasteDraft(text, pastes, pendingPastesRef.current);
+      const current = bufferRef.current.text;
+      invalidateSubmittedPromptProvenance();
+      setPendingPastes(draft.pasteExpansions);
+      bufferRef.current.setText(
+        current ? `${draft.text}\n${current}` : draft.text,
+      );
+    },
+    [invalidateSubmittedPromptProvenance],
+  );
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -1826,17 +1848,30 @@ export const AppContainer = (props: AppContainerProps) => {
     handleOutputStyleSelect,
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
 
+  const handleAuthChange = useCallback(() => {
+    const model = config.getModel();
+    lastNotifiedModelRef.current = model;
+    refreshStatic();
+    setCurrentModel(model);
+  }, [config, refreshStatic]);
+
   const auth = useAuthCommand(
     settings,
     config,
     historyManager.addItem,
-    refreshStatic,
+    handleAuthChange,
+    initializationResult.skipStartupAuthDialog,
   );
   const { state: authState, actions: authActions } = auth;
   const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
   const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
-  useInitializationAuthError(initializationResult.authError, onAuthError);
+  useInitializationAuthError(
+    initializationResult.skipStartupAuthDialog
+      ? null
+      : initializationResult.authError,
+    onAuthError,
+  );
 
   // Sync user tier from config when authentication changes
   // TODO: Implement getUserTier() method on Config if needed
@@ -1957,6 +1992,52 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     });
   }, [addHistoryItem, config]);
+
+  useEffect(() => {
+    // Surface the fail-closed project-hook gate instead of letting hooks
+    // stop silently after the explicit-trust requirement.
+    if (
+      !config.isInteractive() ||
+      config.isExplicitlyTrustedFolder() ||
+      config.getBareMode() ||
+      config.isSafeMode() ||
+      // With every hook disabled the trust gate is not why they are absent.
+      config.getDisableAllHooks() ||
+      // Warn only when the hooks really are withheld: the execution accessor
+      // serves an approved block despite the trust gate. `pending === false`
+      // alone is not "approved" — it also means "nothing to approve" (an
+      // untrusted folder with the trust feature on), the case this warning
+      // exists for.
+      config.getProjectHooks() !== undefined
+    ) {
+      return;
+    }
+    const projectHooks = settings.workspace?.settings?.hooks;
+    if (
+      !projectHooks ||
+      typeof projectHooks !== 'object' ||
+      Object.keys(projectHooks).length === 0
+    ) {
+      return;
+    }
+    addHistoryItem(
+      {
+        type: MessageType.WARNING,
+        text:
+          config.isProjectHooksApprovalGated() &&
+          config.isProjectHooksPendingApproval()
+            ? t(
+                'Project hooks in .qwen/settings.json were not loaded. Approve them in the dialog, or enable security.folderTrust.enabled and trust the folder.',
+              )
+            : t(
+                'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+              ),
+      },
+      Date.now(),
+    );
+    // Startup notice only; later trust changes take effect on restart/reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
 
   const clearPendingStateRef = useRef<() => void>(() => {});
   const clearPendingStateFromRef = useCallback(
@@ -2259,6 +2340,10 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
+    isCommandCancellationBlocked,
+    isCommandCommitting,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -2272,7 +2357,6 @@ export const AppContainer = (props: AppContainerProps) => {
     loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
-    isProcessing,
     setIsProcessing,
     isIdleRef,
     setMemoryFileCount,
@@ -2556,6 +2640,7 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingResponseLengthRef,
     isReceivingContent,
     workflowKeywordActive,
+    turnCancelledRef,
   } = useLlmStream(
     config.getLlmClient(),
     historyManager.history,
@@ -2582,6 +2667,8 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    returnPrompt,
+    isCommandCancellationBlocked,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -2715,7 +2802,11 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePeerMessage,
   } = useMessageQueue();
 
-  midTurnDrainRef.current = drainQueue;
+  // While a Mod hooks prompt.submit, prompts typed during a turn are not
+  // steered into it at a tool boundary: they wait for the turn to end and are
+  // sent, and heard by the hooks, then.
+  midTurnDrainRef.current = (...args) =>
+    getInteractiveModSession(config)?.hearsPrompts ? [] : drainQueue(...args);
   midTurnRestoreRef.current = restoreMessages;
   goalQueueRef.current = {
     peekNextUserBatchKey,
@@ -3719,10 +3810,12 @@ export const AppContainer = (props: AppContainerProps) => {
       // so the auto-restore branch below bails out before its orphan strip
       // runs. Strip the orphaned prompt here; otherwise appendCuratedContent
       // merges the user's NEXT real message into the "no new real user input"
-      // preamble. Safe even if the turn already produced a model response:
-      // the strip only pops trailing user entries, and a responded prompt is
-      // not trailing.
-      if (info?.wasGoalTurn) {
+      // preamble. A Mod's own prompt is stripped the same way: the person
+      // stopped it, so the next prompt must not reach the model behind it.
+      // Safe even if the turn already produced a model response: the strip
+      // only pops trailing user entries, and a responded prompt is not
+      // trailing.
+      if (info?.wasGoalTurn || info?.wasModPromptTurn) {
         llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
@@ -4279,6 +4372,13 @@ export const AppContainer = (props: AppContainerProps) => {
     handleMcpApprovalSelect,
   } = useMcpApproval(config);
   const {
+    isProjectHooksApprovalDialogOpen,
+    pendingProjectHooks,
+    handleProjectHooksApprovalSelect,
+  } = useProjectHooksApproval(config, settings, (text) =>
+    addHistoryItem({ type: MessageType.INFO, text }, Date.now()),
+  );
+  const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener(!config.getShellExecutionSandbox?.());
@@ -4301,6 +4401,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
     isMcpApprovalDialogOpen ||
+    isProjectHooksApprovalDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
@@ -4755,6 +4856,16 @@ export const AppContainer = (props: AppContainerProps) => {
     hasExecutingTool,
   );
 
+  const loadingPhrase = shouldShowBtwTip({
+    tipHistory,
+    elapsedTime,
+    streamingState,
+  })
+    ? t(
+        'Tip: Use /btw to ask a quick side question without interrupting the current work',
+      )
+    : currentLoadingPhrase;
+
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -4763,6 +4874,22 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     terminal,
     pendingToolCalls,
+  });
+
+  // Program status (OSC 7501) for terminal tabs and agent inboxes
+  useProgramStatus({
+    streamingState,
+    pendingToolCalls,
+    history: historyManager.history,
+    pendingHistoryItems,
+    turnCancelledRef,
+    authPending: isAuthDialogOpen || isAuthenticating,
+    shellConfirmationPending: !!shellConfirmationRequest,
+    loopDetectionPending: !!loopDetectionConfirmationRequest,
+    startupApprovalPending:
+      isFolderTrustDialogOpen ||
+      isMcpApprovalDialogOpen ||
+      isProjectHooksApprovalDialogOpen,
   });
 
   // P-notif: terminal-bell when a workflow run finishes (completed / failed),
@@ -4874,15 +5001,29 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // 3. Cancel in-flight btw side-question
-      if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+      if (
+        btwItem &&
+        (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+        !dialogsVisibleRef.current
+      ) {
         cancelBtw();
         return; // Btw cancelled, end processing
       }
 
       // 4. Cancel ongoing requests
-      if (streamingState === StreamingState.Responding) {
+      if (
+        streamingState === StreamingState.Responding &&
+        !isCommandCancellationBlocked()
+      ) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
+      }
+      if (
+        streamingState === StreamingState.Idle &&
+        submissionInFlightRef.current &&
+        cancelOngoingRequest?.()
+      ) {
+        return;
       }
 
       // 5. Clear input buffer (if has content)
@@ -4905,6 +5046,7 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       streamingState,
       cancelOngoingRequest,
+      isCommandCancellationBlocked,
       buffer,
       activeWorktree,
     ],
@@ -4921,6 +5063,23 @@ export const AppContainer = (props: AppContainerProps) => {
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
+        return;
+      }
+
+      if (
+        isCommandCommitting() &&
+        (keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
+          keyMatchers[Command.ESCAPE](key))
+      ) {
+        return;
+      }
+
+      if (
+        (shellConfirmationRequest || confirmationRequest) &&
+        (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key) ||
+          keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key))
+      ) {
         return;
       }
 
@@ -4943,7 +5102,11 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       } else if (keyMatchers[Command.EXIT](key)) {
         // Cancel in-flight btw even when buffer has text (Ctrl+D)
-        if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+        if (
+          btwItem &&
+          (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+          !dialogsVisibleRef.current
+        ) {
           cancelBtw();
           return;
         }
@@ -4972,8 +5135,7 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Skip if shell is focused (to allow shell's own escape handling)
-        if (embeddedShellFocused) {
+        if (embeddedShellFocused || dialogsVisibleRef.current) {
           return;
         }
 
@@ -4993,28 +5155,24 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Input is empty, cancel request immediately (no double-press needed)
-        // Skip when a dialog (background tasks, etc.) is open — ESC should
-        // close the dialog, not cancel the running request.
-        if (
-          streamingState === StreamingState.Responding &&
-          !dialogsVisibleRef.current
-        ) {
+        const isResponding = streamingState === StreamingState.Responding;
+        const requestCancelled =
+          (isResponding ||
+            (streamingState === StreamingState.Idle &&
+              submissionInFlightRef.current)) &&
+          cancelOngoingRequest?.();
+        const commandCancelled = cancelSlashCommand();
+        if (isResponding || requestCancelled || commandCancelled) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
           }
-          cancelOngoingRequest?.();
           setEscapePressedOnce(false);
           return;
         }
 
         // Input is empty and idle — double-ESC opens rewind selector
-        if (
-          streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current &&
-          !config.getIdeMode()
-        ) {
+        if (streamingState === StreamingState.Idle && !config.getIdeMode()) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
@@ -5031,21 +5189,6 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         setEscapePressedOnce(false);
         return;
-      }
-
-      // Dismiss completed btw side-question on Space or Enter,
-      // but only when btw is visible and the input buffer is empty.
-      if (
-        btwItem &&
-        !btwItem.btw.isPending &&
-        !dialogsVisibleRef.current &&
-        !contextMenuOpenRef.current &&
-        buffer.text.length === 0
-      ) {
-        if (key.name === 'return' || key.sequence === ' ') {
-          setBtwItem(null);
-          return;
-        }
       }
 
       // Note: Ctrl+C/D btw cancellation is handled inside handleExit
@@ -5153,6 +5296,9 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       ideContextState,
       handleExit,
+      isCommandCommitting,
+      shellConfirmationRequest,
+      confirmationRequest,
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
@@ -5164,12 +5310,12 @@ export const AppContainer = (props: AppContainerProps) => {
       escapeTimerRef,
       streamingState,
       cancelOngoingRequest,
+      cancelSlashCommand,
       buffer,
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
       btwItem,
-      setBtwItem,
       cancelBtw,
       // `settings` is a stable LoadedSettings instance (not recreated on render).
       // ESLint requires it here because the callback calls settings.setValue().
@@ -5304,6 +5450,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5322,6 +5469,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5331,7 +5480,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      currentLoadingPhrase: loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
@@ -5454,6 +5603,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5472,6 +5622,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5481,7 +5633,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
@@ -5591,6 +5743,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       onTabConsumerChange: setHasTabConsumer,
@@ -5685,6 +5838,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,

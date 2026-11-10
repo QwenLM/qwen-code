@@ -201,7 +201,7 @@ export async function runHostedFileTurn({
         };
       }
       let interrupted = false;
-      session.sink.write = async (record) => {
+      session.sink.write = async (record, diagnostics) => {
         if (
           recoveryCut === 'receipt_complete' &&
           record.type === 'tool_result' &&
@@ -213,7 +213,7 @@ export async function runHostedFileTurn({
             'Owned receipt-complete cut before the last result message',
           );
         }
-        return write(record);
+        return write(record, diagnostics);
       };
       try {
         await assert.rejects(

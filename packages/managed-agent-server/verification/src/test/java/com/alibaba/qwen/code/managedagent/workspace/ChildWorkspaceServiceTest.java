@@ -5,15 +5,18 @@ import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGitTes
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.Row;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -77,9 +80,9 @@ class ChildWorkspaceServiceTest {
     @Autowired
     private ManagedAgentStore sessions;
     @Autowired
-    private ChildWorkspaceStore store;
+    private JdbcChildWorkspaceStore store;
     @Autowired
-    private WorkspaceExecutionStore leases;
+    private JdbcWorkspaceExecutionStore leases;
     @Autowired
     @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
@@ -134,10 +137,10 @@ class ChildWorkspaceServiceTest {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
 
-        assertThat(ready.state()).isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(ready.state()).isEqualTo(JdbcChildWorkspaceStore.READY);
         assertThat(ready.repositoryRelative()).isEqualTo("project");
-        assertThat(ready.childCwdRelative()).isEqualTo(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childCwd(ready.childWorkspaceId(), "."));
-        assertThat(ready.childWorkspaceId()).isEqualTo(com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.childWorkspaceId(
+        assertThat(ready.childCwdRelative()).isEqualTo(ChildWorktreeOperations.childCwd(ready.childWorkspaceId(), "."));
+        assertThat(ready.childWorkspaceId()).isEqualTo(ChildWorkspaceStore.childWorkspaceId(
                 parent.tenantId(), parent.sessionId(), "run-1"));
         Path child = root.resolve(ready.childCwdRelative());
         assertThat(plain(child, "rev-parse", "HEAD")).isEqualTo(ready.baseCommit());
@@ -150,17 +153,17 @@ class ChildWorkspaceServiceTest {
         assertThat(bound.getWorkspaceId()).isEqualTo(parent.workspace().getWorkspaceId());
         // #13753 I2: the merge is recorded while the child runs and waits,
         // at no cost, for its close; nothing touches the running worktree.
-        Row waiting = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
-        assertThat(waiting.state()).isEqualTo(ChildWorkspaceStore.READY);
-        assertThat(waiting.finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
+        Row waiting = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
+        assertThat(waiting.state()).isEqualTo(JdbcChildWorkspaceStore.READY);
+        assertThat(waiting.finishRequest()).isEqualTo(JdbcChildWorkspaceStore.MERGE);
         assertThat(waiting.attempts()).isZero();
         assertThat(waiting.nextRetryAt()).isEqualTo(clock.get() + ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
         assertThat(waiting.lastError()).isEqualTo("The child Session bound to this Workspace is not closed.");
         assertThat(child).isDirectory();
         jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE session_id = ?", childSession);
         clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE).state())
-                .isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE).state())
+                .isEqualTo(JdbcChildWorkspaceStore.READY);
 
         Files.writeString(child.resolve("f.txt"), "a\nb\nc\nd\nCHILD\n");
         Files.writeString(child.resolve("new.txt"), "new\n");
@@ -168,20 +171,20 @@ class ChildWorkspaceServiceTest {
         assertThat(project.resolve("new.txt")).doesNotExist();
         close(childSession);
         clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
-        Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
 
-        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(merged.state()).isEqualTo(JdbcChildWorkspaceStore.MERGED);
         assertThat(merged.outcomeCode()).isEqualTo("merged");
         assertThat(merged.lastError()).isNull();
         assertThat(project.resolve("f.txt")).hasContent("PARENT\nb\nc\nd\nCHILD");
         assertThat(project.resolve("new.txt")).hasContent("new");
-        assertThat(root.resolve(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+        assertThat(root.resolve(ChildWorktreeOperations.childDirectory(ready.childWorkspaceId()))).doesNotExist();
         assertThat(jdbc.queryForList("SELECT holder_key FROM ma_storage_owner"
                 + " WHERE storage_key = ?", String.class, storageKey(parent.workspace()))).containsOnlyNulls();
         assertPinsGone(ready);
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE))
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE))
                 .isEqualTo(merged);
-        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD),
+        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD),
                 "child_workspace_conflict");
     }
 
@@ -204,9 +207,9 @@ class ChildWorkspaceServiceTest {
         Files.writeString(child.resolve("f.txt"), "CHILD\nb\nc\nd\ne\n");
         Files.writeString(project.resolve("f.txt"), "PARENT\nb\nc\nd\ne\n");
 
-        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
 
-        assertThat(conflicted.state()).isEqualTo(ChildWorkspaceStore.CONFLICTED);
+        assertThat(conflicted.state()).isEqualTo(JdbcChildWorkspaceStore.CONFLICTED);
         assertThat(conflicted.outcomeCode()).isEqualTo("conflicted");
         assertThat(conflicted.conflictPaths()).containsExactly("f.txt");
         assertThat(project.resolve("f.txt")).hasContent("PARENT\nb\nc\nd\ne");
@@ -214,11 +217,11 @@ class ChildWorkspaceServiceTest {
         String pin = ChildWorktreeGit.PIN_PREFIX + ready.childWorkspaceId() + "/result";
         assertThat(plain(project, "rev-parse", pin)).isEqualTo(conflicted.resultCommit());
 
-        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).isEqualTo("conflicted");
         assertThat(plain(project, "show", pin + ":f.txt")).isEqualTo("CHILD\nb\nc\nd\ne");
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD))
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD))
                 .isEqualTo(discarded);
     }
 
@@ -239,9 +242,9 @@ class ChildWorkspaceServiceTest {
             Files.writeString(project.resolve(name), "parent\n");
         }
 
-        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
 
-        assertThat(conflicted.state()).isEqualTo(ChildWorkspaceStore.CONFLICTED);
+        assertThat(conflicted.state()).isEqualTo(JdbcChildWorkspaceStore.CONFLICTED);
         assertThat(conflicted.conflictPaths()).hasSize(ChildWorktreeGit.MAX_CONFLICT_PATHS);
         assertThat(conflicted.conflictPaths().getFirst()).isEqualTo("g000.txt");
         assertThat(conflicted.conflictPaths().getLast())
@@ -256,11 +259,11 @@ class ChildWorkspaceServiceTest {
         Files.writeString(root.resolve(ready.childCwdRelative()).resolve("gen/x.txt"), "generated\n");
         Files.writeString(project.resolve(".gitignore"), "gen/\n");
 
-        Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
 
-        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(merged.state()).isEqualTo(JdbcChildWorkspaceStore.MERGED);
         assertThat(project.resolve("gen/x.txt")).hasContent("generated");
-        assertThat(root.resolve(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+        assertThat(root.resolve(ChildWorktreeOperations.childDirectory(ready.childWorkspaceId()))).doesNotExist();
     }
 
     @Test
@@ -270,14 +273,14 @@ class ChildWorkspaceServiceTest {
 
         Row failed = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
 
-        assertThat(failed.state()).isEqualTo(ChildWorkspaceStore.FAILED);
+        assertThat(failed.state()).isEqualTo(JdbcChildWorkspaceStore.FAILED);
         assertThat(failed.outcomeCode()).isEqualTo(ChildWorkspaceException.LAYOUT);
         assertThat(failed.baseCommit()).isNull();
         assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
-        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE),
+        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE),
                 "child_workspace_not_ready");
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD).state())
-                .isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD).state())
+                .isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
     }
 
     @Test
@@ -291,7 +294,7 @@ class ChildWorkspaceServiceTest {
 
             Row failed = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
 
-            assertThat(failed.state()).as(cwd).isEqualTo(ChildWorkspaceStore.FAILED);
+            assertThat(failed.state()).as(cwd).isEqualTo(JdbcChildWorkspaceStore.FAILED);
             assertThat(failed.outcomeCode()).as(cwd).isEqualTo(ChildWorkspaceException.LAYOUT);
             assertThat(failed.baseCommit()).as(cwd).isNull();
             assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).as(cwd).doesNotExist();
@@ -321,40 +324,40 @@ class ChildWorkspaceServiceTest {
         var parent = createSession("project");
         service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         warmer.provider = null;
-        Row owed = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
-        assertThat(owed.state()).isEqualTo(ChildWorkspaceStore.READY);
-        assertThat(owed.finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
+        Row owed = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
+        assertThat(owed.state()).isEqualTo(JdbcChildWorkspaceStore.READY);
+        assertThat(owed.finishRequest()).isEqualTo(JdbcChildWorkspaceStore.MERGE);
         // #13753 I2: a discard replaces a merge that has not started, and
         // the merge it replaced can no longer come back. The discard pins
         // the result the merge would have taken; a repeated one is the same.
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD)
-                .finishRequest()).isEqualTo(ChildWorkspaceStore.DISCARD_PINNED);
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD)
-                .finishRequest()).isEqualTo(ChildWorkspaceStore.DISCARD_PINNED);
-        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE),
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD)
+                .finishRequest()).isEqualTo(JdbcChildWorkspaceStore.DISCARD_PINNED);
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD)
+                .finishRequest()).isEqualTo(JdbcChildWorkspaceStore.DISCARD_PINNED);
+        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE),
                 "child_workspace_conflict");
         warmer.provider = provider(root);
         service.scan();
         Row replaced = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(replaced.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(replaced.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(replaced.resultCommit()).isNotNull();
 
         service.prepare(parent.tenantId(), parent.sessionId(), "run-2");
-        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-2", ChildWorkspaceStore.DISCARD);
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
-        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-2", ChildWorkspaceStore.MERGE),
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-2", JdbcChildWorkspaceStore.DISCARD);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
+        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-2", JdbcChildWorkspaceStore.MERGE),
                 "child_workspace_conflict");
-        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-3", ChildWorkspaceStore.MERGE),
+        assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-3", JdbcChildWorkspaceStore.MERGE),
                 "child_workspace_not_found");
 
         // Once a merge started it runs to its end: a discard is refused.
         service.prepare(parent.tenantId(), parent.sessionId(), "run-4");
-        for (String started : List.of(ChildWorkspaceStore.MERGING, ChildWorkspaceStore.APPLYING,
-                ChildWorkspaceStore.APPLIED)) {
+        for (String started : List.of(JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING,
+                JdbcChildWorkspaceStore.APPLIED)) {
             updateChild("UPDATE ma_workspace SET child_state = ?, finish_request = 'merge'"
                     + " WHERE tenant_id = ? AND child_run_id = X'72756e2d34'", started, parent.tenantId());
             assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-4",
-                    ChildWorkspaceStore.DISCARD), "child_workspace_finishing");
+                    JdbcChildWorkspaceStore.DISCARD), "child_workspace_finishing");
         }
     }
 
@@ -365,11 +368,11 @@ class ChildWorkspaceServiceTest {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         Files.writeString(root.resolve(ready.childCwdRelative()).resolve("new.txt"), "child\n");
-        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE, clock.get());
-        ChildWorkspaceStore racing = org.mockito.Mockito.spy(new ChildWorkspaceStore(jdbc,
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE, clock.get());
+        JdbcChildWorkspaceStore racing = org.mockito.Mockito.spy(new JdbcChildWorkspaceStore(jdbc,
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource())));
         org.mockito.Mockito.doAnswer(call -> {
-            store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD,
+            store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD,
                     clock.get());
             return call.callRealMethod();
         }).when(racing).childSessionsClosed(org.mockito.ArgumentMatchers.any());
@@ -377,7 +380,7 @@ class ChildWorkspaceServiceTest {
 
         Row finished = worker.drive(store.find(parent.tenantId(), parent.sessionId(), "run-1"));
 
-        assertThat(finished.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(finished.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(finished.outcomeCode()).isEqualTo("discarded");
         assertThat(project.resolve("new.txt")).doesNotExist();
         assertThat(finished.attempts()).isZero();
@@ -393,11 +396,11 @@ class ChildWorkspaceServiceTest {
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         Path child = root.resolve(ready.childCwdRelative());
         Files.writeString(child.resolve("new.txt"), "child\n");
-        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE, clock.get());
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE, clock.get());
 
-        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD);
 
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).isEqualTo("discarded");
         assertThat(project.resolve("new.txt")).doesNotExist();
         assertThat(child).doesNotExist();
@@ -410,8 +413,8 @@ class ChildWorkspaceServiceTest {
         // A discard nobody asked to merge first pins nothing (I1).
         Row other = service.prepare(parent.tenantId(), parent.sessionId(), "run-2");
         Files.writeString(root.resolve(other.childCwdRelative()).resolve("other.txt"), "other\n");
-        Row unpinned = service.finish(parent.tenantId(), parent.sessionId(), "run-2", ChildWorkspaceStore.DISCARD);
-        assertThat(unpinned.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        Row unpinned = service.finish(parent.tenantId(), parent.sessionId(), "run-2", JdbcChildWorkspaceStore.DISCARD);
+        assertThat(unpinned.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(unpinned.resultCommit()).isNull();
         assertPinsGone(unpinned);
     }
@@ -426,12 +429,12 @@ class ChildWorkspaceServiceTest {
 
         // Recorded only; the scan finds the ended row by its request.
         assertThat(store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1",
-                ChildWorkspaceStore.DISCARD, clock.get()).finishRequest())
-                .isEqualTo(ChildWorkspaceStore.DISCARD_PINNED);
+                JdbcChildWorkspaceStore.DISCARD, clock.get()).finishRequest())
+                .isEqualTo(JdbcChildWorkspaceStore.DISCARD_PINNED);
         service.scan();
         Row discarded = service.find(parent.tenantId(), parent.sessionId(), "run-1");
 
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).isEqualTo("child_workspace_git");
         String pin = ChildWorktreeGit.PIN_PREFIX + ready.childWorkspaceId() + "/result";
         assertThat(plain(project, "show", pin + ":new.txt")).isEqualTo("child");
@@ -455,7 +458,7 @@ class ChildWorkspaceServiceTest {
                 ready.childWorkspaceId());
         service.scan();
         Row discarded = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         String pin = ChildWorktreeGit.PIN_PREFIX + ready.childWorkspaceId() + "/result";
         assertThat(plain(project, "show", pin + ":new.txt")).isEqualTo("child");
     }
@@ -467,8 +470,8 @@ class ChildWorkspaceServiceTest {
     void aDiscardWithNoResultLeftGoesOnWithoutAPin(String removed) throws Exception {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
-        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE, clock.get());
-        Path worktree = root.resolve(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childDirectory(ready.childWorkspaceId()));
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE, clock.get());
+        Path worktree = root.resolve(ChildWorktreeOperations.childDirectory(ready.childWorkspaceId()));
         Path gone = switch (removed) {
             case "worktree" -> worktree;
             case "worktree-git" -> worktree.resolve(".git");
@@ -480,9 +483,9 @@ class ChildWorkspaceServiceTest {
             }
         }
 
-        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD);
 
-        assertThat(discarded.state()).as(removed).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.state()).as(removed).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).as(removed).isEqualTo("discarded");
         assertThat(discarded.resultCommit()).as(removed).isNull();
         // The row names the pin failure: on this path nothing else records it.
@@ -497,7 +500,7 @@ class ChildWorkspaceServiceTest {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         Files.writeString(root.resolve(ready.childCwdRelative()).resolve("new.txt"), "child\n");
-        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE, clock.get());
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE, clock.get());
         // Writing the result pin fails; everything else works.
         Path failing = temp.resolve("pin-fails-git");
         Files.writeString(failing, "#!/bin/sh\ncase \" $* \" in"
@@ -508,8 +511,8 @@ class ChildWorkspaceServiceTest {
         try {
             warmer.provider = provider(root, Integer.MAX_VALUE, failingGit);
             Row retried = service.finish(parent.tenantId(), parent.sessionId(), "run-1",
-                    ChildWorkspaceStore.DISCARD);
-            assertThat(retried.state()).isEqualTo(ChildWorkspaceStore.DISCARDING);
+                    JdbcChildWorkspaceStore.DISCARD);
+            assertThat(retried.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDING);
             assertThat(retried.attempts()).isEqualTo(1);
             assertThat(root.resolve(ready.childCwdRelative()).resolve("new.txt")).hasContent("child");
             // The last of the bounded retries.
@@ -522,9 +525,9 @@ class ChildWorkspaceServiceTest {
         }
 
         Row discarded = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.resultCommit()).isNull();
-        assertThat(root.resolve(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+        assertThat(root.resolve(ChildWorktreeOperations.childDirectory(ready.childWorkspaceId()))).doesNotExist();
         assertPinsGone(discarded);
     }
 
@@ -532,17 +535,17 @@ class ChildWorkspaceServiceTest {
     void aStartedFinishNeverRunsTheMergeADiscardReplaced() throws Exception {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
-        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE, clock.get());
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE, clock.get());
         Row claimed = store.claim(store.find(parent.tenantId(), parent.sessionId(), "run-1"), "worker",
                 clock.get(), 60_000);
         // The discard lands between the claim and the start of the merge.
-        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD, clock.get());
-        assertThat(store.startFinish(claimed, "worker", ChildWorkspaceStore.MERGING, ChildWorkspaceStore.MERGE,
+        store.requestFinish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD, clock.get());
+        assertThat(store.startFinish(claimed, "worker", JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.MERGE,
                 clock.get())).isFalse();
         assertThat(store.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.READY);
-        assertThat(store.startFinish(claimed, "worker", ChildWorkspaceStore.DISCARDING,
-                ChildWorkspaceStore.DISCARD_PINNED, clock.get())).isTrue();
+                .isEqualTo(JdbcChildWorkspaceStore.READY);
+        assertThat(store.startFinish(claimed, "worker", JdbcChildWorkspaceStore.DISCARDING,
+                JdbcChildWorkspaceStore.DISCARD_PINNED, clock.get())).isTrue();
         assertThat(ready.childWorkspaceId()).isNotNull();
     }
 
@@ -581,12 +584,12 @@ class ChildWorkspaceServiceTest {
         Files.writeString(project.resolve(".gitignore"), "ignored.txt\n");
         Files.writeString(project.resolve("ignored.txt"), "ignored\n");
         Row requested = service.request(parent.tenantId(), parent.sessionId(), "run-1",
-                ChildWorkspaceStore.SNAPSHOT);
-        assertThat(requested.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
-        assertThat(requested.workspaceMode()).isEqualTo(ChildWorkspaceStore.SNAPSHOT);
+                JdbcChildWorkspaceStore.SNAPSHOT);
+        assertThat(requested.state()).isEqualTo(JdbcChildWorkspaceStore.PREPARING);
+        assertThat(requested.workspaceMode()).isEqualTo(JdbcChildWorkspaceStore.SNAPSHOT);
         service.scan();
         Row ready = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(ready.state()).isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(ready.state()).isEqualTo(JdbcChildWorkspaceStore.READY);
         assertThat(ready.snapshot()).isTrue();
         // The frozen view: the parent's working tree as it was, ignored files left out.
         Path copy = root.resolve(ready.childCwdRelative());
@@ -606,20 +609,20 @@ class ChildWorkspaceServiceTest {
         assertThat(profiles.get("approval_mode")).isEqualTo(parentProfiles.get("approval_mode"));
 
         // A merge asked of a snapshot is recorded as the discard it is.
-        Row asked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
-        assertThat(asked.finishRequest()).isEqualTo(ChildWorkspaceStore.DISCARD);
-        assertThat(asked.state()).isEqualTo(ChildWorkspaceStore.READY);
+        Row asked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
+        assertThat(asked.finishRequest()).isEqualTo(JdbcChildWorkspaceStore.DISCARD);
+        assertThat(asked.state()).isEqualTo(JdbcChildWorkspaceStore.READY);
         Files.writeString(copy.resolve("stray.txt"), "stray\n");
         close(child);
         clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
-        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
 
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).isEqualTo("discarded");
         assertThat(discarded.resultCommit()).isNull();
         assertThat(project.resolve("stray.txt")).doesNotExist();
         assertThat(project.resolve("f.txt")).hasContent("uncommitted");
-        assertThat(root.resolve(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+        assertThat(root.resolve(ChildWorktreeOperations.childDirectory(ready.childWorkspaceId()))).doesNotExist();
         assertPinsGone(ready);
     }
 
@@ -629,7 +632,7 @@ class ChildWorkspaceServiceTest {
     @Test
     void aMergeRecordedOnASnapshotByAnOlderRelayRunsAsADiscard() throws Exception {
         var parent = createSession("project");
-        service.request(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.SNAPSHOT);
+        service.request(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.SNAPSHOT);
         service.scan();
         Row ready = service.find(parent.tenantId(), parent.sessionId(), "run-1");
         assertThat(ready.snapshot()).isTrue();
@@ -637,7 +640,7 @@ class ChildWorkspaceServiceTest {
         updateChild("UPDATE ma_workspace SET finish_request = 'merge'"
                 + " WHERE child_workspace_id = ?", ready.childWorkspaceId());
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").finishRequest())
-                .isEqualTo(ChildWorkspaceStore.MERGE);
+                .isEqualTo(JdbcChildWorkspaceStore.MERGE);
         // The copy lies in the parent's storage, so a shell there can change it.
         Files.writeString(root.resolve(ready.childCwdRelative()).resolve("stray.txt"), "stray\n");
         close(child);
@@ -645,11 +648,11 @@ class ChildWorkspaceServiceTest {
         service.scan();
 
         Row discarded = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).isEqualTo("discarded");
         assertThat(discarded.resultCommit()).isNull();
         assertThat(project.resolve("stray.txt")).doesNotExist();
-        assertThat(root.resolve(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+        assertThat(root.resolve(ChildWorktreeOperations.childDirectory(ready.childWorkspaceId()))).doesNotExist();
         assertPinsGone(ready);
     }
 
@@ -664,34 +667,34 @@ class ChildWorkspaceServiceTest {
                 + " WHERE operation_kind = 'CHILD_WORKSPACE' AND operation_id = ?", String.class,
                 ready.childWorkspaceId().getBytes(StandardCharsets.UTF_8));
         assertThat(request).doesNotContain("workspaceMode");
-        assertThat(ready.workspaceMode()).isEqualTo(ChildWorkspaceStore.WORKTREE);
+        assertThat(ready.workspaceMode()).isEqualTo(JdbcChildWorkspaceStore.WORKTREE);
         assertThat(ready.snapshot()).isFalse();
         String child = bindChild(parent, "run-1", ready.childCwdRelative());
         assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?",
                 String.class, child)).isNotEqualTo("hosted-workspace-read/1");
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE)
-                .finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE)
+                .finishRequest()).isEqualTo(JdbcChildWorkspaceStore.MERGE);
     }
 
     @Test
     void aRunsWorkspaceModeIsFixedAndAWorktreeKeepsItsParentsProfile() throws Exception {
         var parent = createSession("project");
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(ready.workspaceMode()).isEqualTo(ChildWorkspaceStore.WORKTREE);
+        assertThat(ready.workspaceMode()).isEqualTo(JdbcChildWorkspaceStore.WORKTREE);
         assertThat(ready.snapshot()).isFalse();
         assertApi(() -> service.request(parent.tenantId(), parent.sessionId(), "run-1",
-                ChildWorkspaceStore.SNAPSHOT), "child_workspace_conflict");
-        service.request(parent.tenantId(), parent.sessionId(), "run-2", ChildWorkspaceStore.SNAPSHOT);
+                JdbcChildWorkspaceStore.SNAPSHOT), "child_workspace_conflict");
+        service.request(parent.tenantId(), parent.sessionId(), "run-2", JdbcChildWorkspaceStore.SNAPSHOT);
         assertApi(() -> service.request(parent.tenantId(), parent.sessionId(), "run-2",
-                ChildWorkspaceStore.WORKTREE), "child_workspace_conflict");
+                JdbcChildWorkspaceStore.WORKTREE), "child_workspace_conflict");
 
         String child = bindChild(parent, "run-1", ready.childCwdRelative());
         assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?",
                 String.class, child)).isEqualTo(jdbc.queryForObject(
                         "SELECT tool_profile FROM ma_session WHERE session_id = ?", String.class,
                         parent.sessionId()));
-        Row asked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
-        assertThat(asked.finishRequest()).isEqualTo(ChildWorkspaceStore.MERGE);
+        Row asked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
+        assertThat(asked.finishRequest()).isEqualTo(JdbcChildWorkspaceStore.MERGE);
     }
 
     @Test
@@ -701,20 +704,20 @@ class ChildWorkspaceServiceTest {
         jdbc.update("UPDATE ma_storage_owner SET holder_key = 'a-tool-turn' WHERE storage_key = ?", key);
 
         Row parked = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(parked.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
+        assertThat(parked.state()).isEqualTo(JdbcChildWorkspaceStore.PREPARING);
         assertThat(parked.attempts()).isZero();
         assertThat(parked.nextRetryAt()).isEqualTo(clock.get() + ChildWorkspaceService.BUSY_DELAY_MS);
-        assertThat(parked.lastError()).contains("held by another tool turn");
+        assertThat(parked.lastError()).contains("Workspace is not available for this operation");
         assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
 
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.PREPARING);
+                .isEqualTo(JdbcChildWorkspaceStore.PREPARING);
         jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL WHERE storage_key = ?", key);
         clock.addAndGet(ChildWorkspaceService.BUSY_DELAY_MS);
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.READY);
+                .isEqualTo(JdbcChildWorkspaceStore.READY);
     }
 
     @Test
@@ -766,14 +769,14 @@ class ChildWorkspaceServiceTest {
 
         other.scan();
         assertThat(other.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.PREPARING);
+                .isEqualTo(JdbcChildWorkspaceStore.PREPARING);
         clock.addAndGet(ChildWorkspaceService.LEASE_MS + 1);
         other.scan();
         assertThat(other.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.READY);
+                .isEqualTo(JdbcChildWorkspaceStore.READY);
 
-        assertThat(store.transition(stalled, "worker-a", ChildWorkspaceStore.FAILED,
-                com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.columns(), clock.get())).isFalse();
+        assertThat(store.transition(stalled, "worker-a", JdbcChildWorkspaceStore.FAILED,
+                ChildWorkspaceStore.columns(), clock.get())).isFalse();
 
         // Same state, newer claim: only the claim generation tells them apart.
         Row second = store.admit(parent.tenantId(), parent.sessionId(), "run-2", parent.workspace(), clock.get());
@@ -781,10 +784,10 @@ class ChildWorkspaceServiceTest {
         clock.addAndGet(ChildWorkspaceService.LEASE_MS + 1);
         Row taken = store.claim(second, "worker-a", clock.get(), ChildWorkspaceService.LEASE_MS);
         assertThat(taken.state()).isEqualTo(first.state());
-        assertThat(store.transition(first, "worker-a", ChildWorkspaceStore.FAILED,
-                com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.columns(), clock.get())).isFalse();
-        assertThat(store.transition(taken, "worker-a", ChildWorkspaceStore.FAILED,
-                com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.columns(), clock.get())).isTrue();
+        assertThat(store.transition(first, "worker-a", JdbcChildWorkspaceStore.FAILED,
+                ChildWorkspaceStore.columns(), clock.get())).isFalse();
+        assertThat(store.transition(taken, "worker-a", JdbcChildWorkspaceStore.FAILED,
+                ChildWorkspaceStore.columns(), clock.get())).isTrue();
         assertBroker(() -> leases.holdForMaintenance(parent.workspace(), stalled.childWorkspaceId(),
                 stalled.claimGeneration()), "workspace_unavailable");
     }
@@ -802,7 +805,7 @@ class ChildWorkspaceServiceTest {
         service.scan();
 
         Row resumed = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(resumed.state()).isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(resumed.state()).isEqualTo(JdbcChildWorkspaceStore.READY);
         assertThat(resumed.baseCommit()).isEqualTo(ready.baseCommit());
         assertThat(plain(child, "rev-parse", "HEAD")).isEqualTo(ready.baseCommit());
         assertThat(child.resolve("f.txt")).hasContent("a\nb\nc\nd\ne");
@@ -817,9 +820,9 @@ class ChildWorkspaceServiceTest {
         // would find the storage busy and park the row in applying.
         warmer.provider = provider(root, 1);
 
-        Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+        Row merged = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
 
-        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(merged.state()).isEqualTo(JdbcChildWorkspaceStore.MERGED);
         assertThat(project.resolve("keep.txt")).hasContent("child");
     }
 
@@ -846,7 +849,7 @@ class ChildWorkspaceServiceTest {
         service.scan();
 
         Row merged = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(merged.state()).isEqualTo(JdbcChildWorkspaceStore.MERGED);
         assertThat(merged.outcomeCode()).isEqualTo("merged");
         assertThat(project.resolve("keep.txt")).hasContent("the parent's later edit");
         assertThat(project.resolve("f.txt")).hasContent("a\nb\nc\nd\nCHILD");
@@ -872,7 +875,7 @@ class ChildWorkspaceServiceTest {
         service.scan();
 
         Row merged = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(merged.state()).isEqualTo(JdbcChildWorkspaceStore.MERGED);
         assertThat(project.resolve("keep.txt")).hasContent("child");
         assertThat(child).doesNotExist();
         assertPinsGone(ready);
@@ -892,9 +895,9 @@ class ChildWorkspaceServiceTest {
         try {
             warmer.provider = provider(root, Integer.MAX_VALUE, failingGit);
 
-            Row parked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
+            Row parked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
 
-            assertThat(parked.state()).isEqualTo(ChildWorkspaceStore.APPLIED);
+            assertThat(parked.state()).isEqualTo(JdbcChildWorkspaceStore.APPLIED);
             assertThat(parked.attempts()).isEqualTo(1);
             assertThat(project.resolve("keep.txt")).hasContent("child");
         } finally {
@@ -905,7 +908,7 @@ class ChildWorkspaceServiceTest {
         clock.addAndGet(ChildWorkspaceService.LEASE_MS);
         service.scan();
         Row merged = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(merged.state()).isEqualTo(ChildWorkspaceStore.MERGED);
+        assertThat(merged.state()).isEqualTo(JdbcChildWorkspaceStore.MERGED);
         assertThat(project.resolve("keep.txt")).hasContent("the parent's later edit");
         assertPinsGone(ready);
     }
@@ -928,16 +931,16 @@ class ChildWorkspaceServiceTest {
         service.scan();
 
         Row blocked = service.find(parent.tenantId(), parent.sessionId(), "run-1");
-        assertThat(blocked.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        assertThat(blocked.state()).isEqualTo(JdbcChildWorkspaceStore.BLOCKED);
         assertThat(blocked.outcomeCode()).isEqualTo("merged");
         assertThat(blocked.lastError()).contains("filter.evil.clean");
         // A discard that fails too keeps the outcome: the merge landed.
-        Row still = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
-        assertThat(still.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        Row still = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD);
+        assertThat(still.state()).isEqualTo(JdbcChildWorkspaceStore.BLOCKED);
         assertThat(still.outcomeCode()).isEqualTo("merged");
         plain(project, "config", "--unset", "filter.evil.clean");
-        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
-        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        Row discarded = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD);
+        assertThat(discarded.state()).isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
         assertThat(discarded.outcomeCode()).isEqualTo("merged");
         assertThat(project.resolve("keep.txt")).hasContent("child");
         assertPinsGone(ready);
@@ -949,7 +952,7 @@ class ChildWorkspaceServiceTest {
         warmer.provider = new ChildWorkspaceProvider() {
             @Override
             public Path storageRoot(ContextBinding binding) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
 
             @Override
@@ -960,16 +963,16 @@ class ChildWorkspaceServiceTest {
         Row row = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
         assertThat(row.attempts()).isEqualTo(1);
         for (int attempt = 0; attempt < ChildWorkspaceService.MAX_ATTEMPTS
-                && !ChildWorkspaceStore.BLOCKED.equals(row.state()); attempt++) {
+                && !JdbcChildWorkspaceStore.BLOCKED.equals(row.state()); attempt++) {
             clock.addAndGet(120_000);
             service.scan();
             row = service.find(parent.tenantId(), parent.sessionId(), "run-1");
         }
-        assertThat(row.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        assertThat(row.state()).isEqualTo(JdbcChildWorkspaceStore.BLOCKED);
         assertThat(row.outcomeCode()).isEqualTo("workspace_unavailable");
         warmer.provider = provider(root);
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD).state())
-                .isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD).state())
+                .isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
     }
 
     @Test
@@ -982,7 +985,7 @@ class ChildWorkspaceServiceTest {
                 && due.parentSessionId().equals(parent.sessionId()));
         service.scan();
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.PREPARING);
+                .isEqualTo(JdbcChildWorkspaceStore.PREPARING);
     }
 
     @Test
@@ -1010,7 +1013,7 @@ class ChildWorkspaceServiceTest {
 
         Row ready = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
 
-        assertThat(ready.state()).isEqualTo(ChildWorkspaceStore.READY);
+        assertThat(ready.state()).isEqualTo(JdbcChildWorkspaceStore.READY);
         assertThat(renewedUntil.get()).isBetween(clock.get() + ChildWorkspaceService.LEASE_MS - 500,
                 clock.get() + ChildWorkspaceService.LEASE_MS + 500);
     }
@@ -1034,17 +1037,17 @@ class ChildWorkspaceServiceTest {
         Path child = root.resolve(ready.childCwdRelative());
         Files.writeString(child.resolve("f.txt"), "CHILD\nb\nc\nd\ne\n");
         Files.writeString(project.resolve("f.txt"), "PARENT\nb\nc\nd\ne\n");
-        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.MERGE);
-        assertThat(conflicted.state()).isEqualTo(ChildWorkspaceStore.CONFLICTED);
+        Row conflicted = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.MERGE);
+        assertThat(conflicted.state()).isEqualTo(JdbcChildWorkspaceStore.CONFLICTED);
         Path container = root.resolve(ChildWorktreeGit.CONTAINER);
         Files.createDirectories(container);
         Path moved = temp.toRealPath().resolve("moved");
         Files.move(container, moved);
         Files.createSymbolicLink(container, moved);
 
-        Row blocked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
+        Row blocked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD);
 
-        assertThat(blocked.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        assertThat(blocked.state()).isEqualTo(JdbcChildWorkspaceStore.BLOCKED);
         assertThat(blocked.outcomeCode()).isEqualTo("conflicted");
         assertThat(blocked.conflictPaths()).containsExactly("f.txt");
         assertThat(blocked.resultCommit()).isEqualTo(conflicted.resultCommit());
@@ -1060,9 +1063,9 @@ class ChildWorkspaceServiceTest {
         Files.move(container, moved);
         Files.createSymbolicLink(container, moved);
 
-        Row blocked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD);
+        Row blocked = service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD);
 
-        assertThat(blocked.state()).isEqualTo(ChildWorkspaceStore.BLOCKED);
+        assertThat(blocked.state()).isEqualTo(JdbcChildWorkspaceStore.BLOCKED);
         assertThat(blocked.outcomeCode()).isEqualTo(ChildWorkspaceException.DIVERGED);
         assertThat(blocked.finishRequest()).isNull();
         clock.addAndGet(120_000);
@@ -1071,8 +1074,8 @@ class ChildWorkspaceServiceTest {
 
         Files.delete(container);
         Files.move(moved, container);
-        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.DISCARD).state())
-                .isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(service.finish(parent.tenantId(), parent.sessionId(), "run-1", JdbcChildWorkspaceStore.DISCARD).state())
+                .isEqualTo(JdbcChildWorkspaceStore.DISCARDED);
     }
 
     @Test
@@ -1096,8 +1099,8 @@ class ChildWorkspaceServiceTest {
 
     @Test
     void anExpiredPhysicalStepIsNeverResumedWithoutStopProof() throws Exception {
-        for (String state : List.of(ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.MERGING,
-                ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING)) {
+        for (String state : List.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.MERGING,
+                JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED, JdbcChildWorkspaceStore.DISCARDING)) {
             var parent = createSession("project");
             Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
             updateChild("UPDATE ma_workspace SET child_state = ? WHERE child_workspace_id = ?", state, row.childWorkspaceId());
@@ -1163,9 +1166,9 @@ class ChildWorkspaceServiceTest {
         service.scan();
 
         assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").state())
-                .isEqualTo(ChildWorkspaceStore.READY);
+                .isEqualTo(JdbcChildWorkspaceStore.READY);
         Row waiting = service.find(parent.tenantId(), parent.sessionId(), "run-2");
-        assertThat(waiting.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
+        assertThat(waiting.state()).isEqualTo(JdbcChildWorkspaceStore.PREPARING);
         assertThat(waiting.attempts()).isZero();
         assertThat(waiting.claimGeneration()).isZero();
     }
@@ -1201,7 +1204,7 @@ class ChildWorkspaceServiceTest {
             Row after = step.get(10, java.util.concurrent.TimeUnit.SECONDS);
 
             assertThat(after.claimedBy()).isEqualTo("thief");
-            assertThat(after.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
+            assertThat(after.state()).isEqualTo(JdbcChildWorkspaceStore.PREPARING);
             assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
             // The worker that gave up its claim still freed the storage it
             // held, though its generation is no longer the row's.
@@ -1223,9 +1226,9 @@ class ChildWorkspaceServiceTest {
     void theScanTheMigrationGateAndTheHoldSweepReadThroughIndexes() {
         // None of the three tables is pruned: each read must key on what it
         // filters, not scan the accumulated history.
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_due"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_due"))
                 .containsExactly("operation_kind", "delivery_state", "available_at");
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_storage"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_storage"))
                 .containsExactly("storage_key", "operation_kind", "state");
         assertThat(indexColumns("ma_storage_owner", "idx_execution_lease_maintenance"))
                 .containsExactly("maintenance_id");
@@ -1242,7 +1245,7 @@ class ChildWorkspaceServiceTest {
         String id = "0".repeat(32);
         String offset = "d".repeat(200) + "/" + "e".repeat(200) + "/" + "f".repeat(200) + "/" + "g".repeat(200)
                 + "/" + "h".repeat(200);
-        assertThat(ChildWorkspaceService.childCwd(id, ".")).isEqualTo(com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit.childDirectory(id));
+        assertThat(ChildWorkspaceService.childCwd(id, ".")).isEqualTo(ChildWorktreeOperations.childDirectory(id));
         assertThatThrownBy(() -> ChildWorkspaceService.childCwd(id, offset))
                 .isInstanceOfSatisfying(ChildWorkspaceException.class,
                         error -> assertThat(error.code()).isEqualTo(ChildWorkspaceException.LAYOUT));
@@ -1266,7 +1269,7 @@ class ChildWorkspaceServiceTest {
 
         Row row = service.prepare(parent.tenantId(), parent.sessionId(), "run-1");
 
-        assertThat(row.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
+        assertThat(row.state()).isEqualTo(JdbcChildWorkspaceStore.PREPARING);
         assertThat(row.attempts()).isEqualTo(1);
         assertThat(row.lastError()).isEqualTo("unforeseen");
         assertThat(row.claimedBy()).isNull();
@@ -1342,7 +1345,7 @@ class ChildWorkspaceServiceTest {
                 }
                 if (calls.incrementAndGet() > budget) {
                     throw new RuntimeBrokerException(409, "workspace_busy",
-                            "Workspace storage is held by another tool turn.", true);
+                            "Workspace is not available for this operation.", true);
                 }
                 return storageRoot;
             }

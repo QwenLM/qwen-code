@@ -17,6 +17,7 @@ import {
   assertModDepth,
   record,
   validateResult,
+  validModelResult,
 } from './dispatch.js';
 import {
   ENGINE_NODE,
@@ -38,9 +39,13 @@ import {
   type ModCommand,
   type ModCommandPresentation,
   type ModLog,
+  type ModModelHost,
   type ModReply,
   type ModRequest,
   type ModSessionFacts,
+  type ModPromptSubmit,
+  type ModPromptSubmitted,
+  type ModQueuedPrompt,
   type ModTurnComplete,
   type ModTurnStart,
   type ModWorkerReply,
@@ -52,6 +57,12 @@ import {
 type ModToolResolver = (
   name: string,
 ) => Promise<AnyDeclarativeTool | undefined>;
+
+/**
+ * Takes a prompt a Mod submitted, to start a turn once the session is idle,
+ * or returns why it was refused.
+ */
+export type ModPromptQueue = (prompt: ModQueuedPrompt) => string | undefined;
 
 /** What a host that draws offers its Mods. */
 export interface ModRenderHost {
@@ -85,6 +96,7 @@ export class ModRuntime {
     start: false,
     complete: [],
   };
+  private prompts: string[] = [];
   private renders: string[] = [];
   // Asked for during the load, before the host knows which plugins draw.
   private early?: Set<string> = new Set();
@@ -99,6 +111,8 @@ export class ModRuntime {
     revision: number;
     phase: number;
     refresh: () => void;
+    // `$.model.complete` calls the host is running for the root.
+    models: Map<number, AbortController>;
   };
   private tool?: {
     next: ModToolNext;
@@ -122,6 +136,8 @@ export class ModRuntime {
     private readonly surface: 'terminal' | null = null,
     private readonly abortTurn?: (turnId: string) => void,
     private readonly renderHost?: ModRenderHost,
+    private readonly queuePrompt?: ModPromptQueue,
+    private readonly completeModel?: ModModelHost,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -135,12 +151,17 @@ export class ModRuntime {
       if (!root || reply.root !== root.id) return;
       if (reply.type === 'host-call') this.executeHost(reply);
       else if (reply.type === 'host-cancel') {
-        for (const id of reply.ids)
+        for (const id of reply.ids) {
           this.tool?.operations.get(id)?.controller.abort();
-      } else if (reply.type === 'check-result')
+          root.models.get(id)?.abort();
+        }
+      } else if (reply.type === 'model-complete') this.answerModel(reply, root);
+      else if (reply.type === 'check-result')
         this.tool?.checks.get(reply.id)?.(reply);
       else if (reply.type === 'turn-abort')
         this.answerTurnAbort(reply, root.id);
+      else if (reply.type === 'prompt-queue')
+        this.answerPromptQueue(reply, root.id);
       else if (reply.type === 'invalidate') {
         if (reply.event !== 'ui.render' || this.failure) return;
         if (this.early) this.early.add(reply.plugin);
@@ -150,11 +171,16 @@ export class ModRuntime {
         if (
           reply.phase !== root.phase ||
           reply.revision <= root.revision ||
-          (reply.operation !== undefined && reply.operation !== root.native)
+          (reply.operation !== undefined &&
+            reply.operation !== root.native &&
+            !root.models.has(reply.operation))
         )
           return;
         root.revision = reply.revision;
-        root.idle = this.tool?.checks.size ? undefined : reply.operation;
+        root.idle =
+          reply.operation === root.native && this.tool?.checks.size
+            ? undefined
+            : reply.operation;
         root.refresh();
       } else if (reply.type === 'log') {
         if (this.failure) return;
@@ -198,6 +224,12 @@ export class ModRuntime {
     facts?: () => ModSessionFacts,
     abortTurn?: (turnId: string) => void,
     render?: ModRenderHost,
+    // Whether this host raises `prompt.submit` for the prompts submitted.
+    prompts = false,
+    // Where `$.prompt.submit` queues a prompt; absent, the host runs none.
+    queuePrompt?: ModPromptQueue,
+    // Runs `$.model.complete`; absent, the host runs no model calls.
+    completeModel?: ModModelHost,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -226,6 +258,8 @@ export class ModRuntime {
       surface,
       abortTurn,
       render,
+      queuePrompt,
+      completeModel,
     );
     try {
       const result = await runtime.request(
@@ -236,6 +270,9 @@ export class ModRuntime {
           surface,
           version,
           sites: render?.sites ?? [],
+          prompts,
+          submits: queuePrompt !== undefined,
+          models: completeModel !== undefined,
         },
         signal,
         60_000,
@@ -245,10 +282,12 @@ export class ModRuntime {
         value.every((name) => plugins.some((plugin) => plugin.name === name));
       const turnComplete = record(result) ? result['turnComplete'] : undefined;
       const renders = record(result) ? result['render'] : undefined;
+      const promptSubmit = record(result) ? result['promptSubmit'] : undefined;
       if (
         !record(result) ||
         typeof result['tools'] !== 'boolean' ||
         typeof result['turnStart'] !== 'boolean' ||
+        !names(promptSubmit) ||
         !names(turnComplete) ||
         !names(renders)
       )
@@ -275,6 +314,7 @@ export class ModRuntime {
         start: result['turnStart'],
         complete: turnComplete,
       };
+      runtime.prompts = promptSubmit;
       runtime.renders = renders;
       const early = runtime.early!;
       runtime.early = undefined;
@@ -303,6 +343,11 @@ export class ModRuntime {
     readonly complete: readonly string[];
   } {
     return this.turns;
+  }
+
+  /** The plugins whose hooks hear `prompt.submit`. */
+  get promptHooks(): readonly string[] {
+    return this.prompts;
   }
 
   /** The plugins whose `ui.render` hooks may draw where this host draws. */
@@ -554,6 +599,32 @@ export class ModRuntime {
     );
   }
 
+  /**
+   * Raises `prompt.submit`: the prompt that arrived beneath the hooks, or why
+   * it did not enter.
+   */
+  async submitPrompt(
+    input: ModPromptSubmit,
+    signal: AbortSignal,
+  ): Promise<ModPromptSubmitted> {
+    const result = await this.request({ type: 'prompt-submit', input }, signal);
+    if (
+      record(result) &&
+      (typeof result['drop'] === 'string'
+        ? Object.keys(result).length === 2 &&
+          typeof result['byHook'] === 'boolean'
+        : typeof result['text'] === 'string' &&
+          Object.keys(result).every(
+            (key) => key === 'text' || key === 'context',
+          ) &&
+          (result['context'] === undefined ||
+            (Array.isArray(result['context']) &&
+              result['context'].every((item) => typeof item === 'string'))))
+    )
+      return result as ModPromptSubmitted;
+    throw new Error('Invalid Mod prompt.submit result.');
+  }
+
   async completeTurn(
     input: ModTurnComplete,
     signal: AbortSignal,
@@ -564,6 +635,66 @@ export class ModRuntime {
   }
 
   // The host owns the running turn, so it judges the id and ends the turn.
+  // A model call runs while the dispatch that made it waits, so it pauses the
+  // root's clock as a native tool does; the worker says when nothing else runs.
+  private answerModel(
+    reply: Extract<ModReply, { type: 'model-complete' }>,
+    root: NonNullable<ModRuntime['root']>,
+  ): void {
+    if (
+      Atomics.load(this.cancelled, 0) !== 0 ||
+      Atomics.load(reply.cancellation, 0) !== 0
+    )
+      return;
+    // The worker and host share the process clock. A queued request may
+    // already have expired before the host gets to start it.
+    const remainingMs = reply.deadline - performance.now();
+    if (remainingMs <= 0) return;
+    const controller = new AbortController();
+    const signal = Number.isFinite(remainingMs)
+      ? AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(Math.ceil(remainingMs)),
+        ])
+      : controller.signal;
+    root.models.set(reply.id, controller);
+    const answer = async (): Promise<ModRequest> => {
+      try {
+        if (!this.completeModel)
+          throw new Error('this host runs no Mod model calls');
+        const result = await this.completeModel(reply.input, signal);
+        if (!validModelResult(result))
+          throw new Error('the host answered with an invalid model result');
+        return { type: 'model-result', id: reply.id, result };
+      } catch (caught) {
+        const error = (
+          caught instanceof Error ? caught.message : String(caught)
+        ).slice(0, 4000);
+        return { type: 'model-result', id: reply.id, error };
+      }
+    };
+    void answer().then((request) => {
+      root.models.delete(reply.id);
+      if (this.root !== root) return;
+      // A cancelled call's caller has its answer already.
+      if (!signal.aborted) {
+        try {
+          this.post(request, root.id);
+        } catch (caught) {
+          this.post(
+            {
+              type: 'model-result',
+              id: reply.id,
+              error: caught instanceof Error ? caught.message : String(caught),
+            },
+            root.id,
+          );
+        }
+      }
+      root.refresh();
+    });
+  }
+
   private answerTurnAbort(
     reply: Extract<ModReply, { type: 'turn-abort' }>,
     root: number,
@@ -582,6 +713,24 @@ export class ModRuntime {
       );
     }
     this.post({ type: 'turn-abort-result', id: reply.id, error }, root);
+  }
+
+  // The host owns the session's turns, so it takes the prompt or refuses it.
+  private answerPromptQueue(
+    reply: Extract<ModReply, { type: 'prompt-queue' }>,
+    root: number,
+  ): void {
+    let refused: string | undefined;
+    try {
+      refused = this.queuePrompt
+        ? this.queuePrompt(reply.prompt)
+        : 'this host does not run prompts a Mod submits';
+    } catch (caught) {
+      refused = (
+        caught instanceof Error ? caught.message : String(caught)
+      ).slice(0, 4000);
+    }
+    this.post({ type: 'prompt-queue-result', id: reply.id, refused }, root);
   }
 
   async end(
@@ -644,13 +793,15 @@ export class ModRuntime {
       id: ++this.sequence,
       revision: 0,
       phase: 0,
+      models: new Map(),
       refresh: () => {
         if (aborted || this.root !== root) return;
         const lending =
-          request.type === 'tool' &&
-          root.native !== undefined &&
-          root.idle === root.native &&
-          !this.tool?.checks.size &&
+          root.idle !== undefined &&
+          ((request.type === 'tool' &&
+            root.idle === root.native &&
+            !this.tool?.checks.size) ||
+            root.models.has(root.idle)) &&
           !budget.expired;
         if (lending !== budget.lending) {
           if (lending) budget.pause();
@@ -665,6 +816,7 @@ export class ModRuntime {
       aborted = true;
       Atomics.store(this.cancelled, 0, 1);
       this.tool?.controller.abort();
+      for (const model of root.models.values()) model.abort();
       if (timer) clearTimeout(timer);
       cancelTimer = setTimeout(stop, 250);
     };
@@ -695,6 +847,8 @@ export class ModRuntime {
       });
     } finally {
       this.root = undefined;
+      for (const model of root.models.values()) model.abort();
+      root.models.clear();
       if (timer) clearTimeout(timer);
       if (cancelTimer) clearTimeout(cancelTimer);
       signal.removeEventListener('abort', onAbort);

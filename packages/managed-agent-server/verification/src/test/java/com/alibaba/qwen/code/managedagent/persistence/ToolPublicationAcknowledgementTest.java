@@ -62,7 +62,7 @@ class ToolPublicationAcknowledgementTest {
     private static final String PRODUCER_TOKEN = Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]);
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
-    private ManagedSessionStore sessions;
+    private JdbcManagedSessionStore sessions;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository runtimeSessions;
     private JdbcToolExecutionRepository executions;
@@ -96,7 +96,23 @@ class ToolPublicationAcknowledgementTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var objects = new HashMap<String, byte[]>();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            public void putIfAbsent(String key, byte[] value) {
+                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                objects.putIfAbsent(key, value.clone());
+            }
+            public InputStream open(String key) {
+                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                objectReads++;
+                duringObjectRead.run();
+                return new ByteArrayInputStream(objects.get(key));
+            }
+            public void validateConfiguration() { }
+        };
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
         runtimeSessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
@@ -119,21 +135,6 @@ class ToolPublicationAcknowledgementTest {
         runtimeSession = runtimeSessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
         grants = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                 new ToolPublicationStore.Capacity(2048, 16 * 1024 * 1024, 16 * 1024 * 1024, 10));
-        var objects = new HashMap<String, byte[]>();
-        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
-            public void putIfAbsent(String key, byte[] value) {
-                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-                objects.putIfAbsent(key, value.clone());
-            }
-            public InputStream open(String key) {
-                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-                objectReads++;
-                duringObjectRead.run();
-                return new ByteArrayInputStream(objects.get(key));
-            }
-            public void validateConfiguration() { }
-        };
-        sessions.setPublicationObjects(bucket);
         data = new ToolPublicationDataStore(jdbc, manager, grants, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
@@ -229,7 +230,7 @@ class ToolPublicationAcknowledgementTest {
     void lateAuthorityChangesRefuse(String damage) {
         var bundle = admissions.verifyOriginalAcknowledgement(execution);
         switch (damage) {
-            case "quarantine" -> jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE");
+            case "quarantine" -> jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE");
             case "object" -> jdbc.update("UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE slot_key = X'6d616e69666573743a31'");
             case "seal" -> jdbc.update("UPDATE ma_output_capture SET seal_manifest_sha256 = ?", "f".repeat(64));
             case "reference" -> jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND journal_revision = ?", revision);
@@ -371,7 +372,7 @@ class ToolPublicationAcknowledgementTest {
     void mismatchedSessionAuthorityAtEveryInjectionSiteRefusesBeforeRpcAndObjectReads(String component) {
         var other = new JdbcDataSource();
         other.setURL("jdbc:h2:mem:foreign-session-" + UUID.randomUUID());
-        var foreignSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(new ManagedSchemaJdbcTemplate(other)));
+        var foreignSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(new ManagedSchemaJdbcTemplate(other));
         var selectedGrants = new ToolPublicationStore(jdbc, manager,
                 "grants".equals(component) ? foreignSessions : sessions, executions, bindings,
                 new ToolPublicationStore.Capacity(2048, 16 * 1024 * 1024, 16 * 1024 * 1024, 10));

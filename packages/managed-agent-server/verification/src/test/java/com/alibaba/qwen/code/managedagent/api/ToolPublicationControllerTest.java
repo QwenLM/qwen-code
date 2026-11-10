@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
@@ -183,8 +183,7 @@ class ToolPublicationControllerTest {
         properties.getSessionStore().setBindingKey("0123456789abcdef0123456789abcdef");
         properties.getToolPublication().setEntryConcurrency(1);
         WriterCredentialPolicy credentials = new WriterCredentialPolicy(properties);
-        ManagedSessionStore sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
-        sessions.setCredentials(credentials);
+        JdbcManagedSessionStore sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, credentials);
         writerToken = credentials.issue(TENANT, WORKSPACE, SESSION);
         var grant = new TransactionTemplate(manager).execute(transaction -> sessions.acquireWriter(
                 TENANT, SESSION, writerToken, new AcquireWriterRequest(WORKSPACE, "writer", 60_000L)));

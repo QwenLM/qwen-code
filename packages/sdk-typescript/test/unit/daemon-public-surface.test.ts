@@ -7,6 +7,7 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import type { DaemonContinueSessionResult } from '../../src/daemon/index.js';
 import * as Public from '../../src/index.js';
+import * as DaemonPublic from '../../src/daemon/index.js';
 
 import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
@@ -125,6 +126,8 @@ import type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
+  DaemonUserSkillActivation,
+  DaemonUserSkillsActivationResult,
   ExtensionDefaultActivationBatchItem,
   ExtensionMutationResponse,
   ExtensionWorkspaceActivationBatchItem,
@@ -199,6 +202,25 @@ import type {
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
+
+it('exports native Skill archive contracts without widening legacy runtime sources', () => {
+  expect(Public.DaemonSkillInstallError).toBe(
+    DaemonPublic.DaemonSkillInstallError,
+  );
+  expectTypeOf<Public.DaemonSkillArchiveInstallRequest>().toEqualTypeOf<DaemonPublic.DaemonSkillArchiveInstallRequest>();
+  expectTypeOf<Public.DaemonSkillArchiveInstallResult>().toEqualTypeOf<DaemonPublic.DaemonSkillArchiveInstallResult>();
+  expectTypeOf<Public.DaemonSkillInstallAttempt>().toEqualTypeOf<DaemonPublic.DaemonSkillInstallAttempt>();
+  expectTypeOf<Public.DaemonSkillInstallOptions>().toEqualTypeOf<DaemonPublic.DaemonSkillInstallOptions>();
+  expectTypeOf<
+    Extract<Public.DaemonSkillInstallSource, { type: 'zip-file' }>
+  >().toBeNever();
+  expectTypeOf<
+    Extract<
+      Public.DaemonSkillConfigInstallRequest['source'],
+      { type: 'zip-file' }
+    >
+  >().toEqualTypeOf<{ type: 'zip-file'; path: string; sha256?: string }>();
+});
 
 describe('resource-link public surface', () => {
   it('keeps the ACP discriminator and nullable metadata in the daemon API', () => {
@@ -443,6 +465,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // assertion a future barrel reshuffle could silently drop the
     // result type SDK consumers need to type `client.recapSession`.
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
+    expect(typeof Public.DaemonClient.prototype.setUserSkillsActivation).toBe(
+      'function',
+    );
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setUserSkillsActivation']>>
+    >().toEqualTypeOf<DaemonUserSkillsActivationResult>();
+    expectTypeOf<
+      Parameters<DaemonClient['setUserSkillsActivation']>[1]
+    >().toEqualTypeOf<DaemonUserSkillActivation>();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
     // Batch Skill toggle surface: type-only imports are erased at vitest
@@ -628,7 +659,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     }>();
     expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
       workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      options?: Omit<
+        Public.DaemonSessionListPageOptions,
+        'cursor' | 'liveOnly'
+      >;
       includeGroups?: boolean;
     }>();
     expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
@@ -713,6 +747,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       hasRunningBackgroundTasks?: boolean;
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
+      hasTurnError?: boolean;
       updatedAt?: string;
     }>();
     expectTypeOf<DaemonWorkspaceSessionLiveState>().toEqualTypeOf<{

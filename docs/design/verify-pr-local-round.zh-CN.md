@@ -24,15 +24,15 @@
 
 新增三个独立脚本，并让 skill 在流程需要的位置指向它们，而不是放在文末。
 
-- `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` 负责解析坐标：用 lane 相同的字段列表抓取快照、校验两个 OID 在本克隆中存在、拒绝不是 PR head 干净检出的树、创建带 `evidence/` 子目录的产物目录，并报告当前进程能观测到的隔离信号。它不据此设闸：解析元数据需要 `gh`，而 `gh` 与边界互斥，因此这条路径总是在宿主上运行。闸门是 `--require-isolation`，用于在边界内、轮次执行任何东西之前运行。
-- `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。
+- `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` 负责解析坐标：用 lane 相同的字段列表抓取快照、校验两个 OID 在本克隆中存在、拒绝不是 PR head 干净检出的树、创建带 `evidence/` 子目录的产物目录，像 lane 一样为 PR 的评审线程和仍有效的 change request 拍快照（尽力而为：抓取失败就不留文件，轮次把它读作未知），并报告当前进程能观测到的隔离信号。它不据此设闸：解析元数据需要 `gh`，而 `gh` 与边界互斥，因此这条路径总是在宿主上运行。闸门是 `--require-isolation`，用于在边界内、轮次执行任何东西之前运行。
+- `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。带 `--context <snapshot>` 时期望 head 来自该宿主持有的文件，而不是产物里可写的 `context.json`；不可用快照是硬性 exit 1 而非警告：产物目录可被轮次刚执行的 PR 代码写入。
 - `scripts/verify-pr-guard.mjs` 接管发布前守卫的两个半程。`--pr <n> --repo <owner>/<repo> --snapshot <file>` 抓取 head、PR 状态以及三个评论列表（带 `--paginate`），只有每次调用都成功才写文件。`--compare --start <a> --now <b>` 列出本轮 dirty 的全部原因并退出 1。
 
 检查器在产物契约要求轮次写出的产物上新增三条规则。产物契约里三者都要点名：产物清单没要求的文件，轮次就不会产出，而对一个不存在的文件做检查是静默的。
 
 - `assertions.json` 在 `fail` 非零时带 `failures: [{ id, attribution }]`，每条失败断言一项，归因为 `pr`、`harness` 或 `environment`。若 `findings`/`blocked` 的账本里没有任何一条归因为 `pr`，报错；账本长度与 `fail` 不一致，同样报错。有失败但没有账本只报警告，因此旧产物仍能通过。
 - `mutations.json` 可以声明 `coverageClaim: "per-commit"`，并给出来自 `git log --no-merges <previous>..<head> --not <target>` 的 `productionCommits` 与 `rows[].commit`。列出的提交没有对应行时报错，并点名这些提交；列表为空同样报错——对空集合做的声明恒真。
-- `assertions.json` 可以带 `gates: [{ suite, pass, fail, skipped? }]`，轮次作为定向门禁运行的每个已有测试套件一项。这些计数不进 `pass`/`fail`/`total`——后者只统计本轮自己写的检查；发布端把门禁合计单独印成一行。列表格式不对报错。断言超过 1000 条却没有 `gates` 只报警告：最近 18 份 CI 产物里这样的 4 轮都把整个 workspace 的测试套件算了进去。
+- `assertions.json` 可以带 `gates: [{ suite, pass, fail, skipped? }]`，轮次作为定向门禁运行的每个已有测试套件一项。这些计数不进 `pass`/`fail`/`total`——后者只统计本轮自己写的检查，每次套件运行算其中一条；发布端把门禁合计单独印成一行。列表格式不对报错。断言超过 1000 条却没有记录任何门禁结果只报警告：最近 18 份 CI 产物里这样的 4 轮都把整个 workspace 的测试套件算了进去。
 
 每个已准备的产物目录保存带完整坐标的 `context.json`——`repo`、`pr`、`baseRefOid` 与 `headRefOid`——本地轮次因此从一个文件读出两个 OID，而不是从 `HEAD` 推导。prepare 只在当前树是 `headRefOid` 的干净检出时才写它：轮次复用这棵树作为 A/B 的 head 侧，所以 HEAD 不对会退出 3 并点名要跑的 `git checkout`，树脏会退出 3 并要求维护者自己提交或 stash——脚本绝不代为 stash，且拒绝时不创建任何产物目录。检查器优先使用该轮快照，并注明实际使用的来源。旧目录回退到按 PR 共享的快照；该轮快照不可读或无效时只报警告，不会改用后续轮次的共享提交号。
 
@@ -96,6 +96,11 @@
 - 模型、CLI 版本、skill 哈希三者都解析成功时，发布的报告评论以署名页脚收尾；否则以通用签名收尾；弱通知——包括产物下载成功但没有报告——一律保留通用签名。lane 在基线重新钉住之后、agent 启动之前采集三个值，该顺序有元测试钉住。skill 与发布侧携带同一页脚模板并有元测试钉住，`report.md` 本身不带页脚。
 - 所有脚本都不执行 PR 代码。
 - 对于自带轮次快照的报告，在不同产物目录中准备后续轮次不会改变检查所用的提交号。可发布的轮次快照不包含 PR 标题或正文。
+
+## 相关设计
+
+- 容器边界与它的宿主机模型代理：
+  [verify-pr-local-model-proxy.zh-CN.md](verify-pr-local-model-proxy.zh-CN.md)。
 
 ## 未决问题
 

@@ -9,6 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -17,6 +18,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -126,6 +128,90 @@ describe('qwen pr review runner routing', () => {
     );
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
+  });
+
+  it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
+    // authorize is the write-permission gate for /review and /resolve. It
+    // loads CI_BOT_PAT but checks out nothing and runs no agent, so the
+    // persistent pool is safe whenever the trigger carries no fork code.
+    // issue_comment and workflow_dispatch have no github.event.pull_request
+    // payload: the old same-repo-only guard fell through to ubuntu-latest for
+    // every command, parking the gate in the hosted queue for hours (#15286).
+    // This removes the GATE wait only: the saving lands where the downstream
+    // job is already pool-routed (/review, /triage, /tmux, /verify); /resolve
+    // end-to-end latency is unchanged because resolve-pr stays on ubuntu-latest.
+    // Pin the exact expression so neither the new ECS disjuncts nor the fork
+    // guard / hosted fallback can be dropped silently.
+    const runsOn = String(parse(workflow).jobs['authorize']['runs-on']);
+
+    expect(runsOn).toBe(
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    );
+    // The command events must reach the persistent pool...
+    expect(runsOn).toContain("github.event_name == 'issue_comment'");
+    expect(runsOn).toContain("github.event_name == 'workflow_dispatch'");
+    // ...while PR-payload events keep the same-repo fork guard, and the
+    // hosted fallback + ECS kill switch stay for forks / disabled routing.
+    expect(runsOn).toContain(
+      'github.event.pull_request.head.repo.full_name == github.repository',
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The ECS routing above is only safe while authorize stays checkout-free:
+    // a `uses:` step (e.g. actions/checkout to read a label or config) would
+    // execute contributor-authored files on the persistent pool with
+    // CI_BOT_PAT in the step env while the expression pin stayed green. Scope
+    // to authorize — other jobs in this workflow legitimately check out.
+    const authorizeJob = parse(workflow).jobs['authorize'];
+    expect(authorizeJob.steps.every((s) => s.uses === undefined)).toBe(true);
+    // Pin the run: half of the premise too: the step inventory is exactly
+    // the one permission step, and no event value is spliced into the shell
+    // — everything must keep arriving through env:. A run-only debug step
+    // interpolating github.event.comment.body adds no `uses:` key and would
+    // slip past the assertion above.
+    expect(authorizeJob.steps.map((s) => s.name)).toEqual([
+      'Check principal write permission',
+    ]);
+    for (const s of authorizeJob.steps) {
+      expect(String(s.run ?? '')).not.toContain('${{');
+    }
+    // On the persistent pool the step must also pin gh's config resolution:
+    // GH_HOST plus a private, guarded GH_CONFIG_DIR, like qwen-autofix.yml's
+    // route/review-scan. Without them a planted shared ~/.config/gh
+    // (http_unix_socket) receives CI_BOT_PAT and can forge the permission
+    // response that downstream jobs consume as should_review.
+    const authorizeStep = authorizeJob.steps.find(
+      (s) => s.id === 'principal_permission',
+    );
+    // Evaluate the live (comment-stripped) lines, not mere substrings: an
+    // unguarded `export GH_CONFIG_DIR="$(mktemp ...)"` one-liner (a failed
+    // mktemp then leaves it empty and gh falls back to the shared config) or
+    // a preamble relocated below the first gh call must both red this test.
+    const live = String(authorizeStep.run)
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    // Fail-closed guarded mint in the sibling route/review-scan shape.
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then';
+    expect(live).toContain('export GH_HOST=github.com');
+    expect(live).toContain(guard);
+    expect(live).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+    // Both pins must be exported BEFORE the first permission API call.
+    const api = live.indexOf(
+      'gh api "repos/${GITHUB_REPOSITORY}/collaborators/',
+    );
+    expect(api).toBeGreaterThan(-1);
+    expect(live.indexOf('export GH_HOST=github.com')).toBeLessThan(api);
+    expect(live.indexOf(guard)).toBeLessThan(api);
+    // The body must execute no repository code: on the pool the cwd is the
+    // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+    // files, so a relative-path or interpreter invocation here would run a
+    // planted file with CI_BOT_PAT in the environment.
+    expect(live).not.toMatch(/(^|[\s;&|(`'"])(\.{1,2}\/)/m);
+    expect(live).not.toMatch(
+      /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+    );
   });
 });
 
@@ -7467,6 +7553,14 @@ describe('review model canary routing', () => {
     expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
       '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
     );
+    // The canary cohort's optional endpoint pair: the URL is a variable,
+    // the key is a secret, and neither is pinned into the script.
+    expect(step.env.REVIEW_BASE_URL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}',
+    );
+    expect(step.env.REVIEW_API_KEY_CANARY).toBe(
+      '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}',
+    );
     // The env no longer carries the model itself: a literal there would make
     // every split a workflow edit, which is the thing a rollout must not need.
     expect(step.env.OPENAI_MODEL).toBeUndefined();
@@ -7475,7 +7569,7 @@ describe('review model canary routing', () => {
     // cohort: the model is recorded nowhere else a later comparison could
     // read it, so without the notice a rollout leaves no trace of which model
     // served a given review.
-    const select = run.indexOf('OPENAI_MODEL="$(review_model_for_bucket');
+    const select = run.indexOf('REVIEW_COHORT=default');
     expect(select).toBeGreaterThan(-1);
     expect(select).toBeLessThan(run.indexOf('MODEL_ARGS=()'));
     expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(
@@ -7484,21 +7578,28 @@ describe('review model canary routing', () => {
   });
 
   it('buckets by PR number and stays inside the configured percent', () => {
-    // The router delegates its clamp to canary_percent_effective, so executing
-    // either needs both. js-yaml has stripped the block scalar's indentation,
-    // so both closing braces sit at column 0.
-    const fn = run.match(
-      /canary_percent_effective\(\) \{[\s\S]*?review_model_for_bucket\(\) \{[\s\S]*?\n\}/,
-    )?.[0];
-    expect(fn).toBeTruthy();
+    const start = run.indexOf('canary_percent_effective() {');
+    const end = run.indexOf('OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"', start);
+    const block = run.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
     const pick = (defaultModel, canaryModel, percent, pr) =>
       execFileSync(
         'bash',
         [
           '-c',
-          `set -euo pipefail\n${fn}\nreview_model_for_bucket '${defaultModel}' '${canaryModel}' '${percent}' '${pr}'`,
+          `set -euo pipefail\n${block}\nif [ "$REVIEW_COHORT" = canary ]; then printf '%s' "$REVIEW_MODEL_CANARY"; else printf '%s' "$REVIEW_MODEL_DEFAULT"; fi`,
         ],
-        { encoding: 'utf8' },
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: defaultModel,
+            REVIEW_MODEL_CANARY: canaryModel,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+          },
+        },
       ).trim();
 
     // Off unless a percent is set: merging this changes nothing, which is
@@ -7517,21 +7618,29 @@ describe('review model canary routing', () => {
       'bash',
       [
         '-c',
-        `set -euo pipefail\n${fn}\nfor pr in {12300..12399}; do if [ "$(review_model_for_bucket main canary 10 "$pr")" = canary ]; then echo "$pr"; fi; done`,
+        `set -euo pipefail\nREVIEW_MODEL_CANARY=canary\nREVIEW_MODEL_CANARY_PERCENT=10\nfor PR_NUMBER in {12300..12399}; do\n${block}\nif [ "$REVIEW_COHORT" = canary ]; then echo "$PR_NUMBER"; fi; done`,
       ],
       { encoding: 'utf8' },
     )
       .trim()
       .split('\n');
     expect(canaried).toEqual(
-      Array.from({ length: 10 }, (_, i) => String(12300 + i)),
+      Array.from({ length: 10 }, (_, index) => String(12300 + index * 10)),
     );
+    for (const decade of [12300, 12310]) {
+      for (let bucket = 0; bucket < 10; bucket++) {
+        expect(pick('main', 'canary', '80', String(decade + bucket))).toBe(
+          bucket < 8 ? 'canary' : 'main',
+        );
+      }
+    }
 
     // Repository-variable typos fail toward off, never toward full rollout.
     // One row per clamp step; deleting that step alone flips its row. The
     // 20-digit value is the digit bound's: bash wraps it to 50.
     expect(pick('main', 'canary', '08', '12307')).toBe('canary');
-    expect(pick('main', 'canary', '0050', '12325')).toBe('canary');
+    expect(pick('main', 'canary', '08', '12308')).toBe('main');
+    expect(pick('main', 'canary', '0050', '12324')).toBe('canary');
     expect(pick('main', 'canary', '250', '12399')).toBe('main');
     expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe(
       'main',
@@ -7546,8 +7655,9 @@ describe('review model canary routing', () => {
   // the four the workflow actually passes: transposing the default and canary
   // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
   // loses the bucket entirely — both with every row above still green. Slice
-  // the real block (helper, router, trim, call site, notice, MODEL_ARGS) and
-  // execute it with the values the step's `env:` supplies.
+  // the real block (helper, router, trim, call site, endpoint override,
+  // notice, MODEL_ARGS) and execute it with the values the step's `env:`
+  // supplies.
   it('routes and reports at the real call site, not a paraphrase of it', () => {
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
@@ -7557,10 +7667,20 @@ describe('review model canary routing', () => {
     expect(notice).toBeGreaterThan(start);
     expect(args).toBeGreaterThan(notice);
     expect(end).toBeGreaterThan(args);
-    const block = run.slice(start, end);
+    // The step logs the pre-override host under its own label; reverting that
+    // rename would report a same-named value the notice no longer means.
+    expect(run).toContain('echo "initial_openai_host=${openai_host}"');
+    expect(run).not.toContain('echo "openai_host=${openai_host}"');
+    // The notice derives its endpoint host from openai_base_host(), which the
+    // workflow defines above configure_qwen_network — outside this slice, and
+    // shared with the proxy bypass. Deleting that helper must fail here.
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
 
     // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
-    // per-run value unnoticed: 9999999 % 100 = 99 is outside every percent a
+    // per-run value unnoticed: 9999999 % 10 = 9 is outside every percent a
     // case below configures, so such a swap routes to the default model.
     const serve = (canary, percent, pr) =>
       execFileSync(
@@ -7576,22 +7696,38 @@ describe('review model canary routing', () => {
             REVIEW_MODEL_DEFAULT: 'default-model',
             REVIEW_MODEL_CANARY: canary,
             REVIEW_MODEL_CANARY_PERCENT: percent,
+            OPENAI_BASE_URL: 'https://default.example.com/v1',
+            OPENAI_API_KEY: 'default-key',
+            REVIEW_BASE_URL_CANARY: '',
+            REVIEW_API_KEY_CANARY: '',
             PR_NUMBER: pr,
             GITHUB_RUN_ID: '9999999',
           },
         },
       );
 
-    // 12309 % 100 = 9 is inside a 10% split; 12310 % 100 = 10 is not. The
+    // 12300 % 10 = 0 is inside a 10% split; 12301 % 10 = 1 is not. The
     // notice's model field is anchored — a bare 'canary' check is satisfied
     // by the percent suffix even when the model field is wrong.
-    expect(serve('canary-model', '10', '12309')).toBe(
-      '::notice title=Review model::canary-model (PR #12309, canary 10%)\n' +
+    expect(serve('canary-model', '10', '12300')).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
         'canary-model|--model canary-model',
     );
-    expect(serve('canary-model', '10', '12310')).toBe(
-      '::notice title=Review model::default-model (PR #12310, canary 10%)\n' +
+    expect(serve('canary-model', '10', '12301')).toBe(
+      '::notice title=Review model::default-model (PR #12301, canary 10%, bucket 1/10, cohort default, endpoint default.example.com)\n' +
         'default-model|--model default-model',
+    );
+
+    // A percent that is not a multiple of ten switches the bucket count to
+    // 100, so a notice hard-coding the count prints a bucket the split never
+    // used: 12387 % 100 = 87 is outside 8%, 12307 % 100 = 7 is inside it.
+    expect(serve('canary-model', '8', '12387')).toBe(
+      '::notice title=Review model::default-model (PR #12387, canary 8%, bucket 87/100, cohort default, endpoint default.example.com)\n' +
+        'default-model|--model default-model',
+    );
+    expect(serve('canary-model', '8', '12307')).toBe(
+      '::notice title=Review model::canary-model (PR #12307, canary 8%, bucket 7/100, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|--model canary-model',
     );
 
     // The notice reports the percent the router APPLIED, not the configured
@@ -7600,7 +7736,7 @@ describe('review model canary routing', () => {
     // nothing about `canary 10 %` looks malformed.
     for (const percent of ['250', '10 ']) {
       expect(serve('canary-model', percent, '12309')).toBe(
-        `::notice title=Review model::default-model (PR #12309, canary 0%)\n` +
+        `::notice title=Review model::default-model (PR #12309, canary 0%, bucket 9/10, cohort default, endpoint default.example.com)\n` +
           'default-model|--model default-model',
       );
     }
@@ -7609,12 +7745,492 @@ describe('review model canary routing', () => {
     // rejects it and that failure is terminal for the whole cohort. Trimming
     // still leaves whitespace-only meaning "no split", not an invented one.
     expect(serve(' canary-model ', '100', '12345')).toBe(
-      '::notice title=Review model::canary-model (PR #12345, canary 100%)\n' +
+      '::notice title=Review model::canary-model (PR #12345, canary 100%, bucket 5/10, cohort canary, endpoint default.example.com)\n' +
         'canary-model|--model canary-model',
     );
     expect(serve('   ', '100', '12345')).toBe(
-      '::notice title=Review model::default-model (PR #12345, canary 100%)\n' +
+      '::notice title=Review model::default-model (PR #12345, canary 100%, bucket 5/10, cohort default, endpoint default.example.com)\n' +
         'default-model|--model default-model',
     );
+  });
+
+  // The endpoint override lives inside the same sliced block, so the real
+  // call site is exercised again — with the base endpoint env present this
+  // time, plus per-row canary URL/key. The override must never leak the
+  // default key to another provider, and must never touch the default
+  // cohort's endpoint.
+  it('moves the endpoint only for the canary cohort, and only with its own key', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+
+    const serve = (canary, percent, pr, canaryUrl, canaryKey, dflt) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|$REVIEW_COHORT|$OPENAI_BASE_URL|$OPENAI_API_KEY"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: dflt ?? 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+            OPENAI_BASE_URL: 'https://default.example.com/v1',
+            OPENAI_API_KEY: 'default-key',
+            REVIEW_BASE_URL_CANARY: canaryUrl ?? '',
+            REVIEW_API_KEY_CANARY: canaryKey ?? '',
+          },
+        },
+      );
+
+    // Full pair configured: the canary cohort moves model, URL and key
+    // together. 12300 % 10 = 0 is inside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint canary.example.com)\n' +
+        'canary-model|canary|https://canary.example.com/v1|canary-key',
+    );
+
+    // A canary URL without its own key must not receive the default key:
+    // the cohort degrades to the default model and endpoint, with a warning.
+    const noKey = serve(
+      'canary-model',
+      '10',
+      '12300',
+      'https://canary.example.com/v1',
+      undefined,
+    );
+    expect(noKey).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // A key without a URL is inert: the model split still applies, the
+    // endpoint stays with the default gateway.
+    expect(serve('canary-model', '10', '12300', undefined, 'canary-key')).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|canary|https://default.example.com/v1|default-key',
+    );
+
+    // The default cohort never touches the canary endpoint, even when the
+    // pair is fully configured. 12301 % 10 = 1 is outside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12301',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::default-model (PR #12301, canary 10%, bucket 1/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // Same model on both cohorts (a pure endpoint quota split): the bucket
+    // decides, names no longer matter. 12307 % 10 = 7 is inside 80%.
+    expect(
+      serve(
+        'same-model',
+        '80',
+        '12307',
+        'https://username:password@canary.example.com/v1?token=secret',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12307, canary 80%, bucket 7/10, cohort canary, endpoint canary.example.com)\n' +
+        'same-model|canary|https://username:password@canary.example.com/v1?token=secret|canary-key',
+    );
+
+    // ...and the same-model split still respects the bucket boundary:
+    // 12308 % 10 = 8 is outside an 80% split, so no override.
+    expect(
+      serve(
+        'same-model',
+        '80',
+        '12308',
+        'https://canary.example.com/v1',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12308, canary 80%, bucket 8/10, cohort default, endpoint default.example.com)\n' +
+        'same-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // An unparseable canary URL degrades like a missing key.
+    const badUrl = serve(
+      'canary-model',
+      '10',
+      '12300',
+      'not a url',
+      'canary-key',
+    );
+    expect(badUrl).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+  });
+});
+
+describe('stale agent-home reclaim guard (#16616)', () => {
+  const cleanStep = () =>
+    parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Clean stale agent state',
+    ).run;
+
+  // The guard block ends before the stage-draft sweep; slicing keeps the
+  // executed body to the agent-home logic so the fixture needs no git tree.
+  const guardBody = () => {
+    const run = cleanStep();
+    const end = run.indexOf('rm -f /tmp/stage-*.md');
+    expect(end).toBeGreaterThan(-1);
+    return run.slice(0, end);
+  };
+
+  const runGuard = (
+    runnerTemp,
+    {
+      sudoBlocked = false,
+      sudoDeletes = false,
+      sudoChownRepairs = false,
+      chmodBlocked = false,
+      binDir,
+    } = {},
+  ) => {
+    binDir = binDir ?? join(runnerTemp, 'stub-bin');
+    mkdirSync(binDir, { recursive: true });
+    // A chmod that always fails leaves a mode-0555 copy unremovable, which is
+    // the shape the drain reports rather than deletes.
+    if (chmodBlocked) {
+      const chmodStub = join(binDir, 'chmod');
+      writeFileSync(chmodStub, '#!/bin/sh\nexit 1\n');
+      chmodSync(chmodStub, 0o755);
+    }
+    if (sudoBlocked || sudoDeletes || sudoChownRepairs) {
+      const sudoStub = join(binDir, 'sudo');
+      writeFileSync(
+        sudoStub,
+        // 'deletes' emulates the reclaim a passwordless-sudo pool member
+        // performs: make the target writable for this uid, then delete it.
+        // Keyed on the subcommand, because the ladder calls it twice — a stub
+        // that deleted on both legs would keep the primary reclaim's case
+        // green after that leg was deleted. 'repairs' emulates the fallback's
+        // shape instead — the sudo rm leg fails and the chown leg is what
+        // hands the directory back, leaving the unprivileged retry to remove
+        // it.
+        sudoDeletes
+          ? '#!/bin/sh\n[ "$2" = rm ] || exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last" 2>/dev/null || true\nexec rm -rf -- "$last"\n'
+          : sudoChownRepairs
+            ? '#!/bin/sh\n[ "$2" = rm ] && exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last"\n'
+            : '#!/bin/sh\nexit 1\n',
+      );
+      chmodSync(sudoStub, 0o755);
+    }
+    return spawnSync('bash', ['-c', guardBody()], {
+      env: {
+        ...process.env,
+        RUNNER_TEMP: runnerTemp,
+        ...(sudoBlocked || sudoDeletes || sudoChownRepairs || chmodBlocked
+          ? { PATH: `${binDir}:/usr/bin:/bin` }
+          : {}),
+      },
+      encoding: 'utf8',
+    });
+  };
+
+  // A same-parent rename of a mode-0555 directory needs only the parent's
+  // write bit on Linux; BSD-derived kernels also rewrite the moved
+  // directory's `..` entry and answer EACCES. The review pool is Linux-only,
+  // so the case runs where the mechanism it pins actually exists.
+  const renamesForeignDir = process.platform === 'linux';
+
+  it('reclaims a stale home and leaves a fresh runner-writable one', () => {
+    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+    try {
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      const out = runGuard(runnerTemp);
+      expect(out.status, out.stderr).toBe(0);
+      expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+      // The fresh home must accept the settings write that killed #16610.
+      writeFileSync(join(stale, 'settings.json'), '{}');
+    } finally {
+      rmSync(runnerTemp, { recursive: true, force: true });
+    }
+  });
+
+  it('fails before checkout when an unlinkable home survives and sudo is unavailable', () => {
+    // A read-only parent makes the home unlinkable for this uid without
+    // needing a second account; with sudo stubbed out, the guard must
+    // exit 1 and name the directory instead of proceeding.
+    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+    const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+    const stale = join(runnerTemp, 'qwen-home');
+    mkdirSync(stale);
+    chmodSync(runnerTemp, 0o555);
+    try {
+      const out = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+      expect(out.status).toBe(1);
+      expect(out.stdout).toContain('stale qwen-home survives cleanup');
+      expect(out.stdout).toContain(stale);
+      // The read-only parent is what refuses the rename, so the success line
+      // must not appear: an ungated echo would tell the operator a leftover
+      // was preserved at a path that was never created, right above the
+      // ::error:: that aborts the job.
+      expect(out.stdout).not.toContain('moved it to');
+    } finally {
+      chmodSync(runnerTemp, 0o755);
+      rmSync(runnerTemp, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a fresh home the runner user cannot write AND traverse', () => {
+    // -w alone would pass a mode-0600 home; settings.json needs w+x.
+    const run = cleanStep();
+    expect(run).toContain('[ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]');
+    expect(run).toContain('fresh qwen-home is not writable');
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'escalates to sudo before quarantining a home rm cannot unlink',
+    () => {
+      // Rung order is load-bearing: quarantining a home that sudo could have
+      // deleted would strand the previous run's home on every review. A
+      // mode-0555 directory is unlinkable for this uid but reclaimable by
+      // the sudo stub, so the quarantine must not fire.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoDeletes: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).not.toContain('moved it to');
+        expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+        expect(
+          readdirSync(runnerTemp).filter((n) =>
+            n.startsWith('qwen-home.stale-'),
+          ),
+        ).toEqual([]);
+        // The fresh home must accept the settings write that killed #16610.
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        if (existsSync(stale)) chmodSync(stale, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
+    'quarantines a home neither rm nor sudo can delete instead of failing',
+    () => {
+      // The pool members without passwordless sudo: the job still has write
+      // access to RUNNER_TEMP, and a same-parent rename needs only that, so
+      // the review proceeds on a fresh home and the leftover is preserved
+      // (and named) under a timestamped path.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{"tools":{}}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).toContain('moved it to');
+        const quarantine = readdirSync(runnerTemp).find((name) =>
+          name.startsWith('qwen-home.stale-'),
+        );
+        expect(quarantine).toBeTruthy();
+        expect(existsSync(join(runnerTemp, quarantine, 'settings.json'))).toBe(
+          true,
+        );
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        for (const name of readdirSync(runnerTemp)) {
+          try {
+            chmodSync(join(runnerTemp, name), 0o755);
+          } catch {
+            // A quarantined home may already be gone; rm below is best-effort.
+          }
+        }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'retries the unlink after the sudo chown fallback hands the home back',
+    () => {
+      // The chown leg exists for the shape where sudo rm fails but sudo can
+      // still take the directory over, leaving the unprivileged retry to
+      // remove it. Deleting that leg strands the home and hands the review
+      // to the quarantine rung it was not meant to need.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoChownRepairs: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).not.toContain('moved it to');
+        expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        if (existsSync(stale)) chmodSync(stale, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
+    'drains an aged quarantine on a later run and spares the rest',
+    () => {
+      // Production shape: a foreign 0555 home whose own mtime is old. The
+      // rung sets it aside without touching that mtime, so run one must
+      // leave the copy alone (the sweep runs before the rung), and a later
+      // run drains it only after a chmod — a hand-back restores the owner
+      // without the write bit.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      const keep = join(runnerTemp, 'triage-context');
+      const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{"tools":{}}');
+      utimesSync(stale, fiveHoursAgo, fiveHoursAgo);
+      chmodSync(stale, 0o555);
+      try {
+        const first = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+        expect(first.status, first.stderr).toBe(0);
+        const quarantine = readdirSync(runnerTemp).find((name) =>
+          name.startsWith('qwen-home.stale-'),
+        );
+        expect(quarantine).toBeTruthy();
+        expect(existsSync(join(runnerTemp, quarantine, 'settings.json'))).toBe(
+          true,
+        );
+
+        // An aged sibling the name filter must spare, and a quarantine a
+        // prior run made from a recently written home, which the age gate
+        // must spare.
+        const fresh = 'qwen-home.stale-20260101T000001Z-2';
+        mkdirSync(keep);
+        utimesSync(keep, fiveHoursAgo, fiveHoursAgo);
+        mkdirSync(join(runnerTemp, fresh));
+
+        const second = runGuard(runnerTemp);
+        expect(second.status, second.stderr).toBe(0);
+        expect(existsSync(join(runnerTemp, quarantine))).toBe(false);
+        expect(existsSync(keep)).toBe(true);
+        expect(existsSync(join(runnerTemp, fresh))).toBe(true);
+        // The live home survives both runs.
+        expect(existsSync(join(runnerTemp, 'qwen-home'))).toBe(true);
+      } finally {
+        for (const name of readdirSync(runnerTemp)) {
+          try {
+            chmodSync(join(runnerTemp, name), 0o755);
+          } catch {
+            // A drained copy may already be gone.
+          }
+        }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'does not follow a planted symlink while repairing mode bits',
+    () => {
+      // find matches a symlink by name and reports the link's own mtime, and
+      // chmod -R follows a symlink operand — so without -type d, anyone able
+      // to write RUNNER_TEMP could point this pre-checkout step at a tree
+      // outside it.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const victim = join(
+        mkdtempSync(join(tmpdir(), 'qwen-home-victim-')),
+        'd',
+      );
+      const lure = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-3');
+      try {
+        mkdirSync(victim);
+        writeFileSync(join(victim, 'file'), 'x');
+        chmodSync(victim, 0o500);
+        symlinkSync(victim, lure);
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        lutimesSync(lure, fiveHoursAgo, fiveHoursAgo);
+        const out = runGuard(runnerTemp);
+        expect(out.status, out.stderr).toBe(0);
+        expect(statSync(victim).mode & 0o200).toBe(0);
+      } finally {
+        chmodSync(victim, 0o755);
+        rmSync(victim, { recursive: true, force: true });
+        rmSync(runnerTemp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'reports a quarantine the drain could not remove instead of claiming a clean sweep',
+    () => {
+      // Silence would make "drained" and "never drainable" identical in the
+      // log, while every later run re-walks the whole stranded tree.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stranded = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-4');
+      try {
+        mkdirSync(stranded);
+        writeFileSync(join(stranded, 'settings.json'), '{}');
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        utimesSync(stranded, fiveHoursAgo, fiveHoursAgo);
+        chmodSync(stranded, 0o555);
+        const out = runGuard(runnerTemp, { chmodBlocked: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).toContain('survived the drain');
+        expect(out.stdout).toContain('qwen-home.stale-20260101T000000Z-4');
+        expect(existsSync(stranded)).toBe(true);
+      } finally {
+        if (existsSync(stranded)) chmodSync(stranded, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps the step header honest about the fail-fast contract', () => {
+    const stepIndex = workflow.indexOf("- name: 'Clean stale agent state'");
+    const header = workflow.slice(stepIndex - 900, stepIndex);
+    expect(header).not.toContain('never fail the job');
+    expect(header).toContain('fails the job here, before checkout');
   });
 });

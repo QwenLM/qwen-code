@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
@@ -62,7 +63,7 @@ public class ToolPublicationRetentionStoreTest {
                 .put("workspaceId", "workspace-1").put("sessionId", session);
         jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                 + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
                 + " VALUES (?, ?, ?, 'workspace-1', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
@@ -97,7 +98,7 @@ public class ToolPublicationRetentionStoreTest {
                 Long.class, tenant)).isEqualTo(first);
         assertThatThrownBy(() -> retention.read(key)).isInstanceOfSatisfying(ManagedAgentException.class,
                 error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         assertThatThrownBy(() -> tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session,
                 "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L))))
                 .isInstanceOf(ManagedAgentException.class);
@@ -300,15 +301,15 @@ public class ToolPublicationRetentionStoreTest {
     void incompleteQuarantinedAndLegacyEvidenceRemainProtected() {
         retire();
         assertThat(blocker()).isNull();
-        jdbc.update("UPDATE ma_output_capture SET write_evidence = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = FALSE WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("legacy_write_evidence_missing");
-        jdbc.update("UPDATE ma_output_capture SET write_evidence = TRUE, quarantined = TRUE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = TRUE, is_quarantined = TRUE WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("quarantined");
-        jdbc.update("UPDATE ma_output_capture SET quarantined = FALSE, accepted_complete = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_quarantined = FALSE, is_accepted_complete = FALSE WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("not_accepted_complete");
-        jdbc.update("UPDATE ma_output_capture SET accepted_complete = TRUE, producer_phase = 'FINISHING' WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_accepted_complete = TRUE, producer_phase = 'FINISHING' WHERE scope_key = ?", scope);
         assertThat(blocker()).isEqualTo("not_accepted_complete");
-        jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ?", tenant);
         assertThat(blocker()).isEqualTo("recovery_protected");
     }
 
@@ -317,7 +318,7 @@ public class ToolPublicationRetentionStoreTest {
         "READY", "BLOCKED_RESOURCE", "BLOCKED_WORKSPACE", "BLOCKED_EXECUTION"
     })
     void retirementDerivesRecoveryProtectionFromThePrivateHead(String recovery) {
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         tx.executeWithoutResult(status -> sessions.sealWriter(tenant, session, "a".repeat(32),
@@ -332,7 +333,7 @@ public class ToolPublicationRetentionStoreTest {
 
     @Test
     void writerAcquisitionAndRetirementSerializeEvenWithoutAnExistingHead() throws Exception {
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newFixedThreadPool(2)) {
@@ -358,15 +359,15 @@ public class ToolPublicationRetentionStoreTest {
     @Test
     void publicDeleteAndPrivateRetirementCommitAtomicallyAfterWriterStops() {
         var props = new ManagedAgentProperties();
-        var publicStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), events -> {},
-                org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var publicStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), events -> {},
+                org.mockito.Mockito.mock(JdbcManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String original = session;
         session = tx.execute(status -> publicStore.insertSessionCommand(tenant, "CREATE_SESSION", "create", "digest",
                 "qwen-code", null, null, java.util.List.of(), null).sessionId());
         key.put("sessionId", session);
         jdbc.update("UPDATE ma_output_capture SET session_id = ? WHERE tenant_id = ? AND session_id = ?",
                 session, tenant, original);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         var operation = tx.execute(status -> publicStore.beginOperation(tenant, session, StoreModels.OperationKind.DELETE,
@@ -395,7 +396,7 @@ public class ToolPublicationRetentionStoreTest {
 
     @Test
     void liveWriterPreventsRetirementAndDefaultsDisablePhysicalDeletion() {
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         assertThatThrownBy(this::retire).isInstanceOf(ManagedAgentException.class);
@@ -436,10 +437,10 @@ public class ToolPublicationRetentionStoreTest {
     @Test
     void retirementSuppressesOutstandingWorkOnlyInItsOwnResultScope() {
         for (String state : java.util.List.of("LEASED", "READY")) {
-            addOperation(OperationKind.TOOL_RESULT_PROJECTION, ManagedToolResultStore.scope(tenant, session),
+            addOperation(OperationKind.TOOL_RESULT_PROJECTION, JdbcManagedToolResultStore.scope(tenant, session),
                     null, session, state, state);
         }
-        addOperation(OperationKind.TOOL_RESULT_PROJECTION, ManagedToolResultStore.scope(tenant, "other"),
+        addOperation(OperationKind.TOOL_RESULT_PROJECTION, JdbcManagedToolResultStore.scope(tenant, "other"),
                 null, "other", "other", "LEASED");
         retire();
         var leased = jdbc.queryForMap("SELECT state, claim_until, failure_code FROM ma_operation"
@@ -464,7 +465,7 @@ public class ToolPublicationRetentionStoreTest {
                 return super.update(sql, arguments);
             }
         };
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(observed));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(observed);
         tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         assertThatThrownBy(() -> sessions.readResource(tenant, "workspace-1", session, "resource-1", "b".repeat(32)))
@@ -501,7 +502,7 @@ public class ToolPublicationRetentionStoreTest {
 
     protected void addCaptureObject(String captureScope, String publication, String captureSession,
             String slot, String resourceId, String objectKey, byte[] inline, String captureState) {
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, captureSession);
+        String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, captureSession);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key, publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, 'op', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(resourceScope, resourceId), resourceScope, tenant, captureSession, resourceId,
                 inline == null ? 1 : inline.length, ToolPublicationRetentionStore.hash(slot),
@@ -518,7 +519,7 @@ public class ToolPublicationRetentionStoreTest {
                         + " tenant_id, workspace_id, session_id, publication_id, target_kind, target_key, request_digest,"
                         + " request_json, state, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'workspace-1', ?, ?,"
                         + " 'OUTPUT_CAPTURE', ?, ?, '{}', ?, 'TEST', ?, ?)",
-                operationKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, targetSession), opScope, kind.name(), id,
+                operationKey, ManagedSessionStore.sessionScopeKey(tenant, targetSession), opScope, kind.name(), id,
                 tenant, targetSession, publication, target, "b".repeat(64), state, time, time);
         return operationKey;
     }

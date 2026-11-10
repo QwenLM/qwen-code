@@ -2,6 +2,13 @@ package com.alibaba.qwen.code.runtimebroker.managedschema;
 
 /** Explicit columns for Managed SQL readers; independent of live database metadata. */
 public enum ManagedSchemaProjection {
+    SIDE_QUERY(
+            "query_key, query_id, tenant_id, session_id, session_scope_key, actor_id, actor_scope_key, "
+                    + "kind, trigger_kind, question, state, active_slot, source_json, private_history_json, "
+                    + "model_config_digest, processing_version, input_resource_id, input_digest, is_input_ready, "
+                    + "claim_instance_id, claim_boot_id, claim_generation, claim_token_hash, read_lease_id, "
+                    + "read_deadline_at, deadline_at, result_revision, answer_text, outcome, usage_json, error_code, "
+                    + "gmt_create, gmt_modified"),
     ARTIFACT(
             "artifact_id, result_id, scope_key, descriptor_json, publication_id, binding_json, "
                     + "manifest_ref_json, stream_id, creation_sequence"),
@@ -23,7 +30,7 @@ public enum ManagedSchemaProjection {
             "tenant_id, session_id, stream_kind, stream_id, last_sequence, "
                     + "replay_floor_sequence, covered_sequence, wake_covered_sequence, projection_version, "
                     + "artifact_refs_resource_key, "
-                    + "output_ranges_json, projection_pending, gmt_modified"),
+                    + "output_ranges_json, is_projection_pending, gmt_modified"),
     MESSAGE(
             "tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, "
                     + "attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, revision, "
@@ -38,7 +45,7 @@ public enum ManagedSchemaProjection {
                     + "payload_version, request_json, result_json, state, phase, admission_stage, "
                     + "delivery_state, session_status_before, receipt_id, claim_owner, claim_generation, "
                     + "claim_until, available_at, attempt_count, budget_exempt_attempt, deadline, "
-                    + "recovery_deadline, execution_mode, verification_request_json, verification_ready, "
+                    + "recovery_deadline, execution_mode, verification_request_json, is_verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
                     + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
@@ -52,22 +59,22 @@ public enum ManagedSchemaProjection {
             "scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id, "
                     + "execution_key, capture_id, binding_json, binding_digest, token_hash, state, "
                     + "expires_at, capture_bytes, producer_bytes, admission_bytes, producer_phase, "
-                    + "quarantined, active_operation_id, finish_operation_id, finish_predecessor_id, "
+                    + "is_quarantined, active_operation_id, finish_operation_id, finish_predecessor_id, "
                     + "finish_digest, terminal_resource_id, admission_resource_id, receipt_sequence, "
                     + "receipt_revision, capture_held_bytes, producer_held_bytes, admission_held_bytes, "
                     + "capture_used_bytes, producer_used_bytes, admission_used_bytes, retention_state, "
-                    + "write_evidence, accepted_complete, collected_at, collected_bytes, "
+                    + "is_write_evidence, is_accepted_complete, collected_at, collected_bytes, "
                     + "released_held_bytes, manifest_resource_key, manifest_sha256, "
                     + "seal_manifest_resource_key, seal_manifest_sha256, gmt_create, gmt_modified"),
     PUBLIC_EVENT(
             "tenant_id, session_id, sequence_id, event_id, turn_id, event_type, data_json, "
-                    + "terminal, source_key, gmt_create, schema_version, projection_version, item_id, "
-                    + "content_part_id, stream_kind, stream_id, state, runtime_state, text, truncated, "
-                    + "artifact_id, capture_id, output_stream_id, first_ordinal, end_ordinal, archived"),
+                    + "is_terminal, source_key, gmt_create, schema_version, projection_version, item_id, "
+                    + "content_part_id, stream_kind, stream_id, state, runtime_state, text, is_truncated, "
+                    + "artifact_id, capture_id, output_stream_id, first_ordinal, end_ordinal, is_archived"),
     REQUEST_RECEIPT(
             "receipt_key, namespace, tenant_key, tenant_id, scope_kind, scope_key, scope_id, "
                     + "idempotency_key, idempotency_digest, request_digest, actor_id, operation, state, "
-                    + "workspace_bound, session_id, turn_id, agent_id, agent_revision, schedule_id, "
+                    + "is_workspace_bound, session_id, turn_id, agent_id, agent_revision, schedule_id, "
                     + "channel_id, account_generation, semantic_revision, action_id, action_version, "
                     + "decision_scope_key, mutation_attempt_sequence, session_status_before, "
                     + "result_operation_key, result_json, gmt_create, gmt_modified"),
@@ -85,11 +92,11 @@ public enum ManagedSchemaProjection {
             "binding_id, request_key, scope_key, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind, "
                     + "storage_id, storage_alias_key, runtime_generation, binding_state, "
-                    + "provision_request_id, provision_seed_ciphertext, provision_seeded, "
+                    + "provision_request_id, provision_seed_ciphertext, is_provision_seeded, "
                     + "credential_key_id, resource_handle_version, resource_handle_json, "
                     + "loss_evidence_json, stop_evidence_json, runtime_instance_id, runtime_endpoint, "
                     + "runtime_lease_id, runtime_epoch, runtime_credential_ciphertext, "
-                    + "runtime_credential_key_id, attestation_generation, drain_requested, "
+                    + "runtime_credential_key_id, attestation_generation, is_drain_requested, "
                     + "operation_owner, operation_lease_until, operation_generation, record_version, "
                     + "last_health_at, last_reconciled_at, last_active_at, drain_receipt_json, "
                     + "first_activation_journal_revision"),
@@ -97,7 +104,7 @@ public enum ManagedSchemaProjection {
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind, "
                     + "binding_id, runtime_generation, session_state, record_version, last_active_at, "
-                    + "execution_storage_key, execution_exclusive"),
+                    + "execution_storage_key, is_rewind_pending"),
     RUNTIME_SLOT(
             "request_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, "
                     + "capability_digest, isolation_class, isolation_key, provisioner_kind, storage_id, "
@@ -105,7 +112,7 @@ public enum ManagedSchemaProjection {
     SCHEDULE(
             "tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, "
                     + "definition_revision, definition_digest, goal, cron, timezone, session_mode, "
-                    + "overlap, catch_up, catch_up_limit, enabled, state, blocked_reason, armed_at, "
+                    + "overlap, catch_up, catch_up_limit, is_enabled, state, blocked_reason, armed_at, "
                     + "watermark_slot, lease_owner, lease_until, fence, gmt_create, gmt_modified, "
                     + "gate, gate_last_outcome, gate_last_at, gate_quiet_since_delivery, "
                     + "gate_failures, gate_last_error"),
@@ -119,12 +126,13 @@ public enum ManagedSchemaProjection {
                     + "public_session_id, deleted_at, workspace_id, workspace_generation, "
                     + "workspace_storage_id, cwd_relative, context_config_ref, context_revision, "
                     + "workspace_config_ref, workspace_policy_ref, agent_revision, approval_mode, "
-                    + "tool_profile, creator_actor_key, owner_actor_key, parent_session_id, "
+                    + "tool_profile, creator_actor_key, owner_actor_key, memory_store_id, owner_only, parent_session_id, "
                     + "root_session_id, parent_child_run_id, child_depth, agent_definition_digest, "
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
-                    + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
-                    + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision, "
-                    + "selected_approval_mode, approval_revision, plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
+                    + "retirement_operation_id, retirement_generation, retired_at, is_recovery_protected, "
+                    + "is_resource_gc_completed, runtime_request_key, is_csi_guard, model_id, model_revision, "
+                    + "model_config_digest, model_config_key_id, model_config_ciphertext, "
+                    + "selected_approval_mode, approval_revision, is_plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
                     + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
@@ -134,15 +142,15 @@ public enum ManagedSchemaProjection {
                     + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
-                    + "phase, operation_id, claim_generation, claim_lease_until, wake_pending, "
-                    + "wake_head_revision, wake_retry_at, wake_scan_pending, cleanup_head_revision"),
+                    + "phase, operation_id, claim_generation, claim_lease_until, is_wake_pending, "
+                    + "wake_head_revision, wake_retry_at, is_wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "
                     + "last_sequence, event_count, events_digest, previous_commit_digest, commit_digest, "
                     + "writer_generation, writer_id, writer_token_hash, activation_epoch, "
                     + "latest_checkpoint_resource_id, record_encoding, record_bytes, byte_length, "
-                    + "record_digest, activation_lease_until, activation_renewal_seq, gmt_create"),
+                    + "record_digest, activation_lease_until, activation_renewal_seq, is_activation_record, gmt_create"),
     SESSION_RECORD(
             "session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, "
                     + "record_id, operation_hash, revision, record_resource_id, task_kind, task_state, "
@@ -160,24 +168,25 @@ public enum ManagedSchemaProjection {
                     + "mount_completed_operation_id, mount_root, mount_host_id, mount_device, mount_inode, "
                     + "mount_birth_time, mount_registration_id, storage_kind, csi_phase, csi_revision, "
                     + "csi_reservation_id, csi_registration_key, csi_registration_revision, "
-                    + "csi_provision_request_id, maintenance_id, maintenance_generation, physical_key"),
+                    + "csi_provision_request_id, maintenance_id, maintenance_generation, physical_key, "
+                    + "member_count"),
     TENANT_GUARD(
             "tenant_key, tenant_id, guard_domain"),
     TOOL_EXECUTION(
             "execution_call_id_hash, execution_call_id, idempotency_key_hash, idempotency_key, "
                     + "binding_id, runtime_generation, harness_session_id, runtime_session_id, "
                     + "runtime_session_key, turn_id, tool_call_id, request_digest, reference_json, "
-                    + "execution_state, execution_status, result_json, last_sequence, cancel_requested, "
+                    + "execution_state, execution_status, result_json, last_sequence, is_cancel_requested, "
                     + "dispatch_owner, dispatch_lease_until, dispatch_generation, record_version, "
                     + "settled_at, abandoned_at, loss_evidence_id, authorized_dispatch_generation, "
                     + "authorized_binding_version, native_authorization_json"),
     TURN(
             "tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, "
-                    + "submission_attempted, harness_event_epoch, harness_last_event_id, dispatch_owner, "
+                    + "is_submission_attempted, harness_event_epoch, harness_last_event_id, dispatch_owner, "
                     + "dispatch_lease_until, error_code, error_message, gmt_create, gmt_modified, "
                     + "completed_at, version, retry_count, consecutive_failures, "
                     + "budget_exempt_failures, retry_after, model_id, model_revision, "
-                    + "approval_mode, approval_revision, plan_enabled, permission_rules_json");
+                    + "approval_mode, approval_revision, is_plan_enabled, permission_rules_json");
 
     private final String columns;
 
