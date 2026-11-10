@@ -439,6 +439,30 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void aResumedPartialDeliveryIsReclaimedNotRejected() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:99", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 3);
+        service.claimDeliveries(TENANT, channel, 16);
+        service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        // The committed record now holds segment 0's receipt, as the Session
+        // store writes it with the partial revision.
+        mirrorSegmentReceipts(admitted.sessionId(), deliveryId, 1);
+        // A reconnecting adapter polls again: the partial delivery must be
+        // handed back, not rejected because its first unsent segment moved
+        // past ordinal 0 while the delivery row still names ordinal 0.
+        ClaimResponse resumed = service.claimDeliveries(TENANT, channel, 16);
+        assertThat(resumed.deliveries()).hasSize(1);
+        assertThat(resumed.deliveries().getFirst().deliveryId())
+                .isEqualTo(deliveryId);
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.segmentId()).isEqualTo(deliveryId + ":0");
+    }
+
+    @Test
     void reconcileRebuildsSegmentRowsThatWereNeverPlanned() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:94", "please reply"));

@@ -395,7 +395,7 @@ public class ManagedChannelService {
                     JsonNode tree = json == null ? null
                             : readJson(json, "channel delivery record");
                     if (tree != null) {
-                        convergeSegments(tenantId, channelId, deliveryId, tree);
+                        planSegments(tenantId, channelId, deliveryId, tree);
                     }
                     String state = record.deliveryState();
                     if (!"planned".equals(state)) {
@@ -449,16 +449,6 @@ public class ManagedChannelService {
             }
         }
         return receipt;
-    }
-
-    /**
-     * Converges the committed record into the segment ledger: the plan insert
-     * carries each segment's identity and the write-once backfill lands any
-     * receipt whose answer was lost, leaving an already-stored receipt intact.
-     */
-    private void convergeSegments(String tenantId, String channelId,
-            String deliveryId, JsonNode tree) {
-        planSegments(tenantId, channelId, deliveryId, tree);
     }
 
     // --- public reads ---
@@ -565,8 +555,12 @@ public class ManagedChannelService {
         JsonNode record = readJson(instances.readResource(tenantId, pending.sessionId(),
                 pending.recordResourceId()), "channel delivery record");
         planSegments(tenantId, channelId, pending.deliveryId(), record);
+        JsonNode firstSegment = null;
         JsonNode firstUnsent = null;
         for (JsonNode segment : record.required("segments")) {
+            if (firstSegment == null) {
+                firstSegment = segment;
+            }
             if (segment.get("receipt").isNull()) {
                 firstUnsent = segment;
                 break;
@@ -575,10 +569,13 @@ public class ManagedChannelService {
         if (firstUnsent == null) {
             throw new IllegalStateException("delivery has no unsent segment");
         }
+        // The delivery-level identity is the record's first segment, stable
+        // across a resumed partial: naming the first unsent segment here
+        // would make findOrCreate reject the row the first claim wrote.
         ChannelDelivery ledger = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, pending.deliveryId(),
-                firstUnsent.required("segmentId").asText(),
-                firstUnsent.required("ordinal").asInt(), "planned", null,
+                firstSegment.required("segmentId").asText(),
+                firstSegment.required("ordinal").asInt(), "planned", null,
                 0, 0));
         Optional<ChannelClaim> existing = instances.findClaim(tenantId,
                 channelId, pending.deliveryId());
@@ -614,7 +611,9 @@ public class ManagedChannelService {
     /**
      * Plans every segment of the record into the segment ledger, carrying any
      * receipt the record already holds (a resumed partial). Idempotent: a
-     * re-claim never overwrites a stored receipt.
+     * re-claim never overwrites a stored receipt. This is also the reconciler's
+     * convergence step: the write-once backfill lands any receipt whose answer
+     * was lost, leaving an already-stored receipt intact.
      */
     private void planSegments(String tenantId, String channelId,
             String deliveryId, JsonNode record) {

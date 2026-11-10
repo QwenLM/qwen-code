@@ -120,6 +120,20 @@ class JdbcChannelSegmentRepositoryTest {
     }
 
     @Test
+    void listsSegmentsInOrdinalOrderNotLexicographic() {
+        // Twelve segments make d1:10 and d1:11 sort before d1:2 lexically, so
+        // only an ordinal-ordered read returns 0..11; dropping the ORDER BY
+        // would surface the segment-id index order instead.
+        List<SegmentLedger> plan = java.util.stream.IntStream.range(0, 12)
+                .mapToObj(i -> new SegmentLedger("d1:" + i, i, null))
+                .toList();
+        segments.plan(tenant, channel, "d1", plan);
+        assertThat(segments.list(tenant, channel, "d1"))
+                .extracting(SegmentLedger::ordinal)
+                .containsExactly(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+    }
+
+    @Test
     void refusesInvalidArguments() {
         assertThatThrownBy(() -> segments.plan(tenant, channel, "d1",
                 List.of(new SegmentLedger("d1:0", -1, null))))
