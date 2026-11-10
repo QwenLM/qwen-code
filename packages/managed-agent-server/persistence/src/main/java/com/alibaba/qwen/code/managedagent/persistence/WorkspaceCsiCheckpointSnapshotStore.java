@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -142,12 +143,12 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 JdbcRuntimeBindingRepository.harnessDrainKey(key.path("tenantId").asText()),
                 JdbcRuntimeBindingRepository.harnessDrainKey(key.path("sessionId").asText()));
         scope(head, key);
-        require((number(head, "storage_version") == 1 || number(head, "storage_version") == 2) && "READY".equals(head.get("recovery_status"))
+        require(List.of(1L, 2L, 3L, 4L).contains(number(head, "storage_version")) && "READY".equals(head.get("recovery_status"))
                 && Set.of("ACTIVE", "SEALED").contains(text(head, "state"))
                 && number(head, "compacted_through_revision") == 0
                 && number(head, "activation_epoch") == binding.path("activationEpoch").longValue());
         ArrayNode transactions = transactions(connection, key, head);
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(key.path("tenantId").asText(), key.path("sessionId").asText());
+        String sessionScope = ManagedSessionStore.sessionScopeKey(key.path("tenantId").asText(), key.path("sessionId").asText());
         ArrayNode resources = resources(connection, key, sessionScope, number(head, "journal_revision"));
         long revision = number(publication, "receipt_revision");
         long sequence = number(publication, "receipt_sequence");

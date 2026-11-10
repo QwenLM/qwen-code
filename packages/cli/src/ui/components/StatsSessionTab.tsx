@@ -10,7 +10,10 @@ import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { fmtTokens, getSeriesColors } from './stats-helpers.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
-import { computeSessionStats } from '../utils/computeStats.js';
+import {
+  computeGenerationRates,
+  computeSessionStats,
+} from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import {
   getStatusColor,
@@ -42,20 +45,8 @@ export const SessionTab: React.FC = () => {
   const cacheRate = totalInput > 0 ? (totalCached / totalInput) * 100 : 0;
   const generation = metrics.generation;
   const lastGeneration = generation?.last;
-  const lastTps =
-    lastGeneration && lastGeneration.generationDurationMs > 0
-      ? lastGeneration.outputTokens /
-        (lastGeneration.generationDurationMs / 1000)
-      : undefined;
-  const averageTtft =
-    generation && generation.timedRequests > 0
-      ? generation.totalTtftMs / generation.timedRequests
-      : undefined;
-  const sessionTps =
-    generation && generation.totalGenerationDurationMs > 0
-      ? generation.totalThroughputOutputTokens /
-        (generation.totalGenerationDurationMs / 1000)
-      : undefined;
+  const { lastTps, averageTtft, sessionTps } =
+    computeGenerationRates(generation);
 
   const successColor = getStatusColor(computed.successRate, {
     green: TOOL_SUCCESS_RATE_HIGH,
@@ -204,7 +195,9 @@ export const SessionTab: React.FC = () => {
           </Box>
           <Box>
             <Box width={labelWidth}>
-              <Text color={theme.text.secondary}>{t('Output Tokens')}:</Text>
+              <Text color={theme.text.secondary}>
+                {t('Output (incl. Reasoning)')}:
+              </Text>
             </Box>
             <Text color={theme.text.primary}>
               {lastGeneration.outputTokens.toLocaleString()}

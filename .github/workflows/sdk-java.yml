@@ -325,23 +325,11 @@ jobs:
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
-          # so the install writes fresh inodes.
-          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
+          # at any depth, including the legacy nested tree, so the install
+          # writes fresh inodes.
+          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
+            -exec rm -rf {} + 2>/dev/null || true
           # The suite resolves from the job-local copy above, so it does not
           # touch host-shared state and must not hold the per-host lock.
           # On 2026-10-22 run 39771949573's fast tier failed at its
@@ -469,18 +457,22 @@ jobs:
           # Maven's resolver tracking markers and version metadata record
           # this run's resolution outcomes, so they are not published.
           # No write-back child inherits fd 9, or a cancelled job's survivor
-          # would hold the host lock until it exits.
-          # The seed drops Maven's resolver tracking markers and version
-          # metadata because they record a resolution outcome, and a
-          # hard-killed transfer leaves *.tmp fragments behind; a red suite
-          # can leave them in the job-local copy, and publishing any would
-          # make the failure stick for every reader of the host cache, so
-          # skip the same names. Both setup failures below are best-effort
-          # too: the gate result is already decided.
-          mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
-          cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          # would hold the host lock until it exits. The in-house coordinates
+          # are never published, so drop any pre-PR copies from the host cache
+          # in the same locked stanza. The seed drops Maven's resolver
+          # tracking markers, version metadata and transfer residue because
+          # they record a resolution outcome; a red suite can leave them in
+          # the job-local copy, and publishing any would make the failure
+          # stick for every reader of the host cache, so skip the same names.
+          # Both setup failures below are best-effort too: the gate result is
+          # already decided.
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          find "${HOME}/.m2/repository" -depth -type d \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
+            -exec rm -rf {} + 9>&- || write_back=$?
+          cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-kubernetes' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -538,7 +530,14 @@ jobs:
         working-directory: 'packages/managed-agent-server'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle'
+        run: |-
+          # The ECS leg resolves the SDK from the job-local repository the
+          # self-hosted step installed it into; the hosted leg's SDK comes
+          # from the default repository the state-test step populated.
+          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then
+            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"
+          fi
+          mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle
 
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
@@ -1005,23 +1004,11 @@ jobs:
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
-          # so the install writes fresh inodes.
-          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
+          # at any depth, including the legacy nested tree, so the install
+          # writes fresh inodes.
+          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
+            -exec rm -rf {} + 2>/dev/null || true
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -1148,18 +1135,22 @@ jobs:
           # Maven's resolver tracking markers and version metadata record
           # this run's resolution outcomes, so they are not published.
           # No write-back child inherits fd 9, or a cancelled job's survivor
-          # would hold the host lock until it exits.
-          # The seed drops Maven's resolver tracking markers and version
-          # metadata because they record a resolution outcome, and a
-          # hard-killed transfer leaves *.tmp fragments behind; a red run can
-          # leave them in the job-local copy, and publishing any would make
-          # the failure stick for every reader of the host cache, so skip the
-          # same names. Both setup failures below are best-effort too: the
-          # gate result is already decided.
-          mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
-          cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          # would hold the host lock until it exits. The in-house coordinates
+          # are never published, so drop any pre-PR copies from the host cache
+          # in the same locked stanza. The seed drops Maven's resolver
+          # tracking markers, version metadata and transfer residue because
+          # they record a resolution outcome; a red suite can leave them in
+          # the job-local copy, and publishing any would make the failure
+          # stick for every reader of the host cache, so skip the same names.
+          # Both setup failures below are best-effort too: the gate result is
+          # already decided.
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          find "${HOME}/.m2/repository" -depth -type d \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
+            -exec rm -rf {} + 9>&- || write_back=$?
+          cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-kubernetes' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -1536,10 +1527,11 @@ jobs:
     # The packaged-stack failover arms, apart from the Hosted MySQL job so
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
-    # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 27 arms × 10 = 270 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 283 + 2.
-    timeout-minutes: 285
+    # its MySQL service. The rewritten-command arm delegates its own cgroup
+    # root below. Each arm also runs when an earlier one failed. Ceilings:
+    # 28 arms × 10 + the capped cgroup delegation × 10 = 290 plus ~13 minutes
+    # for the uncapped setup steps (Checkout.. Install MySQL binaries): 303 + 2.
+    timeout-minutes: 305
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1688,6 +1680,35 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-sibling-approval
+      # The rewritten-command arm executes real package Hooks and shell steps.
+      # Delegate and smoke-test a cgroup root exactly as the Hosted process
+      # gates do; the arm's own shell enters it before starting Spring.
+      - name: 'Delegate a cgroup v2 root for rewritten-command recovery'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        # The smoke child sleeps up to 600 s; cgroup.kill reaps it at once on
+        # the happy path. Cap the step like its sibling arms so a wedged
+        # delegation cannot spend the whole job ceiling uncapped.
+        timeout-minutes: 10
+        run: |-
+          sudo mkdir -p /sys/fs/cgroup/a3-command-rewrite
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/a3-command-rewrite
+          test -f /sys/fs/cgroup/a3-command-rewrite/cgroup.kill
+          echo $$ | sudo tee /sys/fs/cgroup/a3-command-rewrite/cgroup.procs
+          mkdir /sys/fs/cgroup/a3-command-rewrite/smoke
+          sleep 600 </dev/null >/dev/null 2>&1 & smoke=$!
+          echo "$smoke" > /sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.procs
+          grep -q "^$smoke\$" /sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.procs
+          echo 1 > /sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.kill
+          wait "$smoke" || true
+          rmdir /sys/fs/cgroup/a3-command-rewrite/smoke
+      - name: 'Run rewritten-command Hook recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        env:
+          QWEN_E2E_EXTENSION_CGROUP_ROOT: '/sys/fs/cgroup/a3-command-rewrite'
+        run: >-
+          echo $$ | sudo tee /sys/fs/cgroup/a3-command-rewrite/cgroup.procs &&
+          npm run test:e2e:managed-harness-restart-approval-command-rewrite
       - name: 'Run after-earlier-tools crash E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1980,23 +2001,11 @@ jobs:
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
-          # so the install writes fresh inodes.
-          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
+          # at any depth, including the legacy nested tree, so the install
+          # writes fresh inodes.
+          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
+            -exec rm -rf {} + 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -2300,23 +2309,11 @@ jobs:
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
-          # so the install writes fresh inodes.
-          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
+          # at any depth, including the legacy nested tree, so the install
+          # writes fresh inodes.
+          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
+            -exec rm -rf {} + 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
